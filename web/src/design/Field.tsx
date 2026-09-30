@@ -1,11 +1,11 @@
-// Form fields: a label, the control, a hint and an error, in the bank's 44 px field style.
+// Form fields: a label, the control, a hint and an error, in the market's 44 px field style.
 //
 //   <Field label="Amount" htmlFor="dep-amount" hint="In your wallet: 989,880.00 stkB">
 //     <UnitInput id="dep-amount" unit="stkB" inputMode="decimal" value={…} onChange={…} />
 //   </Field>
 //   <Field label="Token" htmlFor="dep-token"><Select id="dep-token">…</Select></Field>
 //   <CopyField value={depositAddress} data-testid="deposit-address" />
-//   <KeyValueList items={[{ term: 'Midnight fees', value: 'paid by the bank' }]} />
+//   <KeyValueList items={[{ term: 'Midnight fees', value: 'paid by the market' }]} />
 //   <Segmented label="Side" options={[{ value: 'buy', label: 'Buy' }, …]} value={side} onChange={setSide} />
 
 import {

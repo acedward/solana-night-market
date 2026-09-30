@@ -1,12 +1,12 @@
-// The Markets section (spec US3, FR-007/FR-008): each stock against USDC, priced only from the
-// live offers on the exchange, and a per-stock order book. Each book line's Take opens the Trade
-// section on that offer (plan L-TRD), which shows the exact legs and whether one coin can pay.
-// Styled with the MN Bank design system (plan P1.5); every word on the page comes from
+// The Markets section: every listed pair (BASE/QUOTE, any two tokens, none special), priced only
+// from the live offers on the exchange, and a per-pair order book. Each book line's Take opens the
+// Trade section on that offer (plan L-TRD), which shows the exact legs and whether one coin can
+// pay. Styled with the design system carried over from MN Bank; every word on the page comes from
 // ../market/view.ts.
 
 import { useState } from 'react';
 
-import type { FeedState, Market, TokenRegistry } from '@mnbank/core';
+import type { FeedState, Market } from '@nightmarket/core';
 
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import {
@@ -22,8 +22,6 @@ import {
   StatementTable,
   StatusPill,
   Sub,
-  shortHex,
-  tokenDisplayName,
   type BadgeTone,
   type Column,
 } from '../design/index.js';
@@ -80,19 +78,19 @@ function FeedStatus({ state }: { state: FeedState }) {
   );
 }
 
-const BOOK_COLUMNS = (stock: string, usdc: string, side: 'asks' | 'bids'): Column[] => [
-  { label: 'Price', sub: 'USDC' },
-  { label: 'Quantity', sub: stock, align: 'right' },
-  { label: side === 'asks' ? 'You pay' : 'You get', sub: usdc, align: 'right' },
+const BOOK_COLUMNS = (base: string, quote: string, side: 'asks' | 'bids'): Column[] => [
+  { label: 'Price', sub: quote },
+  { label: 'Quantity', sub: base, align: 'right' },
+  { label: side === 'asks' ? 'You pay' : 'You get', sub: quote, align: 'right' },
   { label: 'Action', srOnly: true, align: 'right' },
 ];
 
 function BookSide({ market, side }: { market: Market; side: 'asks' | 'bids' }) {
-  const stock = market.stock.midnightName;
-  const usdc = market.usdc.midnightName;
+  const base = market.base.symbol;
+  const quote = market.quote.symbol;
   const lines = bookLines(market, side);
   const takeHref = (offerId: string) =>
-    `#trade?${new URLSearchParams({ stock: market.stock.midnightName, offer: offerId }).toString()}`;
+    `#trade?${new URLSearchParams({ pair: market.pair.id, offer: offerId }).toString()}`;
   const headId = `book-${side}-title`;
   return (
     <div>
@@ -108,7 +106,7 @@ function BookSide({ market, side }: { market: Market; side: 'asks' | 'bids' }) {
       </div>
       <StatementTable
         variant="book"
-        columns={BOOK_COLUMNS(stock, usdc, side)}
+        columns={BOOK_COLUMNS(base, quote, side)}
         aria-labelledby={headId}
         data-testid={side === 'asks' ? 'book-asks' : 'book-bids'}
       >
@@ -146,21 +144,22 @@ function BookSide({ market, side }: { market: Market; side: 'asks' | 'bids' }) {
 }
 
 function Book({ market, onClose }: { market: Market; onClose(): void }) {
-  const stock = market.stock.midnightName;
+  const base = market.base.symbol;
+  const quote = market.quote.symbol;
   const spread = spreadText(market);
   return (
     <Panel
       className="section-gap"
       data-testid="book"
-      data-stock={stock}
-      title={`${stock} / USDC`}
+      data-pair={market.pair.id}
+      title={`${base} / ${quote}`}
       meta={
         <>
           <span data-testid="book-summary">
             {[
               spread !== null ? `Spread ${spread}` : null,
               `last trade ${lastTradeText(market.lastTrade)}`,
-              `prices in USDC per ${stock}`,
+              `prices in ${quote} per ${base}`,
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -173,7 +172,7 @@ function Book({ market, onClose }: { market: Market; onClose(): void }) {
     >
       {market.status === 'no-liquidity' && (
         <Notice className="panel-intro" data-testid="book-empty">
-          No liquidity: nobody is offering to buy or sell {stock} for USDC right now.
+          No liquidity: nobody is offering to buy or sell {base} for {quote} right now.
         </Notice>
       )}
       <div className="book-grid">
@@ -181,42 +180,22 @@ function Book({ market, onClose }: { market: Market; onClose(): void }) {
         <BookSide market={market} side="bids" />
       </div>
       <Notice className="section-gap">
-        <strong>Offers are all or nothing:</strong> you pay and receive the whole amount shown. Taking an offer from the
-        book arrives with the Trade section.
+        <strong>Offers are all or nothing:</strong> you pay and receive the whole amount shown.
       </Notice>
     </Panel>
   );
 }
 
-function origin(registry: TokenRegistry, colour: string, symbol: string) {
-  const t = registry.byColour(colour);
-  return t?.sepoliaAddress ? (
-    <>
-      bridged from Sepolia{' '}
-      <span className="mono" title={`${t.sepoliaAddress} → colour ${colour}`}>
-        {shortHex(t.sepoliaAddress)}
-      </span>
-    </>
-  ) : (
-    <>
-      {symbol} ·{' '}
-      <span className="mono" title={colour}>
-        {shortHex(colour)}
-      </span>
-    </>
-  );
-}
-
 export function Markets() {
-  const { state, registry, error } = useMarkets();
+  const { state, registry, pairs, error } = useMarkets();
   const assets = useAssetFilter();
   const [selected, setSelected] = useState<string | null>(null);
 
   const head = (
     <PageHead
-      eyebrow="Assets priced in USDC"
+      eyebrow="Every pair, from the live book"
       title="Markets"
-      lede="Prices come only from live offers on the exchange. An asset without offers shows “no liquidity”; prices are never estimated."
+      lede="Each market is one token against another, priced in the second. Prices come only from live offers on the exchange: a pair without offers shows “no liquidity”; prices are never estimated."
       actions={<FeedStatus state={state} />}
     />
   );
@@ -232,12 +211,11 @@ export function Markets() {
     );
   }
 
-  // A market shows only when the asset filter shows both of its assets (plan 00042).
-  const rows = marketRows(state, registry, assets.showsPair);
+  // A market shows only when the asset filter shows both of its tokens (plan 00042).
+  const rows = marketRows(state, pairs, assets.showsPair);
   const market =
     state.status === 'ready'
-      ? (state.snapshot.markets.find((m) => m.stock.midnightName === selected && assets.showsPair(m.stock, m.usdc)) ??
-        null)
+      ? (state.snapshot.markets.find((m) => m.pair.id === selected && assets.showsPair(m.base, m.quote)) ?? null)
       : null;
   const ignored = ignoredText(state);
 
@@ -258,12 +236,12 @@ export function Markets() {
       <Panel>
         <StatementTable
           data-testid="markets-table"
-          caption="Assets against USDC"
+          caption="Markets"
           columns={[
-            { label: 'Asset' },
-            { label: 'Best bid', sub: 'USDC', align: 'right' },
-            { label: 'Best ask', sub: 'USDC', align: 'right' },
-            { label: 'Last trade', sub: 'USDC', align: 'right' },
+            { label: 'Market' },
+            { label: 'Best bid', sub: 'in the quote', align: 'right' },
+            { label: 'Best ask', sub: 'in the quote', align: 'right' },
+            { label: 'Last trade', sub: 'in the quote', align: 'right' },
             { label: 'Offers', sub: 'bids / asks', align: 'right' },
             { label: 'Status', align: 'right' },
           ]}
@@ -272,21 +250,20 @@ export function Markets() {
             <tr className="row-empty" data-testid="markets-filtered-empty">
               <td colSpan={6}>
                 <NoValue>
-                  No market in this view: a market shows only when both of its assets are listed.{' '}
+                  No market in this view: a market shows only when both of its tokens are listed.{' '}
                   {assetFilterText(assets)}
                 </NoValue>
               </td>
             </tr>
           )}
           {rows.map((r) => {
-            const token = registry.byColour(r.colour);
             return (
               <tr
-                key={r.colour}
+                key={r.pair}
                 data-testid="market-row"
-                data-stock={r.stock}
-                aria-selected={selected === r.stock}
-                className={selected === r.stock ? 'row-selected' : undefined}
+                data-pair={r.pair}
+                aria-selected={selected === r.pair}
+                className={selected === r.pair ? 'row-selected' : undefined}
               >
                 <AssetCell
                   symbol={
@@ -294,15 +271,15 @@ export function Markets() {
                       variant="link"
                       className="sym"
                       data-testid="open-book"
-                      aria-expanded={selected === r.stock}
+                      aria-expanded={selected === r.pair}
                       disabled={state.status !== 'ready'}
-                      onClick={() => setSelected(selected === r.stock ? null : r.stock)}
+                      onClick={() => setSelected(selected === r.pair ? null : r.pair)}
                     >
-                      {r.stock}
+                      {r.base} / {r.quote}
                     </Button>
                   }
-                  name={token ? tokenDisplayName(token) : undefined}
-                  origin={origin(registry, r.colour, r.symbol)}
+                  name={r.baseName}
+                  origin={`priced in ${r.quote}`}
                 />
                 <Cell label="Best bid" align="right" num>
                   {isPrice(r.bestBid) ? (
@@ -338,7 +315,7 @@ export function Markets() {
             );
           })}
         </StatementTable>
-        <p className="table-note">Holdings are valued at the best bid; an asset with no bid is not valued.</p>
+        <p className="table-note">Prices are in the second token of each pair, per whole first token.</p>
         {ignored && (
           <p className="table-note" data-testid="ignored-offers">
             {ignored}

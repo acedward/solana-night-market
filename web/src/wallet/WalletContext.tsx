@@ -1,122 +1,109 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { getAddress } from 'ethers';
+// The connected Solana wallet (lane B2 wires Phantom through the Wallet Standard's
+// `solana:signMessage`, or `window.phantom.solana`, and refuses Ledger-backed accounts).
+//
+// A wallet here only SIGNS MESSAGES: it never sends a Solana transaction, so it needs no SOL. What the
+// rest of the site reads is its Solana address, its device key (the same 32 bytes as hex) and its
+// `ActionSigning` (./signing.ts). MN Bank's EIP-1193 wallet, network switch and Sepolia reads are
+// gone (AA 00047).
+//
+// THE SEAM: `WalletAdapter`. This build has none, so the site lists no wallet and says Solana
+// wallets are coming; lane B2 provides the Phantom adapter (and tests a mock one).
 
-import type { NetworkProfile } from '@mnbank/core';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 
-import {
-  type ChainParams,
-  type Eip1193Provider,
-  type WalletOption,
-  WalletError,
-  connectWallet,
-  discoverWallets,
-  sameChain,
-  switchChain,
-} from './eip1193.js';
+import { deviceKeyFromSolanaAddress } from '@nightmarket/core';
+
+import type { ActionSigning } from './signing.js';
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected';
+
+/** A wallet the page can offer (a Wallet Standard wallet that signs Solana messages). */
+export interface WalletOption {
+  id: string;
+  name: string;
+  icon?: string;
+}
+
+/** A connected wallet session, as an adapter returns it. */
+export interface WalletSession {
+  /** The Solana address (base58). */
+  address: string;
+  signing: ActionSigning;
+  disconnect(): void;
+}
+
+/** What lane B2 implements for Phantom (and a mock for the browser tests). */
+export interface WalletAdapter {
+  /** The wallets in this browser; `onChange` is called when one registers later. */
+  discover(onChange: (options: WalletOption[]) => void): () => void;
+  connect(option: WalletOption): Promise<WalletSession>;
+}
 
 export interface WalletState {
   status: WalletStatus;
   options: WalletOption[];
+  /** The connected wallet's Solana address (base58), or null. */
   address: string | null;
-  chainId: string | null;
+  /** The same key as 64 lowercase hex: the account's device key, and the local data scope. */
+  deviceKey: string | null;
   walletName: string | null;
-  /** The connected wallet's EIP-1193 provider (signatures and Sepolia reads go through it). */
-  provider: Eip1193Provider | null;
-  /** True when connected to the chain the bank uses (Sepolia). */
-  onRightChain: boolean;
+  /** How the site asks the wallet for signatures, while connected. */
+  signing: ActionSigning | null;
+  /** False when this build has no wallet adapter (Solana wallets arrive with lane B2). */
+  supported: boolean;
   error: string | null;
   connect(option: WalletOption): Promise<void>;
-  switchNetwork(): Promise<void>;
   disconnect(): void;
 }
 
 const WalletCtx = createContext<WalletState | null>(null);
 
-export function WalletProvider({ network, children }: { network: NetworkProfile; children: ReactNode }) {
-  const chain: ChainParams = useMemo(
-    () => ({
-      chainIdHex: network.evm.chainIdHex,
-      chainName: network.evm.chainName,
-      publicRpcUrl: network.evm.publicRpcUrl,
-      explorerUrl: network.evm.explorerUrl,
-    }),
-    [network],
-  );
+export function WalletProvider({ adapter = null, children }: { adapter?: WalletAdapter | null; children: ReactNode }) {
   const [options, setOptions] = useState<WalletOption[]>([]);
   const [status, setStatus] = useState<WalletStatus>('disconnected');
-  const [address, setAddress] = useState<string | null>(null);
-  const [chainId, setChainId] = useState<string | null>(null);
-  const [selected, setSelected] = useState<WalletOption | null>(null);
+  const [session, setSession] = useState<(WalletSession & { name: string }) | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const detach = useRef<(() => void) | null>(null);
 
-  useEffect(() => discoverWallets(setOptions), []);
-  useEffect(() => () => detach.current?.(), []);
+  useEffect(() => adapter?.discover(setOptions), [adapter]);
 
   const disconnect = useCallback(() => {
-    detach.current?.();
-    detach.current = null;
-    setSelected(null);
-    setAddress(null);
-    setChainId(null);
+    session?.disconnect();
+    setSession(null);
     setStatus('disconnected');
-  }, []);
+  }, [session]);
 
   const connect = useCallback(
     async (option: WalletOption) => {
       setError(null);
+      if (!adapter) {
+        setError('Solana wallets are not supported on this site yet.');
+        return;
+      }
       setStatus('connecting');
       try {
-        const r = await connectWallet(option.provider, chain);
-        detach.current?.();
-        const onAccounts = (accounts: unknown) => {
-          const first = Array.isArray(accounts) ? accounts[0] : undefined;
-          if (typeof first === 'string') setAddress(getAddress(first));
-          else disconnect();
-        };
-        const onChain = (id: unknown) => setChainId(typeof id === 'string' ? id.toLowerCase() : null);
-        option.provider.on?.('accountsChanged', onAccounts);
-        option.provider.on?.('chainChanged', onChain);
-        detach.current = () => {
-          option.provider.removeListener?.('accountsChanged', onAccounts);
-          option.provider.removeListener?.('chainChanged', onChain);
-        };
-        setSelected(option);
-        setAddress(r.address);
-        setChainId(r.chainId);
+        const s = await adapter.connect(option);
+        deviceKeyFromSolanaAddress(s.address); // a real Solana address, or refuse
+        setSession({ ...s, name: option.name });
         setStatus('connected');
       } catch (e) {
         setStatus('disconnected');
-        setError(e instanceof WalletError ? e.message : 'The wallet did not connect.');
+        setError(e instanceof Error && e.message ? e.message : 'The wallet did not connect.');
       }
     },
-    [chain, disconnect],
+    [adapter],
   );
 
-  const switchNetwork = useCallback(async () => {
-    if (!selected) return;
-    setError(null);
-    try {
-      await switchChain(selected.provider, chain);
-      setChainId(String(await selected.provider.request({ method: 'eth_chainId' })).toLowerCase());
-    } catch (e) {
-      setError(e instanceof WalletError ? e.message : 'The wallet could not switch networks.');
-    }
-  }, [selected, chain]);
-
+  const connected = status === 'connected' && session !== null;
   const value: WalletState = {
     status,
     options,
-    address,
-    chainId,
-    walletName: selected?.name ?? null,
-    provider: status === 'connected' ? (selected?.provider ?? null) : null,
-    onRightChain: sameChain(chainId, chain.chainIdHex),
+    address: connected ? session.address : null,
+    deviceKey: connected ? deviceKeyFromSolanaAddress(session.address) : null,
+    walletName: connected ? session.name : null,
+    signing: connected ? session.signing : null,
+    supported: adapter !== null,
     error,
     connect,
-    switchNetwork,
     disconnect,
   };
   return <WalletCtx.Provider value={value}>{children}</WalletCtx.Provider>;

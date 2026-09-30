@@ -1,4 +1,4 @@
-# MN Bank web app
+# Night Market web app
 
 A static Vite + React site. Every per-user record lives in the browser's local storage (see
 `src/store/`); the relay keeps none. Build it with `bun run build:web` from the repository root.
@@ -10,7 +10,7 @@ and its optional `assets` is that site's asset set: a list of symbols, or `"all"
 
 | Site | `config.json` | Shows |
 |---|---|---|
-| The bank domain | `{"network":"stagenet","relayUrl":"/relay"}` | the stagenet default set: USDC, stkA, stkB, stkC (wUSDC, wStkA/B/C on Midnight) and their three markets |
+| The market domain | `{"network":"stagenet","relayUrl":"/relay"}` | the stagenet default set: USDC, stkA, stkB, stkC (wUSDC, wStkA/B/C on Midnight) and their three markets |
 | `https://stagenet.tbank.zkdojo.com/` | `{"network":"stagenet","relayUrl":"/relay","assets":["USDC","TBILL","TB13W","TB26W","TB52W"]}` | USDC and the four T-bills, and their four markets |
 | Any site | `{"network":"stagenet","relayUrl":"/relay","assets":"all"}` | all 8 tokens, 7 markets |
 
@@ -18,8 +18,8 @@ and its optional `assets` is that site's asset set: a list of symbols, or `"all"
   (`NETWORK_DEFAULT_ASSETS` in `packages/core/src/network.ts`). Stagenet's is USDC and stkA/B/C;
   the local `undeployed` stack has none, so it shows everything. A site that configures its own
   `tokens` list shows all of them unless it names `assets`.
-- Symbols match the ERC20 symbol or the Midnight name, in any case. A symbol the bank does not
-  have is ignored, with a warning in the browser console (`MN Bank: …`). If none is known, the
+- Symbols match the ERC20 symbol or the Midnight name, in any case. A symbol the market does not
+  have is ignored, with a warning in the browser console (`Night Market: …`). If none is known, the
   network's default set applies, with a warning: a typo never blanks the site.
 - No token is special in the code: the lists live in data (the vendored records, the default set,
   `config.json`).
@@ -28,7 +28,7 @@ and its optional `assets` is that site's asset set: a list of symbols, or `"all"
   plain `http://` the page cannot open or use an account.
 - Browser storage is per origin: each domain has its own accounts, records and filter. A customer
   of one domain keeps nothing on the other (Export and Import move an account between them).
-- One relay serves every domain: it knows all the bank's tokens.
+- One relay serves every domain: it knows all the market's tokens.
 
 ## Showing only some assets (`?assets=`)
 
@@ -38,7 +38,7 @@ then on the site shows only those assets, everywhere tokens appear. The list onl
 the site's set: `?assets=all` goes back to the site's whole set, and a bank token outside it is
 named as "not available on this site" and never shown. A market shows only when both of its
 assets are listed; no asset is special. Symbols match the ERC20 symbol or the Midnight name, in
-any case (`usdc`, `wUSDC`); well-formed symbols the bank does not know yet stay in the list and
+any case (`usdc`, `wUSDC`); well-formed symbols the market does not know yet stay in the list and
 are named in the note under the tabs, and a list with nothing on this site shows the site's whole
 set.
 Sepolia ETH (gas) always shows, as does anything waiting for the customer (a change coin to
@@ -47,9 +47,9 @@ record, a live offer, a transfer in progress). `?assets=all` or `?assets=`, **Sh
 changes what the page shows: it is not a security setting, and the relay never sees it. The code
 is `src/assets/`.
 
-## The MN Bank design system
+## The Night Market design system
 
-`src/design/` holds the bank's look, taken from the owner-approved mockup: an ivory page, a deep
+`src/design/` holds the market's look, taken from the owner-approved mockup: an ivory page, a deep
 navy primary (`#152C55`), ONE antique-gold accent used sparingly (the masthead rule, the monogram,
 the selected row, the current tracker stage, warnings), Libre Caslon Text headings, Source Sans 3
 body text, tabular numerals for every amount, hairline-ruled statement tables with double-ruled
@@ -69,7 +69,7 @@ The fonts come from the `@fontsource/libre-caslon-text` and `@fontsource/source-
 (SIL Open Font License 1.1; the licence texts ship in `public/licenses/`) and are served from the
 site's own origin. Loading them from `fonts.googleapis.com` would hand every visitor's IP address
 to Google before they did anything (a German court found that to breach the GDPR, LG München I,
-3 O 17493/20, 2022), while the bank promises its servers keep nothing about the customer. It would
+3 O 17493/20, 2022), while the market promises its servers keep nothing about the customer. It would
 also break a strict CSP and the browser tests, which refuse any request that leaves the page's
 origin. Only the Latin subset loads, with `font-display: swap`; anything else falls back to
 Georgia / the system sans, and `test/e2e/visual.spec.ts` checks that fallback.
@@ -92,7 +92,7 @@ pass `data-*`, `id`, `role`, `aria-*` and event props straight through to their 
 </section>
 ```
 
-Headings: the masthead's "MN Bank" is the page's `h1`, a page title is an `h2` (`PageHead`), and
+Headings: the masthead's "Night Market" is the page's `h1`, a page title is an `h2` (`PageHead`), and
 a panel title an `h3` (`Panel`).
 
 **Panels.** `Panel` (white box; `title`, `meta` on the right, `tone="quiet"` for the ivory-grey
@@ -211,16 +211,16 @@ new page there (its fixtures are in `test/e2e/visual-fixtures.ts`). The screensh
 
 ## When something is not working (error states)
 
-Every way the bank, the exchange, the MPC, the wallet or the browser can stop an action has one
+Every way the market, the exchange, the MPC, the wallet or the browser can stop an action has one
 wording, kept in one place and unit-tested (`test/errors.test.ts`; the walkthroughs in the browser
 are `test/e2e/errors.spec.ts`):
 
 | File | What it words |
 | --- | --- |
 | `src/relay/messages.ts` | The relay's refusals (rate limits with their wait, the fee wallet low or starting up, a stale or replayed signature) and failed jobs (the exchange's settlement service at its limit or failing). `RelayError.message` is already the customer's sentence. |
-| `src/relay/status.ts` | What `/health` pauses: the bank unreachable, its prover down, its fee wallet low or syncing (the shell); withdrawals when the vault's Sepolia account is low on gas, a slow MPC (Transfers); the settlement service down or refusing (Trade). `BankStatus.tsx` reads `/health` every minute and on tab focus; pages disable what is paused and say why BEFORE the wallet is asked to sign. |
+| `src/relay/status.ts` | What `/health` pauses: the market unreachable, its prover down, its fee wallet low or syncing (the shell); withdrawals when the vault's Sepolia account is low on gas, a slow MPC (Transfers); the settlement service down or refusing (Trade). `BankStatus.tsx` reads `/health` every minute and on tab focus; pages disable what is paused and say why BEFORE the wallet is asked to sign. |
 | `src/store/messages.ts` | Local storage blocked, unavailable or full. |
-| `src/bridge/messages.ts` | A transfer's stages and outcomes, including a stale request the bank closed (Q21 A) and a never-executed deposit closed with `abandonDeposit`. |
+| `src/bridge/messages.ts` | A transfer's stages and outcomes, including a stale request the market closed (Q21 A) and a never-executed deposit closed with `abandonDeposit`. |
 
 A wallet on another network gets a banner with a Switch button, and every signature and send first
 checks the wallet's chain (`ensureChain` in `src/passport/operations.ts`).

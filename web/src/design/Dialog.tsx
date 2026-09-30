@@ -6,7 +6,7 @@
 //     <p>…</p>
 //   </Dialog>
 //
-//   <TypedConfirmDialog open={confirming} tone="danger" title="Clear all MN Bank data from this browser?"
+//   <TypedConfirmDialog open={confirming} tone="danger" title="Clear all Night Market data from this browser?"
 //     phrase="CLEAR ALL" warning={<>Without an export you cannot spend these funds again.</>}
 //     onExportFirst={exportMine} confirmLabel="Clear all data" onConfirm={clearAll} onCancel={close}
 //     testIdPrefix="clear">…</TypedConfirmDialog>

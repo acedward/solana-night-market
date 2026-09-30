@@ -3,10 +3,10 @@
 //   <Figures>
 //     <Figure main label="Total value, priced holdings" value={<Money raw={…} decimals={6} unit="USDC" />}
 //             note="Stocks are valued at the best bid…" />
-//     <Figure label="Ethereum (Sepolia)" value={<Money … />} />
+//     <Figure label="Account" value={<Money … />} />
 //   </Figures>
-//   <PendingItem what="Deposit 25.00 stkA to wStkA" badge={<Badge tone="gold">5 of 7</Badge>}
-//                state="Waiting for Sepolia finality" meta={<>request <Hash value={id} /></>} />
+//   <PendingItem what="Withdraw 25.00 twBTC" badge={<Badge tone="gold">2 of 3</Badge>}
+//                state="Waiting for the proof" meta={<>request <Hash value={id} /></>} />
 
 import type { HTMLAttributes, ReactNode } from 'react';
 

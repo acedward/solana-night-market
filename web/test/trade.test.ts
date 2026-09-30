@@ -1,10 +1,10 @@
-// Plan L-TRD in the browser, against a fake relay, a fake exchange and an injected wallet: a make
-// and a take are ONE signature each over the contract's OpenSwapShielded typed data; the browser
+// Plan L-TRD in the browser, against a fake relay, a fake exchange and a TEST Solana wallet
+// (./fake-signing.ts): a make and a take are ONE signature each over the swap call; the browser
 // seals the entries to the account's own key and picks one coin; a second offer is refused while one
 // is live; an offer too big for any coin is not takeable; a taken or externally settled offer is
-// reconciled from the inbox walk.
+// reconciled from the inbox walk. The pair is any two tokens (no token is special).
 
-import { type BaseWallet, TypedDataEncoder, Wallet, recoverAddress } from 'ethers';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -17,35 +17,30 @@ import {
   type ActionRequest,
   type InboxPage,
   type JobView,
+  type MarketPair,
   type RelayActionName,
   type TokenEntry,
   type ZswapActivity,
-} from '@mnbank/core';
-import { evmDeviceEntry, openEntryPortable, openSwapGatedCall, sealEntryPortable } from '@mnbank/core/passport';
+} from '@nightmarket/core';
+import { openEntryPortable, sealEntryPortable } from '@nightmarket/core/passport';
 import { x25519 } from '@noble/curves/ed25519.js';
 
 import { syncAccount, type OperationEnv } from '../src/passport/operations.js';
 import { readCoins, readRoster } from '../src/passport/records.js';
 import type { RelayClient } from '../src/relay/client.js';
 import { LocalStore } from '../src/store/store.js';
-import { liveOffer as bridgeSeesLiveOffer } from '../src/bridge/operations.js';
 import { confirmCancelsOffer, guardFor, makeOffer, reconcileOffers, takeOffer } from '../src/trade/operations.js';
-import { readTrades } from '../src/trade/records.js';
+import { liveOffer, readTrades } from '../src/trade/records.js';
+import { fakeCallMessage, fakeDeviceEntry, fakeSigning } from './fake-signing.js';
 import { expectImportRoundTrip } from './roundtrip.js';
 
 const ACCOUNT = 'ac'.repeat(32);
-const SALT = '5a'.repeat(32);
-const STOCK = {
-  midnightColour: 'a1'.repeat(32),
-  decimals: 6,
-  midnightName: 'wStkA',
-} as unknown as TokenEntry;
-const USDC = {
-  midnightColour: 'b2'.repeat(32),
-  decimals: 6,
-  midnightName: 'wUSDC',
-} as unknown as TokenEntry;
+// Any two tokens: the pair twUSDM/twUSDC here, 6 decimals each.
+const BASE = { midnightColour: 'a1'.repeat(32), decimals: 6, symbol: 'twUSDM' } as unknown as TokenEntry;
+const QUOTE = { midnightColour: 'b2'.repeat(32), decimals: 6, symbol: 'twUSDC' } as unknown as TokenEntry;
+const PAIR: MarketPair = { id: 'twUSDM/twUSDC', base: BASE, quote: QUOTE };
 const U = 1_000_000n;
+const unhex = (h: string) => hexToBytes(h, h.length / 2);
 
 class FakeRelay {
   submitted: Array<{ action: RelayActionName; request: ActionRequest }> = [];
@@ -94,48 +89,21 @@ class FakeRelay {
   }
 }
 
-function injectedWallet(w: BaseWallet) {
-  const signed: Array<{ primaryType: string; digest: string; signature: string }> = [];
-  const provider = {
-    async request({ method, params }: { method: string; params?: unknown }) {
-      if (method !== 'eth_signTypedData_v4') throw new Error(`unexpected ${method}`);
-      const td = JSON.parse((params as string[])[1]!) as {
-        primaryType: string;
-        domain: never;
-        types: Record<string, never>;
-        message: never;
-      };
-      const { EIP712Domain: _d, ...types } = td.types;
-      const signature = await w.signTypedData(td.domain, types, td.message);
-      signed.push({
-        primaryType: td.primaryType,
-        digest: TypedDataEncoder.hash(td.domain, types, td.message),
-        signature,
-      });
-      return signature;
-    },
-  };
-  return { provider, signed };
-}
-
 let storage: Storage;
 beforeEach(() => {
   window.localStorage.clear();
   storage = window.localStorage;
 });
 
-/** An account holding 3 wStkA (one coin) and 8 + 6 wUSDC (two coins), synced from its inbox. */
+/** An account holding 3 twUSDM (one coin) and 8 + 6 twUSDC (two coins), synced from its inbox. */
 async function setup() {
-  const w = Wallet.createRandom();
   const relay = new FakeRelay();
-  const { provider, signed } = injectedWallet(w);
+  const { signing, calls: signed } = fakeSigning();
   const e: OperationEnv = {
     relay: relay as unknown as RelayClient,
     store: new LocalStore(storage),
-    scope: { network: 'undeployed', evmAddress: w.address },
-    provider,
-    owner: w.address,
-    chainId: 11155111,
+    scope: { network: 'undeployed', owner: signing.deviceKey },
+    signing,
   };
   const sk = x25519.utils.randomSecretKey();
   const pk = x25519.getPublicKey(sk);
@@ -146,21 +114,19 @@ async function setup() {
     booted: true,
     deviceCount: 1,
     deviceEpoch: '0',
-    devices: [evmDeviceEntry(ACCOUNT, w.address, 0n, 2n)],
+    devices: [fakeDeviceEntry(ACCOUNT, signing.deviceKey, 0n, 2n)],
     authNonce: '4',
     inboxCount: '3',
     encKey: bytesToHex(pk),
-    vault: 'ee'.repeat(32),
-    evmDomainSalt: SALT,
   };
   const coins = [
-    { nonce: '01'.repeat(32), color: STOCK.midnightColour, value: 3n * U },
-    { nonce: '02'.repeat(32), color: USDC.midnightColour, value: 8n * U },
-    { nonce: '03'.repeat(32), color: USDC.midnightColour, value: 6n * U },
+    { nonce: '01'.repeat(32), color: BASE.midnightColour, value: 3n * U },
+    { nonce: '02'.repeat(32), color: QUOTE.midnightColour, value: 8n * U },
+    { nonce: '03'.repeat(32), color: QUOTE.midnightColour, value: 6n * U },
   ];
   await addInbox(relay, pk, coins);
   await syncAccount(e, ACCOUNT);
-  return { w, relay, e, pk, sk, signed };
+  return { signing, relay, e, pk, sk, signed };
 }
 
 async function addInbox(
@@ -185,8 +151,8 @@ async function addInbox(
 }
 
 describe('make an offer (L-TRD.1)', () => {
-  it('sell 2 wStkA at 1.05: ONE OpenSwapShielded signature over the exact legs, entries sealed to the account', async () => {
-    const { w, relay, e, sk, signed } = await setup();
+  it('sell 2 twUSDM at 1.05: ONE signature over the exact swap call, entries sealed to the account', async () => {
+    const { signing, relay, e, sk, signed } = await setup();
     relay.results['open-swap'] = {
       offerId: 'f0'.repeat(32),
       kernel: { accepted: true, status: 'live', code: null, reason: null },
@@ -195,36 +161,43 @@ describe('make an offer (L-TRD.1)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 20000,
     };
-    const legs = orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC));
-    const rec = await makeOffer(e, ACCOUNT, legs, { stock: STOCK, usdc: USDC });
+    const legs = orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE));
+    const rec = await makeOffer(e, ACCOUNT, legs, PAIR);
 
-    expect(signed).toHaveLength(1);
-    expect(signed[0]!.primaryType).toBe('OpenSwapShielded');
+    expect(signed).toEqual(['authorise:open-swap']);
     const [sub] = relay.submitted;
     expect(sub!.action).toBe('open-swap');
     const p = sub!.request.payload as Record<string, string> & { coin: Record<string, string> };
     expect(p).toMatchObject({
-      giveColor: STOCK.midnightColour,
+      giveColor: BASE.midnightColour,
       giveAmount: '2000000',
-      wantColor: USDC.midnightColour,
+      wantColor: QUOTE.midnightColour,
       wantAmount: '2100000',
       validUntil: '0',
       authNonce: '4',
     });
     expect(p.coin).toMatchObject({ nonce: '01'.repeat(32), value: '3000000' });
-    // The relay can rebuild the digest from the payload, and it recovers to the wallet.
-    const call = openSwapGatedCall({ account: ACCOUNT, authNonce: 4n, evmDomainSalt: SALT }, w.address, p as never);
-    expect(call.digestHex).toBe(signed[0]!.digest);
-    expect(recoverAddress(call.digestHex, signed[0]!.signature)).toBe(w.address);
-    expect(sub!.request.passportAuth).toMatchObject({ owner: w.address.toLowerCase(), useCounter: '2' });
-    // Both entries open with the account's secret: the 2.10 wUSDC wanted, and the 1 wStkA change.
+    // The device signed exactly this call (the payload the relay receives), at use counter 2.
+    const pa = sub!.request.passportAuth as { owner: string; signature: string; useCounter: string };
+    expect(pa).toMatchObject({ owner: signing.deviceKey, useCounter: '2' });
+    const message = fakeCallMessage(
+      { account: ACCOUNT, authNonce: 4n },
+      { kind: 'swap', action: 'open-swap', payload: p as never },
+    );
+    expect(ed25519.verify(unhex(pa.signature), message, unhex(signing.deviceKey))).toBe(true);
+    // Both entries open with the account's secret: the 2.10 twUSDC wanted, and the 1 twUSDM change.
     const want = await openEntryPortable(sk, hexToBytes(p.wantEntry, 192));
     const change = await openEntryPortable(sk, hexToBytes(p.changeEntry, 192));
     expect(want).toMatchObject({ value: 2_100_000n });
     expect(bytesToHex(want!.nonce)).toBe(p.wantNonce);
     expect(change).toMatchObject({ value: 1_000_000n });
     // My offers holds it as live; the coin is NOT spent and the counter does not move.
-    expect(rec).toMatchObject({ role: 'make', status: 'live', summary: 'sell 2.00 wStkA at 1.05' });
+    expect(rec).toMatchObject({
+      role: 'make',
+      status: 'live',
+      pair: 'twUSDM/twUSDC',
+      summary: 'sell 2.00 twUSDM at 1.05 twUSDC',
+    });
     expect(readCoins(e.store, e.scope, ACCOUNT).every((c) => !c.spent)).toBe(true);
     expect(readRoster(e.store, e.scope, ACCOUNT)).toEqual({ useCounter: '0' });
     expectImportRoundTrip(e.store, e.scope);
@@ -240,12 +213,9 @@ describe('make an offer (L-TRD.1)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 1,
     };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     await expect(
-      makeOffer(e, ACCOUNT, orderLegs('buy', STOCK, USDC, 1n * U, parsePrice('1', USDC)), { stock: STOCK, usdc: USDC }),
+      makeOffer(e, ACCOUNT, orderLegs('buy', BASE, QUOTE, 1n * U, parsePrice('1', QUOTE)), PAIR),
     ).rejects.toThrow(/one live offer at a time/);
     expect(signed).toHaveLength(1);
     expect(relay.submitted).toHaveLength(1);
@@ -253,7 +223,7 @@ describe('make an offer (L-TRD.1)', () => {
     expect(guardFor(e, ACCOUNT, 'withdraw')).toMatchObject({ kind: 'warn' });
   });
 
-  it("uses L-BRG's offer-record shape: a live offer defers the bridge's change re-file, an expired one does not", async () => {
+  it('every other signed action asks first while an offer is live; declining stops it; an expired offer asks nothing', async () => {
     const { relay, e } = await setup();
     relay.results['open-swap'] = {
       offerId: 'f0'.repeat(32),
@@ -263,17 +233,14 @@ describe('make an offer (L-TRD.1)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 1,
     };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
-    expect(bridgeSeesLiveOffer(e, ACCOUNT)).toBe(true);
-    // Every signed action asks first; declining stops it (the bridge starts included, L-TRD.3).
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    expect(liveOffer(readTrades(e.store, e.scope, ACCOUNT), Date.now())).not.toBeNull();
+    // Every signed action asks first; declining stops it (L-TRD.3).
     const asked: string[] = [];
-    for (const a of ['bridge-deposit', 'bridge-withdraw', 'append-inbox', 'withdraw', 'take'] as const) {
+    for (const a of ['append-inbox', 'withdraw', 'take'] as const) {
       expect(confirmCancelsOffer(e, ACCOUNT, a, (m) => (asked.push(m), false))).toBe(false);
     }
-    expect(asked).toHaveLength(5);
+    expect(asked).toHaveLength(3);
     const [rec] = readTrades(e.store, e.scope, ACCOUNT);
     e.store.put(
       e.scope,
@@ -281,16 +248,16 @@ describe('make an offer (L-TRD.1)', () => {
       { ...rec!, expiresAt: Date.now() - 1 },
       { account: ACCOUNT, id: `make-${rec!.offerId}` },
     );
-    expect(bridgeSeesLiveOffer(e, ACCOUNT)).toBe(false);
-    expect(confirmCancelsOffer(e, ACCOUNT, 'bridge-withdraw', () => false)).toBe(true);
+    expect(liveOffer(readTrades(e.store, e.scope, ACCOUNT), Date.now())).toBeNull();
+    expect(confirmCancelsOffer(e, ACCOUNT, 'withdraw', () => false)).toBe(true);
   });
 
   it('refuses an offer bigger than any single coin, naming the largest payment', async () => {
     const { e, signed } = await setup();
-    // 12 wUSDC: the account holds 8 + 6, but no single coin of 12.
-    const legs = orderLegs('buy', STOCK, USDC, 10n * U, parsePrice('1.2', USDC));
-    await expect(makeOffer(e, ACCOUNT, legs, { stock: STOCK, usdc: USDC })).rejects.toThrow(
-      'Not enough wUSDC in one coin. You hold 14.00 wUSDC; one payment can use at most 8.00.',
+    // 12 twUSDC: the account holds 8 + 6, but no single coin of 12.
+    const legs = orderLegs('buy', BASE, QUOTE, 10n * U, parsePrice('1.2', QUOTE));
+    await expect(makeOffer(e, ACCOUNT, legs, PAIR)).rejects.toThrow(
+      'Not enough twUSDC in one coin. You hold 14.00 twUSDC; one payment can use at most 8.00.',
     );
     expect(signed).toHaveLength(0);
   });
@@ -309,17 +276,17 @@ describe('take an offer (L-TRD.2)', () => {
     const rec = await takeOffer(
       e,
       ACCOUNT,
-      { offerId: 'e1'.repeat(32), side: 'ask', stockRaw: 5n * U, usdcRaw: 5_250_000n },
-      { stock: STOCK, usdc: USDC },
+      { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: 5n * U, quoteRaw: 5_250_000n },
+      PAIR,
     );
-    expect(signed).toHaveLength(1);
+    expect(signed).toEqual(['authorise:take']);
     const [sub] = relay.submitted;
     expect(sub!.action).toBe('take');
     expect(sub!.request.payload).toMatchObject({
       offerId: 'e1'.repeat(32),
-      giveColor: USDC.midnightColour,
+      giveColor: QUOTE.midnightColour,
       giveAmount: '5250000',
-      wantColor: STOCK.midnightColour,
+      wantColor: BASE.midnightColour,
       wantAmount: '5000000',
       coin: { nonce: '03'.repeat(32), value: '6000000' }, // 6 covers 5.25; 8 would leave more change
     });
@@ -345,19 +312,13 @@ describe('take an offer (L-TRD.2)', () => {
       cost: {},
       path: 'batcher',
     };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     expect(guardFor(e, ACCOUNT, 'take')).toMatchObject({ kind: 'warn' });
     await takeOffer(
       e,
       ACCOUNT,
-      { offerId: 'e1'.repeat(32), side: 'ask', stockRaw: U, usdcRaw: U },
-      {
-        stock: STOCK,
-        usdc: USDC,
-      },
+      { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: U, quoteRaw: U },
+      PAIR,
     );
     const own = readTrades(e.store, e.scope, ACCOUNT).find((t) => t.role === 'make')!;
     expect(own.status).toBe('cancelled');
@@ -369,13 +330,10 @@ describe('take an offer (L-TRD.2)', () => {
       takeOffer(
         e,
         ACCOUNT,
-        { offerId: 'e1'.repeat(32), side: 'ask', stockRaw: 9n * U, usdcRaw: 9n * U },
-        {
-          stock: STOCK,
-          usdc: USDC,
-        },
+        { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: 9n * U, quoteRaw: 9n * U },
+        PAIR,
       ),
-    ).rejects.toThrow('Not enough wUSDC in one coin. You hold 14.00 wUSDC; one payment can use at most 8.00.');
+    ).rejects.toThrow('Not enough twUSDC in one coin. You hold 14.00 twUSDC; one payment can use at most 8.00.');
     expect(signed).toHaveLength(0);
   });
 });
@@ -391,10 +349,7 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 1,
     };
-    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     const kernel = { offerStatus: async () => 'live' as const };
     expect(await reconcileOffers(e, ACCOUNT, kernel)).toEqual([]);
 
@@ -402,16 +357,16 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
     // offer's coin is spent in the same transaction.
     const payload = relay.submitted[0]!.request.payload as { wantNonce: string };
     await addInbox(relay, pk, [
-      { nonce: payload.wantNonce, color: USDC.midnightColour, value: 2_100_000n },
-      { nonce: '09'.repeat(32), color: STOCK.midnightColour, value: 1n * U },
+      { nonce: payload.wantNonce, color: QUOTE.midnightColour, value: 2_100_000n },
+      { nonce: '09'.repeat(32), color: BASE.midnightColour, value: 1n * U },
     ]);
     relay.zswapActivity.outputs.at(-2)!.txHash = 'settle-tx';
     relay.state.authNonce = '5';
     const changed = await reconcileOffers(e, ACCOUNT, { offerStatus: async () => 'consumed' as const });
     expect(changed).toHaveLength(1);
     expect(changed[0]).toMatchObject({ offerId: rec.offerId, status: 'filled', settledTx: 'settle-tx' });
-    const usdc = readCoins(e.store, e.scope, ACCOUNT).filter((c) => c.color === USDC.midnightColour && !c.spent);
-    expect(usdc.map((c) => c.value).sort()).toEqual(['2100000', '6000000', '8000000']);
+    const quote = readCoins(e.store, e.scope, ACCOUNT).filter((c) => c.color === QUOTE.midnightColour && !c.spent);
+    expect(quote.map((c) => c.value).sort()).toEqual(['2100000', '6000000', '8000000']);
   });
 
   it('fills in the settling transaction later when the exchange says consumed before the inbox shows the coin', async () => {
@@ -424,16 +379,13 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 1,
     };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     const consumed = { offerStatus: async () => 'consumed' as const };
     const [first] = await reconcileOffers(e, ACCOUNT, consumed);
     expect(first).toMatchObject({ status: 'filled' });
     expect(first!.settledTx).toBeUndefined();
     const payload = relay.submitted[0]!.request.payload as { wantNonce: string };
-    await addInbox(relay, pk, [{ nonce: payload.wantNonce, color: USDC.midnightColour, value: 2_100_000n }]);
+    await addInbox(relay, pk, [{ nonce: payload.wantNonce, color: QUOTE.midnightColour, value: 2_100_000n }]);
     relay.zswapActivity.outputs.at(-1)!.txHash = 'late-tx';
     const [second] = await reconcileOffers(e, ACCOUNT, consumed);
     expect(second).toMatchObject({ status: 'filled', settledTx: 'late-tx' });
@@ -449,10 +401,7 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       expiresAt: Date.now() + 3_600_000,
       bytes: 1,
     };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     relay.state.authNonce = '5';
     const [c] = await reconcileOffers(e, ACCOUNT, { offerStatus: async () => 'live' as const });
     expect(c).toMatchObject({ status: 'cancelled' });
@@ -466,10 +415,7 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       expiresAt: Date.now() + 1000,
       bytes: 1,
     };
-    await makeOffer(second.e, ACCOUNT, orderLegs('sell', STOCK, USDC, 2n * U, parsePrice('1.05', USDC)), {
-      stock: STOCK,
-      usdc: USDC,
-    });
+    await makeOffer(second.e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     const [x] = await reconcileOffers(
       second.e,
       ACCOUNT,

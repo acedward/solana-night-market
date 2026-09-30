@@ -1,18 +1,18 @@
 // What the Markets page shows, as plain text per cell: a pure function of the feed's state, so
 // the wording ("no liquidity", "exchange unavailable", "no bids") is unit-tested in one place.
-// Wording follows the MN Bank mockup (P0.6); the styling waits for its approval (Q16).
+// One row per listed pair; no token is special (AA 00047).
 
 import {
   type BookEntry,
   type FeedState,
   type LastTrade,
   type Market,
+  type MarketPair,
   type Ratio,
   type TokenEntry,
-  type TokenRegistry,
   formatPrice,
   formatUnits,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 export type MarketStatus = 'two-sided' | 'bids-only' | 'asks-only' | 'no-liquidity' | 'unavailable' | 'loading';
 
@@ -26,11 +26,13 @@ export const STATUS_TEXT: Record<MarketStatus, string> = {
 };
 
 export interface MarketRowView {
-  /** The stock's Midnight name (wStkA). */
-  stock: string;
-  /** Its Sepolia symbol (stkA), for "bridged from Sepolia". */
-  symbol: string;
-  colour: string;
+  /** The pair, `BASE/QUOTE` (twBTC/twUSDC). */
+  pair: string;
+  /** The base token's symbol (what the row buys or sells) and the quote's (what prices are in). */
+  base: string;
+  quote: string;
+  /** The base token's full name ("Test-wrapped BTC"). */
+  baseName: string;
   bestBid: string;
   bestAsk: string;
   lastTrade: string;
@@ -65,9 +67,10 @@ export function marketStatus(m: Market): MarketStatus {
 
 export function marketRow(m: Market): MarketRowView {
   return {
-    stock: m.stock.midnightName,
-    symbol: m.stock.symbol,
-    colour: m.stock.midnightColour,
+    pair: m.pair.id,
+    base: m.base.symbol,
+    quote: m.quote.symbol,
+    baseName: m.base.name,
     bestBid: m.bids.best ? bidText(m.bids.best.price) : 'no bids',
     bestAsk: m.asks.best ? askText(m.asks.best.price) : 'no asks',
     lastTrade: lastTradeText(m.lastTrade),
@@ -78,24 +81,23 @@ export function marketRow(m: Market): MarketRowView {
   };
 }
 
-/** One row per market in the registry (a stock against USDC), whatever the feed's state. `keep`
- *  decides from a market's two assets whether the page shows it (the asset filter's `showsPair`,
- *  which treats both the same; plan 00042). */
+/** One row per listed pair, whatever the feed's state. `keep` decides from a pair's two tokens
+ *  whether the page shows it (the asset filter's `showsPair`, which treats both the same; plan
+ *  00042). */
 export function marketRows(
   state: FeedState,
-  registry: TokenRegistry,
+  pairs: readonly MarketPair[],
   keep: (a: TokenEntry, b: TokenEntry) => boolean = () => true,
 ): MarketRowView[] {
-  if (state.status === 'ready') return state.snapshot.markets.filter((m) => keep(m.stock, m.usdc)).map(marketRow);
+  if (state.status === 'ready') return state.snapshot.markets.filter((m) => keep(m.base, m.quote)).map(marketRow);
   const status: MarketStatus = state.status === 'unavailable' ? 'unavailable' : 'loading';
-  const usdc = registry.usdc();
-  return registry
-    .stocks()
-    .filter((s) => keep(s, usdc))
-    .map((s) => ({
-      stock: s.midnightName,
-      symbol: s.symbol,
-      colour: s.midnightColour,
+  return pairs
+    .filter((p) => keep(p.base, p.quote))
+    .map((p) => ({
+      pair: p.id,
+      base: p.base.symbol,
+      quote: p.quote.symbol,
+      baseName: p.base.name,
       bestBid: '—',
       bestAsk: '—',
       lastTrade: '—',
@@ -109,9 +111,9 @@ export function marketRows(
 export interface BookLineView {
   offerId: string;
   price: string;
-  /** Stock quantity, whole tokens. */
+  /** Base quantity, whole tokens. */
   quantity: string;
-  /** USDC paid (asks) or received (bids), whole tokens. */
+  /** Quote paid (asks) or received (bids), whole tokens. */
   total: string;
 }
 
@@ -119,8 +121,8 @@ export function bookLines(m: Market, side: 'asks' | 'bids'): BookLineView[] {
   const fmt = (e: BookEntry): BookLineView => ({
     offerId: e.offerId,
     price: side === 'asks' ? askText(e.price) : bidText(e.price),
-    quantity: formatUnits(e.stockRaw, m.stock.decimals, { minFractionDigits: 2, grouping: true }),
-    total: formatUnits(e.usdcRaw, m.usdc.decimals, { minFractionDigits: 2, grouping: true }),
+    quantity: formatUnits(e.baseRaw, m.base.decimals, { minFractionDigits: 2, grouping: true }),
+    total: formatUnits(e.quoteRaw, m.quote.decimals, { minFractionDigits: 2, grouping: true }),
   });
   return m[side].entries.map(fmt);
 }
@@ -136,18 +138,18 @@ export function spreadText(m: Market): string | null {
   return formatPrice({ num, den }, { round: 'up' }).text;
 }
 
-/** The amount side of a depth line: "30.00 wStkA for 32.50 wUSDC". */
+/** The amount side of a depth line: "0.75 twBTC for 46,250.00 twUSDC". */
 export function depthText(m: Market, side: 'asks' | 'bids'): string {
   const s = m[side];
-  const stock = formatUnits(s.depthStockRaw, m.stock.decimals, { minFractionDigits: 2, grouping: true });
-  const usdc = formatUnits(s.depthUsdcRaw, m.usdc.decimals, { minFractionDigits: 2, grouping: true });
-  return `${stock} ${m.stock.midnightName} for ${usdc} ${m.usdc.midnightName}`;
+  const base = formatUnits(s.depthBaseRaw, m.base.decimals, { minFractionDigits: 2, grouping: true });
+  const quote = formatUnits(s.depthQuoteRaw, m.quote.decimals, { minFractionDigits: 2, grouping: true });
+  return `${base} ${m.base.symbol} for ${quote} ${m.quote.symbol}`;
 }
 
-/** "N offers on the exchange are not USDC against one stock" (baskets, stock-to-stock, …). */
+/** "N other offers are not one of the listed pairs" (baskets, unlisted tokens or pairs, …). */
 export function ignoredText(state: FeedState): string | null {
   if (state.status !== 'ready') return null;
   const n = Object.values(state.snapshot.ignored).reduce((t, x) => t + (x ?? 0), 0);
   if (n === 0) return null;
-  return `${n} other ${n === 1 ? 'offer' : 'offers'} with a USDC leg ${n === 1 ? 'is' : 'are'} not USDC against one other asset (a basket, an unshielded leg or an unlisted token) and ${n === 1 ? 'is' : 'are'} not shown.`;
+  return `${n} other ${n === 1 ? 'offer' : 'offers'} on the exchange ${n === 1 ? 'is' : 'are'} not one token against another of a listed pair (a basket, an unshielded leg, an unlisted token or pair) and ${n === 1 ? 'is' : 'are'} not shown.`;
 }

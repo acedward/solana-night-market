@@ -1,17 +1,17 @@
 // The asset filter (plan 00042): an opt-in whitelist, set by the page's URL, of the assets the
-// site shows. `https://<bank>/?assets=USDC,TBILL` keeps the list in this browser's local data and
-// shows only those assets, everywhere tokens appear; with no list, the site's whole set is shown.
+// site shows. `https://<market>/?assets=twBTC,twUSDC` keeps the list in this browser's local data
+// and shows only those assets, everywhere tokens appear; with no list, the site's whole set is
+// shown.
 //
 // The site's set (plan 00046) is the ceiling: each domain serves one build with its own
 // `config.json` `assets` (or its network's default set, which is data), and the URL's list only
 // narrows within it. `?assets=all` goes back to the site's set; a listed symbol outside it is
 // named "not available on this site" and never shown.
 //
-// The rules are generic on purpose (owner, 2026-09-28): an asset is a symbol and a Midnight name,
-// a market is any two assets, and no asset is special. A market shows only when BOTH of its assets
-// are listed, whatever the registry's market model calls them, so a future pair without USDC is
-// filtered by the same code. The filter is presentation only: it hides nothing from the relay,
-// the kernel or the wallet, and it is not a security setting.
+// The rules are generic on purpose (owner, 2026-09-28): an asset is its symbol, a market is any two
+// assets, and no asset is special. A market shows only when BOTH of its assets are listed, so a pair
+// without twUSDC is filtered by the same code as any other. The filter is presentation only: it
+// hides nothing from the relay, the kernel or the wallet, and it is not a security setting.
 
 import { z } from 'zod';
 
@@ -117,12 +117,9 @@ export function applyAssetsParam(
 
 // ── The rules ───────────────────────────────────────────────────────────────
 
-/** An asset as the filter sees it: nothing but its names. */
+/** An asset as the filter sees it: nothing but its symbol (twBTC, twUSDC). */
 export interface FilterAsset {
-  /** The ERC20 symbol on Sepolia (USDC, stkA). */
   symbol: string;
-  /** The name on Midnight (wUSDC, wStkA). */
-  midnightName: string;
 }
 
 export interface AssetView {
@@ -130,10 +127,10 @@ export interface AssetView {
   listed: readonly string[];
   /** The listed symbols this site has an asset for. */
   known: readonly string[];
-  /** The listed symbols the bank has an asset for, outside this site's set: named in the note as
+  /** The listed symbols the market has an asset for, outside this site's set: named in the note as
    *  not available on this site, and never shown. */
   unavailable: readonly string[];
-  /** The listed symbols the bank has no asset for (yet): named in the note. */
+  /** The listed symbols the market has no asset for (yet): named in the note. */
   unknown: readonly string[];
   /** True when the view is narrowed: a list is stored and at least one of its symbols is known.
    *  A list of only unknown symbols narrows nothing, so a typo never blanks the site. */
@@ -143,13 +140,13 @@ export interface AssetView {
   showsPair(a: FilterAsset, b: FilterAsset): boolean;
 }
 
-const namesOf = (a: FilterAsset) => [a.symbol.toLowerCase(), a.midnightName.toLowerCase()];
+const namesOf = (a: FilterAsset) => [a.symbol.toLowerCase()];
 
 /**
- * The view a list gives over a site's assets. Matching ignores case and accepts either name
- * (`USDC`, `usdc` and `wUSDC` all list the same asset). `alwaysVisible` assets (Sepolia ETH, which
- * pays for gas) are shown whatever the list, and count as known when listed. `site` is the site's
- * set (`resolveSiteAssets`; null = every asset): nothing outside it is shown, whatever the list.
+ * The view a list gives over a site's assets. Matching ignores case (`twUSDC` and `TWUSDC` list the
+ * same asset). `alwaysVisible` assets are shown whatever the list, and count as known when listed
+ * (Night Market has none; MN Bank's was Sepolia ETH). `site` is the site's set
+ * (`resolveSiteAssets`; null = every asset): nothing outside it is shown, whatever the list.
  */
 export function assetView(
   listed: readonly string[] | null,
@@ -187,7 +184,7 @@ export interface SiteAssets {
 
 /**
  * A site's asset set: `config.json`'s `assets` (a list of symbols, or "all"), else the network's
- * default set (data; null = every asset). Symbols match either name, in any case. A symbol the
+ * default set (data; null = every asset). Symbols match in any case. A symbol the
  * site has no asset for is ignored, with a warning; when none is known, the network's default
  * applies, with a warning, so a typo never blanks the site.
  */

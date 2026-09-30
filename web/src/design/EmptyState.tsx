@@ -1,7 +1,7 @@
 // An empty state: what is missing, why, and the one thing to do about it.
 //
 //   <EmptyState title="Connect your wallet" action={<Button …>Connect wallet</Button>}>
-//     Connect your wallet to see your holdings and your MN Bank account.
+//     Connect your wallet to see your holdings and your Night Market account.
 //   </EmptyState>
 
 import type { HTMLAttributes, ReactNode } from 'react';

@@ -1,14 +1,16 @@
-// The application shell: the MN Bank masthead (brand, the connected wallet with its Sepolia
-// badge, the Passport account with its "Midnight stagenet" badge), the tab bar, the five
-// sections and the testnet footer, in the owner-approved design (plan P1.5, Q16 A). The pieces
-// come from ./design; this file only wires them to the wallet and the store.
+// The application shell: the Night Market masthead (brand, the connected Solana wallet, the
+// account with its "Midnight stagenet" badge), the tab bar, the four sections and the testnet
+// footer, in the design system carried over from MN Bank. The pieces come from ./design; this file
+// only wires them to the wallet and the store.
+//
+// A create-and-trade market: the order books (Markets) and making and taking offers (Trade) come
+// first; the holdings (Account) and the browser's records (Local data) after.
 
 import { useEffect, useMemo, useState } from 'react';
 
-import type { NetworkProfile } from '@mnbank/core';
+import { shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
 
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
-import { TransfersProvider } from './bridge/TransfersContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
   Button,
@@ -27,41 +29,39 @@ import { Accounts } from './pages/Accounts.js';
 import { LocalData } from './pages/LocalData.js';
 import { Markets } from './pages/Markets.js';
 import { Trade } from './pages/Trade.js';
-import { Transfers } from './pages/Transfers.js';
 import { findAccount } from './passport/records.js';
-import { BankNotices, BankStatusProvider } from './relay/BankStatus.js';
+import { RelayNotices, RelayStatusProvider } from './relay/RelayStatus.js';
 import { storageText } from './store/messages.js';
 import { StoreProvider, useStore } from './store/StoreContext.js';
-import { WalletProvider, useWallet } from './wallet/WalletContext.js';
+import { WalletProvider, useWallet, type WalletAdapter } from './wallet/WalletContext.js';
 
 export const SECTIONS = [
-  { id: 'accounts', label: 'Accounts' },
   { id: 'markets', label: 'Markets' },
-  { id: 'transfers', label: 'Transfers' },
   { id: 'trade', label: 'Trade' },
+  { id: 'account', label: 'Account' },
   { id: 'local', label: 'Local data' },
 ] as const;
 type SectionId = (typeof SECTIONS)[number]['id'];
 
 const sectionFromHash = (): SectionId => {
-  // A section may carry parameters after '?' (#trade?stock=wStkA&offer=…, from the Markets page).
+  // A section may carry parameters after '?' (#trade?pair=twBTC/twUSDC&offer=…, from the Markets page).
   const h = window.location.hash.replace(/^#/, '').split('?')[0] ?? '';
-  return (SECTIONS.find((s) => s.id === h)?.id ?? 'accounts') as SectionId;
+  return (SECTIONS.find((s) => s.id === h)?.id ?? 'markets') as SectionId;
 };
 
-/** The right-hand side of the masthead: who is connected, on which networks. */
+/** The right-hand side of the masthead: who is connected, on which network. */
 function Identity({ network }: { network: NetworkProfile }) {
   const w = useWallet();
   const { store, revision } = useStore();
   const [choosing, setChoosing] = useState(false);
-  // The Passport account this wallet has in this browser (read-only; `revision` follows writes).
+  // The account this wallet has in this browser (read-only; `revision` follows writes).
   const account = useMemo(
     () =>
-      store && w.status === 'connected' && w.address
-        ? findAccount(store, { network: network.name, evmAddress: w.address })
+      store && w.status === 'connected' && w.deviceKey
+        ? findAccount(store, { network: network.name, owner: w.deviceKey })
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store, w.status, w.address, network.name, revision],
+    [store, w.status, w.deviceKey, network.name, revision],
   );
   const midnight = (
     <NetworkBadge network="midnight" data-testid="network-name">
@@ -73,28 +73,12 @@ function Identity({ network }: { network: NetworkProfile }) {
     return (
       <>
         <IdentityChip
-          label="Wallet"
+          label="Solana wallet"
           data-testid="wallet-connected"
           value={
             <span className="id-value" data-testid="wallet-address" title={w.address}>
-              {shortHex(w.address)}
+              {shortSolanaAddress(w.address)}
             </span>
-          }
-          badge={
-            w.onRightChain ? (
-              <NetworkBadge network="sepolia" data-testid="wallet-chain">
-                {network.evm.chainName}
-              </NetworkBadge>
-            ) : (
-              <Button
-                variant="inverse"
-                size="small"
-                data-testid="switch-network"
-                onClick={() => void w.switchNetwork()}
-              >
-                Switch to {network.evm.chainName}
-              </Button>
-            )
           }
         >
           <Button variant="link" onClick={w.disconnect}>
@@ -102,7 +86,7 @@ function Identity({ network }: { network: NetworkProfile }) {
           </Button>
         </IdentityChip>
         <IdentityChip
-          label="Passport account"
+          label="Account"
           value={
             account ? (
               <span className="id-value" title={account.address} data-testid="masthead-account">
@@ -129,14 +113,16 @@ function Identity({ network }: { network: NetworkProfile }) {
           disabled={w.status === 'connecting'}
           onClick={() => setChoosing((c) => !c)}
         >
-          {w.status === 'connecting' ? 'Connecting…' : 'Connect wallet'}
+          {w.status === 'connecting' ? 'Connecting…' : 'Connect Solana wallet'}
         </Button>
         {choosing && (
           <div className="wallet-menu" role="menu" aria-label="Choose a wallet" data-testid="wallet-menu">
-            {w.options.length === 0 ? (
-              <p className="small">
-                No wallet found in this browser. Install MetaMask or another EVM wallet, then reload.
+            {!w.supported ? (
+              <p className="small" data-testid="wallet-unsupported">
+                Solana wallets (Phantom) are coming to this site. You can already browse the order books.
               </p>
+            ) : w.options.length === 0 ? (
+              <p className="small">No Solana wallet found in this browser. Install Phantom, then reload.</p>
             ) : (
               <>
                 <p className="wallet-menu-title">Choose a wallet</p>
@@ -163,19 +149,19 @@ function Identity({ network }: { network: NetworkProfile }) {
   );
 }
 
-/** Remember that this wallet has used the bank on this network (its first record here). */
+/** Remember that this wallet has used the market on this network (its first record here). */
 function ProfileRecorder({ network }: { network: string }) {
   const { store } = useStore();
-  const { address, status } = useWallet();
+  const { deviceKey, status } = useWallet();
   useEffect(() => {
-    if (!store || store.readOnly || status !== 'connected' || !address) return;
-    const scope = { network, evmAddress: address };
+    if (!store || store.readOnly || status !== 'connected' || !deviceKey) return;
+    const scope = { network, owner: deviceKey };
     const existing = store
       .list(scope)
       .find((r) => r.parsed.kind === 'profile' && !r.parsed.scope.global && r.parsed.scope.account === null);
     const firstSeen = (existing?.record?.data as { firstSeen?: number } | undefined)?.firstSeen ?? Date.now();
     store.put(scope, 'profile', { firstSeen, lastSeen: Date.now() });
-  }, [store, address, status, network]);
+  }, [store, deviceKey, status, network]);
   return null;
 }
 
@@ -189,7 +175,6 @@ function Shell({ network, config }: { network: NetworkProfile; config: SiteConfi
   const { status } = useStore();
   const wallet = useWallet();
   const pending = SECTIONS.find((s) => s.id === section)?.label ?? '';
-  const wrongNetwork = wallet.status === 'connected' && !wallet.onRightChain;
   const storage = status === 'ok' ? null : storageText(status);
   return (
     <div className="app">
@@ -203,38 +188,21 @@ function Shell({ network, config }: { network: NetworkProfile; config: SiteConfi
             {storage.text}
           </Notice>
         )}
-        {wrongNetwork && (
-          <Notice tone="warning" role="alert" title="Your wallet is on another network." data-testid="wrong-network">
-            MN Bank works on {network.evm.chainName}
-            {wallet.chainId ? ` (your wallet is on chain ${parseInt(wallet.chainId, 16) || wallet.chainId})` : ''}.
-            Nothing will be signed or sent until you switch.{' '}
-            <Button
-              variant="secondary"
-              size="small"
-              data-testid="wrong-network-switch"
-              onClick={() => void wallet.switchNetwork()}
-            >
-              Switch to {network.evm.chainName}
-            </Button>
-          </Notice>
-        )}
         {wallet.error && (
           <Notice tone="danger" role="alert" data-testid="wallet-error">
             {wallet.error}
           </Notice>
         )}
-        <BankNotices place="shell" />
+        <RelayNotices place="shell" />
         <AssetFilterNote />
       </div>
       <main className="wrap">
         {section === 'local' ? (
           <LocalData network={network.name} relayUrl={config.relayUrl} />
-        ) : section === 'accounts' ? (
+        ) : section === 'account' ? (
           <Accounts network={network} relayUrl={config.relayUrl} />
         ) : section === 'markets' ? (
           <Markets />
-        ) : section === 'transfers' ? (
-          <Transfers network={network} />
         ) : section === 'trade' ? (
           <Trade network={network} relayUrl={config.relayUrl} />
         ) : (
@@ -246,11 +214,14 @@ function Shell({ network, config }: { network: NetworkProfile; config: SiteConfi
           </section>
         )}
       </main>
-      <SiteFooter networkName={`Midnight ${network.name}`} evmName={`Ethereum ${network.evm.chainName}`} />
+      <SiteFooter networkName={`Midnight ${network.name}`} />
       <ProfileRecorder network={network.name} />
     </div>
   );
 }
+
+/** The wallet adapter this build ships: none yet (lane B2 adds Phantom's). */
+const WALLET_ADAPTER: WalletAdapter | null = null;
 
 export function App() {
   const [config, setConfig] = useState<SiteConfig | null>(null);
@@ -262,7 +233,7 @@ export function App() {
     return (
       <div className="wrap app-banner">
         <Notice tone="danger" role="alert">
-          MN Bank could not start: {failed}
+          Night Market could not start: {failed}
         </Notice>
       </div>
     );
@@ -274,16 +245,14 @@ export function App() {
     );
   return (
     <StoreProvider>
-      <WalletProvider network={config.network}>
-        <BankStatusProvider relayUrl={config.relayUrl}>
-          <MarketProvider network={config.network} tokens={config.tokens}>
+      <WalletProvider adapter={WALLET_ADAPTER}>
+        <RelayStatusProvider relayUrl={config.relayUrl}>
+          <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
             <AssetFilterProvider site={config.assets}>
-              <TransfersProvider network={config.network} relayUrl={config.relayUrl}>
-                <Shell network={config.network} config={config} />
-              </TransfersProvider>
+              <Shell network={config.network} config={config} />
             </AssetFilterProvider>
           </MarketProvider>
-        </BankStatusProvider>
+        </RelayStatusProvider>
       </WalletProvider>
     </StoreProvider>
   );

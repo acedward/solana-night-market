@@ -1,4 +1,4 @@
-// The MN Bank design system (plan P1.5): tokens and styles in ./index.css (imported once by
+// The Night Market design system (plan P1.5): tokens and styles in ./index.css (imported once by
 // main.tsx), components below. How to use them: web/README.md, "Adopting the design system".
 
 export { Badge, NetworkBadge, NoValue, StatusPill, YoursBadge } from './Badge.js';
@@ -11,7 +11,7 @@ export { EmptyState } from './EmptyState.js';
 export { CopyField, Field, KeyValueList, Segmented, Select, TextInput, UnitInput, copyText } from './Field.js';
 export type { FieldProps, KeyValueItem, SegmentedOption } from './Field.js';
 export { Figure, Figures, PendingItem } from './Figures.js';
-export { cx, shortHex, tokenDisplayName } from './format.js';
+export { cx, shortHex } from './format.js';
 export { Money, formatMoney } from './Money.js';
 export type { MoneyFormat, MoneyProps } from './Money.js';
 export { Notice } from './Notice.js';

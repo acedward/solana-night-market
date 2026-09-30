@@ -1,5 +1,5 @@
-// The bank's status as the page knows it (plan P4-A error states): /health read when the page
-// opens, every minute, and when the tab comes back into view. Pages ask `useBankStatus()` for the
+// The market's status as the page knows it (plan P4-A error states): /health read when the page
+// opens, every minute, and when the tab comes back into view. Pages ask `useRelayStatus()` for the
 // notices of their place (./status.ts) and for whether an action would be refused, so a paused
 // action is explained BEFORE the wallet is asked to sign anything.
 
@@ -7,17 +7,17 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { Notice } from '../design/index.js';
 import { RelayClient } from './client.js';
-import { bankNotices, spendingPaused, withdrawalsPaused, type BankState, type NoticePlace } from './status.js';
+import { relayNotices, spendingPaused, type RelayState, type NoticePlace } from './status.js';
 
 export const HEALTH_POLL_MS = 60_000;
 
-interface BankStatusValue extends BankState {
+interface RelayStatusValue extends RelayState {
   refresh(): Promise<void>;
 }
 
-const Ctx = createContext<BankStatusValue | null>(null);
+const Ctx = createContext<RelayStatusValue | null>(null);
 
-export function BankStatusProvider({
+export function RelayStatusProvider({
   relayUrl,
   pollMs = HEALTH_POLL_MS,
   children,
@@ -27,7 +27,7 @@ export function BankStatusProvider({
   children: ReactNode;
 }) {
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
-  const [state, setState] = useState<BankState>({ health: null, reachable: null, checkedAt: null });
+  const [state, setState] = useState<RelayState>({ health: null, reachable: null, checkedAt: null });
   const inFlight = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(() => {
@@ -71,23 +71,21 @@ export function BankStatusProvider({
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-/** Outside a provider (a component test), the bank is simply "not read yet". */
-const UNKNOWN: BankStatusValue = { health: null, reachable: null, checkedAt: null, refresh: async () => {} };
+/** Outside a provider (a component test), the market is simply "not read yet". */
+const UNKNOWN: RelayStatusValue = { health: null, reachable: null, checkedAt: null, refresh: async () => {} };
 
-export function useBankStatus(): BankStatusValue & {
-  /** Why actions the bank pays fees for are paused now, or null. */
+export function useRelayStatus(): RelayStatusValue & {
+  /** Why actions the market pays fees for are paused now, or null. */
   spendingPaused: string | null;
-  /** Why withdrawals to Sepolia are paused now, or null. */
-  withdrawalsPaused: string | null;
 } {
   const v = useContext(Ctx) ?? UNKNOWN;
-  return { ...v, spendingPaused: spendingPaused(v), withdrawalsPaused: withdrawalsPaused(v) };
+  return { ...v, spendingPaused: spendingPaused(v) };
 }
 
 /** The notices of one place, as design-system Notices (each with its own test id). */
-export function BankNotices({ place, className }: { place: NoticePlace; className?: string }) {
-  const s = useBankStatus();
-  const notices = bankNotices(s).filter((n) => n.place === place);
+export function RelayNotices({ place, className }: { place: NoticePlace; className?: string }) {
+  const s = useRelayStatus();
+  const notices = relayNotices(s).filter((n) => n.place === place);
   if (notices.length === 0) return null;
   return (
     <>
@@ -98,7 +96,7 @@ export function BankNotices({ place, className }: { place: NoticePlace; classNam
           role="status"
           title={n.title}
           className={className}
-          data-testid={`bank-${n.id}`}
+          data-testid={`relay-${n.id}`}
         >
           {n.text}
         </Notice>

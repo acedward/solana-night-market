@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { encPublicKeyOf } from '@mnbank/core';
+import { encPublicKeyOf } from '@nightmarket/core';
 
 import { exportFileText, importFile } from '../src/pages/LocalData.js';
 import {
@@ -15,8 +15,9 @@ import {
 } from '../src/store/schema.js';
 import { ImportError, LocalStore, StoreReadOnlyError, type Migration } from '../src/store/store.js';
 
-const ME: WalletScope = { network: 'stagenet', evmAddress: '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01' };
-const OTHER: WalletScope = { network: 'stagenet', evmAddress: `0x${'22'.repeat(20)}` };
+// Device keys (a Solana wallet's public key, 64 hex); ME's is given in mixed case on purpose.
+const ME: WalletScope = { network: 'stagenet', owner: 'AbCdEf0123456789aBcDeF0123456789'.repeat(2) };
+const OTHER: WalletScope = { network: 'stagenet', owner: '22'.repeat(32) };
 const ACC = '5a'.repeat(32);
 const ACC2 = '6b'.repeat(32);
 
@@ -30,13 +31,12 @@ const snapshot = () => {
 };
 
 const COLOUR = '5e'.repeat(32);
-const DEVICE = ME.evmAddress.toLowerCase();
+const DEVICE = ME.owner.toLowerCase();
 /** Records as the page writes them (security review F-B4: Import accepts only these shapes). */
 const accountRecord = (address: string) => ({
   address,
   device: DEVICE,
   network: 'stagenet',
-  vault: 'ee'.repeat(32),
   createdAt: 1,
   txs: { waveOne: '00ab', waveTwo: '00cd', activation: '00ef' },
 });
@@ -54,31 +54,32 @@ const coin = (value: string, n: string) => ({
 const pair = (secret: string) => ({ encSecretKey: secret, encPublicKey: encPublicKeyOf(secret) });
 const SECRET_A = pair('ff'.repeat(31) + '7f');
 const SECRET_B = pair('11'.repeat(32));
-const TRANSFER_ID = '0123456789abcdef';
-const transferRecord = {
-  id: TRANSFER_ID,
-  kind: 'deposit',
-  account: ACC,
-  symbol: 'stkA',
-  midnightName: 'wStkA',
-  erc20: '0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52',
-  colour: COLOUR,
-  decimals: 6,
-  amount: '1000000',
-  depositAddress: '0xEb5A392eeee639C23434C1FA8bccbF6bC730377C',
+const OFFER_ID = 'f0'.repeat(32);
+const OFFER_KEY_ID = `make-${OFFER_ID}`;
+/** A trade record as trade/operations.ts writes it (a pair of any two tokens). */
+const offerRecord = {
+  offerId: OFFER_ID,
+  role: 'make',
+  side: 'sell',
+  pair: 'twUSDM/twUSDC',
+  base: COLOUR,
+  quote: 'b2'.repeat(32),
+  baseRaw: '2000000',
+  quoteRaw: '2100000',
+  summary: 'sell 2.00 twUSDM at 1.05 twUSDC',
+  coin: 'c0'.repeat(32),
+  authNonce: '4',
+  wantNonce: '11'.repeat(32),
   createdAt: 1,
-  updatedAt: 2,
-  state: 'running',
-  jobIds: ['1'.padStart(32, '0')],
-  requestId: 'a1'.repeat(32),
-  stages: [{ stage: 'mpc-signed', at: 3, detail: { evmNonce: '0' } }],
+  expiresAt: 2,
+  status: 'live',
 };
 const seed = (store: LocalStore) => {
   store.put(ME, 'profile', { firstSeen: 1 });
   store.put(ME, 'account', accountRecord(ACC), { account: ACC });
   store.put(ME, 'secret', SECRET_A, { account: ACC });
   store.put(ME, 'coins', [coin('60000000', '01'), coin('40000000', '02')], { account: ACC });
-  store.put(ME, 'bridge', transferRecord, { account: ACC, id: TRANSFER_ID });
+  store.put(ME, 'offer', offerRecord, { account: ACC, id: OFFER_KEY_ID });
   store.put(ME, 'account', accountRecord(ACC2), { account: ACC2 });
   store.put(OTHER, 'profile', { firstSeen: 2 });
   store.put('global', 'settings', { grouping: true });
@@ -87,28 +88,32 @@ const seed = (store: LocalStore) => {
 beforeEach(() => localStorage.clear());
 
 describe('keys', () => {
-  it('namespace by network, EVM address (lowercased) and account', () => {
+  it('namespace by network, device key (lowercased) and account', () => {
     const k = recordKey(ME, 'coins', { account: `0x${ACC.toUpperCase()}` });
-    expect(k).toBe(`mn-bank/v1/stagenet/${ME.evmAddress.toLowerCase()}/${ACC}/coins`);
+    expect(k).toBe(`night-market/v1/stagenet/${DEVICE}/${ACC}/coins`);
     expect(parseKey(k)).toEqual({
-      scope: { global: false, network: 'stagenet', evmAddress: ME.evmAddress.toLowerCase(), account: ACC },
+      scope: { global: false, network: 'stagenet', owner: DEVICE, account: ACC },
       kind: 'coins',
     });
-    expect(parseKey(recordKey(ME, 'bridge', { account: ACC, id: 'req-1' }))?.id).toBe('req-1');
+    expect(parseKey(recordKey(ME, 'offer', { account: ACC, id: 'req-1' }))?.id).toBe('req-1');
     expect(parseKey(recordKey('global', 'settings'))).toEqual({ scope: { global: true }, kind: 'settings' });
     expect(recordKey(ME, 'profile')).toContain('/-/profile');
   });
 
   it('refuse malformed parts, and parse nothing foreign', () => {
-    expect(() => recordKey({ network: 'Stage Net', evmAddress: ME.evmAddress }, 'profile')).toThrow(StoreKeyError);
-    expect(() => recordKey({ network: 'stagenet', evmAddress: '0x12' }, 'profile')).toThrow(StoreKeyError);
+    expect(() => recordKey({ network: 'Stage Net', owner: ME.owner }, 'profile')).toThrow(StoreKeyError);
+    expect(() => recordKey({ network: 'stagenet', owner: '0x12' }, 'profile')).toThrow(StoreKeyError);
+    // An EVM address is not a device key.
+    expect(() => recordKey({ network: 'stagenet', owner: `0x${'22'.repeat(20)}` }, 'profile')).toThrow(StoreKeyError);
     expect(() => recordKey(ME, 'coins', { account: 'xyz' })).toThrow(StoreKeyError);
-    expect(() => recordKey(ME, 'bridge', { id: 'a/b' })).toThrow(StoreKeyError);
+    expect(() => recordKey(ME, 'offer', { id: 'a/b' })).toThrow(StoreKeyError);
     for (const k of [
       'other/key',
-      'mn-bank/v1/stagenet/0x12/-/profile',
-      `mn-bank/v1/stagenet/${OTHER.evmAddress}/-/nope`,
-      `mn-bank/v1/_global/settings/a/b`,
+      'night-market/v1/stagenet/0x12/-/profile',
+      `night-market/v1/stagenet/${OTHER.owner}/-/nope`,
+      `night-market/v1/_global/settings/a/b`,
+      `night-market/v1/stagenet/${OTHER.owner}/-/bridge`,
+      `mn-bank/v1/stagenet/${OTHER.owner}/-/profile`,
     ]) {
       expect(parseKey(k)).toBeNull();
     }
@@ -131,8 +136,8 @@ describe('the store', () => {
     expect(mine.map((v) => v.parsed.kind).sort()).toEqual([
       'account',
       'account',
-      'bridge',
       'coins',
+      'offer',
       'profile',
       'secret',
     ]);
@@ -215,30 +220,27 @@ describe('Export, CLEAR ALL and Import (Q11, SC-005)', () => {
     const before = snapshot();
     const file = JSON.parse(JSON.stringify(store.exportWallet(ME))) as unknown; // as downloaded
     expect(file).toMatchObject({
-      format: 'mn-bank-local-data',
+      format: 'night-market-local-data',
       formatVersion: 1,
       schemaVersion: 1,
       network: 'stagenet',
-      evmAddress: ME.evmAddress.toLowerCase(),
+      owner: DEVICE,
     });
     expect((file as { records: unknown[] }).records).toHaveLength(6); // not OTHER's, not global
 
     expect(store.clearAll()).toBe(9); // 8 records + the schema marker
     expect(Object.keys(snapshot()).filter((k) => k.startsWith(STORE_PREFIX))).toEqual([]);
 
-    const r = store.importWallet(file, {
-      network: 'stagenet',
-      evmAddress: ME.evmAddress.toUpperCase().replace('0X', '0x'),
-    });
+    const r = store.importWallet(file, { network: 'stagenet', owner: ME.owner.toUpperCase() });
     expect(r).toEqual({ imported: 6, replaced: 0 });
     const after = snapshot();
     for (const [k, v] of Object.entries(before)) {
-      if (k.includes(ME.evmAddress.toLowerCase())) expect(after[k]).toBe(v);
+      if (k.includes(DEVICE)) expect(after[k]).toBe(v);
     }
     expect(store.importWallet(file, ME)).toEqual({ imported: 6, replaced: 6 });
   });
 
-  it("CLEAR ALL leaves keys that are not the bank's", () => {
+  it("CLEAR ALL leaves keys that are not the market's", () => {
     localStorage.setItem('another-app/key', 'x');
     const store = new LocalStore(localStorage);
     seed(store);
@@ -251,7 +253,7 @@ describe('Export, CLEAR ALL and Import (Q11, SC-005)', () => {
     seed(store);
     const file = store.exportWallet(ME);
     store.clearAll();
-    expect(() => store.importWallet(file, { network: 'undeployed', evmAddress: ME.evmAddress })).toThrow(
+    expect(() => store.importWallet(file, { network: 'undeployed', owner: ME.owner })).toThrow(
       /stagenet network/,
     );
     expect(() => store.importWallet(file, OTHER)).toThrow(/another wallet/);
@@ -294,26 +296,29 @@ describe('Export, CLEAR ALL and Import (Q11, SC-005)', () => {
       ...file,
       records: [...file.records.filter((r) => r.key !== key), { key, value: { v: 1, kind, updatedAt: 1, data } }],
     });
-    const bridgeKey = recordKey(ME, 'bridge', { account: ACC, id: TRANSFER_ID });
+    const offerKey = recordKey(ME, 'offer', { account: ACC, id: OFFER_KEY_ID });
     const cases: Array<[unknown, RegExp]> = [
       // an unknown field
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, redirectTo: '0x00' }), /not in the shape/],
-      // an ill-typed deposit address, token, amount or colour
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, depositAddress: 'attacker' }), /not in the shape/],
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, erc20: 'javascript:alert(1)' }), /not in the shape/],
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, amount: '-1' }), /not in the shape/],
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, colour: 'zz' }), /not in the shape/],
-      // filed under another account or id than it names
-      [withRecord(bridgeKey, 'bridge', { ...transferRecord, account: ACC2 }), /does not match its key/],
+      [withRecord(offerKey, 'offer', { ...offerRecord, redirectTo: '0x00' }), /not in the shape/],
+      // an ill-typed pair, colour or amount
+      [withRecord(offerKey, 'offer', { ...offerRecord, pair: 'javascript:alert(1)' }), /not in the shape/],
+      [withRecord(offerKey, 'offer', { ...offerRecord, base: 'zz' }), /not in the shape/],
+      [withRecord(offerKey, 'offer', { ...offerRecord, baseRaw: '-1' }), /not in the shape/],
+      // MN Bank's stock/USDC shape is not this page's
       [
-        withRecord(recordKey(ME, 'bridge', { account: ACC, id: 'fedcba9876543210' }), 'bridge', transferRecord),
+        withRecord(offerKey, 'offer', { ...offerRecord, stock: COLOUR, usdc: 'b2'.repeat(32) }),
+        /not in the shape/,
+      ],
+      // filed under another id than it names
+      [
+        withRecord(recordKey(ME, 'offer', { account: ACC, id: `make-${'f1'.repeat(32)}` }), 'offer', offerRecord),
         /does not match its key/,
       ],
       // an account record for another device, or naming another account than its key
       [
         withRecord(recordKey(ME, 'account', { account: ACC }), 'account', {
           ...accountRecord(ACC),
-          device: `0x${'33'.repeat(20)}`,
+          device: '33'.repeat(32),
         }),
         /another device/,
       ],
@@ -374,7 +379,7 @@ class FullStorage implements Storage {
 }
 
 describe('Import is one change (security review F-B5)', () => {
-  /** The seeded wallet's export, changed: other coins, a new transfer, and (optionally) another secret. */
+  /** The seeded wallet's export, changed: other coins, a new offer, and (optionally) another secret. */
   const changedFile = (store: LocalStore, secret?: { encSecretKey: string; encPublicKey: string }) => {
     const file = store.exportWallet(ME);
     const records = file.records.map((r) => {
@@ -384,10 +389,10 @@ describe('Import is one change (security review F-B5)', () => {
       if (k.kind === 'secret' && secret) return { ...r, value: { ...v, data: secret } };
       return r;
     });
-    const id = 'fedcba9876543210';
+    const offerId = 'fe'.repeat(32);
     records.push({
-      key: recordKey(ME, 'bridge', { account: ACC, id }),
-      value: { v: 1, kind: 'bridge', updatedAt: 5, data: { ...transferRecord, id } },
+      key: recordKey(ME, 'offer', { account: ACC, id: `make-${offerId}` }),
+      value: { v: 1, kind: 'offer', updatedAt: 5, data: { ...offerRecord, offerId } },
     });
     return { ...file, records };
   };
@@ -398,7 +403,7 @@ describe('Import is one change (security review F-B5)', () => {
     seed(store);
     const before = snapshot();
     const file = changedFile(store, SECRET_B);
-    // Room for the smaller coin list and a few bytes more, not for the new transfer: the import
+    // Room for the smaller coin list and a few bytes more, not for the new offer: the import
     // fails part-way, after some keys were already replaced.
     full.capacity = full.used() + 100;
     const newCoins = JSON.stringify(
@@ -414,7 +419,7 @@ describe('Import is one change (security review F-B5)', () => {
       /no room for the file, so nothing was imported \(everything is as it was\)/,
     );
     expect(newCoinsWritten).toBe(true); // it really failed part-way, after replacing the coins …
-    expect(snapshot()).toEqual(before); // … and the old secret, the old coins are back, no new transfer
+    expect(snapshot()).toEqual(before); // … and the old secret, the old coins are back, no new offer
     full.capacity = 1_000_000;
     expect(store.importWallet(file, ME, { approvedSecretReplacements: new Set([ACC]) })).toMatchObject({
       imported: 7,
@@ -508,7 +513,7 @@ describe('Import is one change (security review F-B5)', () => {
         })),
       ],
     };
-    expect(() => store.importWallet(big, ME)).toThrow(/more than an MN Bank export can/);
+    expect(() => store.importWallet(big, ME)).toThrow(/more than a Night Market export can/);
     const twice = { ...file, records: [...file.records, file.records[0]!] };
     expect(() => store.importWallet(twice, ME)).toThrow(/same record twice/);
   });

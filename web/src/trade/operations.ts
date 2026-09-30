@@ -1,6 +1,7 @@
 // The trade operations, as the browser runs them (plan L-TRD, spec US7/US8): make an offer, take a
-// whole offer from the book, and reconcile My offers. Each trade asks the wallet for exactly ONE
-// signature: the contract's own OpenSwapShielded typed data, which the relay rebuilds and checks.
+// whole offer from the book, and reconcile My offers, on any listed pair. Each trade asks the
+// wallet for exactly ONE signature over the swap call (the arm's message, through the Solana
+// wallet's `ActionSigning`, lane B2), which the relay rebuilds and checks.
 //
 // The browser picks the coin (one coin per payment, Q9), draws the wanted coin's nonce, and seals
 // both inbox entries (the wanted coin, and the predicted change) to the account's OWN public key,
@@ -19,21 +20,22 @@ import {
   type StoredCoin,
   type TakePayload,
   type TakeResult,
+  type MarketPair,
+  type PassportAuth,
   type TokenEntry,
   bytesToHex,
   fundWithOneCoin,
   guardSignedAction,
   hexToBytes,
   takeLegs,
-} from '@mnbank/core';
-import { freshWantNonce, offerInboxEntriesPortable, openSwapGatedCall, predictChangeCoin } from '@mnbank/core/passport';
+} from '@nightmarket/core';
+import { freshWantNonce, offerInboxEntriesPortable, predictChangeCoin } from '@nightmarket/core/passport';
 
 import {
   OperationError,
   dropJob,
   gatedContext,
   putJob,
-  signTypedData,
   syncAccount,
   updateJob,
   type OperationEnv,
@@ -42,24 +44,19 @@ import { readCoins } from '../passport/records.js';
 import { jobErrorText } from '../relay/messages.js';
 import { liveOffer, putTrade, readTrades, tradeSummary, type TradeRecord } from './records.js';
 
-const lower = (s: string) => s.toLowerCase();
-
-interface Tokens {
-  stock: TokenEntry;
-  usdc: TokenEntry;
-}
-
 /** The payload of one open-swap call and its single signature (the browser's half of a trade). */
 async function buildCall(
   env: OperationEnv,
   account: string,
+  action: 'open-swap' | 'take',
   legs: OrderLegs,
   giveToken: TokenEntry,
-): Promise<{ payload: OpenSwapPayload; passportAuth: Record<string, string>; coin: StoredCoin }> {
+  offerId?: string,
+): Promise<{ payload: OpenSwapPayload; passportAuth: PassportAuth; coin: StoredCoin }> {
   const funded = fundWithOneCoin(readCoins(env.store, env.scope, account), legs.give, giveToken);
   if (!funded.ok) throw new OperationError(funded.reason);
   const coin = funded.coin;
-  const { state, counter } = await gatedContext(env, account);
+  const { state, counter, ctx } = await gatedContext(env, account);
   const want = { nonce: freshWantNonce(), color: hexToBytes(legs.want.colour, 32), value: legs.want.amount };
   const change = predictChangeCoin(
     {
@@ -83,17 +80,9 @@ async function buildCall(
     coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex },
     authNonce: state.authNonce,
   };
-  const call = openSwapGatedCall(
-    { account, authNonce: BigInt(state.authNonce), evmDomainSalt: state.evmDomainSalt },
-    env.owner,
-    payload,
-  );
-  const signature = await signTypedData(env, call.typedData);
-  return {
-    payload,
-    passportAuth: { owner: lower(env.owner), signature, useCounter: counter.toString(10) },
-    coin,
-  };
+  const signed = offerId === undefined ? payload : ({ ...payload, offerId } satisfies TakePayload);
+  const passportAuth = await env.signing.authorise(ctx, { kind: 'swap', action, payload: signed }, counter);
+  return { payload, passportAuth, coin };
 }
 
 async function runJob(
@@ -101,7 +90,7 @@ async function runJob(
   account: string,
   action: 'open-swap' | 'take',
   payload: Record<string, unknown>,
-  passportAuth: Record<string, string>,
+  passportAuth: PassportAuth,
   context: Record<string, unknown>,
 ): Promise<JobView> {
   const job = await env.relay.submit(action, { account, payload, passportAuth });
@@ -110,33 +99,40 @@ async function runJob(
   const done = await env.relay.waitForJob(job.requestId, (j) => updateJob(env, account, j));
   dropJob(env, account, job.requestId);
   if (done.state !== 'succeeded' || !done.result)
-    throw new OperationError(jobErrorText(done.error, 'The bank could not complete this.'));
+    throw new OperationError(jobErrorText(done.error, 'The market could not complete this.'));
   return done;
 }
 
 /**
- * Make an offer ("sell N at P" / "buy N at P", FR-011): refused while another offer is live (Q9);
- * one signature; the relay proves, publishes and reports the exchange's id. The coin is NOT marked
- * spent (the offer has not executed) and the device's use counter does not move until it does.
+ * Make an offer on a pair ("sell N base at P", "buy N base at P", P in quote per base, FR-011):
+ * refused while another offer is live (Q9); one signature; the relay proves, publishes and reports
+ * the exchange's id. The coin is NOT marked spent (the offer has not executed) and the device's use
+ * counter does not move until it does.
  */
-export async function makeOffer(env: OperationEnv, account: string, legs: OrderLegs, t: Tokens): Promise<TradeRecord> {
+export async function makeOffer(
+  env: OperationEnv,
+  account: string,
+  legs: OrderLegs,
+  pair: MarketPair,
+): Promise<TradeRecord> {
   const now = Date.now();
   const live = liveOffer(readTrades(env.store, env.scope, account), now);
   const guard = guardSignedAction('open-swap', live, now);
   if (guard.kind === 'refuse') throw new OperationError(guard.message);
-  const giveToken = legs.side === 'sell' ? t.stock : t.usdc;
-  const { payload, passportAuth, coin } = await buildCall(env, account, legs, giveToken);
-  const summary = tradeSummary(legs.side, legs.stockRaw, t.stock, legs.effectivePrice);
+  const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
+  const { payload, passportAuth, coin } = await buildCall(env, account, 'open-swap', legs, giveToken);
+  const summary = tradeSummary(legs.side, legs.baseRaw, pair.base, legs.effectivePrice, pair.quote);
   const done = await runJob(env, account, 'open-swap', payload as never, passportAuth, { summary });
   const r = done.result as unknown as OpenSwapResult;
   const record: TradeRecord = {
     offerId: r.offerId,
     role: 'make',
     side: legs.side,
-    stock: t.stock.midnightColour,
-    usdc: t.usdc.midnightColour,
-    stockRaw: legs.stockRaw.toString(10),
-    usdcRaw: legs.usdcRaw.toString(10),
+    pair: pair.id,
+    base: pair.base.midnightColour,
+    quote: pair.quote.midnightColour,
+    baseRaw: legs.baseRaw.toString(10),
+    quoteRaw: legs.quoteRaw.toString(10),
     summary,
     coin: coin.commitment,
     authNonce: payload.authNonce,
@@ -159,18 +155,18 @@ export async function makeOffer(env: OperationEnv, account: string, legs: OrderL
 export async function takeOffer(
   env: OperationEnv,
   account: string,
-  entry: Pick<BookEntry, 'offerId' | 'side' | 'stockRaw' | 'usdcRaw'>,
-  t: Tokens,
+  entry: Pick<BookEntry, 'offerId' | 'side' | 'baseRaw' | 'quoteRaw'>,
+  pair: MarketPair,
 ): Promise<TradeRecord> {
-  const legs = takeLegs(entry, t.stock, t.usdc);
-  const giveToken = legs.side === 'sell' ? t.stock : t.usdc;
-  const { payload, passportAuth, coin } = await buildCall(env, account, legs, giveToken);
-  const summary = tradeSummary(legs.side, legs.stockRaw, t.stock, legs.effectivePrice);
+  const legs = takeLegs(entry, pair.base, pair.quote);
+  const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
+  const { payload, passportAuth, coin } = await buildCall(env, account, 'take', legs, giveToken, entry.offerId);
+  const summary = tradeSummary(legs.side, legs.baseRaw, pair.base, legs.effectivePrice, pair.quote);
   const takePayload: TakePayload = { ...payload, offerId: entry.offerId };
   const done = await runJob(env, account, 'take', takePayload as never, passportAuth, { summary });
   const r = done.result as unknown as TakeResult;
   // The call executed: the counter moved, the coin is spent, and any live offer of ours is dead.
-  env.store.put(env.scope, 'roster', { useCounter: (BigInt(passportAuth.useCounter!) + 1n).toString(10) }, { account });
+  env.store.put(env.scope, 'roster', { useCounter: (BigInt(passportAuth.useCounter) + 1n).toString(10) }, { account });
   const coins = readCoins(env.store, env.scope, account).map((c) =>
     c.commitment === coin.commitment ? { ...c, spent: true, spentTx: r.txHash } : c,
   );
@@ -184,10 +180,11 @@ export async function takeOffer(
     offerId: entry.offerId,
     role: 'take',
     side: legs.side,
-    stock: t.stock.midnightColour,
-    usdc: t.usdc.midnightColour,
-    stockRaw: legs.stockRaw.toString(10),
-    usdcRaw: legs.usdcRaw.toString(10),
+    pair: pair.id,
+    base: pair.base.midnightColour,
+    quote: pair.quote.midnightColour,
+    baseRaw: legs.baseRaw.toString(10),
+    quoteRaw: legs.quoteRaw.toString(10),
     summary,
     coin: coin.commitment,
     authNonce: payload.authNonce,
@@ -260,8 +257,8 @@ export function guardFor(
   return guardSignedAction(action, liveOffer(readTrades(env.store, env.scope, account), now), now);
 }
 
-/** After another signed call executed (a withdrawal, a re-filed change, a bridge start), every live
- *  offer of the account is dead: its auth nonce moved (Q9). */
+/** After another signed call executed (a withdrawal, a re-filed change), every live offer of the
+ *  account is dead: its auth nonce moved (Q9). */
 export function markLiveOffersCancelled(env: Pick<OperationEnv, 'store' | 'scope'>, account: string): number {
   let n = 0;
   for (const t of readTrades(env.store, env.scope, account)) {

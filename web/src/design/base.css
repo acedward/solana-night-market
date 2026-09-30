@@ -1,7 +1,7 @@
 /*
- * MN Bank base styles: reset, typography and small utilities. Bare elements get the bank's look
+ * Night Market base styles: reset, typography and small utilities. Bare elements get the market's look
  * at zero specificity (:where), so a page that has not adopted the components yet still reads
- * as MN Bank; every component class overrides them.
+ * as Night Market; every component class overrides them.
  */
 *,
 *::before,

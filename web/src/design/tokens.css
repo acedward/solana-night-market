@@ -1,5 +1,5 @@
 /*
- * MN Bank design tokens (plan P1.5), taken from the owner-approved mockup (Q16 A).
+ * Night Market design tokens (plan P1.5), taken from the owner-approved mockup (Q16 A).
  *
  * One primary (navy), ONE muted accent (antique gold, used sparingly: the masthead rule, the
  * monogram, the selected row, the current tracker stage, warnings), slate text on ivory.
@@ -52,8 +52,6 @@
   --disabled-bg: #e4e1da;
   --disabled-border: #d2cdc3;
   --disabled-ink: #545b65;
-  --sepolia-bg: #22396a; /* the "Sepolia" badge on navy */
-  --sepolia-border: #4a6296;
 
   /* ── type ─────────────────────────────────────────────────────────── */
   --serif: 'Libre Caslon Text', Georgia, 'Times New Roman', Times, serif;

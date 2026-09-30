@@ -1,11 +1,11 @@
 // Page structure: the page head, panels and cards.
 //
 //   <PageHead eyebrow="Statement" title="Accounts" lede="…" actions={<Button …>Refresh</Button>} />
-//   <Panel title="Ethereum (Sepolia)" meta={<>Wallet <span className="mono">0x4847…e56b</span></>}>…</Panel>
+//   <Panel title="Midnight stagenet" meta={<>Account <span className="mono">4847…e56b</span></>}>…</Panel>
 //   <Panel tone="quiet" as="aside" title="Pending">…</Panel>      the ivory-grey side box
 //   <Card title="Open your Passport account">…</Card>               a panel with the gold top rule
 //
-// Headings: the masthead's "MN Bank" is the page's h1, a page title is an h2, a panel title an h3.
+// Headings: the masthead's "Night Market" is the page's h1, a page title is an h2, a panel title an h3.
 
 import { useId, type HTMLAttributes, type ReactNode } from 'react';
 

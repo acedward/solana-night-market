@@ -7,20 +7,20 @@ import { expect } from 'vitest';
 import type { WalletScope } from '../src/store/schema.js';
 import type { LocalStore } from '../src/store/store.js';
 
-const bankKeys = (evmAddress: string) => {
+const walletKeys = (owner: string) => {
   const out: Record<string, string> = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i)!;
-    if (k.includes(evmAddress.toLowerCase())) out[k] = localStorage.getItem(k)!;
+    if (k.includes(owner.toLowerCase())) out[k] = localStorage.getItem(k)!;
   }
   return out;
 };
 
 export function expectImportRoundTrip(store: LocalStore, scope: WalletScope): void {
-  const before = bankKeys(scope.evmAddress);
+  const before = walletKeys(scope.owner);
   const file = JSON.parse(JSON.stringify(store.exportWallet(scope))) as unknown;
   store.clearAll();
   const r = store.importWallet(file, scope);
   expect(r.imported).toBe(Object.keys(before).length);
-  expect(bankKeys(scope.evmAddress)).toEqual(before);
+  expect(walletKeys(scope.owner)).toEqual(before);
 }

@@ -2,7 +2,7 @@
 // every offer it took, under the store's `offer` kind, one record per offer id. Nothing about a
 // trade is kept anywhere else: the relay forgets the job after its TTL.
 
-import { type OfferState, type TradeSide, formatUnits, type Ratio, formatPrice } from '@mnbank/core';
+import { type OfferState, type TradeSide, formatUnits, type Ratio, formatPrice } from '@nightmarket/core';
 
 import type { LocalStore } from '../store/store.js';
 import { recordKey, type WalletScope } from '../store/schema.js';
@@ -13,12 +13,14 @@ export interface TradeRecord {
   /** `make`: this account's own offer; `take`: an offer this account took. */
   role: 'make' | 'take';
   side: TradeSide;
-  /** Stock and USDC colours, and the two legs in base units (decimal strings). */
-  stock: string;
-  usdc: string;
-  stockRaw: string;
-  usdcRaw: string;
-  /** Human text, e.g. "sell 2.00 wStkA at 1.05". */
+  /** The pair (`BASE/QUOTE`), its base and quote colours, and the two legs in base units (decimal
+   *  strings). */
+  pair: string;
+  base: string;
+  quote: string;
+  baseRaw: string;
+  quoteRaw: string;
+  /** Human text, e.g. "sell 0.50 twBTC at 60,000.00 twUSDC". */
   summary: string;
   /** The coin the give is paid from (its commitment). */
   coin: string;
@@ -29,7 +31,7 @@ export interface TradeRecord {
   createdAt: number;
   /** Unix ms after which the ledger refuses the offer (intent TTL). */
   expiresAt: number;
-  /** The same word L-BRG's change re-file reads (`live` blocks it, Q9). */
+  /** Whether the offer can still settle (`live` blocks a second offer, Q9). */
   status: OfferState;
   /** The exchange's last word on it. */
   kernelStatus?: string;
@@ -58,12 +60,13 @@ export function liveOffer(trades: readonly TradeRecord[], now: number): TradeRec
   return trades.find((t) => t.role === 'make' && t.status === 'live' && now < t.expiresAt) ?? null;
 }
 
-/** "sell 2.00 wStkA at 1.05" */
+/** "sell 0.50 twBTC at 60,000.00 twUSDC" */
 export function tradeSummary(
   side: TradeSide,
-  stockRaw: bigint,
-  stock: { midnightName: string; decimals: number },
+  baseRaw: bigint,
+  base: { symbol: string; decimals: number },
   price: Ratio,
+  quote: { symbol: string },
 ): string {
-  return `${side} ${formatUnits(stockRaw, stock.decimals, { minFractionDigits: 2, grouping: true })} ${stock.midnightName} at ${formatPrice(price, { round: side === 'sell' ? 'up' : 'down' }).text}`;
+  return `${side} ${formatUnits(baseRaw, base.decimals, { minFractionDigits: 2, grouping: true })} ${base.symbol} at ${formatPrice(price, { round: side === 'sell' ? 'up' : 'down' }).text} ${quote.symbol}`;
 }

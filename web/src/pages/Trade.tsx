@@ -1,18 +1,18 @@
-// The Trade section (spec US7, US8; plan L-TRD): buy or sell a stock at USDC prices, either by
-// making an offer ("Sell N at P" / "Buy N at P", pre-filled from the best ask or bid) or by taking
-// one whole offer from the book. Every trade is ONE wallet signature; the exact legs are shown
-// before it. The account's offers (My offers) are reconciled from the chain and the exchange.
+// The Trade section (plan L-TRD, generic since AA 00047): on any listed pair BASE/QUOTE, buy or sell
+// the base at a price in the quote, either by making an offer ("Sell N at P" / "Buy N at P",
+// pre-filled from the best ask or bid) or by taking one whole offer from the book. Every trade is
+// ONE wallet signature (the Solana wallet's, lane B2); the exact legs are shown before it. The
+// account's offers (My offers) are reconciled from the chain and the exchange.
 //
 // The seam limits are enforced and explained here (Q9, FR-019): one live offer at a time, each
 // payment from one coin (an offer the account cannot pay keeps a greyed Buy or Sell that says why
-// on hover, focus and tap: "Not enough wStkA. You hold 100.00 wStkA.", AA 00044), and a warning
+// on hover, focus and tap: "Not enough twBTC. You hold 0.10 twBTC.", AA 00044), and a warning
 // before a take cancels a live offer (L-TRD.3).
 //
-// Styled with the MN Bank design system (plan P4-A, following web/README.md "Adopting the design
-// system"): the order form and the book side by side as in the approved mockup, statement tables
-// for the book and My offers, the stage tracker for a trade in progress. Presentation only: the
-// behaviour and every data-testid are L-TRD's. The bank's status (plan P4-A error states) pauses
-// the actions it cannot carry out, with the reason, before anything is signed.
+// Styled with the design system carried over from MN Bank (web/README.md "Adopting the design
+// system"): the order form and the book side by side, statement tables for the book and My
+// offers, the stage tracker for a trade in progress. The market's status (plan P4-A error states)
+// pauses the actions it cannot carry out, with the reason, before anything is signed.
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 
@@ -21,6 +21,7 @@ import {
   type JobView,
   KernelClient,
   type Market,
+  type MarketPair,
   type NetworkProfile,
   type OrderLegs,
   type TokenEntry,
@@ -32,7 +33,7 @@ import {
   parsePrice,
   parseUnits,
   takeLegs,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import {
   Button,
@@ -54,7 +55,6 @@ import {
   Tooltip,
   UnitInput,
   YoursBadge,
-  tokenDisplayName,
   type Column,
   type PillStatus,
   type TrackerStage,
@@ -64,7 +64,7 @@ import { useMarkets } from '../market/MarketContext.js';
 import { askText, bidText } from '../market/view.js';
 import { syncAccount, type OperationEnv } from '../passport/operations.js';
 import { findAccount, readCoins, readSecret } from '../passport/records.js';
-import { BankNotices, useBankStatus } from '../relay/BankStatus.js';
+import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import { guardFor, makeOffer, reconcileOffers, takeOffer } from '../trade/operations.js';
@@ -112,13 +112,13 @@ const PREFILL_HINT: Record<TradeSide, string> = {
   buy: 'Use the best bid',
 };
 
-/** `#trade?stock=wStkA&offer=<id>`: the Markets page's Take buttons link here. */
+/** `#trade?pair=twBTC/twUSDC&offer=<id>`: the Markets page's Take buttons link here. */
 function hashParams(): URLSearchParams {
   const q = window.location.hash.split('?')[1] ?? '';
   return new URLSearchParams(q);
 }
 
-/** A trade job in progress, as the bank reports it (the stage tracker of the design system). */
+/** A trade job in progress, as the market reports it (the stage tracker of the design system). */
 function Tracker({ job }: { job: JobView }) {
   const shown = job.stages.filter((s) => s.stage !== 'queued' || job.stages.length === 1);
   const stages: TrackerStage[] = shown.map((s, i) => ({
@@ -166,36 +166,36 @@ function Tracker({ job }: { job: JobView }) {
 /** The exact legs of an order or a take, as in the mockup: what leaves the account, what arrives. */
 function LegsPreview({
   legs,
-  stock,
-  usdc,
+  base,
+  quote,
   foot,
 }: {
   legs: OrderLegs;
-  stock: TokenEntry;
-  usdc: TokenEntry;
+  base: TokenEntry;
+  quote: TokenEntry;
   foot?: string;
 }) {
-  const giveT = legs.side === 'sell' ? stock : usdc;
-  const wantT = legs.side === 'sell' ? usdc : stock;
+  const giveT = legs.side === 'sell' ? base : quote;
+  const wantT = legs.side === 'sell' ? quote : base;
   return (
     <div className="legs" data-testid="legs" aria-label="What this trade does">
       <div className="leg">
         <span className="k">You give</span>
         <span className="v num" data-testid="legs-give" data-raw={legs.give.amount.toString()}>
-          {amt(legs.give.amount, giveT)} {giveT.midnightName}
+          {amt(legs.give.amount, giveT)} {giveT.symbol}
         </span>
       </div>
       <div className="leg">
         <span className="k">You receive</span>
         <span className="v num" data-testid="legs-want" data-raw={legs.want.amount.toString()}>
-          {amt(legs.want.amount, wantT)} {wantT.midnightName}
+          {amt(legs.want.amount, wantT)} {wantT.symbol}
         </span>
       </div>
       <div className="foot" data-testid="legs-price">
         Price {formatPrice(legs.effectivePrice, { round: legs.side === 'sell' ? 'up' : 'down' }).text}{' '}
-        {usdc.midnightName} per {stock.midnightName}
+        {quote.symbol} per {base.symbol}
         {legs.rounded && (
-          <span data-testid="legs-rounded"> (rounded to a whole unit of {usdc.midnightName}, in your favour)</span>
+          <span data-testid="legs-rounded"> (rounded to a whole unit of {quote.symbol}, in your favour)</span>
         )}
         {foot ? <>. {foot}</> : null}
       </div>
@@ -204,18 +204,17 @@ function LegsPreview({
 }
 
 export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
-  const { state, registry } = useMarkets();
+  const { state, registry, pairs: allPairs } = useMarkets();
   const { store, revision } = useStore();
   const wallet = useWallet();
-  const bank = useBankStatus();
+  const relayStatus = useRelayStatus();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const kernel = useMemo(() => new KernelClient({ baseUrl: network.zswap.kernelUrl }), [network]);
   const assets = useAssetFilter();
   const params = hashParams();
-  const usdc = registry?.usdc() ?? null;
-  // Only the markets whose two assets the asset filter shows (plan 00042).
-  const stocks = (registry?.stocks() ?? []).filter((s) => !!usdc && assets.showsPair(s, usdc));
-  const [stockName, setStockName] = useState<string>(params.get('stock') ?? stocks[0]?.midnightName ?? '');
+  // Only the pairs whose two tokens the asset filter shows (plan 00042).
+  const pairs: MarketPair[] = allPairs.filter((p) => assets.showsPair(p.base, p.quote));
+  const [pairId, setPairId] = useState<string>(params.get('pair') ?? pairs[0]?.id ?? '');
   const [picked, setPicked] = useState<string | null>(params.get('offer'));
   const [side, setSide] = useState<TradeSide>('sell');
   const [quantity, setQuantity] = useState('');
@@ -225,14 +224,14 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmTake, setConfirmTake] = useState<BookEntry | null>(null);
 
-  const stock = stocks.find((s) => s.midnightName === stockName) ?? stocks[0] ?? null;
+  const pair = pairs.find((p) => p.id === pairId) ?? pairs[0] ?? null;
+  const base = pair?.base ?? null;
+  const quote = pair?.quote ?? null;
   const market: Market | null =
-    state.status === 'ready' && stock
-      ? (state.snapshot.markets.find((m) => m.stock.midnightColour === stock.midnightColour) ?? null)
-      : null;
+    state.status === 'ready' && pair ? (state.snapshot.markets.find((m) => m.pair.id === pair.id) ?? null) : null;
 
-  const evmAddress = wallet.status === 'connected' ? wallet.address : null;
-  const scope = useMemo(() => (evmAddress ? { network: network.name, evmAddress } : null), [evmAddress, network.name]);
+  const owner = wallet.status === 'connected' ? wallet.deviceKey : null;
+  const scope = useMemo(() => (owner ? { network: network.name, owner } : null), [owner, network.name]);
   const account = useMemo(
     () => (store && scope ? findAccount(store, scope) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -257,20 +256,12 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   }, []);
   const live = liveOffer(trades, now);
   // The history lists only the markets the filter shows; a live offer (the banner) always shows.
-  const shownTrades = trades.filter((t) => assets.showsColour(t.stock) && assets.showsColour(t.usdc));
+  const shownTrades = trades.filter((t) => assets.showsColour(t.base) && assets.showsColour(t.quote));
 
   const env = useCallback((): OperationEnv | null => {
-    if (!store || !scope || !wallet.provider || !wallet.address) return null;
-    return {
-      relay,
-      store,
-      scope,
-      provider: wallet.provider,
-      owner: wallet.address,
-      chainId: network.evm.chainId,
-      onJob: setJob,
-    };
-  }, [store, scope, wallet.provider, wallet.address, relay, network]);
+    if (!store || !scope || !wallet.signing) return null;
+    return { relay, store, scope, signing: wallet.signing, onJob: setJob };
+  }, [store, scope, wallet.signing, relay]);
 
   // Reconcile My offers and the coins when the page opens, and every 30 s while an offer is live.
   const accountAddress = account?.address;
@@ -295,31 +286,31 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       if (every) clearInterval(every);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountAddress, evmAddress, !!live]);
+  }, [accountAddress, owner, !!live]);
 
   const head = (
     <PageHead
-      eyebrow="Buy and sell at USDC prices"
+      eyebrow="Make and take offers"
       title="Trade"
       lede={
-        usdc
-          ? `Every trade is one asset against ${usdc.midnightName}, at a price in ${usdc.midnightName}. Take an existing offer now, or place your own at your price. You sign once per trade; the bank pays the network fees.`
-          : 'Every trade is one asset against USDC. Take an existing offer now, or place your own at your price.'
+        pair
+          ? `Trade ${pair.base.symbol} for ${pair.quote.symbol}, at a price in ${pair.quote.symbol}, or pick another market. Take an existing offer now, or place your own at your price. You sign once per trade; the market pays the network fees.`
+          : 'Every trade is one token against another, on a listed market. Take an existing offer now, or place your own at your price.'
       }
     />
   );
 
-  if (registry && usdc && stocks.length === 0 && assets.filtering) {
+  if (registry && pairs.length === 0 && assets.filtering) {
     return (
       <section data-testid="section-trade">
         {head}
         <EmptyState data-testid="trade-filtered-empty" title="No market in this view">
-          A market shows only when both of its assets are listed. {assetFilterText(assets)}
+          A market shows only when both of its tokens are listed. {assetFilterText(assets)}
         </EmptyState>
       </section>
     );
   }
-  if (!registry || !stock || !usdc) {
+  if (!registry || !pair || !base || !quote) {
     return (
       <section data-testid="section-trade">
         {head}
@@ -333,7 +324,13 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     return (
       <section data-testid="section-trade">
         {head}
-        <EmptyState title="Connect your wallet">Connect your wallet to trade.</EmptyState>
+        <EmptyState title="Connect your Solana wallet">
+          <span data-testid="trade-connect">
+            {wallet.supported
+              ? 'Connect your Solana wallet to trade. It only signs messages: it needs no SOL.'
+              : 'Trading with a Solana wallet is coming to this site. Until then, browse the order books on Markets.'}
+          </span>
+        </EmptyState>
       </section>
     );
   }
@@ -343,7 +340,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         {head}
         <EmptyState title="No account in this browser">
           <span data-testid="trade-no-account">
-            Open an account on <a href="#accounts">Accounts</a> (or import your export on{' '}
+            Open an account on <a href="#account">Account</a> (or import your export on{' '}
             <a href="#local">Local data</a>) to trade.
           </span>
         </EmptyState>
@@ -365,17 +362,17 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   let legsError: string | null = null;
   if (quantity.trim() !== '' && price.trim() !== '') {
     try {
-      legs = orderLegs(side, stock, usdc, parseUnits(quantity, stock.decimals), parsePrice(price, usdc));
+      legs = orderLegs(side, base, quote, parseUnits(quantity, base.decimals), parsePrice(price, quote));
     } catch (e) {
       legsError = e instanceof Error ? e.message : 'Enter a quantity and a price.';
     }
   }
-  const makeFunding = legs ? fundWithOneCoin(coins, legs.give, legs.side === 'sell' ? stock : usdc) : null;
+  const makeFunding = legs ? fundWithOneCoin(coins, legs.give, legs.side === 'sell' ? base : quote) : null;
   const makeGuard = guardFor({ store: store!, scope }, account.address, 'open-swap', now);
 
-  // What the bank's status says the page cannot do now (plan P4-A error states).
-  const paused = bank.spendingPaused;
-  const batcherDown = bank.health ? !bank.health.batcher.reachable : false;
+  // What the market's status says the page cannot do now (plan P4-A error states).
+  const paused = relayStatus.spendingPaused;
+  const batcherDown = relayStatus.health ? !relayStatus.health.batcher.reachable : false;
   const exchangeDown = state.status === 'unavailable';
 
   const run = async (label: string, fn: (e: OperationEnv) => Promise<void>) => {
@@ -398,7 +395,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused) return;
     const l = legs;
     void run('make', async (e) => {
-      const rec = await makeOffer(e, account.address, l, { stock, usdc });
+      const rec = await makeOffer(e, account.address, l, pair);
       setMessage({ kind: 'ok', text: `Your offer is on the exchange: ${rec.summary} (offer ${short(rec.offerId)}).` });
       setQuantity('');
     });
@@ -408,8 +405,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const asks = market?.asks.entries ?? [];
   const bids = market?.bids.entries ?? [];
   const takeability = (e: BookEntry) => {
-    const l = takeLegs(e, stock, usdc);
-    return { legs: l, funding: fundWithOneCoin(coins, l.give, l.side === 'sell' ? stock : usdc) };
+    const l = takeLegs(e, base, quote);
+    return { legs: l, funding: fundWithOneCoin(coins, l.give, l.side === 'sell' ? base : quote) };
   };
   const cannotTake = !!busy || !!paused || batcherDown || exchangeDown;
   const startTake = (e: BookEntry) => {
@@ -419,7 +416,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const doTake = (e: BookEntry) =>
     void run('take', async (env2) => {
       setConfirmTake(null);
-      const rec = await takeOffer(env2, account.address, e, { stock, usdc });
+      const rec = await takeOffer(env2, account.address, e, pair);
       setMessage({
         kind: 'ok',
         text: `Done: ${rec.summary}, settled in one transaction (tx ${short(rec.settledTx ?? '')}).`,
@@ -434,9 +431,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const bestBid = market?.bids.best ?? null;
 
   const bookColumns = (kind: 'asks' | 'bids'): Column[] => [
-    { label: 'Price', sub: usdc.midnightName },
-    { label: 'Quantity', sub: stock.midnightName, align: 'right' },
-    { label: kind === 'asks' ? 'You pay' : 'You get', sub: usdc.midnightName, align: 'right' },
+    { label: 'Price', sub: quote.symbol },
+    { label: 'Quantity', sub: base.symbol, align: 'right' },
+    { label: kind === 'asks' ? 'You pay' : 'You get', sub: quote.symbol, align: 'right' },
     { label: 'Action', srOnly: true, align: 'right' },
   ];
 
@@ -485,8 +482,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                         {kind === 'asks' ? askText(e.price) : bidText(e.price)}
                       </span>
                     </td>
-                    <td className="num">{amt(e.stockRaw, stock)}</td>
-                    <td className="num">{amt(e.usdcRaw, usdc)}</td>
+                    <td className="num">{amt(e.baseRaw, base)}</td>
+                    <td className="num">{amt(e.quoteRaw, quote)}</td>
                     <td className="act">
                       {own ? (
                         <YoursBadge data-testid="own-offer" />
@@ -540,8 +537,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       >
         <LegsPreview
           legs={t.legs}
-          stock={stock}
-          usdc={usdc}
+          base={base}
+          quote={quote}
           foot="All or nothing: you pay and receive exactly these amounts, from one coin"
         />
         {!t.funding.ok && (
@@ -584,7 +581,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           Exchange unavailable: {state.reason}. You cannot trade until it answers again.
         </Notice>
       )}
-      <BankNotices place="trade" className="panel-intro" />
+      <RelayNotices place="trade" className="panel-intro" />
       {paused && (
         <Notice tone="warning" className="panel-intro" data-testid="trade-paused">
           Not now: {paused}
@@ -597,8 +594,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           className="panel-intro"
           data-testid="live-offer-banner"
         >
-          You have a live offer: {live.summary}, until {clock(live.expiresAt)}. Any other signed action (a take, a
-          withdrawal, a bridge move) cancels it; we ask you before it happens.
+          You have a live offer: {live.summary}, until {clock(live.expiresAt)}. Any other signed action (a take or a
+          withdrawal) cancels it; we ask you before it happens.
         </Notice>
       )}
 
@@ -608,8 +605,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             <Segmented
               label="Side"
               options={[
-                { value: 'buy', label: `Buy ${stock.midnightName}`, testId: 'side-buy' },
-                { value: 'sell', label: `Sell ${stock.midnightName}`, testId: 'side-sell' },
+                { value: 'buy', label: `Buy ${base.symbol}`, testId: 'side-buy' },
+                { value: 'sell', label: `Sell ${base.symbol}`, testId: 'side-sell' },
               ]}
               value={side}
               onChange={(v) => {
@@ -618,19 +615,19 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               }}
             />
           </Field>
-          <Field label="Asset" htmlFor="tr-stock">
+          <Field label="Market" htmlFor="tr-pair">
             <Select
-              id="tr-stock"
-              value={stock.midnightName}
+              id="tr-pair"
+              value={pair.id}
               onChange={(e) => {
-                setStockName(e.target.value);
+                setPairId(e.target.value);
                 setPicked(null);
               }}
-              data-testid="trade-stock"
+              data-testid="trade-pair"
             >
-              {stocks.map((s) => (
-                <option key={s.midnightColour} value={s.midnightName}>
-                  {s.midnightName} — {tokenDisplayName(s)} / {usdc.midnightName}
+              {pairs.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.base.symbol} / {p.quote.symbol} — {p.base.name}
                 </option>
               ))}
             </Select>
@@ -639,7 +636,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             <Field label="Quantity" htmlFor="tr-qty">
               <UnitInput
                 id="tr-qty"
-                unit={stock.midnightName}
+                unit={base.symbol}
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
                 inputMode="decimal"
@@ -648,7 +645,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               />
             </Field>
             <Field
-              label={`Price per ${stock.midnightName}`}
+              label={`Price per ${base.symbol}`}
               htmlFor="tr-price"
               hint={
                 <Button variant="link" onClick={() => prefill(side)} data-testid="make-prefill">
@@ -660,7 +657,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             >
               <UnitInput
                 id="tr-price"
-                unit={usdc.midnightName}
+                unit={quote.symbol}
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
                 inputMode="decimal"
@@ -677,10 +674,10 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           {legs && (
             <LegsPreview
               legs={legs}
-              stock={stock}
-              usdc={usdc}
+              base={base}
+              quote={quote}
               {...(makeFunding?.ok
-                ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the bank pays them' }
+                ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the market pays them' }
                 : {})}
             />
           )}
@@ -709,7 +706,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           </p>
         </Panel>
 
-        <Panel title="Take an offer" meta={`${stock.midnightName} / ${usdc.midnightName}`} data-testid="take-section">
+        <Panel title="Take an offer" meta={`${base.symbol} / ${quote.symbol}`} data-testid="take-section">
           <p className="small muted panel-intro">
             Offers are all or nothing: you pay and receive exactly the amounts shown, from one coin.
           </p>
@@ -732,8 +729,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           </ButtonRow>
           {market?.status === 'no-liquidity' && (
             <Notice className="section-gap" data-testid="trade-no-liquidity">
-              No liquidity: nobody is offering to buy or sell {stock.midnightName} right now. You can make an offer
-              instead.
+              No liquidity: nobody is offering to buy or sell {base.symbol} for {quote.symbol} right now. You can make
+              an offer instead.
             </Notice>
           )}
           {pickedGone && (

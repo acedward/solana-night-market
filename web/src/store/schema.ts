@@ -1,21 +1,21 @@
-// The browser store's layout (spec FR-003, FR-004, Q5, Q11). Every per-user record the bank
+// The browser store's layout (spec FR-003, FR-004, Q5, Q11). Every per-user record the market
 // keeps lives in this browser's localStorage, under one prefix, namespaced by Midnight network,
-// EVM address and Passport account:
+// the wallet's device key (a Solana public key as 64 lowercase hex) and Passport account:
 //
-//   mn-bank/schema                                          the schema version (an integer)
-//   mn-bank/v1/_global/<kind>                               settings for this browser
-//   mn-bank/v1/<network>/<0xevm lowercase>/-/<kind>[/<id>]  a wallet's records with no account
-//   mn-bank/v1/<network>/<0xevm lowercase>/<account>/<kind>[/<id>]
+//   night-market/schema                                          the schema version (an integer)
+//   night-market/v1/_global/<kind>                               settings for this browser
+//   night-market/v1/<network>/<device key>/-/<kind>[/<id>]       a wallet's records with no account
+//   night-market/v1/<network>/<device key>/<account>/<kind>[/<id>]
 //
 // Each value is JSON: {"v": 1, "kind", "updatedAt" (ms), "data"}. Records of a SENSITIVE kind
 // (the account's encryption secret) are masked in the Local data tab until revealed.
 
 import { z } from 'zod';
 
-export const STORE_PREFIX = 'mn-bank/';
-export const SCHEMA_KEY = 'mn-bank/schema';
+export const STORE_PREFIX = 'night-market/';
+export const SCHEMA_KEY = 'night-market/schema';
 export const SCHEMA_VERSION = 1;
-const V1 = 'mn-bank/v1/';
+const V1 = 'night-market/v1/';
 
 export const RECORD_KINDS = [
   'profile',
@@ -23,7 +23,6 @@ export const RECORD_KINDS = [
   'secret',
   'coins',
   'roster',
-  'bridge',
   'offer',
   'job',
   'settings',
@@ -42,15 +41,15 @@ export const CARRIED_GLOBAL_KEYS: ReadonlySet<string> = new Set([ASSET_FILTER_KE
 
 export interface WalletScope {
   network: string;
-  /** 0x-prefixed, lowercase. */
-  evmAddress: string;
+  /** The wallet's device key: its Solana public key, 64 lowercase hex. */
+  owner: string;
 }
 
 export type RecordScope =
-  { global: true } | { global: false; network: string; evmAddress: string; account: string | null };
+  { global: true } | { global: false; network: string; owner: string; account: string | null };
 
 const NETWORK_RE = /^[a-z0-9-]{1,32}$/;
-const EVM_RE = /^0x[0-9a-f]{40}$/;
+const OWNER_RE = /^[0-9a-f]{64}$/;
 const ACCOUNT_RE = /^[0-9a-f]{64}$/;
 const ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -59,9 +58,9 @@ export class StoreKeyError extends Error {
 }
 
 export function normaliseScope(scope: WalletScope): WalletScope {
-  const s = { network: scope.network, evmAddress: scope.evmAddress.toLowerCase() };
+  const s = { network: scope.network, owner: scope.owner.replace(/^0x/, '').toLowerCase() };
   if (!NETWORK_RE.test(s.network)) throw new StoreKeyError(`bad network "${scope.network}"`);
-  if (!EVM_RE.test(s.evmAddress)) throw new StoreKeyError('bad EVM address');
+  if (!OWNER_RE.test(s.owner)) throw new StoreKeyError('bad wallet key');
   return s;
 }
 
@@ -78,7 +77,7 @@ export function recordKey(
   const s = normaliseScope(scope);
   const account = opts.account ? opts.account.replace(/^0x/, '').toLowerCase() : '-';
   if (account !== '-' && !ACCOUNT_RE.test(account)) throw new StoreKeyError('bad account address');
-  return `${V1}${s.network}/${s.evmAddress}/${account}/${tail}`;
+  return `${V1}${s.network}/${s.owner}/${account}/${tail}`;
 }
 
 export interface ParsedKey {
@@ -97,12 +96,12 @@ export function parseKey(key: string): ParsedKey | null {
     if (!isKind(kind) || rest.length > 0 || (id !== undefined && !ID_RE.test(id))) return null;
     return { scope: { global: true }, kind, ...(id !== undefined ? { id } : {}) };
   }
-  const [network, evm, account, kind, id, ...rest] = parts;
-  if (!network || !NETWORK_RE.test(network) || !evm || !EVM_RE.test(evm)) return null;
+  const [network, owner, account, kind, id, ...rest] = parts;
+  if (!network || !NETWORK_RE.test(network) || !owner || !OWNER_RE.test(owner)) return null;
   if (account !== '-' && !ACCOUNT_RE.test(account ?? '')) return null;
   if (!isKind(kind) || rest.length > 0 || (id !== undefined && !ID_RE.test(id))) return null;
   return {
-    scope: { global: false, network, evmAddress: evm, account: account === '-' ? null : account! },
+    scope: { global: false, network, owner, account: account === '-' ? null : account! },
     kind,
     ...(id !== undefined ? { id } : {}),
   };
@@ -110,7 +109,7 @@ export function parseKey(key: string): ParsedKey | null {
 
 export function inWalletScope(parsed: ParsedKey, scope: WalletScope): boolean {
   const s = normaliseScope(scope);
-  return !parsed.scope.global && parsed.scope.network === s.network && parsed.scope.evmAddress === s.evmAddress;
+  return !parsed.scope.global && parsed.scope.network === s.network && parsed.scope.owner === s.owner;
 }
 
 export const StoredRecordSchema = z.object({
@@ -127,7 +126,7 @@ export function encodeRecord<T>(kind: RecordKind, data: T, updatedAt: number): s
 
 // ── Export files (Q11) ──────────────────────────────────────────────────────
 
-export const EXPORT_FORMAT = 'mn-bank-local-data';
+export const EXPORT_FORMAT = 'night-market-local-data';
 export const EXPORT_FORMAT_VERSION = 1;
 
 /** The most an import's records may hold (security review F-B5): their total size once
@@ -148,7 +147,7 @@ export const ExportFileSchema = z.object({
   schemaVersion: z.number().int().positive(),
   exportedAt: z.string(),
   network: z.string().regex(NETWORK_RE),
-  evmAddress: z.string().regex(EVM_RE),
+  owner: z.string().regex(OWNER_RE),
   records: z
     .array(z.object({ key: z.string().startsWith(STORE_PREFIX).max(512), value: z.unknown() }))
     .max(MAX_IMPORT_RECORDS),

@@ -1,5 +1,5 @@
 /*
- * MN Bank components (plan P1.5), following the approved mockup (Q16 A). Class names match
+ * Night Market components (plan P1.5), following the approved mockup (Q16 A). Class names match
  * the React components in web/src/design/*.tsx; pages should use the components rather than
  * these classes directly. Colours come only from tokens.css.
  */
@@ -24,7 +24,7 @@
 .app-banner {
   margin-top: var(--space-4);
 }
-/* The shell's standing notices (storage, network, the bank's status): nothing when there are none. */
+/* The shell's standing notices (storage, network, the market's status): nothing when there are none. */
 .app-banner-stack {
   display: grid;
   gap: var(--space-3);
@@ -133,21 +133,11 @@
   border-radius: var(--radius-sm);
   white-space: nowrap;
 }
-.net-sepolia {
-  background: var(--sepolia-bg);
-  border: 1px solid var(--sepolia-border);
-  color: var(--on-navy);
-}
 .net-midnight {
   border: 1px solid var(--gold);
   color: var(--on-navy-gold);
 }
 /* The same badges on a light surface (inside the page, not the masthead). */
-.net-light.net-sepolia {
-  background: var(--navy-soft);
-  border-color: var(--navy-soft-border);
-  color: var(--navy);
-}
 .net-light.net-midnight {
   background: var(--gold-soft);
   border-color: var(--gold-soft-border);

@@ -1,7 +1,7 @@
 // A control that says why it is greyed out, on hover, keyboard focus and tap (AA 00044): an
 // order-book Buy or Sell the account cannot pay.
 //
-//   <Tooltip id={`nt-${offerId}`} text="Not enough wStkA. You hold 100.00 wStkA.">
+//   <Tooltip id={`nt-${offerId}`} text="Not enough twBTC. You hold 100.00 twBTC.">
 //     <Button size="small" variant="secondary" disabled aria-describedby={`nt-${offerId}`}>Sell</Button>
 //   </Tooltip>
 //

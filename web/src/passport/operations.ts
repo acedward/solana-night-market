@@ -1,6 +1,7 @@
 // The account operations, as the browser runs them (plan L-ACC): open an account, rebuild its
 // coins from chain data, and the two gated calls of this lane (a withdrawal, and re-filing its
-// change in the inbox, Q13). Each asks the wallet for exactly ONE signature.
+// change in the inbox, Q13). Each asks the wallet for exactly ONE signature, through the Solana
+// wallet's `ActionSigning` (../wallet/signing.ts, lane B2).
 //
 // The browser is the source of truth (Q5): the encryption secret is generated and kept here,
 // the inbox is decrypted here, every coin is kept here, and the relay receives only public keys,
@@ -15,31 +16,30 @@ import {
   localCoin,
   parseShieldedAddress,
   reconcileCoins,
-  relayActionTypedData,
   type AccountStateView,
   type AppendInboxPayload,
   type JobView,
+  type PassportAuth,
   type RegisterResult,
   type SignedRelayAction,
   type StoredCoin,
   type WithdrawPayload,
   type WithdrawResult,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 import {
   appendInboxRequest,
-  findEvmUseCounter,
-  gatedCall,
   generateEncKeyPairPortable,
   openEntryPortable,
   sealEntryPortable,
   withdrawRequest,
-} from '@mnbank/core/passport';
+  type GatedContext,
+} from '@nightmarket/core/passport';
 
 import type { RelayClient } from '../relay/client.js';
 import { jobErrorText } from '../relay/messages.js';
 import { recordKey, type WalletScope } from '../store/schema.js';
 import type { LocalStore } from '../store/store.js';
-import type { Eip1193Provider } from '../wallet/eip1193.js';
+import type { ActionSigning } from '../wallet/signing.js';
 import {
   readCoins,
   readRoster,
@@ -57,55 +57,18 @@ export class OperationError extends Error {
 export interface OperationEnv {
   relay: RelayClient;
   store: LocalStore;
-  /** This wallet on this network. */
+  /** This wallet on this network (`owner` is its device key). */
   scope: WalletScope;
-  provider: Eip1193Provider;
-  /** The connected EOA (checksummed or lowercase). */
-  owner: string;
-  chainId: number;
+  /** How the connected Solana wallet signs (lane B2). */
+  signing: ActionSigning;
   /** Where the job's progress goes (stages, queue position). */
   onJob?: (job: JobView) => void;
 }
 
-const lower = (s: string) => s.toLowerCase();
-
-/** The wallet is on another network (plan P4-A error states): nothing is signed or sent. */
-export class WrongNetworkError extends OperationError {
-  override name = 'WrongNetworkError';
-}
-
-/**
- * Refuse before any signature or transaction when the wallet is not on the bank's chain (Sepolia):
- * the typed data names the chain, so a wallet on another one would refuse or sign for the wrong
- * network, and a transaction would go to the wrong chain.
- */
-export async function ensureChain(env: Pick<OperationEnv, 'provider' | 'chainId'>): Promise<void> {
-  let current: unknown;
-  try {
-    current = await env.provider.request({ method: 'eth_chainId' });
-  } catch {
-    return; // a wallet that cannot say: let it decide (it checks the typed data's chain itself)
-  }
-  if (typeof current !== 'string') return;
-  const id = current.startsWith('0x') ? parseInt(current, 16) : Number(current);
-  if (Number.isFinite(id) && id !== env.chainId) {
-    throw new WrongNetworkError(
-      `Your wallet is on another network (chain ${id}). Switch it to Sepolia (chain ${env.chainId}) and try again; nothing was signed or sent.`,
-    );
-  }
-}
-
-export async function signTypedData(env: OperationEnv, typedData: unknown): Promise<string> {
-  await ensureChain(env);
-  const sig = await env.provider.request({
-    method: 'eth_signTypedData_v4',
-    params: [
-      lower(env.owner),
-      JSON.stringify(typedData, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString(10) : v)),
-    ],
-  });
-  if (typeof sig !== 'string' || !/^0x[0-9a-fA-F]{130}$/.test(sig))
-    throw new OperationError('The wallet returned no signature.');
+/** Sign a RelayAction envelope with the wallet: its signature, 128 lowercase hex. */
+async function signEnvelope(env: OperationEnv, message: Parameters<ActionSigning['relayAction']>[0]) {
+  const sig = await env.signing.relayAction(message);
+  if (!/^[0-9a-f]{128}$/.test(sig)) throw new OperationError('The wallet returned no signature.');
   return sig;
 }
 
@@ -142,11 +105,11 @@ export const dropJob = (env: OperationEnv, account: string | null, requestId: st
 
 /**
  * Register: generate the encryption key pair here (the secret is stored BEFORE anything leaves
- * the page), ask the wallet for ONE signature (the RelayAction, which is also the enrolment: the
- * relay recovers the device's public key from it), and wait while the relay deploys both waves,
- * seals the vault, retires the authority and activates. Resumes a registration in flight.
+ * the page), ask the wallet for ONE signature (the RelayAction, which is also the enrolment: its
+ * owner IS the device key), and wait while the relay deploys both waves, retires the authority and
+ * activates. Resumes a registration in flight.
  */
-export async function openAccount(env: OperationEnv, vault: string): Promise<AccountRecord> {
+export async function openAccount(env: OperationEnv): Promise<AccountRecord> {
   const { relay, store, scope } = env;
   let secret = readSecret(store, scope, null);
   const inFlight = findJobs(env, null, 'register')[0];
@@ -163,12 +126,12 @@ export async function openAccount(env: OperationEnv, vault: string): Promise<Acc
     const message = buildRelayActionMessage({
       action: 'register',
       network: scope.network,
-      owner: env.owner,
+      owner: env.signing.deviceKey,
       payload,
       nonce,
       expiry: Math.floor(Date.now() / 1000) + Math.min(maxTtlSeconds, 300),
     });
-    const signature = await signTypedData(env, relayActionTypedData(message, env.chainId));
+    const signature = await signEnvelope(env, message);
     const job = await relay.submit('register', { payload, auth: { message, signature } });
     putJob(env, null, job, 'register');
     env.onJob?.(job);
@@ -187,7 +150,6 @@ export async function openAccount(env: OperationEnv, vault: string): Promise<Acc
     address: account,
     device: r.device,
     network: scope.network,
-    vault,
     createdAt: Date.now(),
     txs: r.txs,
   };
@@ -232,7 +194,7 @@ export async function syncAccount(env: OperationEnv, account: string): Promise<S
   if (!secret)
     throw new OperationError('This browser does not hold the account secret. Import your export to use it here.');
   const state = await relay.accountState(account);
-  if (!state) throw new OperationError('The bank cannot find this account on the network.');
+  if (!state) throw new OperationError('The market cannot find this account on the network.');
   const sk = hexToBytes(secret.encSecretKey, 32);
   const inbox: Array<{ nonce: string; color: string; value: string; inboxIndex: string }> = [];
   let unreadable = 0;
@@ -272,9 +234,10 @@ export async function gatedContext(env: OperationEnv, account: string) {
   const state = await env.relay.accountState(account);
   if (!state || !state.booted) throw new OperationError('The account is not active.');
   const hint = BigInt(readRoster(env.store, env.scope, account)?.useCounter ?? '0');
-  const counter = findEvmUseCounter(state.devices, account, env.owner, BigInt(state.deviceEpoch), hint);
+  const counter = env.signing.useCounter(state, hint);
   if (counter === null) throw new OperationError('This wallet is not a device of this account.');
-  return { state, counter };
+  const ctx: GatedContext = { account, authNonce: BigInt(state.authNonce) };
+  return { state, counter, ctx };
 }
 
 /**
@@ -291,13 +254,13 @@ async function relayEnvelope(
   const message = buildRelayActionMessage({
     action,
     network: env.scope.network,
-    owner: env.owner,
+    owner: env.signing.deviceKey,
     account,
     payload,
     nonce,
     expiry: Math.floor(Date.now() / 1000) + Math.min(maxTtlSeconds, 300),
   });
-  return { message, signature: await signTypedData(env, relayActionTypedData(message, env.chainId)) };
+  return { message, signature: await signEnvelope(env, message) };
 }
 
 async function submitGated(
@@ -305,19 +268,18 @@ async function submitGated(
   account: string,
   action: 'withdraw' | 'append-inbox',
   payload: WithdrawPayload | AppendInboxPayload,
-  typedData: unknown,
+  passportAuth: PassportAuth,
   counter: bigint,
   context: Record<string, unknown>,
   opts: { envelope?: boolean } = {},
 ): Promise<JobView> {
   if (!RELAY_ACTIONS.includes(action)) throw new OperationError('unknown action');
-  const signature = await signTypedData(env, typedData);
   const body = payload as unknown as Record<string, unknown>;
   const auth = opts.envelope && action === 'withdraw' ? await relayEnvelope(env, action, account, body) : undefined;
   const job = await env.relay.submit(action, {
     account,
     payload: body,
-    passportAuth: { owner: lower(env.owner), signature, useCounter: counter.toString(10) },
+    passportAuth,
     ...(auth ? { auth } : {}),
   });
   putJob(env, account, job, action, context);
@@ -325,13 +287,13 @@ async function submitGated(
   const done = await env.relay.waitForJob(job.requestId, (j) => updateJob(env, account, j));
   dropJob(env, account, job.requestId);
   if (done.state !== 'succeeded')
-    throw new OperationError(jobErrorText(done.error, 'The bank could not complete this.'));
+    throw new OperationError(jobErrorText(done.error, 'The market could not complete this.'));
   env.store.put(env.scope, 'roster', { useCounter: (counter + 1n).toString(10) }, { account });
   return done;
 }
 
 /** A payee: a shielded wallet address (`mn_shield-addr_…`, both keys), or a bare 32-byte coin
- *  public key (only the bank's own wallet can be paid that way: nothing is sealed to it). */
+ *  public key (only the relay's own wallet can be paid that way: nothing is sealed to it). */
 export function recipientOf(text: string, network: string): { coinPublicKey: string; encryptionPublicKey?: string } {
   const t = text.trim();
   if (/^mn_/i.test(t)) {
@@ -356,7 +318,7 @@ export async function withdrawToWallet(
   const to = recipientOf(args.recipient, env.scope.network);
   const coins = readCoins(env.store, env.scope, account);
   const coin = chooseCoin(coins, args.color, args.amount);
-  const { state, counter } = await gatedContext(env, account);
+  const { state, counter, ctx } = await gatedContext(env, account);
   const payload: WithdrawPayload = {
     recipient: to.coinPublicKey,
     ...(to.encryptionPublicKey ? { recipientEncryptionKey: to.encryptionPublicKey } : {}),
@@ -365,25 +327,21 @@ export async function withdrawToWallet(
     coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex },
     authNonce: state.authNonce,
   };
-  const call = gatedCall(
-    { account, authNonce: BigInt(state.authNonce), evmDomainSalt: state.evmDomainSalt },
-    env.owner,
-    withdrawRequest(payload),
-  );
+  const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: withdrawRequest(payload) }, counter);
   // Paying a wallet seals the coin to its encryption key, which the contract's challenge does not
-  // cover: a second signature binds it for the bank (security review F-B6).
+  // cover: a second signature binds it for the market (security review F-B6).
   const done = await submitGated(
     env,
     account,
     'withdraw',
     payload,
-    call.typedData,
+    passportAuth,
     counter,
     { spent: coin.commitment },
     { envelope: payload.recipientEncryptionKey !== undefined },
   );
   const result = done.result as unknown as WithdrawResult;
-  // The change has no inbox entry yet (Q13); the bank's single-use entitlement to file one is kept
+  // The change has no inbox entry yet (Q13); the market's single-use entitlement to file one is kept
   // with it (security review F-B3).
   const change = result.change
     ? {
@@ -406,14 +364,14 @@ export async function withdrawToWallet(
  * wallet signs the `AppendInbox` call once.
  */
 export async function secureChange(env: OperationEnv, account: string, coin: StoredCoin): Promise<{ txId: string }> {
-  // The bank pays for filing an entry only against the entitlement it issued for this coin (F-B3):
+  // The market pays for filing an entry only against the entitlement it issued for this coin (F-B3):
   // without one, say so before the wallet is asked for anything.
   if (!coin.appendEntitlement) {
     throw new OperationError(
-      'The bank has no record of this coin as change it can file, so it cannot secure it. It stays spendable from this browser: keep your Export up to date.',
+      'The market has no record of this coin as change it can file, so it cannot secure it. It stays spendable from this browser: keep your Export up to date.',
     );
   }
-  const { state, counter } = await gatedContext(env, account);
+  const { state, counter, ctx } = await gatedContext(env, account);
   const entry = await sealEntryPortable(hexToBytes(state.encKey, 32), {
     nonce: hexToBytes(coin.nonce, 32),
     color: hexToBytes(coin.color, 32),
@@ -424,12 +382,8 @@ export async function secureChange(env: OperationEnv, account: string, coin: Sto
     authNonce: state.authNonce,
     entitlement: coin.appendEntitlement,
   };
-  const call = gatedCall(
-    { account, authNonce: BigInt(state.authNonce), evmDomainSalt: state.evmDomainSalt },
-    env.owner,
-    appendInboxRequest(payload),
-  );
-  const done = await submitGated(env, account, 'append-inbox', payload, call.typedData, counter, {
+  const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: appendInboxRequest(payload) }, counter);
+  const done = await submitGated(env, account, 'append-inbox', payload, passportAuth, counter, {
     coin: coin.commitment,
   });
   return { txId: String((done.result as { txId?: unknown } | undefined)?.txId ?? '') };

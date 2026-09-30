@@ -1,4 +1,4 @@
-// Plan P1.5: the MN Bank components render the markup their styles and the pages' tests rely on.
+// Plan P1.5: the Night Market components render the markup their styles and the pages' tests rely on.
 
 import { act, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -22,7 +22,6 @@ import {
   UnitInput,
   formatMoney,
   shortHex,
-  tokenDisplayName,
 } from '../src/design/index.js';
 
 const html = (el: ReactElement) => renderToStaticMarkup(el);
@@ -33,10 +32,10 @@ describe('Money', () => {
     expect(formatMoney(412_310_000_000_000_000n, 18, { minFractionDigits: 0, maxFractionDigits: 6 })).toBe('0.41231');
     expect(formatMoney(5n, 6)).toBe('0.000005');
     expect(formatMoney(1_000_000n, 6, { grouping: false })).toBe('1.00');
-    const out = html(<Money raw={10_500_000n} decimals={6} unit="wUSDC" data-testid="m" />);
+    const out = html(<Money raw={10_500_000n} decimals={6} unit="twUSDC" data-testid="m" />);
     expect(out).toContain('class="num"');
     expect(out).toContain('data-raw="10500000"');
-    expect(out).toContain('10.50<span class="money-unit">wUSDC</span>');
+    expect(out).toContain('10.50<span class="money-unit">twUSDC</span>');
   });
 });
 
@@ -44,15 +43,15 @@ describe('statement tables', () => {
   it('stack by default, carry each cell label for phone width, and double-rule the subtotal', () => {
     const out = html(
       <StatementTable
-        columns={[{ label: 'Asset' }, { label: 'Value', sub: 'USDC', align: 'right' }]}
+        columns={[{ label: 'Asset' }, { label: 'Value', sub: 'twUSDC', align: 'right' }]}
         foot={
-          <SubtotalRow span={1} label="Subtotal" valueLabel="USDC" valueTestId="total">
+          <SubtotalRow span={1} label="Subtotal" valueLabel="twUSDC" valueTestId="total">
             1.00
           </SubtotalRow>
         }
       >
         <tr>
-          <AssetCell symbol="wStkA" name="Stock A" origin="bridged from Sepolia" />
+          <AssetCell symbol="twBTC" name="Test-wrapped BTC" origin="shielded" />
           <Cell label="Value" align="right" num>
             1.00
           </Cell>
@@ -60,11 +59,11 @@ describe('statement tables', () => {
       </StatementTable>,
     );
     expect(out).toMatch(/^<table class="ledger stack">/);
-    expect(out).toContain('<th scope="col" class="r">Value<span class="th-sub">USDC</span></th>');
+    expect(out).toContain('<th scope="col" class="r">Value<span class="th-sub">twUSDC</span></th>');
     expect(out).toContain('<td data-label="Value" class="r num">1.00</td>');
-    expect(out).toContain('<td class="cell-asset"><span class="sym">wStkA</span><span class="name">Stock A</span>');
+    expect(out).toContain('<td class="cell-asset"><span class="sym">twBTC</span><span class="name">Test-wrapped BTC</span>');
     expect(out).toMatch(/<tfoot><tr><td class="cell-block" colspan="1">Subtotal<\/td>/i);
-    expect(out).toContain('data-label="USDC" data-testid="total"');
+    expect(out).toContain('data-label="twUSDC" data-testid="total"');
   });
 
   it('keeps an order book a table at phone width', () => {
@@ -76,7 +75,7 @@ describe('statement tables', () => {
 describe('badges, buttons, notices', () => {
   it('map tones and variants to the design classes', () => {
     expect(html(<Badge tone="green">Two-sided</Badge>)).toBe('<span class="tag tag-green">Two-sided</span>');
-    expect(html(<NetworkBadge network="sepolia" />)).toBe('<span class="net net-sepolia">Sepolia</span>');
+    expect(html(<NetworkBadge network="midnight" />)).toBe('<span class="net net-midnight">Midnight</span>');
     expect(html(<StatusPill status="live">Live</StatusPill>)).toContain('class="status st-live"');
     expect(html(<Button>Open account</Button>)).toBe('<button type="button" class="btn">Open account</button>');
     expect(html(<Button variant="danger">CLEAR ALL</Button>)).toContain('class="btn btn-danger"');
@@ -98,15 +97,15 @@ describe('badges, buttons, notices', () => {
   });
 
   it('announces a unit suffix with its input', () => {
-    const out = html(<UnitInput id="amount" unit="stkB" />);
-    const id = /<span class="unit" id="([^"]+)">stkB<\/span>/.exec(out)?.[1];
+    const out = html(<UnitInput id="amount" unit="twETH" />);
+    const id = /<span class="unit" id="([^"]+)">twETH<\/span>/.exec(out)?.[1];
     expect(id).toBeTruthy();
     expect(out).toContain(`aria-describedby="${id}"`);
   });
 });
 
 describe('the tooltip on a greyed-out control (AA 00044)', () => {
-  const text = 'Not enough wStkA. You hold 100.00 wStkA.';
+  const text = 'Not enough twBTC. You hold 100.00 twBTC.';
   const el = (
     <Tooltip id="nt-1" text={text} data-testid="not-enough">
       <Button size="small" variant="secondary" disabled aria-describedby="nt-1">
@@ -164,7 +163,7 @@ describe('the stage tracker', () => {
         label="Deposit"
         stages={[
           { key: 'a', title: 'Tokens sent', state: 'done', data: { testid: 'job-stage', stage: 'sent' } },
-          { key: 'b', title: 'Sepolia finality', state: 'current', detail: 'about 12 min' },
+          { key: 'b', title: 'Chain finality', state: 'current', detail: 'about 12 min' },
           { key: 'c', title: 'Completed', state: 'pending' },
         ]}
       />,
@@ -177,11 +176,8 @@ describe('the stage tracker', () => {
 });
 
 describe('names', () => {
-  it('shortens hex and names tokens in plain words', () => {
+  it('shortens hex', () => {
     expect(shortHex('0x484738A67858305Edfc139B194Ed430Fe4D8e56b')).toBe('0x4847…e56b');
     expect(shortHex('abc')).toBe('abc');
-    expect(tokenDisplayName({ role: 'stock', symbol: 'stkA' })).toBe('Stock A');
-    expect(tokenDisplayName({ role: 'usdc', symbol: 'USDC' })).toBe('USD Coin (test)');
-    expect(tokenDisplayName({ role: 'stock', symbol: 'TSLA' })).toBe('');
   });
 });

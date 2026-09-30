@@ -3,10 +3,10 @@
 // `label` is shown before its value), so nothing scrolls sideways on a phone.
 //
 //   <StatementTable columns={[{ label: 'Asset' }, { label: 'Quantity', align: 'right' },
-//                             { label: 'Price', sub: 'USDC, best bid', align: 'right' }]}
-//                   foot={<SubtotalRow label="Subtotal, priced holdings" span={2} valueLabel="USDC">…</SubtotalRow>}>
+//                             { label: 'Price', sub: 'twUSDC, best bid', align: 'right' }]}
+//                   foot={<SubtotalRow label="Subtotal, priced holdings" span={2} valueLabel="twUSDC">…</SubtotalRow>}>
 //     <tr>
-//       <AssetCell symbol="wStkA" name="Stock A" origin={<>bridged from Sepolia <span className="mono">0x2Ab7…FB52</span></>} />
+//       <AssetCell symbol="twBTC" name="Test-wrapped BTC" origin="shielded" />
 //       <Cell label="Quantity" align="right"><Money raw={…} decimals={6} /></Cell>
 //       <Cell label="Price" align="right">1.02</Cell>
 //     </tr>

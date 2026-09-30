@@ -1,9 +1,9 @@
-// The MN Bank typefaces, SELF-HOSTED from the @fontsource packages (SIL Open Font License 1.1;
+// The Night Market typefaces, SELF-HOSTED from the @fontsource packages (SIL Open Font License 1.1;
 // the licence texts ship with the site under licenses/).
 //
 // Why not the Google Fonts CDN the mockup used: a request to fonts.googleapis.com hands every
 // visitor's IP address to a third party before they have done anything (a German court found
-// exactly that to breach the GDPR, LG München I, 3 O 17493/20, January 2022). The bank tells
+// exactly that to breach the GDPR, LG München I, 3 O 17493/20, January 2022). The market tells
 // customers its servers keep nothing about them, so the page must not leak them to Google
 // either. Self-hosting also keeps the site working under a strict CSP, offline, and in the
 // browser tests, which refuse every request that leaves the page's own origin.

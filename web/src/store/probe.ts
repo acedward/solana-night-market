@@ -3,7 +3,7 @@
 
 export type StorageStatus = 'ok' | 'blocked' | 'full' | 'unavailable';
 
-const PROBE_KEY = 'mn-bank/probe';
+const PROBE_KEY = 'night-market/probe';
 
 /** Returns the Storage if it can be read and written, with the reason when it cannot. */
 export function probeStorage(get: () => Storage | null | undefined = () => globalThis.localStorage): {

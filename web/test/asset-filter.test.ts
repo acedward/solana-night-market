@@ -1,16 +1,19 @@
-// Plan 00042 P1.4: the asset filter's parsing, storage and rules, case by case (the plan's P1
-// testing table). The rules are generic: no asset is special, and a market shows only when both of
-// its assets are listed, so a pair without USDC is filtered by the same code.
+// Plan 00042 P1.4, carried over: the asset filter's parsing, storage and rules, case by case. The
+// rules are generic: no asset is special, and a market shows only when both of its tokens are
+// listed, so a pair without twUSDC (twETH/twBTC) is filtered by the same code as any other.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   type FeedState,
   NETWORK_DEFAULT_ASSETS,
+  NETWORK_DEFAULT_PAIRS,
+  type MarketPair,
   type TokenEntry,
-  registryFromConfig,
+  registryFor,
+  resolvePairs,
   stagenetRegistry,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import { assetFilterText } from '../src/assets/AssetFilterContext.js';
 import contextSource from '../src/assets/AssetFilterContext.tsx?raw';
@@ -32,10 +35,10 @@ import { ASSET_FILTER_KEY, type WalletScope } from '../src/store/schema.js';
 import { ImportError, LocalStore } from '../src/store/store.js';
 
 const registry = stagenetRegistry();
-const ETH: FilterAsset = { symbol: 'ETH', midnightName: 'ETH' };
-const token = (symbol: string) => registry.tokens.find((t) => t.symbol === symbol)!;
+const PAIRS = resolvePairs(registry, undefined, NETWORK_DEFAULT_PAIRS.stagenet).pairs;
+const ALL = ['twBTC', 'twETH', 'twUSDC', 'twUSDM', 'utwUSDC', 'utwBTC'];
 const LOADING: FeedState = { status: 'loading', stream: 'off' };
-const ME: WalletScope = { network: 'stagenet', evmAddress: `0x${'ab'.repeat(20)}` };
+const ME: WalletScope = { network: 'stagenet', owner: 'ab'.repeat(32) };
 
 /** A page load at `url` on a site whose set is `site` (null = every asset): the parameter
  *  applied to the store, and the view it gives. */
@@ -46,7 +49,7 @@ function load(
   site: readonly string[] | null = null,
 ) {
   const replaced: string[] = [];
-  const u = new URL(url, 'https://bank.example/');
+  const u = new URL(url, 'https://market.example/');
   const win = {
     location: { search: u.search, href: u.href },
     history: {
@@ -57,17 +60,18 @@ function load(
   const applied = applyAssetsParam(win, store);
   const listed =
     readAssetFilter(store) ?? (applied.param.kind === 'set' && !applied.saved ? applied.param.symbols : null);
-  return { applied, replaced, view: assetView(listed, assets, [ETH], site) };
+  return { applied, replaced, view: assetView(listed, assets, [], site) };
 }
 
-const shown = (view: ReturnType<typeof assetView>) => registry.tokens.filter(view.shows).map((t) => t.symbol);
-const markets = (view: ReturnType<typeof assetView>, r = registry) =>
-  marketRows(LOADING, r, view.showsPair).map((m) => `${m.symbol}/${r.usdc().symbol}`);
-const bankKeys = () => {
+const shown = (view: ReturnType<typeof assetView>, tokens: readonly TokenEntry[] = registry.tokens) =>
+  tokens.filter(view.shows).map((t) => t.symbol);
+const markets = (view: ReturnType<typeof assetView>, pairs: readonly MarketPair[] = PAIRS) =>
+  marketRows(LOADING, pairs, view.showsPair).map((m) => m.pair);
+const marketKeys = () => {
   const out: Record<string, string> = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i)!;
-    if (k.startsWith('mn-bank/')) out[k] = localStorage.getItem(k)!;
+    if (k.startsWith('night-market/')) out[k] = localStorage.getItem(k)!;
   }
   return out;
 };
@@ -81,15 +85,18 @@ beforeEach(() => {
 describe('the assets parameter', () => {
   it('parses a list: trimmed, split on commas, well-formed symbols only, no duplicates', () => {
     expect(parseAssetsParam('')).toEqual({ kind: 'absent' });
-    expect(parseAssetsParam('?stock=wStkA')).toEqual({ kind: 'absent' });
-    expect(parseAssetsParam('?assets=USDC,TBILL')).toEqual({ kind: 'set', symbols: ['USDC', 'TBILL'] });
-    expect(parseAssetsParam('?assets=%20usdc%20,,TBILL,USDC,')).toEqual({ kind: 'set', symbols: ['usdc', 'TBILL'] });
-    expect(parseAssetsParam('?assets=USDC+TBILL')).toEqual({ kind: 'set', symbols: ['USDC', 'TBILL'] });
+    expect(parseAssetsParam('?pair=twBTC/twUSDC')).toEqual({ kind: 'absent' });
+    expect(parseAssetsParam('?assets=twUSDC,twBTC')).toEqual({ kind: 'set', symbols: ['twUSDC', 'twBTC'] });
+    expect(parseAssetsParam('?assets=%20twusdc%20,,twBTC,twUSDC,')).toEqual({
+      kind: 'set',
+      symbols: ['twusdc', 'twBTC'],
+    });
+    expect(parseAssetsParam('?assets=twUSDC+twBTC')).toEqual({ kind: 'set', symbols: ['twUSDC', 'twBTC'] });
     expect(parseAssetsParam('?assets=all')).toEqual({ kind: 'clear' });
     expect(parseAssetsParam('?assets=ALL')).toEqual({ kind: 'clear' });
     expect(parseAssetsParam('?assets=')).toEqual({ kind: 'clear' });
     expect(parseAssetsParam('?assets')).toEqual({ kind: 'clear' });
-    expect(parseAssetsParam('?assets=%3Cscript%3E,USDC')).toEqual({ kind: 'set', symbols: ['USDC'] });
+    expect(parseAssetsParam('?assets=%3Cscript%3E,twUSDC')).toEqual({ kind: 'set', symbols: ['twUSDC'] });
     expect(parseAssetsParam('?assets=<script>')).toEqual({ kind: 'invalid' });
     expect(parseAssetsParam(`?assets=${'X'.repeat(17)}`)).toEqual({ kind: 'invalid' });
     const many = Array.from({ length: 40 }, (_, i) => `T${i}`).join(',');
@@ -97,70 +104,64 @@ describe('the assets parameter', () => {
   });
 
   it('is removed from the address bar, keeping the path, the other parameters and the section', () => {
-    expect(withoutAssetsParam('https://bank.example/?assets=USDC')).toBe('/');
-    expect(withoutAssetsParam('https://bank.example/app/?x=1&assets=USDC#markets')).toBe('/app/?x=1#markets');
-    const { replaced } = load('/?assets=stkA#markets', store);
+    expect(withoutAssetsParam('https://market.example/?assets=twUSDC')).toBe('/');
+    expect(withoutAssetsParam('https://market.example/app/?x=1&assets=twUSDC#markets')).toBe('/app/?x=1#markets');
+    const { replaced } = load('/?assets=twBTC#markets', store);
     expect(replaced).toEqual(['/#markets']);
     expect(load('/#markets', store).replaced).toEqual([]); // no parameter: the address is left alone
   });
 });
 
-describe('the rules (the plan P1 testing table)', () => {
+describe('the rules', () => {
   it('no parameter, nothing stored: everything is visible and nothing is written', () => {
     const { view } = load('/', store);
     expect(view.filtering).toBe(false);
-    expect(shown(view)).toEqual(['stkA', 'stkB', 'stkC', 'USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
-    expect(markets(view)).toEqual([
-      'stkA/USDC',
-      'stkB/USDC',
-      'stkC/USDC',
-      'TBILL/USDC',
-      'TB13W/USDC',
-      'TB26W/USDC',
-      'TB52W/USDC',
-    ]);
-    expect(bankKeys()).toEqual({});
+    expect(shown(view)).toEqual(ALL);
+    expect(markets(view)).toEqual(['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC']);
+    expect(marketKeys()).toEqual({});
   });
 
-  it('?assets=USDC: USDC only, and no market (none has both assets listed)', () => {
-    const { view } = load('/?assets=USDC', store);
+  it('?assets=twUSDC: twUSDC only, and no market (none has both tokens listed)', () => {
+    const { view } = load('/?assets=twUSDC', store);
     expect(view.filtering).toBe(true);
-    expect(shown(view)).toEqual(['USDC']);
+    expect(shown(view)).toEqual(['twUSDC']);
     expect(markets(view)).toEqual([]);
   });
 
-  it('?assets=stka: stkA (wStkA) only, and no market (USDC is not listed)', () => {
-    const { view } = load('/?assets=stka', store);
-    expect(shown(view)).toEqual(['stkA']);
-    expect(view.shows({ symbol: 'STKA', midnightName: 'other' })).toBe(true); // any case
+  it('?assets=twbtc: twBTC only (any case), and no market', () => {
+    const { view } = load('/?assets=twbtc', store);
+    expect(shown(view)).toEqual(['twBTC']);
+    expect(view.shows({ symbol: 'TWBTC' })).toBe(true);
     expect(markets(view)).toEqual([]);
   });
 
-  it('?assets=stkA,USDC: stkA, USDC and the stkA/USDC market only', () => {
-    const { view } = load('/?assets=stkA,USDC', store);
-    expect(shown(view)).toEqual(['stkA', 'USDC']);
-    expect(markets(view)).toEqual(['stkA/USDC']);
+  it('?assets=twBTC,twUSDC: those two and the twBTC/twUSDC market only', () => {
+    const { view } = load('/?assets=twBTC,twUSDC', store);
+    expect(shown(view)).toEqual(['twBTC', 'twUSDC']);
+    expect(markets(view)).toEqual(['twBTC/twUSDC']);
   });
 
-  it('matches the Midnight name too: ?assets=wUSDC lists USDC', () => {
-    expect(shown(load('/?assets=wusdc', store).view)).toEqual(['USDC']);
+  it('?assets=twETH,twBTC: the pair without twUSDC, exactly like any other', () => {
+    const { view } = load('/?assets=twETH,twBTC', store);
+    expect(shown(view)).toEqual(['twBTC', 'twETH']);
+    expect(markets(view)).toEqual(['twETH/twBTC']);
   });
 
-  it('a pair without USDC (TBILL/EURC, generic assets): shown when both are listed; USDC is not special', () => {
-    const TBILL = { symbol: 'TBILL', midnightName: 'wTBILL' };
-    const EURC = { symbol: 'EURC', midnightName: 'wEURC' };
-    const USDC = { symbol: 'USDC', midnightName: 'wUSDC' };
+  it('a pair of generic assets: shown when both are listed; no asset is special', () => {
+    const A = { symbol: 'AAA' };
+    const B = { symbol: 'BBB' };
+    const C = { symbol: 'CCC' };
     const pairs: Array<[FilterAsset, FilterAsset]> = [
-      [TBILL, EURC],
-      [TBILL, USDC],
-      [EURC, USDC],
+      [A, B],
+      [A, C],
+      [B, C],
     ];
-    const view = assetView(['TBILL', 'EURC'], [TBILL, EURC, USDC]);
-    expect(pairs.filter(([a, b]) => view.showsPair(a, b))).toEqual([[TBILL, EURC]]);
-    expect([TBILL, EURC, USDC].filter(view.shows)).toEqual([TBILL, EURC]);
+    const view = assetView(['AAA', 'BBB'], [A, B, C]);
+    expect(pairs.filter(([a, b]) => view.showsPair(a, b))).toEqual([[A, B]]);
+    expect([A, B, C].filter(view.shows)).toEqual([A, B]);
     // The order of a pair's legs does not matter, and neither leg is a quote currency.
-    expect(view.showsPair(EURC, TBILL)).toBe(true);
-    expect(assetView(['USDC'], [TBILL, EURC, USDC]).showsPair(TBILL, USDC)).toBe(false);
+    expect(view.showsPair(B, A)).toBe(true);
+    expect(assetView(['CCC'], [A, B, C]).showsPair(A, C)).toBe(false);
   });
 
   it('the rules never read a role: no "usdc"/"stock" in the filter code', () => {
@@ -168,251 +169,226 @@ describe('the rules (the plan P1 testing table)', () => {
     expect(src).not.toMatch(/\brole\b|\.usdc\(|stocks\(|'usdc'|'stock'/);
   });
 
-  it('?assets=USDC,EURC while EURC is unknown: USDC only, and the note names EURC', () => {
-    const { view } = load('/?assets=USDC,EURC', store);
-    expect(shown(view)).toEqual(['USDC']);
-    expect(view.known).toEqual(['USDC']);
+  it('?assets=twUSDC,EURC while EURC is unknown: twUSDC only, and the note names EURC', () => {
+    const { view } = load('/?assets=twUSDC,EURC', store);
+    expect(shown(view)).toEqual(['twUSDC']);
+    expect(view.known).toEqual(['twUSDC']);
     expect(view.unknown).toEqual(['EURC']);
-    expect(readAssetFilter(store)).toEqual(['USDC', 'EURC']); // kept, for when EURC arrives
+    expect(readAssetFilter(store)).toEqual(['twUSDC', 'EURC']); // kept, for when EURC arrives
   });
 
   it('?assets=EURC (nothing known): everything stays visible, with the note', () => {
     const { view } = load('/?assets=EURC', store);
     expect(view.filtering).toBe(false);
     expect(view.unknown).toEqual(['EURC']);
-    expect(shown(view)).toEqual(['stkA', 'stkB', 'stkC', 'USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
-    expect(markets(view)).toHaveLength(7);
+    expect(shown(view)).toEqual(ALL);
+    expect(markets(view)).toHaveLength(4);
   });
 
-  it('Sepolia ETH is always visible', () => {
-    expect(load('/?assets=USDC', store).view.shows(ETH)).toBe(true);
-    // Listing it counts as known: the list narrows the view to ETH alone.
-    const { view } = load('/?assets=ETH', store);
-    expect(view.unknown).toEqual([]);
-    expect(shown(view)).toEqual([]);
+  it('assets marked always visible show whatever the list, and count as known (the site passes none)', () => {
+    const PINNED = { symbol: 'PIN' };
+    const view = assetView(['twUSDC'], registry.tokens, [PINNED]);
+    expect(view.shows(PINNED)).toBe(true);
+    expect(assetView(['PIN'], registry.tokens, [PINNED]).unknown).toEqual([]);
+    expect(contextSource).toMatch(/assetView\(.*, \[\], site\)/);
   });
 
   it('a stored filter applies with no parameter', () => {
-    load('/?assets=stkA,USDC', store);
-    const again = load('/#accounts', new LocalStore(localStorage));
+    load('/?assets=twBTC,twUSDC', store);
+    const again = load('/#account', new LocalStore(localStorage));
     expect(again.applied.param.kind).toBe('absent');
-    expect(shown(again.view)).toEqual(['stkA', 'USDC']);
+    expect(shown(again.view)).toEqual(['twBTC', 'twUSDC']);
   });
 
   it('?assets=all and ?assets= clear it', () => {
     for (const url of ['/?assets=all', '/?assets=']) {
-      load('/?assets=USDC', store);
-      expect(bankKeys()[ASSET_FILTER_KEY]).toBeDefined();
+      load('/?assets=twUSDC', store);
+      expect(marketKeys()[ASSET_FILTER_KEY]).toBeDefined();
       const { view } = load(url, store);
       expect(view.filtering).toBe(false);
-      expect(bankKeys()[ASSET_FILTER_KEY]).toBeUndefined();
-      expect(shown(view)).toHaveLength(8);
+      expect(marketKeys()[ASSET_FILTER_KEY]).toBeUndefined();
+      expect(shown(view)).toHaveLength(6);
     }
   });
 
   it('a new list replaces the old one', () => {
-    load('/?assets=USDC', store);
-    expect(shown(load('/?assets=stkB,USDC', store).view)).toEqual(['stkB', 'USDC']);
-    expect(readAssetFilter(store)).toEqual(['stkB', 'USDC']);
+    load('/?assets=twUSDC', store);
+    expect(shown(load('/?assets=twETH,twUSDC', store).view)).toEqual(['twETH', 'twUSDC']);
+    expect(readAssetFilter(store)).toEqual(['twETH', 'twUSDC']);
   });
 
-  it('?assets=<script>,USDC drops the bad symbol; a list of only bad ones changes nothing', () => {
-    expect(load('/?assets=%3Cscript%3E,USDC', store).view.listed).toEqual(['USDC']);
+  it('?assets=<script>,twUSDC drops the bad symbol; a list of only bad ones changes nothing', () => {
+    expect(load('/?assets=%3Cscript%3E,twUSDC', store).view.listed).toEqual(['twUSDC']);
     const { applied, replaced } = load('/?assets=%3Cscript%3E', store);
     expect(applied.param.kind).toBe('invalid');
     expect(replaced).toEqual(['/']);
-    expect(readAssetFilter(store)).toEqual(['USDC']);
+    expect(readAssetFilter(store)).toEqual(['twUSDC']);
   });
 
   it('a browser that cannot keep data applies the list to this page load only', () => {
-    const { applied, view } = load('/?assets=USDC', null);
+    const { applied, view } = load('/?assets=twUSDC', null);
     expect(applied.saved).toBe(false);
-    expect(shown(view)).toEqual(['USDC']);
-    expect(bankKeys()).toEqual({});
+    expect(shown(view)).toEqual(['twUSDC']);
+    expect(marketKeys()).toEqual({});
   });
 
   it('Export, then Import: the filter survives; CLEAR ALL removes it', () => {
     store.put(ME, 'profile', { firstSeen: 1 });
-    load('/?assets=USDC,TBILL', store);
+    load('/?assets=twUSDC,twBTC', store);
     const file = store.exportWallet(ME);
     expect(file.records.map((r) => r.key)).toContain(ASSET_FILTER_KEY);
     expect(store.clearAll()).toBe(3); // the profile, the filter, the schema marker
     expect(readAssetFilter(store)).toBeNull();
-    expect(bankKeys()).toEqual({});
+    expect(marketKeys()).toEqual({});
     expect(store.importWallet(JSON.parse(JSON.stringify(file)), ME).imported).toBe(2);
-    expect(readAssetFilter(store)).toEqual(['USDC', 'TBILL']);
+    expect(readAssetFilter(store)).toEqual(['twUSDC', 'twBTC']);
   });
 
   it('Import refuses a filter record this page would not write', () => {
     store.put(ME, 'profile', { firstSeen: 1 });
-    saveAssetFilter(store, ['USDC']);
+    saveAssetFilter(store, ['twUSDC']);
     const file = JSON.parse(JSON.stringify(store.exportWallet(ME))) as {
       records: Array<{ key: string; value: { data: unknown } }>;
     };
     file.records.find((r) => r.key === ASSET_FILTER_KEY)!.value.data = { assets: ['<script>'] };
     localStorage.clear();
     expect(() => new LocalStore(localStorage).importWallet(file, ME)).toThrow(ImportError);
-    expect(bankKeys()).toEqual({});
+    expect(marketKeys()).toEqual({});
   });
 
-  it('a config token list with TBILL + ?assets=USDC,TBILL: the TBILL/USDC market, no stk (no code change)', () => {
-    const colour = (b: string) => b.repeat(32);
-    const withTbill = registryFromConfig('stagenet', {
-      tokens: [
-        { symbol: 'USDC', midnightName: 'wUSDC', role: 'usdc', decimals: 6, midnightColour: colour('e5') },
-        { symbol: 'stkA', midnightName: 'wStkA', role: 'stock', decimals: 6, midnightColour: colour('5e') },
-        { symbol: 'TBILL', midnightName: 'wTBILL', role: 'stock', decimals: 6, midnightColour: colour('7b') },
-      ],
+  it('a token the market adds by configuration (nmGOLD) and its pair: filtered by the same code', () => {
+    const withGold = registryFor('stagenet', {
+      tokens: [{ symbol: 'nmGOLD', name: 'Night Market gold', decimals: 2, midnightColour: 'f7'.repeat(32) }],
     });
-    const { view } = load('/?assets=USDC,TBILL', store, withTbill.tokens);
+    const pairs = resolvePairs(withGold, ['nmGOLD/twUSDC', 'twBTC/twUSDC'], NETWORK_DEFAULT_PAIRS.stagenet).pairs;
+    const { view } = load('/?assets=twUSDC,nmGOLD', store, withGold.tokens);
     expect(view.unknown).toEqual([]);
-    expect(withTbill.tokens.filter(view.shows).map((t) => t.symbol)).toEqual(['USDC', 'TBILL']);
-    expect(markets(view, withTbill)).toEqual(['TBILL/USDC']);
+    expect(shown(view, withGold.tokens)).toEqual(['twUSDC', 'nmGOLD']);
+    expect(markets(view, pairs)).toEqual(['nmGOLD/twUSDC']);
   });
 });
 
 describe('the markets view with a filter', () => {
   it('keeps every market when nothing is listed (the unfiltered page is unchanged)', () => {
-    expect(marketRows(LOADING, registry)).toEqual(
-      marketRows(LOADING, registry, assetView(null, registry.tokens).showsPair),
-    );
+    expect(marketRows(LOADING, PAIRS)).toEqual(marketRows(LOADING, PAIRS, assetView(null, registry.tokens).showsPair));
   });
 
-  it('passes both assets of each market to the filter', () => {
+  it('passes both tokens of each pair to the filter', () => {
     const seen: string[] = [];
-    marketRows(LOADING, registry, (a, b) => {
+    marketRows(LOADING, PAIRS, (a, b) => {
       seen.push(`${a.symbol}/${b.symbol}`);
       return true;
     });
-    expect(seen).toEqual([
-      'stkA/USDC',
-      'stkB/USDC',
-      'stkC/USDC',
-      'TBILL/USDC',
-      'TB13W/USDC',
-      'TB26W/USDC',
-      'TB52W/USDC',
-    ]);
-    expect(token('USDC').midnightName).toBe('wUSDC');
+    expect(seen).toEqual(['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC']);
   });
 });
 
-// Plan 00046 P2.4: each domain's set (config.json `assets`, or the network's default set, which is
-// data) is the ceiling, and the 00042 list narrows within it.
-describe("the site's set (plan 00046 P2.4 testing table)", () => {
-  const TBANK = ['USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W'];
+// Plan 00046 P2.4, carried over: each domain's set (config.json `assets`, or the network's default
+// set, which is data) is the ceiling, and the 00042 list narrows within it.
+describe("the site's set", () => {
+  const PARTNER = ['twETH', 'twBTC'];
   const stagenetSite = (configured: unknown) =>
     resolveSiteAssets(configured, NETWORK_DEFAULT_ASSETS.stagenet, registry.tokens);
   const onSite = (configured: unknown, url = '/') => load(url, store, registry.tokens, stagenetSite(configured).set);
 
-  it('stagenet, no assets: USDC and stkA/B/C, 3 markets (the default set is data)', () => {
-    expect(stagenetSite(undefined)).toEqual({ set: ['USDC', 'stkA', 'stkB', 'stkC'], warnings: [] });
+  it('stagenet, no assets: every token and every pair (its default set is data: all of them)', () => {
+    expect(NETWORK_DEFAULT_ASSETS.stagenet).toBeNull();
+    expect(stagenetSite(undefined)).toEqual({ set: null, warnings: [] });
     const { view } = onSite(undefined);
     expect(view.filtering).toBe(false);
-    expect(shown(view)).toEqual(['stkA', 'stkB', 'stkC', 'USDC']);
-    expect(markets(view)).toEqual(['stkA/USDC', 'stkB/USDC', 'stkC/USDC']);
-  });
-
-  it('the tbank set: those 5 tokens and 4 markets, no stk', () => {
-    expect(stagenetSite(TBANK)).toEqual({ set: TBANK, warnings: [] });
-    const { view } = onSite(TBANK);
-    expect(shown(view)).toEqual(['USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
-    expect(markets(view)).toEqual(['TBILL/USDC', 'TB13W/USDC', 'TB26W/USDC', 'TB52W/USDC']);
-    expect(view.shows(ETH)).toBe(true);
-  });
-
-  it('assets: "all": 8 tokens, 7 markets', () => {
-    expect(stagenetSite('all')).toEqual({ set: null, warnings: [] });
-    expect(stagenetSite('ALL').set).toBeNull();
-    const { view } = onSite('all');
-    expect(shown(view)).toHaveLength(8);
-    expect(markets(view)).toHaveLength(7);
-  });
-
-  it('the tbank set + ?assets=USDC,TBILL: TBILL/USDC only', () => {
-    const { view } = onSite(TBANK, '/?assets=USDC,TBILL');
-    expect(view.filtering).toBe(true);
-    expect(shown(view)).toEqual(['USDC', 'TBILL']);
-    expect(markets(view)).toEqual(['TBILL/USDC']);
-    expect([view.unavailable, view.unknown]).toEqual([[], []]);
-  });
-
-  it('the tbank set + ?assets=stkA,USDC: USDC only, and stkA named as not available on this site', () => {
-    const { view } = onSite(TBANK, '/?assets=stkA,USDC');
-    expect(shown(view)).toEqual(['USDC']);
-    expect(markets(view)).toEqual([]);
-    expect(view.known).toEqual(['USDC']);
-    expect(view.unavailable).toEqual(['stkA']);
-    expect(view.unknown).toEqual([]);
-    expect(assetFilterText(view)).toBe('Showing only USDC. Not available on this site: stkA.');
-    // A list of only outside symbols narrows nothing: the site's set, with the note.
-    const only = onSite(TBANK, '/?assets=wStkA').view;
-    expect(only.filtering).toBe(false);
-    expect(shown(only)).toEqual(['USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
-    expect(assetFilterText(only)).toBe(
-      'None of the listed assets is on this site, so every asset is shown. Not available on this site: wStkA.',
-    );
-  });
-
-  it('the tbank set + ?assets=all: the tbank set (the stored list is forgotten)', () => {
-    onSite(TBANK, '/?assets=USDC,TBILL');
-    expect(readAssetFilter(store)).toEqual(['USDC', 'TBILL']);
-    const { view } = onSite(TBANK, '/?assets=all');
-    expect(readAssetFilter(store)).toBeNull();
-    expect(view.filtering).toBe(false);
-    expect(shown(view)).toEqual(['USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
+    expect(shown(view)).toEqual(ALL);
     expect(markets(view)).toHaveLength(4);
   });
 
-  it('a typo (TBIL) beside valid symbols: the valid ones, and a warning', () => {
-    const r = stagenetSite(['usdc', 'TBIL', 'tbill', 'wUSDC']);
-    expect(r.set).toEqual(['USDC', 'TBILL']); // any case, either name, no duplicates
-    expect(r.warnings).toEqual(['config.json "assets": ignoring unknown assets: TBIL']);
+  it('a partner set (twETH, twBTC): those 2 tokens and their market only', () => {
+    expect(stagenetSite(PARTNER)).toEqual({ set: PARTNER, warnings: [] });
+    const { view } = onSite(PARTNER);
+    expect(shown(view)).toEqual(['twBTC', 'twETH']);
+    expect(markets(view)).toEqual(['twETH/twBTC']);
+  });
+
+  it('assets: "all": 6 tokens, 4 markets', () => {
+    expect(stagenetSite('all')).toEqual({ set: null, warnings: [] });
+    expect(stagenetSite('ALL').set).toBeNull();
+    const { view } = onSite('all');
+    expect(shown(view)).toHaveLength(6);
+    expect(markets(view)).toHaveLength(4);
+  });
+
+  it('the partner set + ?assets=twETH: twETH only, and no market', () => {
+    const { view } = onSite(PARTNER, '/?assets=twETH');
+    expect(view.filtering).toBe(true);
+    expect(shown(view)).toEqual(['twETH']);
+    expect(markets(view)).toEqual([]);
+    expect([view.unavailable, view.unknown]).toEqual([[], []]);
+  });
+
+  it('the partner set + ?assets=twUSDC,twETH: twETH only, and twUSDC named as not available on this site', () => {
+    const { view } = onSite(PARTNER, '/?assets=twUSDC,twETH');
+    expect(shown(view)).toEqual(['twETH']);
+    expect(view.known).toEqual(['twETH']);
+    expect(view.unavailable).toEqual(['twUSDC']);
+    expect(view.unknown).toEqual([]);
+    expect(assetFilterText(view)).toBe('Showing only twETH. Not available on this site: twUSDC.');
+    // A list of only outside symbols narrows nothing: the site's set, with the note.
+    const only = onSite(PARTNER, '/?assets=twUSDM').view;
+    expect(only.filtering).toBe(false);
+    expect(shown(only)).toEqual(['twBTC', 'twETH']);
+    expect(assetFilterText(only)).toBe(
+      'None of the listed assets is on this site, so every asset is shown. Not available on this site: twUSDM.',
+    );
+  });
+
+  it('the partner set + ?assets=all: the partner set (the stored list is forgotten)', () => {
+    onSite(PARTNER, '/?assets=twETH');
+    expect(readAssetFilter(store)).toEqual(['twETH']);
+    const { view } = onSite(PARTNER, '/?assets=all');
+    expect(readAssetFilter(store)).toBeNull();
+    expect(view.filtering).toBe(false);
+    expect(shown(view)).toEqual(['twBTC', 'twETH']);
+  });
+
+  it('a typo (twETC) beside valid symbols: the valid ones, and a warning', () => {
+    const r = stagenetSite(['tweth', 'twETC', 'TWBTC', 'twETH']);
+    expect(r.set).toEqual(['twETH', 'twBTC']); // any case, no duplicates
+    expect(r.warnings).toEqual(['config.json "assets": ignoring unknown assets: twETC']);
   });
 
   it('only unknown symbols (or not a list): the network default, and a warning', () => {
-    const r = stagenetSite(['TBIL', 'EURC']);
-    expect(r.set).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
+    const r = stagenetSite(['twETC', 'EURC']);
+    expect(r.set).toBeNull();
     expect(r.warnings).toEqual([
-      'config.json "assets": ignoring unknown assets: TBIL, EURC',
+      'config.json "assets": ignoring unknown assets: twETC, EURC',
       'config.json "assets" names no known asset; using the network\'s default',
     ]);
-    expect(stagenetSite([]).set).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
-    for (const bad of ['USDC,TBILL', 42, { a: 1 }, [7]]) {
+    for (const bad of ['twETH,twBTC', 42, { a: 1 }, [7]]) {
       const b = stagenetSite(bad);
-      expect(b.set).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
+      expect(b.set).toBeNull();
       expect(b.warnings.length).toBeGreaterThan(0);
     }
-    // A default the registry does not know (a configured token list without the stk line): everything.
-    const other = resolveSiteAssets(undefined, ['stkA'], [{ symbol: 'USDC', midnightName: 'wUSDC' }]);
+    // A default set (data) naming a token the registry does not know: everything, with warnings.
+    const other = resolveSiteAssets(undefined, ['wStkA'], [{ symbol: 'twUSDC' }]);
     expect(other.set).toBeNull();
     expect(other.warnings).toHaveLength(2);
   });
 
-  it('undeployed, no assets: everything (its network has no default set)', () => {
-    expect(NETWORK_DEFAULT_ASSETS.undeployed).toBeNull();
-    expect(resolveSiteAssets(undefined, NETWORK_DEFAULT_ASSETS.undeployed, registry.tokens)).toEqual({
-      set: null,
+  it('a default set that names known tokens narrows like a configured one (the data drives it)', () => {
+    expect(resolveSiteAssets(undefined, ['twBTC', 'twUSDC'], registry.tokens)).toEqual({
+      set: ['twBTC', 'twUSDC'],
       warnings: [],
     });
-  });
-
-  it('no site set, no list: exactly the 00042 view (the unfiltered page is unchanged)', () => {
-    const a = assetView(null, registry.tokens, [ETH], null);
-    expect(registry.tokens.filter(a.shows)).toEqual(registry.tokens);
-    expect(a.unavailable).toEqual([]);
   });
 
   it('the site code names no token and reads no role (the owner rule: no special token in code)', () => {
     for (const src of [filterSource, configSource, contextSource]) {
       const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-      expect(code).not.toMatch(/\b(w?usdc|w?stk[abc]|tbill|tb\d\dw)\b/i);
+      expect(code).not.toMatch(/\bu?tw(usdc|usdm|btc|eth)\b|\bw?usdc\b|\bw?stk[abc]\b/i);
       expect(code).not.toMatch(/\brole\b|\.usdc\(|stocks\(|'stock'/);
     }
   });
 });
 
-describe('loadSiteConfig: the site set from config.json (plan 00046 P2.2)', () => {
+describe('loadSiteConfig: the site set and pairs from config.json', () => {
   const fetchJson = (body: unknown) =>
     (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
   let warn: ReturnType<typeof vi.spyOn>;
@@ -421,45 +397,44 @@ describe('loadSiteConfig: the site set from config.json (plan 00046 P2.2)', () =
   });
   afterEach(() => warn.mockRestore());
 
-  it('the bank domain (no assets): the stagenet default, no warning', async () => {
+  it('the market domain (no assets): every token, no warning; no config.json: the same', async () => {
     const c = await loadSiteConfig(fetchJson({ network: 'stagenet', relayUrl: '/relay' }));
-    expect(c.assets).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
+    expect(c.assets).toBeNull();
+    expect(c.pairs).toBeUndefined();
+    const none = (async () => new Response('', { status: 404 })) as unknown as typeof fetch;
+    expect((await loadSiteConfig(none)).assets).toBeNull();
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('the tbank domain: its own set', async () => {
-    const assets = ['USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W'];
-    const c = await loadSiteConfig(fetchJson({ network: 'stagenet', relayUrl: '/relay', assets }));
-    expect(c.assets).toEqual(assets);
+  it('a partner domain: its own set and pairs, passed through as data', async () => {
+    const c = await loadSiteConfig(
+      fetchJson({ network: 'stagenet', relayUrl: '/relay', assets: ['twETH', 'twBTC'], pairs: ['twETH/twBTC'] }),
+    );
+    expect(c.assets).toEqual(['twETH', 'twBTC']);
+    expect(c.pairs).toEqual(['twETH/twBTC']);
     expect(warn).not.toHaveBeenCalled();
   });
 
   it('"all", a typo, and only unknown symbols', async () => {
     expect((await loadSiteConfig(fetchJson({ assets: 'all' }))).assets).toBeNull();
-    expect((await loadSiteConfig(fetchJson({ assets: ['USDC', 'TBIL'] }))).assets).toEqual(['USDC']);
-    expect(warn).toHaveBeenCalledWith('MN Bank: config.json "assets": ignoring unknown assets: TBIL');
+    expect((await loadSiteConfig(fetchJson({ assets: ['twUSDC', 'twETC'] }))).assets).toEqual(['twUSDC']);
+    expect(warn).toHaveBeenCalledWith('Night Market: config.json "assets": ignoring unknown assets: twETC');
     warn.mockClear();
-    expect((await loadSiteConfig(fetchJson({ assets: ['NOPE'] }))).assets).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
+    expect((await loadSiteConfig(fetchJson({ assets: ['NOPE'] }))).assets).toBeNull();
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  it('undeployed with its token list and no assets: everything; no config.json: the stagenet default', async () => {
+  it('undeployed with its token list and no assets: everything', async () => {
     const tokens = {
       tokens: [
-        { symbol: 'tUSDC', midnightName: 'a', role: 'usdc', decimals: 6, midnightColour: 'aa'.repeat(32) },
-        { symbol: 'tSTK', midnightName: 'b', role: 'stock', decimals: 6, midnightColour: 'bb'.repeat(32) },
+        { symbol: 'tA', decimals: 6, midnightColour: 'aa'.repeat(32) },
+        { symbol: 'tB', decimals: 8, midnightColour: 'bb'.repeat(32) },
       ],
     };
     expect((await loadSiteConfig(fetchJson({ network: 'undeployed', tokens }))).assets).toBeNull();
-    // A stagenet site with its own token list: the default set belongs to the built-in list, so
-    // every configured token shows unless `assets` names some (the 00042 config-TBILL case).
-    const own = { tokens: { tokens: [tokens.tokens[0], { ...tokens.tokens[1], symbol: 'TBILL' }] } };
-    expect((await loadSiteConfig(fetchJson({ network: 'stagenet', ...own }))).assets).toBeNull();
-    expect((await loadSiteConfig(fetchJson({ network: 'stagenet', ...own, assets: ['TBILL'] }))).assets).toEqual([
-      'TBILL',
-    ]);
-    const none = (async () => new Response('', { status: 404 })) as unknown as typeof fetch;
-    expect((await loadSiteConfig(none)).assets).toEqual(['USDC', 'stkA', 'stkB', 'stkC']);
+    expect(
+      (await loadSiteConfig(fetchJson({ network: 'undeployed', tokens, assets: ['tB'] }))).assets,
+    ).toEqual(['tB']);
     expect(warn).not.toHaveBeenCalled();
   });
 });

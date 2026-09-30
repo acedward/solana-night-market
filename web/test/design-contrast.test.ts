@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Plan P1.5: every text colour the MN Bank design puts on a background meets WCAG 2.2 AA
+// Plan P1.5: every text colour the Night Market design puts on a background meets WCAG 2.2 AA
 // (4.5:1 for text; 3:1 for large text and for the parts of a control, 1.4.11). The pairs are
 // read from web/src/design/tokens.css, so a colour change that breaks contrast fails here.
 
@@ -57,7 +57,6 @@ export const PAIRS: ReadonlyArray<readonly [string, string, number, string]> = [
   ['on-navy', 'navy', TEXT, 'a tooltip: why a button is greyed out (AA 00044)'],
   ['on-navy-muted', 'navy', TEXT, 'masthead labels, the tagline'],
   ['on-navy-gold', 'navy', TEXT, 'the "Midnight stagenet" badge'],
-  ['on-navy', 'sepolia-bg', TEXT, 'the "Sepolia" badge'],
   ['gold-ink', 'gold-soft', TEXT, '"Your offer", gold badges'],
   ['gold-ink', 'surface', TEXT, '"refunded"'],
   ['warn-ink', 'warn-soft', TEXT, 'warning notices'],
@@ -79,7 +78,7 @@ export const PAIRS: ReadonlyArray<readonly [string, string, number, string]> = [
   ['navy', 'surface', LARGE_OR_UI, 'the current tab underline, secondary-button borders'],
 ];
 
-describe('the MN Bank colour tokens (WCAG 2.2 AA)', () => {
+describe('the Night Market colour tokens (WCAG 2.2 AA)', () => {
   it('parses every token the pairs use', () => {
     for (const [fg, bg] of PAIRS) expect([hex(fg), hex(bg)]).toHaveLength(2);
   });

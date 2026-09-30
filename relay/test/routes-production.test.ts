@@ -183,6 +183,10 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
   switch (action) {
     case 'register':
       return { encPublicKey: (n % 2 ? 'cd' : 'ab').repeat(32) };
+    case 'demo-tokens':
+      return {};
+    case 'withdraw-unshielded':
+      return { recipient: '12'.repeat(32), color: COLOUR_A, amount, authNonce: a };
     case 'withdraw':
       return {
         recipient: '11'.repeat(32),

@@ -3,11 +3,19 @@
 // pure circuits on compact-runtime 0.20.0, the only runtime the browser bundle carries.
 
 import nacl from 'tweetnacl';
-import { bytesToHex, hexToBytes, registryFor, type DeviceSigner, type OpenSwapPayload } from '@nightmarket/core';
+import {
+  buildRelayActionMessage,
+  bytesToHex,
+  hexToBytes,
+  registryFor,
+  type DeviceSigner,
+  type OpenSwapPayload,
+} from '@nightmarket/core';
+import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
 import { ed25519DeviceForCheck, withdrawRequest, callContext } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
-import { SigningUnavailableError, ed25519ActionSigning, type CallToAuthorise } from '../src/wallet/signing.js';
+import { EnvelopeSignatureError, ed25519ActionSigning, type CallToAuthorise } from '../src/wallet/signing.js';
 
 const tokens = registryFor('stagenet');
 const display = { network: 'stagenet', tokens } as const;
@@ -106,12 +114,36 @@ describe('ed25519ActionSigning (the browser side of the arm)', () => {
     expect(signing.useCounter({ ...state, devices: [] }, 0n)).toBeNull();
   });
 
-  it('refuses before any proof: a wallet that signs something else, and the envelope (lane B3)', async () => {
+  it('refuses before any proof: a wallet that signs something else', async () => {
     const { signer } = naclWallet(4);
     const other = naclWallet(5).signer;
     const wrongKey = ed25519ActionSigning({ ...signer, signMessage: other.signMessage }, display);
     await expect(wrongKey.authorise(ctx, gated, 0n)).rejects.toThrow(/tweetnacl pre-check/);
+  });
+
+  it("signs the relay envelope in lane B3's Solana scheme (Track A's proof-of-key text), checked before it is sent", async () => {
+    const { signer, asked } = naclWallet(6);
     const signing = ed25519ActionSigning(signer, display);
-    await expect(signing.relayAction({} as never)).rejects.toBeInstanceOf(SigningUnavailableError);
+    const message = buildRelayActionMessage({
+      action: 'register',
+      network: 'stagenet',
+      owner: signer.deviceKey,
+      payload: { encPublicKey: 'ab'.repeat(32) },
+      nonce: `0x${'12'.repeat(32)}`,
+      expiry: 1_900_000_000,
+    });
+    const signature = await signing.relayAction(message);
+    expect(asked).toHaveLength(1);
+    const text = new TextDecoder().decode(asked[0]);
+    expect(text.split('\n').slice(0, 2)).toEqual(['Night Market - stagenet', 'Prove you hold this key']);
+    expect(text).toContain('This signature authorises nothing and moves no funds.');
+    expect(solanaRelayActionScheme.verify(message, hexToBytes(signature))).toBe(true);
+    // Another key's signature, or an envelope for another owner, never leaves the page.
+    const other = naclWallet(7).signer;
+    const wrong = ed25519ActionSigning({ ...signer, signMessage: other.signMessage }, display);
+    await expect(wrong.relayAction(message)).rejects.toBeInstanceOf(EnvelopeSignatureError);
+    await expect(signing.relayAction({ ...message, owner: other.deviceKey })).rejects.toBeInstanceOf(
+      EnvelopeSignatureError,
+    );
   });
 });

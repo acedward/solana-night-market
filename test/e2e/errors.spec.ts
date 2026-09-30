@@ -5,8 +5,8 @@
 //   the market's relay unreachable · its fee wallet (DUST) low or still syncing · its prover down ·
 //   local storage full.
 //
-// The states that pause an action a connected wallet starts (opening an account, a take refused by
-// the settlement service, the exchange down on Trade) come back with lane B2's mock Phantom.
+// The wallet's own error states (a Ledger account, a declined or locked wallet, no answer, another
+// key) are in ./wallet.spec.ts, with the mock Phantom.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 

@@ -6,7 +6,9 @@
 
 import { useState } from 'react';
 
-import type { FeedState, Market } from '@nightmarket/core';
+import type { FeedState, Market, NetworkProfile } from '@nightmarket/core';
+
+import { HoldingsPanel } from '../account/HoldingsPanel.js';
 
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import {
@@ -170,6 +172,16 @@ function Book({ market, onClose }: { market: Market; onClose(): void }) {
         </>
       }
     >
+      <div className="btn-row panel-intro">
+        <ButtonLink
+          variant="primary"
+          size="small"
+          href={`#trade?${new URLSearchParams({ pair: market.pair.id }).toString()}`}
+          data-testid="book-make"
+        >
+          Make an offer on {base} / {quote}
+        </ButtonLink>
+      </div>
       {market.status === 'no-liquidity' && (
         <Notice className="panel-intro" data-testid="book-empty">
           No liquidity: nobody is offering to buy or sell {base} for {quote} right now.
@@ -186,7 +198,7 @@ function Book({ market, onClose }: { market: Market; onClose(): void }) {
   );
 }
 
-export function Markets() {
+export function Markets({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
   const { state, registry, pairs, error } = useMarkets();
   const assets = useAssetFilter();
   const [selected, setSelected] = useState<string | null>(null);
@@ -222,107 +234,124 @@ export function Markets() {
   return (
     <section data-testid="section-markets">
       {head}
-      {state.status === 'unavailable' && (
-        <Notice tone="danger" role="alert" className="panel-intro" data-testid="exchange-unavailable">
-          Exchange unavailable: {state.reason}. Prices are not shown until it answers again; your holdings are not
-          affected.
-        </Notice>
-      )}
-      {state.status === 'ready' && !state.complete && (
-        <Notice tone="warning" className="panel-intro" data-testid="book-incomplete">
-          The exchange has more offers than this page reads; the best prices may be missing some of them.
-        </Notice>
-      )}
-      <Panel>
-        <StatementTable
-          data-testid="markets-table"
-          caption="Markets"
-          columns={[
-            { label: 'Market' },
-            { label: 'Best bid', sub: 'in the quote', align: 'right' },
-            { label: 'Best ask', sub: 'in the quote', align: 'right' },
-            { label: 'Last trade', sub: 'in the quote', align: 'right' },
-            { label: 'Offers', sub: 'bids / asks', align: 'right' },
-            { label: 'Status', align: 'right' },
-          ]}
-        >
-          {rows.length === 0 && assets.filtering && (
-            <tr className="row-empty" data-testid="markets-filtered-empty">
-              <td colSpan={6}>
-                <NoValue>
-                  No market in this view: a market shows only when both of its tokens are listed.{' '}
-                  {assetFilterText(assets)}
-                </NoValue>
-              </td>
-            </tr>
+      <div className="market-layout">
+        <div className="market-main">
+          {state.status === 'unavailable' && (
+            <Notice tone="danger" role="alert" className="panel-intro" data-testid="exchange-unavailable">
+              Exchange unavailable: {state.reason}. Prices are not shown until it answers again; your holdings are not
+              affected.
+            </Notice>
           )}
-          {rows.map((r) => {
-            return (
-              <tr
-                key={r.pair}
-                data-testid="market-row"
-                data-pair={r.pair}
-                aria-selected={selected === r.pair}
-                className={selected === r.pair ? 'row-selected' : undefined}
-              >
-                <AssetCell
-                  symbol={
-                    <Button
-                      variant="link"
-                      className="sym"
-                      data-testid="open-book"
-                      aria-expanded={selected === r.pair}
-                      disabled={state.status !== 'ready'}
-                      onClick={() => setSelected(selected === r.pair ? null : r.pair)}
-                    >
-                      {r.base} / {r.quote}
-                    </Button>
-                  }
-                  name={r.baseName}
-                  origin={`priced in ${r.quote}`}
-                />
-                <Cell label="Best bid" align="right" num>
-                  {isPrice(r.bestBid) ? (
-                    <span className="price-bid" data-testid="best-bid">
-                      {r.bestBid}
-                    </span>
-                  ) : (
-                    <NoValue data-testid="best-bid">{r.bestBid}</NoValue>
-                  )}
-                </Cell>
-                <Cell label="Best ask" align="right" num>
-                  {isPrice(r.bestAsk) ? (
-                    <span className="price-ask" data-testid="best-ask">
-                      {r.bestAsk}
-                    </span>
-                  ) : (
-                    <NoValue data-testid="best-ask">{r.bestAsk}</NoValue>
-                  )}
-                </Cell>
-                <Cell label="Last trade" align="right" num data-testid="last-trade">
-                  <span className="num-wrap">
-                    {isPrice(r.lastTrade) ? r.lastTrade : <NoValue>{r.lastTrade}</NoValue>}
-                    {r.lastTradeAt && <Sub>{r.lastTradeAt}</Sub>}
-                  </span>
-                </Cell>
-                <Cell label="Offers" align="right" num data-testid="offer-counts">
-                  {r.bids} / {r.asks}
-                </Cell>
-                <Cell label="Status" align="right" data-testid="market-status" data-status={r.status}>
-                  <Badge tone={STATUS_TONE[r.status]}>{STATUS_TEXT[r.status]}</Badge>
-                </Cell>
-              </tr>
-            );
-          })}
-        </StatementTable>
-        <p className="table-note">Prices are in the second token of each pair, per whole first token.</p>
-        {ignored && (
-          <p className="table-note" data-testid="ignored-offers">
-            {ignored}
-          </p>
-        )}
-      </Panel>
-      {market && <Book market={market} onClose={() => setSelected(null)} />}
+          {state.status === 'ready' && !state.complete && (
+            <Notice tone="warning" className="panel-intro" data-testid="book-incomplete">
+              The exchange has more offers than this page reads; the best prices may be missing some of them.
+            </Notice>
+          )}
+          <Panel>
+            <StatementTable
+              data-testid="markets-table"
+              caption="Markets"
+              columns={[
+                { label: 'Market' },
+                { label: 'Best bid', sub: 'in the quote', align: 'right' },
+                { label: 'Best ask', sub: 'in the quote', align: 'right' },
+                { label: 'Last trade', sub: 'in the quote', align: 'right' },
+                { label: 'Offers', sub: 'bids / asks', align: 'right' },
+                { label: 'Status', align: 'right' },
+                { label: 'Trade', srOnly: true, align: 'right' },
+              ]}
+            >
+              {rows.length === 0 && assets.filtering && (
+                <tr className="row-empty" data-testid="markets-filtered-empty">
+                  <td colSpan={7}>
+                    <NoValue>
+                      No market in this view: a market shows only when both of its tokens are listed.{' '}
+                      {assetFilterText(assets)}
+                    </NoValue>
+                  </td>
+                </tr>
+              )}
+              {rows.map((r) => {
+                return (
+                  <tr
+                    key={r.pair}
+                    data-testid="market-row"
+                    data-pair={r.pair}
+                    aria-selected={selected === r.pair}
+                    className={selected === r.pair ? 'row-selected' : undefined}
+                  >
+                    <AssetCell
+                      symbol={
+                        <Button
+                          variant="link"
+                          className="sym"
+                          data-testid="open-book"
+                          aria-expanded={selected === r.pair}
+                          disabled={state.status !== 'ready'}
+                          onClick={() => setSelected(selected === r.pair ? null : r.pair)}
+                        >
+                          {r.base} / {r.quote}
+                        </Button>
+                      }
+                      name={r.baseName}
+                      origin={`priced in ${r.quote}`}
+                    />
+                    <Cell label="Best bid" align="right" num>
+                      {isPrice(r.bestBid) ? (
+                        <span className="price-bid" data-testid="best-bid">
+                          {r.bestBid}
+                        </span>
+                      ) : (
+                        <NoValue data-testid="best-bid">{r.bestBid}</NoValue>
+                      )}
+                    </Cell>
+                    <Cell label="Best ask" align="right" num>
+                      {isPrice(r.bestAsk) ? (
+                        <span className="price-ask" data-testid="best-ask">
+                          {r.bestAsk}
+                        </span>
+                      ) : (
+                        <NoValue data-testid="best-ask">{r.bestAsk}</NoValue>
+                      )}
+                    </Cell>
+                    <Cell label="Last trade" align="right" num data-testid="last-trade">
+                      <span className="num-wrap">
+                        {isPrice(r.lastTrade) ? r.lastTrade : <NoValue>{r.lastTrade}</NoValue>}
+                        {r.lastTradeAt && <Sub>{r.lastTradeAt}</Sub>}
+                      </span>
+                    </Cell>
+                    <Cell label="Offers" align="right" num data-testid="offer-counts">
+                      {r.bids} / {r.asks}
+                    </Cell>
+                    <Cell label="Status" align="right" data-testid="market-status" data-status={r.status}>
+                      <Badge tone={STATUS_TONE[r.status]}>{STATUS_TEXT[r.status]}</Badge>
+                    </Cell>
+                    <Cell label="Trade" align="right">
+                      <ButtonLink
+                        size="small"
+                        href={`#trade?${new URLSearchParams({ pair: r.pair }).toString()}`}
+                        data-testid="trade-market"
+                      >
+                        Trade
+                      </ButtonLink>
+                    </Cell>
+                  </tr>
+                );
+              })}
+            </StatementTable>
+            <p className="table-note">Prices are in the second token of each pair, per whole first token.</p>
+            {ignored && (
+              <p className="table-note" data-testid="ignored-offers">
+                {ignored}
+              </p>
+            )}
+          </Panel>
+          {market && <Book market={market} onClose={() => setSelected(null)} />}
+        </div>
+        <div className="market-side">
+          <HoldingsPanel network={network} relayUrl={relayUrl} />
+        </div>
+      </div>
     </section>
   );
 }

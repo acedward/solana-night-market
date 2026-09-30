@@ -91,7 +91,7 @@ const offer = z
 const job = z
   .object({
     requestId: z.string().regex(/^[0-9a-f]{32}$/),
-    action: z.enum(['register', 'withdraw', 'append-inbox', 'open-swap', 'take']),
+    action: z.enum(['register', 'withdraw', 'withdraw-unshielded', 'append-inbox', 'open-swap', 'take', 'demo-tokens']),
     startedAt: ms,
     state: z.enum(['queued', 'running', 'succeeded', 'failed']),
     stage: text(64),

@@ -1690,3 +1690,68 @@
   color: var(--muted);
   margin-top: var(--space-1);
 }
+
+/* ── The market layout (AA 00047 lane B2): books and trading first, holdings beside them ── */
+.market-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+.market-layout > .market-main,
+.market-layout > .market-side {
+  min-width: 0;
+}
+@media (min-width: 1180px) {
+  .market-layout {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+/* In the narrower main column the order form and the book stack from a wider breakpoint. */
+@media (max-width: 1320px) and (min-width: 1180px) {
+  .market-main .trade-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.holdings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.holdings-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: var(--rule-hair);
+  font-size: var(--text-md);
+}
+.holdings-list li:first-child {
+  border-top: 0;
+}
+.holdings-list .sym {
+  font-weight: 600;
+  color: var(--ink);
+}
+.holdings-list .num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* ── The signing panel: the exact text the wallet shows ─────────────── */
+.sign-text {
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  max-height: 45vh;
+  overflow: auto;
+  border: var(--rule-hair);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

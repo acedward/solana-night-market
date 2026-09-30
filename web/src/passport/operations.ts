@@ -25,9 +25,13 @@ import {
   type StoredCoin,
   type WithdrawPayload,
   type WithdrawResult,
+  type WithdrawUnshieldedPayload,
+  type WithdrawUnshieldedResult,
+  parseUnshieldedAddress,
 } from '@nightmarket/core';
 import {
   appendInboxRequest,
+  withdrawUnshieldedRequest,
   generateEncKeyPairPortable,
   openEntryPortable,
   sealEntryPortable,
@@ -266,8 +270,8 @@ async function relayEnvelope(
 async function submitGated(
   env: OperationEnv,
   account: string,
-  action: 'withdraw' | 'append-inbox',
-  payload: WithdrawPayload | AppendInboxPayload,
+  action: 'withdraw' | 'withdraw-unshielded' | 'append-inbox',
+  payload: WithdrawPayload | WithdrawUnshieldedPayload | AppendInboxPayload,
   passportAuth: PassportAuth,
   counter: bigint,
   context: Record<string, unknown>,
@@ -314,6 +318,7 @@ export async function withdrawToWallet(
   env: OperationEnv,
   account: string,
   args: { color: string; amount: bigint; recipient: string },
+  opts: { recipientEnvelope?: boolean } = {},
 ): Promise<{ txId: string; change: StoredCoin | null }> {
   const to = recipientOf(args.recipient, env.scope.network);
   const coins = readCoins(env.store, env.scope, account);
@@ -329,7 +334,9 @@ export async function withdrawToWallet(
   };
   const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: withdrawRequest(payload) }, counter);
   // Paying a wallet seals the coin to its encryption key, which the contract's challenge does not
-  // cover: a second signature binds it for the market (security review F-B6).
+  // cover (security review F-B6). Night Market asks ONE prompt per action (questions Q13 option B):
+  // the encryption key rides the request unsigned, unless the relay turns F-B6's second signature
+  // back on (its public config's `withdrawRecipientEnvelope`), when the wallet signs an envelope too.
   const done = await submitGated(
     env,
     account,
@@ -338,7 +345,7 @@ export async function withdrawToWallet(
     passportAuth,
     counter,
     { spent: coin.commitment },
-    { envelope: payload.recipientEncryptionKey !== undefined },
+    { envelope: opts.recipientEnvelope === true && payload.recipientEncryptionKey !== undefined },
   );
   const result = done.result as unknown as WithdrawResult;
   // The change has no inbox entry yet (Q13); the market's single-use entitlement to file one is kept
@@ -356,6 +363,45 @@ export async function withdrawToWallet(
   if (change) next.push(change);
   env.store.put(env.scope, 'coins', next, { account });
   return { txId: result.txId, change };
+}
+
+/**
+ * Pay `amount` of `color` from the account's UNSHIELDED balance to an unshielded wallet
+ * (`mn_addr_…`): the arm's `withdraw_unshielded_with_ed25519`, ONE signature (its F3 message shows
+ * the amount, the token and the recipient's fingerprint). Unshielded tokens are public balances, not
+ * coins: nothing is kept here, and the next balance read shows the change.
+ */
+export async function withdrawUnshieldedToWallet(
+  env: OperationEnv,
+  account: string,
+  args: { color: string; amount: bigint; recipient: string; balance?: bigint },
+): Promise<{ txId: string }> {
+  let recipient: string;
+  try {
+    recipient = parseUnshieldedAddress(args.recipient, env.scope.network);
+  } catch (e) {
+    throw new OperationError(e instanceof Error ? e.message : 'Enter an unshielded wallet address (mn_addr_…).');
+  }
+  if (args.amount <= 0n) throw new OperationError('Enter an amount above zero.');
+  if (args.balance !== undefined && args.amount > args.balance)
+    throw new OperationError('The account does not hold that much of this token (unshielded).');
+  const { state, counter, ctx } = await gatedContext(env, account);
+  const payload: WithdrawUnshieldedPayload = {
+    recipient,
+    color: args.color.replace(/^0x/, '').toLowerCase(),
+    amount: args.amount.toString(10),
+    authNonce: state.authNonce,
+  };
+  const passportAuth = await env.signing.authorise(
+    ctx,
+    { kind: 'gated', request: withdrawUnshieldedRequest(payload) },
+    counter,
+  );
+  const done = await submitGated(env, account, 'withdraw-unshielded', payload, passportAuth, counter, {
+    color: payload.color,
+  });
+  const result = done.result as unknown as WithdrawUnshieldedResult | undefined;
+  return { txId: String(result?.txId ?? '') };
 }
 
 /**

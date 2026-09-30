@@ -29,7 +29,15 @@ export interface SiteConfig {
    *  serves the same build with its own `config.json`, and the page's `?assets=` list only narrows
    *  within this set. */
   assets: string[] | null;
+  /** How long the page waits for the Solana wallet to answer a connection or a signature, in
+   *  seconds (`walletTimeoutSeconds`, 5–600; default 120). */
+  walletTimeoutSeconds: number;
 }
+
+export const DEFAULT_WALLET_TIMEOUT_SECONDS = 120;
+
+const walletTimeout = (v: unknown): number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 5 && v <= 600 ? v : DEFAULT_WALLET_TIMEOUT_SECONDS;
 
 export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<SiteConfig> {
   let raw: {
@@ -39,6 +47,7 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     tokens?: unknown;
     pairs?: unknown;
     assets?: unknown;
+    walletTimeoutSeconds?: unknown;
   } = {};
   try {
     const res = await fetchImpl('./config.json', { cache: 'no-store' });
@@ -55,6 +64,7 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     ...(raw.tokens !== undefined ? { tokens: raw.tokens } : {}),
     ...(raw.pairs !== undefined ? { pairs: raw.pairs } : {}),
     assets: siteAssets(network, raw.tokens, raw.assets),
+    walletTimeoutSeconds: walletTimeout(raw.walletTimeoutSeconds),
   };
 }
 

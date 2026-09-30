@@ -6,18 +6,23 @@ import {
   API_PATHS,
   AccountStateViewSchema,
   ApiErrorSchema,
+  DemoTokensInfoSchema,
   HealthResponseSchema,
   type HealthResponse,
   InboxPageSchema,
   JobViewSchema,
   NonceResponseSchema,
+  UnshieldedBalancesViewSchema,
   ZswapActivitySchema,
+  unshieldedBalancesPath,
   type AccountStateView,
   type ActionRequest,
+  type DemoTokensInfo,
   type InboxPage,
   type JobView,
   type NonceResponse,
   type RelayActionName,
+  type UnshieldedBalancesView,
   type ZswapActivity,
 } from '@nightmarket/core';
 
@@ -141,5 +146,40 @@ export class RelayClient {
 
   async zswap(account: string): Promise<ZswapActivity> {
     return ZswapActivitySchema.parse(await this.call(API_PATHS.accountZswap(account)));
+  }
+
+  /** What the relay's public configuration says about signing: whether a withdrawal to a wallet
+   *  also needs F-B6's envelope over the whole body (questions Q13; off by default, when the field is
+   *  absent too). */
+  async signingPolicy(): Promise<{ withdrawRecipientEnvelope: boolean }> {
+    try {
+      const body = (await this.call(API_PATHS.config)) as { withdrawRecipientEnvelope?: unknown } | null;
+      return { withdrawRecipientEnvelope: body?.withdrawRecipientEnvelope === true };
+    } catch {
+      return { withdrawRecipientEnvelope: false };
+    }
+  }
+
+  /** The demo-token offer (AA 00047, packages/core/src/demo-tokens.ts): the pack, the limits and,
+   *  for `owner`, whether that key has claimed. Null when this relay does not serve it. */
+  async demoTokensInfo(owner?: string): Promise<DemoTokensInfo | null> {
+    const path = owner ? `${API_PATHS.demoTokens}?owner=${encodeURIComponent(owner)}` : API_PATHS.demoTokens;
+    try {
+      return DemoTokensInfoSchema.parse(await this.call(path));
+    } catch (e) {
+      if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
+      throw e;
+    }
+  }
+
+  /** The account's unshielded balances (AA 00047, packages/core/src/unshielded.ts). Null when this
+   *  relay does not serve them. */
+  async unshieldedBalances(account: string): Promise<UnshieldedBalancesView | null> {
+    try {
+      return UnshieldedBalancesViewSchema.parse(await this.call(unshieldedBalancesPath(account)));
+    } catch (e) {
+      if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
+      throw e;
+    }
   }
 }

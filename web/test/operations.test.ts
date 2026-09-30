@@ -122,13 +122,14 @@ describe('openAccount (L-ACC.1)', () => {
   it('stores the secret first, asks for ONE signature, and keeps the account record on success', async () => {
     const relay = new FakeRelay();
     let secretAtSigning: unknown = null;
-    let e!: OperationEnv;
+    const at: { env?: OperationEnv } = {};
     const { signing, calls } = fakeSigning({
       onSign: () => {
-        secretAtSigning = readSecret(e.store, e.scope, null);
+        secretAtSigning = readSecret(at.env!.store, at.env!.scope, null);
       },
     });
-    e = env(signing, relay);
+    const e = env(signing, relay);
+    at.env = e;
     relay.results.register = {
       account: ACCOUNT,
       device: signing.deviceKey,

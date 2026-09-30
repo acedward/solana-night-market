@@ -253,9 +253,7 @@ describe('Export, CLEAR ALL and Import (Q11, SC-005)', () => {
     seed(store);
     const file = store.exportWallet(ME);
     store.clearAll();
-    expect(() => store.importWallet(file, { network: 'undeployed', owner: ME.owner })).toThrow(
-      /stagenet network/,
-    );
+    expect(() => store.importWallet(file, { network: 'undeployed', owner: ME.owner })).toThrow(/stagenet network/);
     expect(() => store.importWallet(file, OTHER)).toThrow(/another wallet/);
     expect(localStorage.length).toBe(0);
   });
@@ -305,10 +303,7 @@ describe('Export, CLEAR ALL and Import (Q11, SC-005)', () => {
       [withRecord(offerKey, 'offer', { ...offerRecord, base: 'zz' }), /not in the shape/],
       [withRecord(offerKey, 'offer', { ...offerRecord, baseRaw: '-1' }), /not in the shape/],
       // MN Bank's stock/USDC shape is not this page's
-      [
-        withRecord(offerKey, 'offer', { ...offerRecord, stock: COLOUR, usdc: 'b2'.repeat(32) }),
-        /not in the shape/,
-      ],
+      [withRecord(offerKey, 'offer', { ...offerRecord, stock: COLOUR, usdc: 'b2'.repeat(32) }), /not in the shape/],
       // filed under another id than it names
       [
         withRecord(recordKey(ME, 'offer', { account: ACC, id: `make-${'f1'.repeat(32)}` }), 'offer', offerRecord),

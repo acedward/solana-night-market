@@ -314,12 +314,7 @@ describe('take an offer (L-TRD.2)', () => {
     };
     await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     expect(guardFor(e, ACCOUNT, 'take')).toMatchObject({ kind: 'warn' });
-    await takeOffer(
-      e,
-      ACCOUNT,
-      { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: U, quoteRaw: U },
-      PAIR,
-    );
+    await takeOffer(e, ACCOUNT, { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: U, quoteRaw: U }, PAIR);
     const own = readTrades(e.store, e.scope, ACCOUNT).find((t) => t.role === 'make')!;
     expect(own.status).toBe('cancelled');
   });
@@ -327,12 +322,7 @@ describe('take an offer (L-TRD.2)', () => {
   it('an offer too big for any coin is refused before the wallet is asked', async () => {
     const { e, signed } = await setup();
     await expect(
-      takeOffer(
-        e,
-        ACCOUNT,
-        { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: 9n * U, quoteRaw: 9n * U },
-        PAIR,
-      ),
+      takeOffer(e, ACCOUNT, { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: 9n * U, quoteRaw: 9n * U }, PAIR),
     ).rejects.toThrow('Not enough twUSDC in one coin. You hold 14.00 twUSDC; one payment can use at most 8.00.');
     expect(signed).toHaveLength(0);
   });

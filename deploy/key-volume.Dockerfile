@@ -40,17 +40,15 @@ COPY packages/core/package.json packages/core/
 COPY packages/core/src packages/core/src
 COPY relay/package.json relay/
 COPY relay/src relay/src
-# The vault v0.3.0 deposit preflight (pure), which @mnbank/core's bridge module re-exports.
-COPY vendor/passport/contract/contracts/erc20-vault/src/preflight.ts vendor/passport/contract/contracts/erc20-vault/src/preflight.ts
 # The Compact sources only (the account, its modules, the vault and the vendored singleton).
 COPY vendor/passport/contract/contracts/account.compact vendor/passport/contract/contracts/
 COPY vendor/passport/contract/contracts/modules vendor/passport/contract/contracts/modules
 COPY vendor/passport/contract/contracts/erc20-vault/src/erc20-vault.compact vendor/passport/contract/contracts/erc20-vault/src/
 COPY vendor/passport/contract/contracts/erc20-vault/src/vendor vendor/passport/contract/contracts/erc20-vault/src/vendor
-COPY deploy/key-volume/build.sh /usr/local/bin/mnbank-key-volume
+COPY deploy/key-volume/build.sh /usr/local/bin/nightmarket-key-volume
 # The mount points, owned by the unprivileged user: a new named volume takes this ownership.
-RUN chmod 0755 /usr/local/bin/mnbank-key-volume \
+RUN chmod 0755 /usr/local/bin/nightmarket-key-volume \
  && mkdir -p vendor/passport/contract/contracts/managed /zk-params \
  && chown bun:bun vendor/passport/contract/contracts/managed /zk-params
 USER bun
-ENTRYPOINT ["/usr/local/bin/mnbank-key-volume"]
+ENTRYPOINT ["/usr/local/bin/nightmarket-key-volume"]

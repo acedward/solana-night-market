@@ -6,11 +6,9 @@ test-results/
 .tools/
 vendor/
 bun.lock
-# Vendored byte-for-byte from acedward/passport; never reformat
-packages/core/src/tokens/deployments/*.json
+# Vendored byte-for-byte; never reformat
 packages/core/src/passport/vendor/offer-codec.ts
-packages/core/src/passport/vendor/signet-derive.ts
-relay/src/bridge/vendor/relayer.ts
+packages/core/src/tokens/mint-test-tokens/metadata.stagenet.json
 # Prose and tables are formatted by hand
 *.md
 # Kernel responses captured verbatim from the staging exchange; never reformat

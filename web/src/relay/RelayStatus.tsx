@@ -96,7 +96,7 @@ export function RelayNotices({ place, className }: { place: NoticePlace; classNa
           role="status"
           title={n.title}
           className={className}
-          data-testid={`relay-${n.id}`}
+          data-testid={`market-${n.id}`}
         >
           {n.text}
         </Notice>

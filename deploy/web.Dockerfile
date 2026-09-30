@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# The MN Bank web app: the static site, built here and served by an unprivileged nginx, which also
+# The Night Market web app: the static site, built here and served by an unprivileged nginx, which also
 # proxies /relay/ to the relay so the site and its relay share one origin (no CORS).
 # The site's runtime configuration (/config.json) is written at start from the environment
 # (deploy/web/entrypoint.sh), so one image serves any network. No secret is ever in this image.
@@ -32,10 +32,10 @@ RUN bun run build:web \
 
 FROM ${NGINX_IMAGE}
 COPY deploy/web/nginx.conf /etc/nginx/nginx.conf
-COPY deploy/web/entrypoint.sh /usr/local/bin/mnbank-web
+COPY deploy/web/entrypoint.sh /usr/local/bin/nightmarket-web
 COPY --from=build /app/web/dist /usr/share/nginx/html
-RUN chmod 0755 /usr/local/bin/mnbank-web \
+RUN chmod 0755 /usr/local/bin/nightmarket-web \
  && rm -rf /etc/nginx/conf.d /docker-entrypoint.d
 USER nginx
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/mnbank-web"]
+ENTRYPOINT ["/usr/local/bin/nightmarket-web"]

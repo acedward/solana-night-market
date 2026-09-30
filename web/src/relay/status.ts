@@ -9,13 +9,7 @@ import type { HealthResponse } from '@nightmarket/core';
 export type NoticePlace = 'shell' | 'trade';
 
 export interface RelayNotice {
-  id:
-    | 'relay-down'
-    | 'prover-down'
-    | 'sponsor-low'
-    | 'sponsor-syncing'
-    | 'batcher-down'
-    | 'batcher-refusing';
+  id: 'relay-down' | 'prover-down' | 'sponsor-low' | 'sponsor-syncing' | 'batcher-down' | 'batcher-refusing';
   place: NoticePlace;
   tone: 'danger' | 'warning' | 'info';
   title: string;

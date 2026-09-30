@@ -117,7 +117,9 @@ describe('the markets table', () => {
   });
 
   it('says how many offers it did not price', () => {
-    expect(ignoredText(ready)).toMatch(/^5 other offers on the exchange are not one token against another of a listed pair/);
+    expect(ignoredText(ready)).toMatch(
+      /^5 other offers on the exchange are not one token against another of a listed pair/,
+    );
   });
 });
 
@@ -145,7 +147,9 @@ describe('the book of one pair', () => {
       expect.objectContaining({ price: '65,000.00', quantity: '0.25', total: '16,250.00' }),
     ]);
     const eth = market('twETH/twBTC');
-    expect(bookLines(eth, 'bids')).toEqual([expect.objectContaining({ price: '0.04', quantity: '1.00', total: '0.04' })]);
+    expect(bookLines(eth, 'bids')).toEqual([
+      expect.objectContaining({ price: '0.04', quantity: '1.00', total: '0.04' }),
+    ]);
     expect(depthText(eth, 'bids')).toBe('1.00 twETH for 0.04 twBTC');
   });
 });

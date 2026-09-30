@@ -17,16 +17,7 @@ export const SCHEMA_KEY = 'night-market/schema';
 export const SCHEMA_VERSION = 1;
 const V1 = 'night-market/v1/';
 
-export const RECORD_KINDS = [
-  'profile',
-  'account',
-  'secret',
-  'coins',
-  'roster',
-  'offer',
-  'job',
-  'settings',
-] as const;
+export const RECORD_KINDS = ['profile', 'account', 'secret', 'coins', 'roster', 'offer', 'job', 'settings'] as const;
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 /** Kinds whose value is a secret: masked until the customer reveals it. */
@@ -45,8 +36,7 @@ export interface WalletScope {
   owner: string;
 }
 
-export type RecordScope =
-  { global: true } | { global: false; network: string; owner: string; account: string | null };
+export type RecordScope = { global: true } | { global: false; network: string; owner: string; account: string | null };
 
 const NETWORK_RE = /^[a-z0-9-]{1,32}$/;
 const OWNER_RE = /^[0-9a-f]{64}$/;

@@ -1,8 +1,15 @@
-# MN Bank: operator runbook (stagenet)
+# Night Market: operator runbook (stagenet)
 
-This runbook deploys and runs MN Bank on Midnight **stagenet** with Ethereum **Sepolia**. Both are
-test networks: nothing here carries real value. Every command runs from the repository root unless
-it says otherwise.
+> **Being rewritten (AA 00047).** This runbook is MN Bank's, carried over. Night Market has **no
+> Sepolia and no bridge**: skip sections 5 and 8, the bridge parts of 7, 9 and 14, and every
+> `SEPOLIA_*` / `BRIDGE_*` / `STALE_CLOSE_*` / `VAULT_GAS_*` setting (the bundle no longer reads
+> them). Image, volume and path names are now `nightmarket…` where this text says `mnbank…`. Lane
+> B3 rewrites the runbook for the Ed25519 arm: compactc 0.35.0 keys, the rc.8 proof server for the
+> contract circuits beside rc.6 for DUST, and the demo-token endpoint. `deploy/.env.example` and
+> `deploy/compose.yml` are current.
+
+This runbook deploys and runs the market on Midnight **stagenet**, a test network: nothing here
+carries real value. Every command runs from the repository root unless it says otherwise.
 
 ## Contents
 

@@ -382,7 +382,11 @@ export async function secureChange(env: OperationEnv, account: string, coin: Sto
     authNonce: state.authNonce,
     entitlement: coin.appendEntitlement,
   };
-  const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: appendInboxRequest(payload) }, counter);
+  const passportAuth = await env.signing.authorise(
+    ctx,
+    { kind: 'gated', request: appendInboxRequest(payload) },
+    counter,
+  );
   const done = await submitGated(env, account, 'append-inbox', payload, passportAuth, counter, {
     coin: coin.commitment,
   });

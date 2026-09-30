@@ -1,40 +1,89 @@
-# Passport EVM dApp
+# Night Market
 
-A bank-style web app for opening and using Passport accounts on Midnight with an EVM wallet.
+A create-and-trade market on Midnight, controlled by Solana wallets. **A proof of concept on test
+networks: nothing here carries real value.**
 
 ## What this is
 
-A customer with only an EVM wallet (MetaMask or any EIP-1193 wallet) can:
+A customer with only a Solana wallet (Phantom) can:
 
-1. **Open an account.** Connect the wallet and open a Passport account on Midnight with one signature. The wallet is the account's key; no Midnight wallet is needed.
-2. **See holdings.** See the tokens held on Sepolia and in the Passport account, side by side, like a bank statement.
-3. **Bridge both ways.** Move tokens from Sepolia into the Passport account on Midnight, and back out to any Sepolia address.
-4. **See prices.** See the USDC price of each asset (tokenised stocks, test T-bills), taken only from the live ZSwap offer book. A pair with no live offers shows "no liquidity".
-5. **Buy and sell.** Trade an asset against USDC by making an offer at a chosen price, or by taking an offer already in the book.
-6. **Keep data in the browser.** Everything the dApp stores about a customer stays in the browser. A Local data tab shows it and offers Export, Import and Clear all.
+1. **Open an account.** Connect the wallet and open a Passport account on Midnight. The wallet's
+   Ed25519 key is the account's key: it only signs messages, needs no SOL, and no Midnight wallet
+   is needed. The market pays every Midnight fee.
+2. **Get demo tokens.** The market's stagenet tokens are the native Midnight test tokens of
+   [`effectstream/mint-test-tokens`](https://github.com/effectstream/mint-test-tokens) (twBTC,
+   twETH, twUSDC, twUSDM).
+3. **See the order books.** Each configured market is two tokens, any two: twBTC/twUSDC,
+   twETH/twUSDC, twUSDM/twUSDC and twETH/twBTC by default. Prices come only from the live ZSwap
+   offer book; a market with no live offers shows "no liquidity". No token is special.
+4. **Make and take offers.** Trade one token for another by making an offer at a chosen price, or
+   by taking an offer already in the book.
+5. **Keep data in the browser.** Everything the market stores about a customer stays in the
+   browser. A Local data tab shows it and offers Export, Import and Clear all.
+
+Night Market is built from [MN Bank](https://github.com/acedward/passport-evm-dapp) (an EVM-wallet
+bank on the same Passport accounts), with the EVM wallet, Sepolia and the bridge removed. Its
+history is this repository's `main`.
+
+## Status
+
+Work in progress on the `00047-solana-night-market` branch (draft pull request into `main`):
+
+| Step | What | State |
+|---|---|---|
+| B1 | Rebrand; remove Sepolia, EVM and the bridge; the mint-test-tokens registry; generic pairs | done |
+| Track A | The Passport account's Ed25519 arm (`acedward/passport`, branch `00047-solana-ed25519-arm`) | in progress |
+| B2 | Web: Phantom connect, account opening, the market UI, the signing screens | next |
+| B3 | Relay: Ed25519 actions, both proof servers, key pins, the demo-token endpoint | next |
+| P6 | Integration and stagenet acceptance | after A, B2, B3 |
+
+Until B2 and B3 land, the site browses the order books; connecting a wallet says that Solana
+wallets are coming. The signing seams are `packages/core/src/signing.ts` (the device key and
+signature types), `web/src/wallet/signing.ts` (`ActionSigning`, what the browser asks the wallet
+to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a signed call).
 
 ## Architecture
 
-- **Web app**: a static site. It connects the EVM wallet, holds the customer's records in local storage, and computes balances and prices in the browser.
-- **Relay**: a stateless service. It proves each transaction, pays the Midnight fees from a sponsor wallet, and drives bridge requests to completion. It stores nothing about individual customers.
-- **Networks**: Midnight stagenet and Ethereum Sepolia. Both are test networks; nothing here carries real value.
+- **Web app**: a static site. It connects the Solana wallet, holds the customer's records in local
+  storage, and computes balances and prices in the browser.
+- **Relay**: a stateless service. It proves each transaction and pays the Midnight fees from a
+  sponsor wallet. It stores nothing about individual customers.
+- **Network**: Midnight stagenet, a test network.
 
 ## How this branch works
 
-`00039-passport-evm-dapp` is the master branch of this project's single pull request into `main`. Work is done on short-lived branches whose temporary pull requests target this branch, and each is merged in with a merge commit once its checks are green. The master pull request stays a draft until the work is complete.
+`00047-solana-night-market` is the master branch of this project's single pull request into
+`main`. Work is done on short-lived branches whose temporary pull requests target this branch, and
+each is merged in with a merge commit once its checks are green. The master pull request stays a
+draft until the work is complete.
 
 ## Repository layout
 
 | Path | What it holds |
 |---|---|
-| `packages/core` | Shared, environment-neutral TypeScript: network profiles, the token registry, amount maths, the relay's action authorisation and API types, and the browser-safe Passport client surface (`@mnbank/core/passport`). |
+| `packages/core` | Shared, environment-neutral TypeScript: network profiles, the token registry (built from the vendored mint-test-tokens registry), the market pairs, amount maths, the relay's action envelope and API types, and the browser-safe Passport client surface (`@nightmarket/core/passport`). |
 | `relay/` | The relay service (Bun + Hono). |
 | `web/` | The web app (Vite + React). |
 | `deploy/` | Compose files, Dockerfiles, `.env.example` and the runbook. |
-| `docs/` | Reference notes: `PERFORMANCE.md` (proof times and DUST per action, from the live runs). |
+| `docs/` | Reference notes: `PERFORMANCE.md` (MN Bank's proof times and DUST per action). |
 | `scripts/` | The contract light compile, the Docker check runner and the secret scan. |
-| `test/` | Browser end-to-end tests (Playwright). |
+| `test/` | Browser end-to-end tests (Playwright) and the take gate's offline half. |
 | `vendor/passport` | A git submodule: [`acedward/passport`](https://github.com/acedward/passport), pinned. The account contract and its client come from here. |
+
+## Configuration
+
+The site reads `config.json` next to `index.html` (`web/public/config.json`):
+
+| Key | Meaning |
+|---|---|
+| `network` | `stagenet` (default) or `undeployed` (a local stack). |
+| `relayUrl` | The relay's base URL as the browser sees it. |
+| `tokens` | `{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"? }] }`: tokens added to the network's built-in list (`"mode": "replace"` replaces it). |
+| `pairs` | The markets, `["BASE/QUOTE", …]`; default: the network's pairs. |
+| `assets` | This site's asset set (a list of symbols, or `"all"`); the page's `?assets=` link narrows within it. |
+
+One build and one relay can serve several domains, each with its own `config.json`
+([`web/README.md`](web/README.md)).
 
 ## Development
 
@@ -62,22 +111,9 @@ scripts/docker-check.sh down         # remove the container and volumes
 
 `deploy/compose.yml` is the deployment bundle for stagenet: a one-shot job that builds and
 verifies the relay's proving keys, the proof server, the relay and the web site.
-[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) is the operator's guide (sizing, the sponsor wallet,
-secrets, health, limits, upgrades and incidents), and [`deploy/.env.example`](deploy/.env.example)
-documents every setting. One build and one relay can serve several domains, each with its own
-asset set (`config.json` `assets` or `WEB_ASSETS`; [`web/README.md`](web/README.md) and RUNBOOK
-section 16). Every domain must be served over https.
-
-## The local end-to-end
-
-`test/stack/run-e2e.sh all` runs the whole product on a local ledger-9 Midnight stack with the
-ZSwap kernel and batcher, then tears it all down. It drives the web app with Playwright, and the
-page calls the relay over HTTP. Two customers open accounts, are funded, make and take an offer
-in one transaction through the local batcher, and restore an export. Markets is checked against
-a manual computation over the kernel's book.
-
-It needs a Docker host with about 30 GB of memory, so it is not part of the hosted CI.
-`test/stack/README.md` covers what it proves, its requirements, and a self-hosted runner job.
+[`deploy/.env.example`](deploy/.env.example) documents every setting. The operator's runbook
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) is MN Bank's and is being rewritten for Night Market
+(lane B3). Every domain must be served over https.
 
 ## Checks and the secret scan
 
@@ -96,3 +132,7 @@ labelled-private-key rules, each proven by a self-test on random fakes) over the
 and the working tree. With `SECRET_SCAN_FILES`, it also reads those files in-process and checks
 that no 3-word window of a mnemonic and no key's hex appears anywhere in the tree or the
 history. It never prints a secret.
+
+## License
+
+Apache-2.0 ([`LICENSE`](LICENSE)).

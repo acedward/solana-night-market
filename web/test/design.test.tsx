@@ -61,7 +61,9 @@ describe('statement tables', () => {
     expect(out).toMatch(/^<table class="ledger stack">/);
     expect(out).toContain('<th scope="col" class="r">Value<span class="th-sub">twUSDC</span></th>');
     expect(out).toContain('<td data-label="Value" class="r num">1.00</td>');
-    expect(out).toContain('<td class="cell-asset"><span class="sym">twBTC</span><span class="name">Test-wrapped BTC</span>');
+    expect(out).toContain(
+      '<td class="cell-asset"><span class="sym">twBTC</span><span class="name">Test-wrapped BTC</span>',
+    );
     expect(out).toMatch(/<tfoot><tr><td class="cell-block" colspan="1">Subtotal<\/td>/i);
     expect(out).toContain('data-label="twUSDC" data-testid="total"');
   });

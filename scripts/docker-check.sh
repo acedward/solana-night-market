@@ -13,14 +13,14 @@
 #   scripts/docker-check.sh down        remove the container and its volumes
 #
 # Environment:
-#   DOCKER_CHECK_NAME   prefix of the container and volumes (default mnbank-check)
+#   DOCKER_CHECK_NAME   prefix of the container and volumes (default nightmarket-check)
 #   PLAYWRIGHT_IMAGE    Playwright image with Chromium for @playwright/test 1.62.0
 #   BUN_IMAGE           image the Bun 1.3.11 binary is copied from
 #   COMPACTC_ZIP        optional local compactc 0.34.0 archive (still SHA-256 verified)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NAME="${DOCKER_CHECK_NAME:-mnbank-check}"
+NAME="${DOCKER_CHECK_NAME:-nightmarket-check}"
 PW_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.62.0-noble}"
 BUN_IMAGE="${BUN_IMAGE:-oven/bun:1.3.11}"
 C="$NAME-runner"

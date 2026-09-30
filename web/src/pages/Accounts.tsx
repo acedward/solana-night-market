@@ -91,10 +91,7 @@ const JOB_TITLE: Record<string, string> = {
 /** "14:06" UTC from the relay's Unix seconds. */
 const clock = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString().slice(11, 16);
 
-const HOLDING_COLUMNS: Column[] = [
-  { label: 'Token' },
-  { label: 'Quantity', align: 'right' },
-];
+const HOLDING_COLUMNS: Column[] = [{ label: 'Token' }, { label: 'Quantity', align: 'right' }];
 
 function JobTracker({ job }: { job: JobView }) {
   const last = job.stages.length - 1;
@@ -246,9 +243,7 @@ function SendForm({
     <details className="disclosure" data-testid="send-midnight">
       <summary>Send to a Midnight wallet (advanced)</summary>
       <form className="disclosure-body" onSubmit={submit}>
-        <p className="panel-intro small">
-          Pays a shielded Midnight wallet straight from your account.
-        </p>
+        <p className="panel-intro small">Pays a shielded Midnight wallet straight from your account.</p>
         <div className="form-grid">
           <Field label="Token" htmlFor="send-token">
             <Select id="send-token" value={chosen} onChange={(e) => setColor(e.target.value)} data-testid="send-token">

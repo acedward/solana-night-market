@@ -1,4 +1,4 @@
-// Plan P1.5 testing: the visual smoke of the MN Bank design. Every page at 1280 px and at 375 px
+// Plan P1.5 testing: the visual smoke of the Night Market design. Every page at 1280 px and at 375 px
 // (a touch phone), with:
 //   - a screenshot per page (saved under $VISUAL_OUT_DIR, default test-results/visual);
 //   - no horizontal page scroll, and no element wider than the page outside its own scroll box;
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 
 import { healthBody } from './errors-fixtures.js';
-import { connect, installCustomer, serveExchange } from './visual-fixtures.js';
+import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const OUT = process.env.VISUAL_OUT_DIR ?? `${root}/test-results/visual`;
@@ -86,57 +86,43 @@ for (const vp of VIEWPORTS) {
       deviceScaleFactor: vp.touch ? 2 : 1,
     });
 
-    test('Accounts before a wallet connects', async ({ page }) => {
+    test('Account before a wallet connects', async ({ page }) => {
       const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: false });
-      await page.goto('/#accounts');
+      await page.goto('/#account');
       await expect(page.getByTestId('connect')).toBeVisible();
+      await expect(page.getByTestId('account-connect')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts-disconnected`);
+      await shot(page, `${vp.name}-account-disconnected`);
       expect(ex.external).toEqual([]);
     });
 
-    test('Accounts: no account in this browser yet', async ({ page }) => {
+    test('the Connect menu (no Solana wallet adapter yet)', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: false });
-      await page.goto('/#accounts');
-      await connect(page);
-      await expect(page.getByTestId('no-account')).toBeVisible();
-      await expect(
-        page.locator('[data-testid=sepolia-row][data-symbol=stkA] [data-testid=sepolia-balance]'),
-      ).toHaveText('989,690.00');
+      await page.goto('/#markets');
+      await page.getByTestId('connect').click();
+      await expect(page.getByTestId('wallet-unsupported')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts-open`);
-    });
-
-    test('Accounts: the statement', async ({ page }) => {
-      const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
-      await page.goto('/#accounts');
-      await connect(page);
-      await expect(page.locator('[data-testid=passport-row]')).toHaveCount(4);
-      await expect(page.getByTestId('unsecured-coin')).toHaveCount(1);
-      // wStkA 60 + 40 at the best bid 0.95; wUSDC 11 + 9.50 + the 0.50 change at face value.
-      await expect(page.locator('[data-testid=passport-row][data-name=wStkA] [data-testid=passport-value]')).toHaveText(
-        '95.00',
-      );
-      await expect(
-        page.locator('[data-testid=passport-row][data-name=wStkA] [data-testid=passport-largest]'),
-      ).toHaveText('60.00');
-      await expect(page.getByTestId('passport-total')).toHaveText('116.00');
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts`);
-      expect(ex.external).toEqual([]);
+      await shot(page, `${vp.name}-connect-menu`, false);
     });
 
     test('Markets with a book open', async ({ page }) => {
       await serveExchange(page);
       await page.goto('/#markets');
       await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
-      await page.locator('[data-testid=market-row][data-stock=wStkA]').getByTestId('open-book').click();
+      await page.locator('[data-testid=market-row][data-pair="twUSDM/twUSDC"]').getByTestId('open-book').click();
       await expect(page.getByTestId('book')).toBeVisible();
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-markets`);
+    });
+
+    test('Markets: a pair of 18- and 8-decimal tokens (twETH/twBTC)', async ({ page }) => {
+      await serveExchange(page);
+      await page.goto('/#markets');
+      await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
+      await page.locator('[data-testid=market-row][data-pair="twETH/twBTC"]').getByTestId('open-book').click();
+      await expect(page.getByTestId('book')).toHaveAttribute('data-pair', 'twETH/twBTC');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-markets-eth-btc`);
     });
 
     test('Markets when the exchange is down', async ({ page }) => {
@@ -149,9 +135,8 @@ for (const vp of VIEWPORTS) {
 
     test('Local data', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTransfers: true });
+      await seedRecords(page, customerRecords().entries);
       await page.goto('/#local');
-      await connect(page);
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-local`);
@@ -160,9 +145,8 @@ for (const vp of VIEWPORTS) {
     // Layout checks run before any screenshot: a full-page capture can reset the touch emulation.
     test('Local data: the CLEAR ALL dialog', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
+      await seedRecords(page, customerRecords().entries);
       await page.goto('/#local');
-      await connect(page);
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
       await page.getByTestId('clear-all').click();
       await expect(page.getByTestId('clear-dialog')).toBeVisible();
@@ -176,22 +160,6 @@ for (const vp of VIEWPORTS) {
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
     });
 
-    test('Transfers: a deposit being funded, one in flight, one finished', async ({ page }) => {
-      await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTransfers: true });
-      await page.goto('/#transfers');
-      await connect(page);
-      await expect(page.locator('[data-testid=transfer][data-state=running]')).toHaveCount(1);
-      await expect(page.locator('[data-testid=transfer][data-state=succeeded]')).toHaveCount(1);
-      await page.getByTestId('deposit-token').selectOption('stkB');
-      await page.getByTestId('deposit-amount').fill('50');
-      await page.getByTestId('deposit-continue').click();
-      await expect(page.getByTestId('deposit-held')).not.toHaveText('—');
-      await expect(page.getByTestId('withdraw-largest')).toContainText('60 wStkA');
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-transfers`);
-    });
-
     test('Trade before a wallet connects', async ({ page }) => {
       await serveExchange(page);
       await page.goto('/#trade');
@@ -200,58 +168,19 @@ for (const vp of VIEWPORTS) {
       await shot(page, `${vp.name}-trade-disconnected`);
     });
 
-    // Plan P4-A: Trade on the design system — the order form, the book, a take being reviewed
-    // (with a line the account cannot pay: a greyed Buy that says why, AA 00044), the live-offer
-    // rule and My offers.
-    test('Trade: the order form, the book, a take under review and My offers', async ({ page }) => {
-      const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTrades: true });
-      await page.goto('/#trade');
-      await connect(page);
-      await expect(page.locator('[data-testid=trade-line]').first()).toBeVisible();
-      await expect(page.getByTestId('live-offer-banner')).toContainText('sell 2.00 wStkA at 1.10');
-      await expect(page.locator('[data-testid=my-trade]')).toHaveCount(2);
-      await expect(page.locator('[data-testid=take-line-not-enough]').first()).toBeDisabled();
-      await expect(page.locator('[data-testid=not-takeable]')).toHaveCount(0);
-      // The design components, not the old plain markup.
-      await expect(page.getByTestId('make-section')).toHaveClass(/panel/);
-      await expect(page.getByTestId('take-section')).toHaveClass(/panel/);
-      await expect(page.locator('[data-testid=trade-book-asks]')).toHaveClass(/book/);
-      await expect(page.getByTestId('side-sell')).toHaveAttribute('aria-checked', 'true');
-      await page.getByTestId('make-quantity').fill('10');
-      await page.getByTestId('make-price').fill('1.05');
-      await expect(page.getByTestId('legs-give')).toHaveText('10.00 wStkA');
-      await page.getByTestId('buy-best-ask').click();
-      await expect(page.getByTestId('take-confirm')).toBeVisible();
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-trade`);
-      // The greyed Buy's tooltip open (a tap on the phone, a hover on the desktop) fits the page.
-      const notEnough = page.locator('[data-testid=not-enough]').first();
-      if (vp.touch) await notEnough.tap();
-      else await notEnough.hover();
-      await expect(notEnough.getByTestId('tooltip')).toBeVisible();
-      await expect(notEnough.getByTestId('tooltip')).toHaveText(/^Not enough wUSDC\. You hold [0-9.,]+ wUSDC\.$/);
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-trade-not-enough`);
-      expect(ex.external).toEqual([]);
-    });
-
-    test('an error state: the bank low on fee funds, withdrawals paused (plan P4-A)', async ({ page }) => {
+    test('an error state: the market low on fee funds (plan P4-A)', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
       await page.route('**/health', (route) =>
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(healthBody({ dustLow: true, vaultGasLow: true })),
+          body: JSON.stringify(healthBody({ dustLow: true })),
         }),
       );
-      await page.goto('/#transfers');
-      await connect(page);
-      await expect(page.getByTestId('bank-sponsor-low')).toBeVisible();
-      await expect(page.getByTestId('bank-vault-gas-low')).toBeVisible();
+      await page.goto('/#markets');
+      await expect(page.getByTestId('market-sponsor-low')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-transfers-paused`);
+      await shot(page, `${vp.name}-markets-paused`);
     });
   });
 }
@@ -284,7 +213,7 @@ test('without the font files the page falls back cleanly', async ({ page }) => {
   await page.route(/\.woff2?(\?.*)?$/, (route) => route.abort('failed'));
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#markets');
-  await expect(page.getByRole('heading', { name: 'MN Bank' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Night Market' })).toBeVisible();
   await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
   await page.evaluate(() => document.fonts.ready);
   const loaded = await page.evaluate(() => {
@@ -308,7 +237,7 @@ test('without the font files the page falls back cleanly', async ({ page }) => {
 
 test('restrained motion, and none under prefers-reduced-motion', async ({ page }) => {
   await serveExchange(page);
-  await page.goto('/#accounts');
+  await page.goto('/#account');
   const tab = page.getByTestId('tab-markets');
   expect(await tab.evaluate((el) => getComputedStyle(el).transitionDuration)).toMatch(/^0\.12s/);
   await page.emulateMedia({ reducedMotion: 'reduce' });

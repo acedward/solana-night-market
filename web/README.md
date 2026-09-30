@@ -3,6 +3,22 @@
 A static Vite + React site. Every per-user record lives in the browser's local storage (see
 `src/store/`); the relay keeps none. Build it with `bun run build:web` from the repository root.
 
+## The markets (`config.json` `pairs`)
+
+A market is any two tokens, `BASE/QUOTE`: the price is in QUOTE per BASE. The site's markets are
+`config.json` `pairs` (a list of `"BASE/QUOTE"` strings), or the network's default pairs
+(`NETWORK_DEFAULT_PAIRS` in `packages/core/src/tokens/pairs.ts`; stagenet: twBTC/twUSDC,
+twETH/twUSDC, twUSDM/twUSDC, twETH/twBTC). No token is special in the code: a pair without twUSDC
+(twETH/twBTC) is read, priced and filtered by the same code as any other. A pair that names an
+unknown token, the same token twice or a token without a shielded colour is left out, with a
+warning in the browser console (`Night Market: …`).
+
+The tokens are the network's built-in list (stagenet: the vendored
+[`effectstream/mint-test-tokens`](https://github.com/effectstream/mint-test-tokens) registry,
+`packages/core/src/tokens/mint-test-tokens/`), plus any the site adds in `config.json` `tokens`
+(`{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"? }] }`; `"mode": "replace"` replaces
+the list, which the local `undeployed` stack needs).
+
 ## Each site's asset set (`config.json` `assets`)
 
 One build serves several domains. Each domain serves its own `config.json` next to `index.html`,
@@ -10,19 +26,15 @@ and its optional `assets` is that site's asset set: a list of symbols, or `"all"
 
 | Site | `config.json` | Shows |
 |---|---|---|
-| The market domain | `{"network":"stagenet","relayUrl":"/relay"}` | the stagenet default set: USDC, stkA, stkB, stkC (wUSDC, wStkA/B/C on Midnight) and their three markets |
-| `https://stagenet.tbank.zkdojo.com/` | `{"network":"stagenet","relayUrl":"/relay","assets":["USDC","TBILL","TB13W","TB26W","TB52W"]}` | USDC and the four T-bills, and their four markets |
-| Any site | `{"network":"stagenet","relayUrl":"/relay","assets":"all"}` | all 8 tokens, 7 markets |
+| The market domain | `{"network":"stagenet","relayUrl":"/relay"}` | every token and every default market |
+| A partner domain | `{"network":"stagenet","relayUrl":"/relay","assets":["twETH","twBTC"]}` | twETH and twBTC, and their one market |
+| Any site | `{"network":"stagenet","relayUrl":"/relay","assets":"all"}` | every token and market |
 
 - Without `assets`, a site shows its network's default set: data beside the network profiles
-  (`NETWORK_DEFAULT_ASSETS` in `packages/core/src/network.ts`). Stagenet's is USDC and stkA/B/C;
-  the local `undeployed` stack has none, so it shows everything. A site that configures its own
-  `tokens` list shows all of them unless it names `assets`.
-- Symbols match the ERC20 symbol or the Midnight name, in any case. A symbol the market does not
-  have is ignored, with a warning in the browser console (`Night Market: …`). If none is known, the
-  network's default set applies, with a warning: a typo never blanks the site.
-- No token is special in the code: the lists live in data (the vendored records, the default set,
-  `config.json`).
+  (`NETWORK_DEFAULT_ASSETS` in `packages/core/src/network.ts`). Stagenet's is every token (null).
+- Symbols match in any case. A symbol the market does not have is ignored, with a warning in the
+  browser console (`Night Market: …`). If none is known, the network's default set applies, with a
+  warning: a typo never blanks the site.
 - The site needs a **secure origin** (https, or `localhost` in development). The page derives and
   encrypts the account's keys with WebCrypto, which browsers only offer on a secure origin: over
   plain `http://` the page cannot open or use an account.
@@ -32,20 +44,27 @@ and its optional `assets` is that site's asset set: a list of symbols, or `"all"
 
 ## Showing only some assets (`?assets=`)
 
-A link such as `https://<bank>/?assets=USDC,TBILL` keeps that list in the browser's local data
-(`mn-bank/v1/_global/settings/asset-filter`) and removes the parameter from the address bar; from
-then on the site shows only those assets, everywhere tokens appear. The list only narrows within
-the site's set: `?assets=all` goes back to the site's whole set, and a bank token outside it is
-named as "not available on this site" and never shown. A market shows only when both of its
-assets are listed; no asset is special. Symbols match the ERC20 symbol or the Midnight name, in
-any case (`usdc`, `wUSDC`); well-formed symbols the market does not know yet stay in the list and
-are named in the note under the tabs, and a list with nothing on this site shows the site's whole
-set.
-Sepolia ETH (gas) always shows, as does anything waiting for the customer (a change coin to
-record, a live offer, a transfer in progress). `?assets=all` or `?assets=`, **Show all assets**
-(under the tabs, or in Local data) and CLEAR ALL clear it; Export and Import carry it. It only
-changes what the page shows: it is not a security setting, and the relay never sees it. The code
-is `src/assets/`.
+A link such as `https://<market>/?assets=twBTC,twUSDC` keeps that list in the browser's local data
+(`night-market/v1/_global/settings/asset-filter`) and removes the parameter from the address bar;
+from then on the site shows only those assets, everywhere tokens appear. The list only narrows
+within the site's set: `?assets=all` goes back to the site's whole set, and a market token outside
+it is named as "not available on this site" and never shown. A market shows only when both of its
+assets are listed; no asset is special. Symbols match in any case; well-formed symbols the market
+does not know yet stay in the list and are named in the note under the tabs, and a list with
+nothing on this site shows the site's whole set. Anything waiting for the customer (a change coin
+to record, a live offer) always shows. `?assets=all` or `?assets=`, **Show all assets** (under the
+tabs, or in Local data) and CLEAR ALL clear it; Export and Import carry it. It only changes what
+the page shows: it is not a security setting, and the relay never sees it. The code is
+`src/assets/`.
+
+## The Solana wallet (lane B2)
+
+This build ships no wallet adapter yet: Connect says that Solana wallets are coming, and the
+Account and Trade sections ask the customer to wait. The seam is `src/wallet/`:
+`WalletContext.tsx` takes a `WalletAdapter` (the wallet's public key and `signMessage`), and every
+operation asks for signatures only through `ActionSigning` (`src/wallet/signing.ts`): the relay's
+action envelope, a Passport call's authorisation, and the device's use counter. Lane B2 plugs
+Phantom and Track A's Ed25519 arm client in there.
 
 ## The Night Market design system
 
@@ -84,9 +103,9 @@ pass `data-*`, `id`, `role`, `aria-*` and event props straight through to their 
 ```tsx
 <section data-testid="section-trade">
   <PageHead
-    eyebrow="Buy and sell at USDC prices"
+    eyebrow="Make and take offers"
     title="Trade"
-    lede="Every trade is one asset against USDC. Take an existing offer now, or place your own at your price."
+    lede="Every trade is one token against another. Take an existing offer now, or place your own at your price."
   />
   <div className="trade-grid">…</div>
 </section>
@@ -107,14 +126,14 @@ card that invites an action). Two panels side by side: `<div className="form-gri
     <Segmented label="Side" options={[{ value: 'buy', label: 'Buy' }, { value: 'sell', label: 'Sell' }]}
                value={side} onChange={setSide} />
   </Field>
-  <Field label="Quantity" htmlFor="tr-qty" hint="Largest single payment: 11.00 wUSDC">
-    <UnitInput id="tr-qty" unit="wStkA" inputMode="decimal" value={qty} onChange={…} data-testid="order-quantity" />
+  <Field label="Quantity" htmlFor="tr-qty" hint="Largest single payment: 11.00 twUSDC">
+    <UnitInput id="tr-qty" unit="twBTC" inputMode="decimal" value={qty} onChange={…} data-testid="order-quantity" />
   </Field>
-  <Field label="Asset" htmlFor="tr-stock"><Select id="tr-stock" …>…</Select></Field>
+  <Field label="Market" htmlFor="tr-pair"><Select id="tr-pair" …>…</Select></Field>
   <div className="legs">                         {/* the exact legs, as in the mockup */}
-    <div className="leg"><span className="k">You give</span><span className="v num">10.50 wUSDC</span></div>
-    <div className="leg"><span className="k">You receive</span><span className="v num">10.00 wStkA</span></div>
-    <div className="foot">Paid with your wUSDC coin of 11.00; the change stays in your account.</div>
+    <div className="leg"><span className="k">You give</span><span className="v num">10.50 twUSDC</span></div>
+    <div className="leg"><span className="k">You receive</span><span className="v num">0.50 twBTC</span></div>
+    <div className="foot">Paid with your twUSDC coin of 11.00; the change stays in your account.</div>
   </div>
   <ButtonRow stretch>
     <Button type="submit" data-testid="place-order">Place order</Button>
@@ -134,7 +153,7 @@ screen). A link that looks like a button (the Markets book's Take): `ButtonLink 
 in tabular numerals, and keeps the raw value in `data-raw`:
 
 ```tsx
-<Money raw={10_500_000n} decimals={6} unit="wUSDC" />   // 10.50 wUSDC
+<Money raw={10_500_000n} decimals={6} unit="twUSDC" />   // 10.50 twUSDC
 ```
 
 Prices from the book keep `bidText` / `askText` from `src/market/view.ts` (bids round down, asks
@@ -145,12 +164,12 @@ give every non-first cell its column's `label`:
 
 ```tsx
 <StatementTable caption="My offers" columns={[{ label: 'Placed' }, { label: 'Order' },
-  { label: 'Quantity', align: 'right' }, { label: 'Price', sub: 'USDC', align: 'right' },
+  { label: 'Quantity', align: 'right' }, { label: 'Price', sub: 'twUSDC', align: 'right' },
   { label: 'Status', align: 'right' }]}>
   {offers.map((o) => (
     <tr key={o.id} data-testid="my-offer" data-status={o.status}>
       <Cell block>{placedAt(o)}</Cell>
-      <Cell label="Order">{o.side === 'sell' ? 'Sell' : 'Buy'} {o.stock}</Cell>
+      <Cell label="Order">{o.side === 'sell' ? 'Sell' : 'Buy'} {o.base}</Cell>
       <Cell label="Quantity" align="right" num>{o.quantity}</Cell>
       <Cell label="Price" align="right" num>{o.price}</Cell>
       <Cell label="Status" align="right"><StatusPill status="live">Live</StatusPill></Cell>
@@ -164,25 +183,25 @@ line</Sub></span>`, so the phone layout keeps the line under the value. An order
 `<StatementTable variant="book" …>`: it stays a compact table on a phone, with the Take button in
 `<td className="act">`. A line the account cannot pay: the disabled small `Button`, in place,
 wrapped in a `Tooltip` that says why on hover, keyboard focus and tap (no extra row):
-`<Tooltip id="nt-…" text="Not enough wStkA. You hold 100.00 wStkA."><Button … disabled
+`<Tooltip id="nt-…" text="Not enough twBTC. You hold 100.00 twBTC."><Button … disabled
 aria-describedby="nt-…">Sell</Button></Tooltip>`. The wrapper is the focusable part, and `id` names
 the visually hidden copy of the text the button's `aria-describedby` points to; the sentence
 comes from `fundWithOneCoin` (`notEnoughText`). The account's own offer: `<YoursBadge />` ("Your
-offer"). A holdings row: `AssetCell symbol="wStkA" name="Stock A" origin=…`; a subtotal:
+offer"). A holdings row: `AssetCell symbol="twBTC" name="Test-wrapped BTC" origin=…`; a subtotal:
 `SubtotalRow` in `foot`.
 
 **Badges and states.** `Badge tone="green|navy|grey|gold|red"` (a market's Two-sided / Bids only /
 No liquidity), `StatusPill status="live|filled|cancelled|progress|refunded|failed|done|idle"` (an
-offer's or transfer's state, with a dot), `NoValue` for a deliberately absent value ("no
-liquidity", "not valued", "no bids"), `NetworkBadge network="sepolia|midnight"`.
+offer's or job's state, with a dot), `NoValue` for a deliberately absent value ("no
+liquidity", "not valued", "no bids"), `NetworkBadge network="midnight"`.
 
 **Messages.** `Notice tone="info|warning|danger|success" title="…"`; give it `role="alert"` for an
 error the customer caused and `role="status"` for a result. The one-live-offer rule (Q9):
 
 ```tsx
 <Notice tone="warning" title="One live offer per account.">
-  You already have one: Sell 10.00 wStkA at 1.05. Placing an order, taking an offer, starting a
-  deposit or withdrawing is a new signed action, and it cancels that offer. We ask you before it happens.
+  You already have one: Sell 0.50 twBTC at 60,000. Placing an order, taking an offer or
+  withdrawing is a new signed action, and it cancels that offer. We ask you before it happens.
 </Notice>
 ```
 
@@ -211,17 +230,12 @@ new page there (its fixtures are in `test/e2e/visual-fixtures.ts`). The screensh
 
 ## When something is not working (error states)
 
-Every way the market, the exchange, the MPC, the wallet or the browser can stop an action has one
-wording, kept in one place and unit-tested (`test/errors.test.ts`; the walkthroughs in the browser
-are `test/e2e/errors.spec.ts`):
+Every way the market, the exchange, the wallet or the browser can stop an action has one wording,
+kept in one place and unit-tested (`test/errors.test.ts`; the walkthroughs in the browser are
+`test/e2e/errors.spec.ts`):
 
 | File | What it words |
 | --- | --- |
 | `src/relay/messages.ts` | The relay's refusals (rate limits with their wait, the fee wallet low or starting up, a stale or replayed signature) and failed jobs (the exchange's settlement service at its limit or failing). `RelayError.message` is already the customer's sentence. |
-| `src/relay/status.ts` | What `/health` pauses: the market unreachable, its prover down, its fee wallet low or syncing (the shell); withdrawals when the vault's Sepolia account is low on gas, a slow MPC (Transfers); the settlement service down or refusing (Trade). `BankStatus.tsx` reads `/health` every minute and on tab focus; pages disable what is paused and say why BEFORE the wallet is asked to sign. |
+| `src/relay/status.ts` | What `/health` pauses: the market unreachable, its prover down, its fee wallet low or syncing (the shell); the settlement service down or refusing (Trade). `RelayStatus.tsx` reads `/health` every minute and on tab focus; pages disable what is paused and say why BEFORE the wallet is asked to sign. |
 | `src/store/messages.ts` | Local storage blocked, unavailable or full. |
-| `src/bridge/messages.ts` | A transfer's stages and outcomes, including a stale request the market closed (Q21 A) and a never-executed deposit closed with `abandonDeposit`. |
-
-A wallet on another network gets a banner with a Switch button, and every signature and send first
-checks the wallet's chain (`ensureChain` in `src/passport/operations.ts`).
-

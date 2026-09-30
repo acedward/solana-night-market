@@ -91,8 +91,8 @@ export function SiteFooter({ networkName = 'Midnight stagenet' }) {
           Testnet only — {networkName}. Tokens have no real value. A proof of concept.
         </p>
         <p>
-          The tokens are Midnight test tokens with public faucets. Your Solana wallet only signs messages: this app never
-          sends a Solana transaction, and never asks for your wallet&apos;s seed or private key.
+          The tokens are Midnight test tokens with public faucets. Your Solana wallet only signs messages: this app
+          never sends a Solana transaction, and never asks for your wallet&apos;s seed or private key.
         </p>
       </div>
     </footer>

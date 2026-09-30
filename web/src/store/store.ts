@@ -306,7 +306,9 @@ export class LocalStore {
     if (f.schemaVersion < this.version) {
       const migrated = migrate(entries, f.schemaVersion, this.version, this.migrations);
       if (!migrated)
-        throw new ImportError('This file is from a version of Night Market this page cannot read. Nothing was imported.');
+        throw new ImportError(
+          'This file is from a version of Night Market this page cannot read. Nothing was imported.',
+        );
       entries = migrated;
     }
     const bytes = entries.reduce((n, [k, v]) => n + k.length + v.length, 0);

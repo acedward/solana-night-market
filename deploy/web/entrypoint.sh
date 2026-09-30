@@ -1,5 +1,5 @@
 #!/bin/sh
-# MN Bank web: write the runtime configuration from the environment, then run nginx.
+# Night Market web: write the runtime configuration from the environment, then run nginx.
 #
 #   WEB_NETWORK                  stagenet (default) or undeployed: the network profile the site uses
 #   WEB_RELAY_URL                the relay's base URL as the browser sees it (default /relay, the
@@ -11,17 +11,21 @@
 #   WEB_DNS_RESOLVER             DNS for the relay's name (default 127.0.0.11, Docker's)
 #   WEB_CONTENT_SECURITY_POLICY  optional Content-Security-Policy header value
 #   WEB_ASSETS                   this site's asset set: comma-separated symbols (for example
-#                                USDC,TBILL,TB13W,TB26W,TB52W), or "all"; empty: the network's
-#                                default set (stagenet: USDC, stkA, stkB, stkC). Written into
-#                                config.json as "assets"; one image serves every domain
+#                                twETH,twBTC), or "all"; empty: the network's default set
+#                                (stagenet: every token). Written into config.json as "assets";
+#                                one image serves every domain
+#   WEB_PAIRS                    this site's markets: comma-separated BASE/QUOTE pairs (for example
+#                                twBTC/twUSDC,twETH/twBTC); empty: the network's default pairs.
+#                                Written into config.json as "pairs"
 #
-# A full site configuration can be mounted at /etc/mnbank/config.json instead (for example with
-# network overrides, a token list or "assets"); it is then served as is, and WEB_ASSETS is ignored.
+# A full site configuration can be mounted at /etc/nightmarket/config.json instead (for example
+# with network overrides, a token list, "assets" or "pairs"); it is then served as is, and
+# WEB_ASSETS and WEB_PAIRS are ignored.
 set -eu
 
-D=/tmp/mnbank
+D=/tmp/nightmarket
 fail() {
-  echo "mnbank-web: $*" >&2
+  echo "nightmarket-web: $*" >&2
   exit 78
 }
 
@@ -32,6 +36,7 @@ resolver="${WEB_DNS_RESOLVER:-127.0.0.11}"
 trusted="${WEB_TRUSTED_PROXIES:-}"
 csp="${WEB_CONTENT_SECURITY_POLICY:-}"
 assets="${WEB_ASSETS:-}"
+pairs="${WEB_PAIRS:-}"
 
 case "$network" in stagenet | undeployed) ;; *) fail "WEB_NETWORK must be stagenet or undeployed" ;; esac
 case "$relay_url" in *'"'* | *'\'* | *' '*) fail "WEB_RELAY_URL must not contain quotes, backslashes or spaces" ;; esac
@@ -60,17 +65,38 @@ if [ -n "$(echo "$assets" | tr -d ' ,')" ]; then
   fi
 fi
 
+# WEB_PAIRS -> the JSON value of "pairs" (empty: no key, the network's default pairs). Each pair is
+# two symbols by the rule above, BASE/QUOTE, at most 32 of them.
+pairs_json=""
+if [ -n "$(echo "$pairs" | tr -d ' ,')" ]; then
+  set -f
+  n=0
+  for p in $(echo "$pairs" | tr ',' ' '); do
+    echo "$p" | grep -Eq '^[A-Za-z0-9._-]{1,16}/[A-Za-z0-9._-]{1,16}$' ||
+      fail "WEB_PAIRS: '$p' is not a pair (BASE/QUOTE, symbols of letters, digits, . _ -)"
+    n=$((n + 1))
+    pairs_json="$pairs_json${pairs_json:+,}\"$p\""
+  done
+  set +f
+  [ "$n" -le 32 ] || fail "WEB_PAIRS names $n pairs (at most 32)"
+  pairs_json="[$pairs_json]"
+fi
+
 mkdir -p "$D" /tmp/client_body /tmp/proxy /tmp/fastcgi /tmp/uwsgi /tmp/scgi
 
 assets_log="${assets_json:-the network default}"
-if [ -f /etc/mnbank/config.json ]; then
-  cp /etc/mnbank/config.json "$D/config.json"
-  [ -z "$assets_json" ] || echo "mnbank-web: WEB_ASSETS is ignored: the mounted config.json is served as is" >&2
+pairs_log="${pairs_json:-the network default}"
+if [ -f /etc/nightmarket/config.json ]; then
+  cp /etc/nightmarket/config.json "$D/config.json"
+  [ -z "$assets_json$pairs_json" ] ||
+    echo "nightmarket-web: WEB_ASSETS and WEB_PAIRS are ignored: the mounted config.json is served as is" >&2
   assets_log="as the mounted config.json says"
-elif [ -n "$assets_json" ]; then
-  printf '{"network":"%s","relayUrl":"%s","assets":%s}\n' "$network" "$relay_url" "$assets_json" >"$D/config.json"
+  pairs_log="$assets_log"
 else
-  printf '{"network":"%s","relayUrl":"%s"}\n' "$network" "$relay_url" >"$D/config.json"
+  extra=""
+  [ -z "$assets_json" ] || extra="$extra,\"assets\":$assets_json"
+  [ -z "$pairs_json" ] || extra="$extra,\"pairs\":$pairs_json"
+  printf '{"network":"%s","relayUrl":"%s"%s}\n' "$network" "$relay_url" "$extra" >"$D/config.json"
 fi
 
 {
@@ -95,5 +121,5 @@ else
   : >"$D/headers.conf"
 fi
 
-echo "mnbank-web: network $network, relay $relay_url (upstream $upstream), trusted proxies: ${trusted:-none}, assets: $assets_log" >&2
+echo "nightmarket-web: network $network, relay $relay_url (upstream $upstream), trusted proxies: ${trusted:-none}, assets: $assets_log, pairs: $pairs_log" >&2
 exec nginx -g 'daemon off;'

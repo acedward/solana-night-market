@@ -1,26 +1,26 @@
-// Plan 00042 P3.1: the asset filter in the browser. `?assets=…` is stored, removed from the
-// address bar, and applied in every view (Accounts, Markets, Trade, Transfers); a market shows
-// only when both of its assets are listed; a reload keeps the list; `?assets=all`, Show all
-// assets and CLEAR ALL bring everything back; a token from the site's config (a fake TBILL) is
-// filtered with no code change. The customer, the relay's reads and the exchange are the visual
-// tests' fixtures (served through page.route: nothing leaves the page's origin). Screenshots go
-// to $ASSET_FILTER_OUT_DIR (default test-results/asset-filter).
+// Plan 00042 P3.1, carried over: the asset filter in the browser. `?assets=…` is stored, removed
+// from the address bar and applied in every view; a market shows only when both of its assets are
+// listed, whichever they are (twETH/twBTC has no twUSDC leg and is filtered like any other); a
+// reload keeps the list; `?assets=all`, Show all assets and CLEAR ALL bring everything back; a
+// token from the site's config (nmGOLD) and its pair are filtered with no code change. The
+// exchange is the visual tests' fixture (served through page.route: nothing leaves the page's
+// origin). The connected-wallet views (Account holdings, the Trade picker) come with lane B2's mock
+// Phantom. Screenshots go to $ASSET_FILTER_OUT_DIR (default test-results/asset-filter).
 
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
-import { connect, installCustomer, serveExchange } from './visual-fixtures.js';
+import { COLOUR, leg, offerRow, BOOK } from '../../packages/core/test/fixtures/kernel/book.js';
+import { serveExchange } from './visual-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const OUT = process.env.ASSET_FILTER_OUT_DIR ?? `${root}/test-results/asset-filter`;
 mkdirSync(OUT, { recursive: true });
 
-const FILTER_KEY = 'mn-bank/v1/_global/settings/asset-filter';
-/** Any stock token's name, in either form (stkA, wStkB, …). */
-const STK = /\bw?stk[abc]\b/i;
+const FILTER_KEY = 'night-market/v1/_global/settings/asset-filter';
+const ALL_PAIRS = ['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC'];
 
 test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -29,186 +29,143 @@ const shot = async (page: Page, name: string) => {
   await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true, animations: 'disabled' });
 };
 const stored = (page: Page) => page.evaluate((k) => localStorage.getItem(k), FILTER_KEY);
-const attrs = (page: Page, selector: string, name: string) =>
-  page.locator(selector).evaluateAll((els, n) => els.map((e) => e.getAttribute(n) ?? ''), name);
-const options = (page: Page, testId: string) =>
-  page
-    .getByTestId(testId)
-    .locator('option')
-    .evaluateAll((os) => os.map((o) => (o.textContent ?? '').trim()));
+const pairs = async (page: Page) => {
+  await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
+  return page
+    .locator('[data-testid=market-row]')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('data-pair') ?? ''));
+};
 const openTab = async (page: Page, id: string) => {
   await page.getByTestId(`tab-${id}`).click();
   await expect(page.getByTestId(`section-${id}`)).toBeVisible();
 };
 
-test('no parameter: every asset shows, and nothing is stored', async ({ page }) => {
+test('no parameter: every pair shows, and nothing is stored', async ({ page }) => {
   const ex = await serveExchange(page);
-  await installCustomer(page, { withAccount: true, withTransfers: true, withTrades: true });
-  await page.goto('/#accounts');
-  await connect(page);
-  await expect(page.locator('[data-testid=passport-row]')).toHaveCount(4);
-  expect(await attrs(page, '[data-testid=sepolia-row]', 'data-symbol')).toEqual([
-    'ETH',
-    'stkA',
-    'stkB',
-    'stkC',
-    'USDC',
-  ]);
+  await page.goto('/#markets');
+  expect(await pairs(page)).toEqual(ALL_PAIRS);
   await expect(page.getByTestId('asset-filter-note')).toHaveCount(0);
-  await openTab(page, 'markets');
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(3);
-  await openTab(page, 'transfers');
-  await expect(page.locator('[data-testid=transfer][data-state=succeeded]')).toHaveCount(1);
   expect(await stored(page)).toBeNull();
-  await shot(page, '01-no-filter-transfers');
+  await shot(page, '01-no-filter-markets');
   expect(ex.external).toEqual([]);
 });
 
-test('?assets=stkA,USDC: only those assets and their market, in every view; a reload keeps it', async ({ page }) => {
+test('?assets=twBTC,twUSDC: only their market; stored, gone from the address bar; a reload keeps it', async ({
+  page,
+}) => {
   const ex = await serveExchange(page);
-  await installCustomer(page, { withAccount: true, withTransfers: true, withTrades: true });
-  await page.goto('/?assets=stkA,USDC#accounts');
-  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only stkA, USDC.');
-  // Stored, and gone from the address bar (the section stays).
+  await page.goto('/?assets=twBTC,twUSDC#markets');
+  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only twBTC, twUSDC.');
   await expect.poll(() => new URL(page.url()).search).toBe('');
-  expect(new URL(page.url()).hash).toBe('#accounts');
-  expect(JSON.parse((await stored(page))!)).toMatchObject({ kind: 'settings', data: { assets: ['stkA', 'USDC'] } });
-  await connect(page);
-
-  // Accounts: the EVM and Passport holdings (ETH always shows: it pays for gas).
-  await expect(page.locator('[data-testid=passport-row]')).toHaveCount(2);
-  expect(await attrs(page, '[data-testid=sepolia-row]', 'data-symbol')).toEqual(['ETH', 'stkA', 'USDC']);
-  expect(await attrs(page, '[data-testid=passport-row]', 'data-name')).toEqual(['wStkA', 'wUSDC']);
-  await expect(page.getByTestId('sepolia-holdings')).not.toContainText(/stk[bc]/i);
-  await expect(page.getByTestId('passport-holdings')).not.toContainText(/stk[bc]/i);
-  await shot(page, '02-stkA-USDC-accounts');
-
-  // Markets: the one market whose two assets are listed.
-  await openTab(page, 'markets');
-  await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
-  expect(await attrs(page, '[data-testid=market-row]', 'data-stock')).toEqual(['wStkA']);
-  await shot(page, '03-stkA-USDC-markets');
-
-  // Trade: the pair picker.
-  await openTab(page, 'trade');
-  expect(await options(page, 'trade-stock')).toEqual([expect.stringMatching(/^wStkA .* \/ wUSDC$/)]);
-  await shot(page, '04-stkA-USDC-trade');
-
-  // Transfers: what can be deposited or withdrawn; the finished wStkB withdrawal is left out, the
-  // stkA deposit still in progress stays.
-  await openTab(page, 'transfers');
-  expect(await options(page, 'deposit-token')).toEqual(['stkA → wStkA', 'USDC → wUSDC']);
-  expect((await options(page, 'withdraw-token')).map((o) => o.split(' ')[0])).toEqual(['wStkA', 'wUSDC']);
-  await expect(page.locator('[data-testid=transfer][data-state=succeeded]')).toHaveCount(0);
-  await expect(page.locator('[data-testid=transfer][data-state=running]')).toHaveCount(1);
-  await shot(page, '05-stkA-USDC-transfers');
+  expect(new URL(page.url()).hash).toBe('#markets');
+  expect(JSON.parse((await stored(page))!)).toMatchObject({
+    kind: 'settings',
+    data: { assets: ['twBTC', 'twUSDC'] },
+  });
+  expect(await pairs(page)).toEqual(['twBTC/twUSDC']);
+  await expect(page.getByTestId('section-markets')).not.toContainText(/\btw(eth|usdm)\b/i);
+  await shot(page, '02-twBTC-twUSDC-markets');
 
   // A reload, with no parameter: the same view.
   await page.reload();
-  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only stkA, USDC.');
-  await openTab(page, 'markets');
-  await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
-  expect(await attrs(page, '[data-testid=market-row]', 'data-stock')).toEqual(['wStkA']);
+  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only twBTC, twUSDC.');
+  expect(await pairs(page)).toEqual(['twBTC/twUSDC']);
   expect(ex.external).toEqual([]);
 });
 
-test('?assets=USDC,TBILL on the stk site: USDC only, no market, and TBILL is not on this site', async ({ page }) => {
+test('?assets=twETH,twBTC: the pair without twUSDC, filtered like any other', async ({ page }) => {
   await serveExchange(page);
-  await installCustomer(page, { withAccount: true, withTransfers: true, withTrades: true });
-  await page.goto('/?assets=USDC,TBILL#accounts');
-  await expect(page.getByTestId('asset-filter-note')).toHaveText(
-    // TBILL is a bank token since plan 00046, outside this site's set (the stagenet default).
-    'Showing only USDC. Not available on this site: TBILL. Show all assets',
-  );
-  await connect(page);
-  await expect(page.locator('[data-testid=passport-row]')).toHaveCount(1);
-  expect(await attrs(page, '[data-testid=sepolia-row]', 'data-symbol')).toEqual(['ETH', 'USDC']);
-  await expect(page.getByTestId('section-accounts')).not.toContainText(STK);
-  await shot(page, '06-USDC-TBILL-accounts');
-  await openTab(page, 'markets');
-  await expect(page.getByTestId('markets-filtered-empty')).toBeVisible();
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(0);
-  await expect(page.getByTestId('section-markets')).not.toContainText(STK);
-  await shot(page, '07-USDC-TBILL-markets');
-  await openTab(page, 'trade');
-  await expect(page.getByTestId('trade-filtered-empty')).toBeVisible();
-  await expect(page.getByTestId('section-trade')).not.toContainText(STK);
-  await openTab(page, 'transfers');
-  expect(await options(page, 'deposit-token')).toEqual(['USDC → wUSDC']);
-  expect((await options(page, 'withdraw-token')).map((o) => o.split(' ')[0])).toEqual(['wUSDC']);
+  await page.goto('/?assets=twETH,twBTC#markets');
+  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only twETH, twBTC.');
+  expect(await pairs(page)).toEqual(['twETH/twBTC']);
+  await expect(page.getByTestId('section-markets')).not.toContainText(/\btwusd[cm]\b/i);
+  await shot(page, '03-twETH-twBTC-markets');
 });
 
-test('a token from the config (a fake TBILL): ?assets=USDC,TBILL shows only TBILL/USDC', async ({ page }) => {
+test('?assets=twUSDC: no market has both tokens listed; Markets and Trade say so', async ({ page }) => {
   await serveExchange(page);
+  await page.goto('/?assets=twUSDC#markets');
+  await expect(page.getByTestId('asset-filter-note')).toContainText('Showing only twUSDC.');
+  await expect(page.getByTestId('markets-filtered-empty')).toBeVisible();
+  await expect(page.locator('[data-testid=market-row]')).toHaveCount(0);
+  await openTab(page, 'trade');
+  await expect(page.getByTestId('trade-filtered-empty')).toContainText(
+    'A market shows only when both of its tokens are listed.',
+  );
+});
+
+test('a token and a pair from the config (nmGOLD/twUSDC): filtered with no code change', async ({ page }) => {
+  const GOLD = 'f7'.repeat(32);
+  await serveExchange(page, {
+    book: [...BOOK, offerRow(31, [leg(GOLD, 1_000)], [leg(COLOUR.twUSDC, 2_500_000_000)])], // ask 10.00 nmGOLD @ 250
+  });
   await page.route('**/config.json', (route) =>
     route.fulfill({
       json: {
         network: 'stagenet',
         relayUrl: '',
-        // The site config's token list (TokenConfig: { tokens: [...] }), as a deployment would set it.
-        tokens: {
-          tokens: [
-            { symbol: 'USDC', midnightName: 'wUSDC', role: 'usdc', decimals: 6, midnightColour: COLOUR.wUSDC },
-            { symbol: 'stkA', midnightName: 'wStkA', role: 'stock', decimals: 6, midnightColour: COLOUR.wStkA },
-            { symbol: 'TBILL', midnightName: 'wTBILL', role: 'stock', decimals: 6, midnightColour: '7b'.repeat(32) },
-          ],
-        },
+        // The site config's extra tokens (added to the built-in list) and its pairs, as a
+        // deployment would set them: data, no token special.
+        tokens: { tokens: [{ symbol: 'nmGOLD', name: 'Night Market gold', decimals: 2, midnightColour: GOLD }] },
+        pairs: ['nmGOLD/twUSDC', 'twBTC/twUSDC', 'twETH/twBTC'],
       },
     }),
   );
-  await page.goto('/?assets=USDC,TBILL#markets');
-  await expect(page.getByTestId('asset-filter-note')).toHaveText('Showing only USDC, TBILL. Show all assets');
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(1);
-  expect(await attrs(page, '[data-testid=market-row]', 'data-stock')).toEqual(['wTBILL']);
-  await expect(page.getByTestId('section-markets')).not.toContainText(STK);
-  await shot(page, '08-config-TBILL-markets');
+  await page.goto('/#markets');
+  expect(await pairs(page)).toEqual(['nmGOLD/twUSDC', 'twBTC/twUSDC', 'twETH/twBTC']);
+  await expect(page.locator('[data-testid=market-row][data-pair="nmGOLD/twUSDC"]').getByTestId('best-ask')).toHaveText(
+    '250.00',
+  );
+  await page.goto('/?assets=twUSDC,nmGOLD#markets');
+  await expect(page.getByTestId('asset-filter-note')).toHaveText('Showing only twUSDC, nmGOLD. Show all assets');
+  expect(await pairs(page)).toEqual(['nmGOLD/twUSDC']);
+  await shot(page, '04-config-nmGOLD-markets');
 });
 
 test('an unknown list shows everything; ?assets=all, Show all assets and CLEAR ALL clear it', async ({ page }) => {
   await serveExchange(page);
   // Nothing known: everything shows, and the note says why.
-  await page.goto('/?assets=TBILL,EURC#markets');
+  await page.goto('/?assets=EURC#markets');
   await expect(page.getByTestId('asset-filter-note')).toContainText(
-    'None of the listed assets is on this site, so every asset is shown. Not available on this site: TBILL. ' +
-      'Not on this site yet: EURC.',
+    'None of the listed assets is on this site, so every asset is shown. Not on this site yet: EURC.',
   );
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(3);
+  expect(await pairs(page)).toEqual(ALL_PAIRS);
 
   // ?assets=all.
-  await page.goto('/?assets=stkA,USDC#markets');
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(1);
+  await page.goto('/?assets=twBTC,twUSDC#markets');
+  expect(await pairs(page)).toEqual(['twBTC/twUSDC']);
   await page.goto('/?assets=all#markets');
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(3);
+  expect(await pairs(page)).toEqual(ALL_PAIRS);
   await expect(page.getByTestId('asset-filter-note')).toHaveCount(0);
   expect(await stored(page)).toBeNull();
   await expect.poll(() => new URL(page.url()).search).toBe('');
 
   // Show all assets, in Local data (with the note that it is not a security setting).
-  await page.goto('/?assets=stkA,USDC#local');
-  await expect(page.getByTestId('asset-filter-panel')).toContainText('?assets=stkA,USDC');
+  await page.goto('/?assets=twBTC,twUSDC#local');
+  await expect(page.getByTestId('asset-filter-panel')).toContainText('?assets=twBTC,twUSDC');
   await expect(page.getByTestId('asset-filter-disclaimer')).toHaveText(
     'This only changes what this page shows; it is not a security setting.',
   );
-  await shot(page, '09-local-data-filter');
+  await shot(page, '05-local-data-filter');
   await page.getByTestId('asset-filter-clear').click();
   await expect(page.getByTestId('asset-filter-panel')).toHaveCount(0);
   await expect(page.getByTestId('asset-filter-note')).toHaveCount(0);
   expect(await stored(page)).toBeNull();
 
   // The header note's Show all assets.
-  await page.goto('/?assets=USDC#markets');
+  await page.goto('/?assets=twUSDC#markets');
   await expect(page.locator('[data-testid=market-row]')).toHaveCount(0);
   await page.getByTestId('asset-filter-show-all').click();
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(3);
+  expect(await pairs(page)).toEqual(ALL_PAIRS);
   expect(await stored(page)).toBeNull();
 
   // CLEAR ALL.
-  await page.goto('/?assets=USDC#local');
+  await page.goto('/?assets=twUSDC#local');
   await page.getByTestId('clear-all').click();
   await page.getByTestId('clear-confirm-input').fill('CLEAR ALL');
   await page.getByTestId('clear-confirm').click();
   await expect(page.getByTestId('asset-filter-note')).toHaveCount(0);
   expect(await stored(page)).toBeNull();
   await openTab(page, 'markets');
-  await expect(page.locator('[data-testid=market-row]')).toHaveCount(3);
+  expect(await pairs(page)).toEqual(ALL_PAIRS);
 });

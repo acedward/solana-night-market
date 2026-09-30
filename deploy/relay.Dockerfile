@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# The MN Bank relay. The image holds code only: no prover keys and no secrets (mounted as files,
+# The Night Market relay. The image holds code only: no prover keys and no secrets (mounted as files,
 # see .env.example). The key volume (the compiled contracts with the relay's prover keys, plan
 # P0.5) is mounted read-only at /app/vendor/passport/contract/contracts/managed, the directory the
 # pinned Passport client imports its compiled account from, so the relay proves with the key
@@ -34,8 +34,6 @@ COPY relay/src relay/src
 # TypeScript sources only, and an empty mount point for the key volume.
 COPY vendor/passport/contract/package.json vendor/passport/contract/
 COPY vendor/passport/contract/src vendor/passport/contract/src
-# The vault v0.3.0 deposit preflight (pure, no imports), which @mnbank/core's bridge contract re-exports.
-COPY vendor/passport/contract/contracts/erc20-vault/src/preflight.ts vendor/passport/contract/contracts/erc20-vault/src/preflight.ts
 RUN mkdir -p vendor/passport/contract/contracts/managed
 ENV MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed
 USER bun

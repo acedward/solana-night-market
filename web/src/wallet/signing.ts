@@ -17,8 +17,7 @@ import type { AuthRequest, GatedContext } from '@nightmarket/core/passport';
 /** One call to authorise: a gated account call (a withdrawal, an inbox append) or a swap (a make or
  *  a take, one `open_swap_shielded` call). */
 export type CallToAuthorise =
-  | { kind: 'gated'; request: AuthRequest }
-  | { kind: 'swap'; action: 'open-swap' | 'take'; payload: OpenSwapPayload };
+  { kind: 'gated'; request: AuthRequest } | { kind: 'swap'; action: 'open-swap' | 'take'; payload: OpenSwapPayload };
 
 export interface ActionSigning {
   /** The device key (64 lowercase hex): the Solana wallet's public key. */

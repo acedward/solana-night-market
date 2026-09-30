@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, '00039-**']
+    branches: [main, '00047-**']
   pull_request:
 
 permissions:
@@ -42,7 +42,7 @@ jobs:
       - run: bun run build:web
       - name: The relay starts under Bun and serves
         run: |
-          printf '{"tokens":[{"symbol":"tUSDC","midnightName":"a","role":"usdc","decimals":6,"midnightColour":"%s"},{"symbol":"tSTK","midnightName":"b","role":"stock","decimals":6,"midnightColour":"%s"}]}' \
+          printf '{"tokens":[{"symbol":"tA","decimals":6,"midnightColour":"%s"},{"symbol":"tB","decimals":8,"midnightColour":"%s"}]}' \
             "$(printf 'aa%.0s' {1..32})" "$(printf 'bb%.0s' {1..32})" > "$RUNNER_TEMP/tokens.json"
           RELAY_NETWORK=undeployed TOKENS_FILE="$RUNNER_TEMP/tokens.json" RELAY_HOST=127.0.0.1 RELAY_PORT=18080 bun relay/src/main.ts > "$RUNNER_TEMP/relay.log" 2>&1 &
           RELAY_PID=$!
@@ -93,15 +93,15 @@ jobs:
           submodules: true
           persist-credentials: false
       - name: Build
-        run: docker build -f deploy/relay.Dockerfile --build-arg RELAY_VERSION=${{ github.sha }} -t mnbank/relay:ci .
+        run: docker build -f deploy/relay.Dockerfile --build-arg RELAY_VERSION=${{ github.sha }} -t nightmarket/relay:ci .
       - name: The image holds no proving or verifier keys
         run: |
-          found="$(docker run --rm --entrypoint sh mnbank/relay:ci -c 'find / -xdev \( -name "*.prover" -o -name "*.verifier" -o -name "*.bzkir" \) -print 2>/dev/null' || true)"
+          found="$(docker run --rm --entrypoint sh nightmarket/relay:ci -c 'find / -xdev \( -name "*.prover" -o -name "*.verifier" -o -name "*.bzkir" \) -print 2>/dev/null' || true)"
           if [ -n "$found" ]; then echo "keys found in the image:"; echo "$found"; exit 1; fi
-          docker image inspect mnbank/relay:ci --format 'size {{.Size}} bytes'
+          docker image inspect nightmarket/relay:ci --format 'size {{.Size}} bytes'
       - name: The image starts and serves
         run: |
-          docker run -d --name relay-ci -e RELAY_NETWORK=stagenet -p 127.0.0.1:18080:8080 mnbank/relay:ci
+          docker run -d --name relay-ci -e RELAY_NETWORK=stagenet -p 127.0.0.1:18080:8080 nightmarket/relay:ci
           for i in $(seq 1 50); do curl -sf http://127.0.0.1:18080/v1/config >/dev/null && break; sleep 0.3; done
           curl -sf http://127.0.0.1:18080/v1/config
           code="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:18080/health)"
@@ -122,32 +122,36 @@ jobs:
       - name: The compose file is valid with the example settings
         run: |
           cp deploy/.env.example "$RUNNER_TEMP/bundle.env"
-          touch "$RUNNER_TEMP/seed" "$RUNNER_TEMP/rpc"
+          touch "$RUNNER_TEMP/seed"
           sed -i -e "s#^SPONSOR_SEED_HOST_FILE=.*#SPONSOR_SEED_HOST_FILE=$RUNNER_TEMP/seed#" \
-            -e "s#^SEPOLIA_RPC_URL_HOST_FILE=.*#SEPOLIA_RPC_URL_HOST_FILE=$RUNNER_TEMP/rpc#" \
             -e "s#^RELAY_ENV_FILE=.*#RELAY_ENV_FILE=$RUNNER_TEMP/bundle.env#" "$RUNNER_TEMP/bundle.env"
           docker compose -f deploy/compose.yml --env-file "$RUNNER_TEMP/bundle.env" config --quiet
           docker compose -f deploy/compose.yml --env-file "$RUNNER_TEMP/bundle.env" config --services
       - name: Build the web and key-volume images
         run: |
-          docker build -f deploy/web.Dockerfile -t mnbank/web:ci .
-          docker build -f deploy/key-volume.Dockerfile -t mnbank/key-volume:ci .
+          docker build -f deploy/web.Dockerfile -t nightmarket/web:ci .
+          docker build -f deploy/key-volume.Dockerfile -t nightmarket/key-volume:ci .
       - name: The web image serves the site and its runtime configuration
         run: |
-          docker run -d --name web-ci --read-only --tmpfs /tmp -e WEB_NETWORK=stagenet -p 127.0.0.1:18081:8080 mnbank/web:ci
+          docker run -d --name web-ci --read-only --tmpfs /tmp -e WEB_NETWORK=stagenet -p 127.0.0.1:18081:8080 nightmarket/web:ci
           for i in $(seq 1 50); do curl -sf http://127.0.0.1:18081/healthz >/dev/null && break; sleep 0.2; done
-          curl -sf http://127.0.0.1:18081/ | grep -q '<title>MN Bank</title>'
+          curl -sf http://127.0.0.1:18081/ | grep -q '<title>Night Market</title>'
           test "$(curl -sf http://127.0.0.1:18081/config.json)" = '{"network":"stagenet","relayUrl":"/relay"}'
           curl -sI http://127.0.0.1:18081/ | grep -qi '^x-content-type-options: nosniff'
           docker logs web-ci 2>&1 | tail -3
           docker rm -f web-ci
+          # A partner domain: its asset set and its markets, written into config.json as data.
+          docker run -d --name web-ci2 --read-only --tmpfs /tmp -e WEB_NETWORK=stagenet -e WEB_ASSETS=twETH,twBTC -e WEB_PAIRS=twETH/twBTC -p 127.0.0.1:18082:8080 nightmarket/web:ci
+          for i in $(seq 1 50); do curl -sf http://127.0.0.1:18082/healthz >/dev/null && break; sleep 0.2; done
+          test "$(curl -sf http://127.0.0.1:18082/config.json)" = '{"network":"stagenet","relayUrl":"/relay","assets":["twETH","twBTC"],"pairs":["twETH/twBTC"]}'
+          docker rm -f web-ci2
       - name: The key-volume image holds no keys, and its tools run
         run: |
-          found="$(docker run --rm --entrypoint sh mnbank/key-volume:ci -c 'find / -xdev \( -name "*.prover" -o -name "*.verifier" \) -print 2>/dev/null' || true)"
+          found="$(docker run --rm --entrypoint sh nightmarket/key-volume:ci -c 'find / -xdev \( -name "*.prover" -o -name "*.verifier" \) -print 2>/dev/null' || true)"
           if [ -n "$found" ]; then echo "keys found in the image:"; echo "$found"; exit 1; fi
-          docker run --rm --entrypoint /opt/compactc/compactc mnbank/key-volume:ci --version | grep -qx 0.34.0
-          docker run --rm --entrypoint bun mnbank/key-volume:ci relay/src/tools/key-volume.ts marker-inputs /tmp
-          docker image inspect mnbank/web:ci mnbank/key-volume:ci --format '{{.RepoTags}} {{.Size}} bytes'
+          docker run --rm --entrypoint /opt/compactc/compactc nightmarket/key-volume:ci --version | grep -qx 0.34.0
+          docker run --rm --entrypoint bun nightmarket/key-volume:ci relay/src/tools/key-volume.ts marker-inputs /tmp
+          docker image inspect nightmarket/web:ci nightmarket/key-volume:ci --format '{{.RepoTags}} {{.Size}} bytes'
 
   prover-memory:
     # Plan P5.1b (question Q25): the relay streams each prover key to the proof server instead of

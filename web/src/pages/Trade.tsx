@@ -192,8 +192,8 @@ function LegsPreview({
         </span>
       </div>
       <div className="foot" data-testid="legs-price">
-        Price {formatPrice(legs.effectivePrice, { round: legs.side === 'sell' ? 'up' : 'down' }).text}{' '}
-        {quote.symbol} per {base.symbol}
+        Price {formatPrice(legs.effectivePrice, { round: legs.side === 'sell' ? 'up' : 'down' }).text} {quote.symbol}{' '}
+        per {base.symbol}
         {legs.rounded && (
           <span data-testid="legs-rounded"> (rounded to a whole unit of {quote.symbol}, in your favour)</span>
         )}
@@ -340,8 +340,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         {head}
         <EmptyState title="No account in this browser">
           <span data-testid="trade-no-account">
-            Open an account on <a href="#account">Account</a> (or import your export on{' '}
-            <a href="#local">Local data</a>) to trade.
+            Open an account on <a href="#account">Account</a> (or import your export on <a href="#local">Local data</a>)
+            to trade.
           </span>
         </EmptyState>
       </section>

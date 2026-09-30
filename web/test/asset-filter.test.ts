@@ -432,9 +432,7 @@ describe('loadSiteConfig: the site set and pairs from config.json', () => {
       ],
     };
     expect((await loadSiteConfig(fetchJson({ network: 'undeployed', tokens }))).assets).toBeNull();
-    expect(
-      (await loadSiteConfig(fetchJson({ network: 'undeployed', tokens, assets: ['tB'] }))).assets,
-    ).toEqual(['tB']);
+    expect((await loadSiteConfig(fetchJson({ network: 'undeployed', tokens, assets: ['tB'] }))).assets).toEqual(['tB']);
     expect(warn).not.toHaveBeenCalled();
   });
 });

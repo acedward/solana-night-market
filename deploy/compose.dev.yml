@@ -5,17 +5,17 @@
 # Optional overrides, added with more -f flags:
 #   compose.stack.yml    join a local ledger-9 stack's network (STACK_NETWORK=<project>_default)
 #   compose.keys.yml     mount the read-only key volume (RELAY_KEYS_VOLUME)
-#   compose.secrets.yml  mount the sponsor seed and the Sepolia RPC URL as secret files
+#   compose.secrets.yml  mount the sponsor seed as a secret file
 # Tear down with the same files and `down -v`.
 
-name: ${COMPOSE_PROJECT_NAME:-mnbank-dev}
+name: ${COMPOSE_PROJECT_NAME:-nightmarket-dev}
 
 services:
   relay:
     build:
       context: ..
       dockerfile: deploy/relay.Dockerfile
-    image: mnbank/relay:${IMAGE_TAG:-dev}
+    image: nightmarket/relay:${IMAGE_TAG:-dev}
     env_file:
       - path: .env
         required: false

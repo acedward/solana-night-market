@@ -30,13 +30,14 @@ carries real value. Every command runs from the repository root unless it says o
 
 ## 1. What runs
 
-`deploy/compose.yml` runs five services. They start in this order.
+`deploy/compose.yml` runs six services. They start in this order.
 
 | Service | What it does | Public? | Holds a secret? |
 |---|---|---|---|
 | `keys` | A one-shot job. It compiles the Passport account (compactc **0.35.0**; its declared callees with 0.34.0, as compile-time inputs only) and the demo-token faucet (compactc 0.34.0), keeps the prover keys the relay needs, checks them, and writes them to the `keys` volume. Then it exits. Later starts only re-check the volume (a few seconds). | No | No |
 | `proof-server-contracts` | `midnightntwrk/proof-server:9.0.0-rc.8`, pinned by digest: proves the account's circuits (ZKIR 3.1, which rc.6 cannot read) and the faucet's `mint`. | No | No |
 | `proof-server-dust` | `midnightntwrk/proof-server:9.0.0-rc.6`, pinned by digest: proves the sponsor wallet's DUST spends (stagenet requires dust/9; rc.8 proves dust/10). One server will do both once stagenet moves to dust/10. | No | No |
+| `relay-data-init` | A one-shot job before every relay start. It hands the `relay-data` volume to the relay's user (`RELAY_USER`), mode 700, then exits. `busybox` pinned by digest, run as root with no capability except `CHOWN`, no network and a read-only root. | No | No |
 | `relay` | Proves, pays every DUST fee from the sponsor wallet, submits, publishes offers to the exchange and settles takes through its batcher. Keeps no customer data; its only state is the demo-token claims file. | Only through `web`, under `/relay/` | The sponsor seed, as a file |
 | `web` | The static site on an unprivileged nginx. It also passes `/relay/` to the relay, so the site and the relay share one origin. | Yes, behind your TLS proxy | No |
 
@@ -47,7 +48,7 @@ Volumes:
 | `<project>_keys` | 2.2 GB | The compiled account and faucet with the relay's prover keys, and the check report `.night-market-keys.json`. Public artefacts. |
 | `<project>_zk-params` | about 0.2 GB | The public parameters the key compile downloads. |
 | `<project>_contract-proof-params`, `<project>_dust-proof-params` | about 0.3 GB each | Each proof server's public parameters and zswap keys, fetched at its first start. |
-| `<project>_relay-data` | kilobytes | `demo-token-claims.json`: which Solana keys received demo tokens, and when. Back it up (section 7). |
+| `<project>_relay-data` | kilobytes | `demo-token-claims.json`: which Solana keys received demo tokens, and when. Owned by `RELAY_USER`, mode 700 (`relay-data-init`). Back it up (section 7). |
 
 Services you do not run here: the stagenet ZSwap kernel (`https://stagenet.api-zswap.zkdojo.com`)
 and batcher (`https://stagenet.batcher-zswap.zkdojo.com`). They must run with
@@ -105,8 +106,8 @@ sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" /srv/nightmarket/secrets
 
 # 3. The settings.
 cp deploy/.env.example deploy/.env
-# Edit deploy/.env: at least SPONSOR_SEED_HOST_FILE and RELAY_USER="$(id -u):$(id -g)".
-# Keep RELAY_KEYS_FINGERPRINT as shipped. Keep comments on their own lines.
+# Edit deploy/.env: at least SPONSOR_SEED_HOST_FILE and RELAY_USER="$(id -u):$(id -g)"
+# (numbers, not a name). Keep RELAY_KEYS_FINGERPRINT as shipped. Keep comments on their own lines.
 
 # 4. Build the three images (about 5 minutes).
 docker compose -f deploy/compose.yml build
@@ -116,12 +117,28 @@ docker compose -f deploy/compose.yml build
 # 6. The key volume (section 5): about 15 to 60 minutes the first time. Watch it finish.
 docker compose -f deploy/compose.yml up keys
 
-# 7. Start everything.
+# 7. Start everything (relay-data-init runs first and exits 0; see below).
 docker compose -f deploy/compose.yml up -d
 docker compose -f deploy/compose.yml ps     # relay and web must show "healthy"
 curl -s http://127.0.0.1:18080/health       # section 8
 curl -s http://127.0.0.1:18080/v1/demo-tokens   # section 7: enabled, the pack, the day's room
 ```
+
+**The relay's user.** The relay runs as `RELAY_USER`, the host user whose uid can read the seed
+file (mode 600). Its only writable state is the `relay-data` volume. A new volume would take the
+image's directory (uid 1000, mode 700), and a relay of any other uid could not write it. So the
+one-shot `relay-data-init` service runs before every relay start: it hands the volume and
+everything in it to `RELAY_USER`, mode 700. The relay mounts the volume with `nocopy`, so Docker
+never copies the image's ownership back. Changing `RELAY_USER` later needs nothing else: the next
+`up` hands the volume to the new user.
+
+- `docker compose -f deploy/compose.yml logs relay-data-init` shows the result, for example
+  `the relay's data dir now belongs to 1001:1001`.
+- If it exits 64, `RELAY_USER` is not a numeric `uid:gid`.
+- If the relay exits 78 with `the demo-token claims store cannot create its lock file (…): EACCES`,
+  the data dir is not writable by the relay's user. The line names the path, the relay's uid and
+  gid, the directory's owner and the fix. Check that `relay-data-init` ran (`ps -a`), and do not
+  start the relay with `--no-deps` on a new volume.
 
 Then put your TLS proxy in front of `127.0.0.1:18081`. With Caddy:
 
@@ -377,11 +394,13 @@ landed, and released when anything failed, so a failed pack can be claimed again
 landed before the failure is then received twice; faucet tokens cost nothing).
 
 **The claims store** is `<RELAY_DATA_DIR>/demo-token-claims.json`, rewritten atomically on every
-change, next to a lock file that keeps a second relay off it: **one relay per data dir**. It holds
-public values only (the Solana key, the account, times, transaction ids). Back it up with the
-deployment; losing it lets every key claim once more. To let one key claim again, stop the relay,
-remove that key's record from the file, and start it. A reservation found at start (the relay
-stopped mid-job) is released, with a warning in the log.
+change, next to a lock file that keeps a second relay off it: **one relay per data dir**. Only an
+existing lock held by a live process means "in use by another relay"; a lock left by a crash is
+taken over, and a data dir the relay cannot write is reported as that (section 3, "The relay's
+user"). It holds public values only (the Solana key, the account, times, transaction ids). Back it
+up with the deployment; losing it lets every key claim once more. To let one key claim again, stop
+the relay, remove that key's record from the file, and start it. A reservation found at start (the
+relay stopped mid-job) is released, with a warning in the log.
 
 **The two paths.** `direct` (the default): each token is ONE transaction, the faucet's `mint` to the
 account's contract address composed with the account's `deposit_shielded` that receives it, as two
@@ -529,7 +548,7 @@ operator. A batcher that answers 429 means its daily cap: takes resume when the 
 | Symptom | Likely cause | Action |
 |---|---|---|
 | Actions refused, `sponsor.dustLow: true` | Out of DUST | Section 4.4. |
-| Relay exits with code 78 | A configuration error, a key volume missing, incomplete or not the pinned one, or the demo-token claims file in use by another relay | Read the first error line. |
+| Relay exits with code 78 | A configuration error, a key volume missing, incomplete or not the pinned one, the demo-token claims file in use by another relay, or a data dir the relay's user cannot write (`EACCES`, `EROFS`, `ENOSPC`) | Read the first error line: it names the path, the error, the relay's uid and gid, and the fix (section 3, "The relay's user"). |
 | Relay exits with code 75 | The sponsor wallet could not be opened | Check the seed file. |
 | Every signed action refused "the signature does not approve this call" | The page and the relay render with different token lists or labels | Section 6: one token list for both. |
 | A customer's account refused "not a Night Market account" | An account not opened by this market's key set (FR-005) | Expected: the relay only acts on market accounts. |
@@ -541,6 +560,7 @@ operator. A batcher that answers 429 means its daily cap: takes resume when the 
 | Stagenet node / ledger | `2.0.0-d9729c13` / `crate-ledger-9.1.0.0-rc.3` |
 | Contract prover | `midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf` |
 | DUST prover | `midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b` |
+| Data-volume init | `busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e` |
 | Compact compilers | compactc 0.35.0 (`0.35.0 (debb05f94 2026-09-29)`, the account, `--feature-zkir-v3`) and 0.34.0 (the account's callees and the faucet); archive SHA-256s in `scripts/fetch-compactc.sh` |
 | Passport sources | `vendor/passport` = acedward/passport @ `451f7610e90000e0c5550877418122a04b85d0e6` (branch `00047-solana-ed25519-arm`); `account.compact` SHA-256 `800dd4a38f2d25228d4732fdb39b3f5f0cbe42d792eef020914b8532c85f6f26` |
 | Key set fingerprint | `a627edb18f6aa54c48194ee9fb38b89140887cfc56b0efb377c9504b79edda92` |

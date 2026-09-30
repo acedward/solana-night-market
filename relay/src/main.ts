@@ -21,7 +21,7 @@ import {
 } from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
 import { demoTokens, demoTokensInfo } from './demo/action.js';
-import { DemoTokenClaims } from './demo/claims.js';
+import { ClaimsStoreError, DemoTokenClaims } from './demo/claims.js';
 import { DemoFaucets } from './demo/faucet.js';
 import { resolvePack, type ResolvedPackItem } from './demo/pack.js';
 import { healthCollector, httpProbes } from './health.js';
@@ -196,7 +196,12 @@ async function main(): Promise<void> {
       });
       claims.lock();
     } catch (e) {
-      log.error('the demo-token endpoint cannot start; refusing to start', { error: e });
+      // A ClaimsStoreError says what is wrong (another relay holds the lock, or the data dir cannot
+      // be written: path, errno, the relay's uid/gid) and how to fix it; its stack adds nothing.
+      log.error(
+        'the demo-token endpoint cannot start; refusing to start',
+        e instanceof ClaimsStoreError ? { reason: e.message, kind: e.kind, code: e.code, path: e.path } : { error: e },
+      );
       process.exit(78);
     }
     log.info('demo tokens enabled', {

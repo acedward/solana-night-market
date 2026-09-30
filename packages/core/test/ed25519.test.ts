@@ -75,7 +75,7 @@ describe('what the browser and the relay agree on', () => {
   });
 
   it('the pinned client is Track A’s branch head', () => {
-    expect(PASSPORT_CLIENT_COMMIT).toBe('05be272926784f32fd6282b0f0b1689a8238ea43');
+    expect(PASSPORT_CLIENT_COMMIT).toBe('451f7610e90000e0c5550877418122a04b85d0e6');
   });
 });
 

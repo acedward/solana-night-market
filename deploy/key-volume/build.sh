@@ -36,7 +36,7 @@ NM="$APP/node_modules"
 CC=/opt/compactc-0.35.0/compactc
 CALLEE_CC=/opt/compactc-0.34.0/compactc
 KV=(bun "$APP/relay/src/tools/key-volume.ts")
-# account.compact @ acedward/passport 05be272 (branch 00047-solana-ed25519-arm, the Ed25519 arm).
+# account.compact @ acedward/passport 451f761 (branch 00047-solana-ed25519-arm, the Ed25519 arm).
 ACCOUNT_PIN="${KEYS_ACCOUNT_SOURCE_SHA256:-800dd4a38f2d25228d4732fdb39b3f5f0cbe42d792eef020914b8532c85f6f26}"
 MIN_FREE_GB="${KEYS_MIN_FREE_GB:-16}"
 export MIDNIGHT_PP="${MIDNIGHT_PP:-/tmp/zk-params}"

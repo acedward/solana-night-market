@@ -1,5 +1,5 @@
 // The Passport client surface the BROWSER uses, imported module by module from the pinned
-// submodule (vendor/passport = acedward/passport @ 05be272, branch 00047-solana-ed25519-arm: Track
+// submodule (vendor/passport = acedward/passport @ 451f761, branch 00047-solana-ed25519-arm: Track
 // A's Ed25519 arm; questions Q12 option A).
 //
 // Never import the package root or its `./browser` entry here: the root pulls in modules that
@@ -47,4 +47,4 @@ export * from './offer-call.js';
 export * from './vendor/offer-codec.js';
 
 /** The upstream commit the client code above comes from. */
-export const PASSPORT_CLIENT_COMMIT = '05be272926784f32fd6282b0f0b1689a8238ea43';
+export const PASSPORT_CLIENT_COMMIT = '451f7610e90000e0c5550877418122a04b85d0e6';

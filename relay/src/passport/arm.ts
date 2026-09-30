@@ -11,7 +11,7 @@
 //     request), yielding the circuit's trailing authorisation arguments;
 //   - the device a registration enrols.
 //
-// B1.5 typed the seam with Track A's client (vendor/passport @ 05be272): a check's `auth` is Track A's
+// B1.5 typed the seam with Track A's client (vendor/passport @ 451f761): a check's `auth` is Track A's
 // `Ed25519Authorisation` and a registration's device its `Ed25519Device`. `./ed25519-arm.ts` is the
 // arm: its device and circuit arguments are real, its two call checks are lane B3's (TODO(B3)). Until
 // B3 finishes them and defines the Solana envelope scheme, main.ts wires no arm: the account and

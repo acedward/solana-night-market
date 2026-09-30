@@ -19,13 +19,14 @@ import { join } from 'node:path';
 
 import { RELAY_PROVEN_CIRCUITS } from './required.js';
 
-/** The bundles a relay key volume holds, in compile order (callees first). The Passport account
- *  contract declares the ERC20 vault (and through it the Signet singleton) as a callee, so they are
- *  compiled with it, although Night Market proves none of their circuits. */
-export const KEY_VOLUME_BUNDLES = ['SignetSigner', 'SignetCircuits', 'Erc20Vault', 'account'] as const;
+/** The bundles a relay key volume holds: the Passport account alone (AA 00047 B1.5). The account
+ *  declares the ERC20 vault (and through it the Signet singleton) as callees, so the key job still
+ *  compiles them (deploy/key-volume/build.sh), but only as compile-time inputs: the compactc 0.35.0
+ *  account module imports none of their JavaScript, and Night Market proves none of their circuits. */
+export const KEY_VOLUME_BUNDLES = ['account'] as const;
 
-/** The bundles that carry keys (SignetCircuits is JavaScript only). */
-export const KEYED_BUNDLES = ['SignetSigner', 'Erc20Vault', 'account'] as const;
+/** The bundles that carry keys. */
+export const KEYED_BUNDLES = ['account'] as const;
 
 /**
  * The prover keys the key job keeps, as `<bundle>/<circuit>`. Everything else is pruned after

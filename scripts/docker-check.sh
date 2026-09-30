@@ -16,7 +16,9 @@
 #   DOCKER_CHECK_NAME   prefix of the container and volumes (default nightmarket-check)
 #   PLAYWRIGHT_IMAGE    Playwright image with Chromium for @playwright/test 1.62.0
 #   BUN_IMAGE           image the Bun 1.3.11 binary is copied from
-#   COMPACTC_ZIP        optional local compactc 0.34.0 archive (still SHA-256 verified)
+#   COMPACTC_ZIP_0_35_0 optional local compactc 0.35.0 archive (the account; still SHA-256 verified)
+#   COMPACTC_ZIP_0_34_0 optional local compactc 0.34.0 archive (the callees; still SHA-256 verified)
+#   DOCKER_CHECK_MEMORY optional memory cap of the runner container (e.g. 6g; no swap beyond it)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,7 +39,13 @@ up() {
   docker volume create "$BUNV" >/dev/null
   docker run --rm -v "$BUNV:/out" "$BUN_IMAGE" sh -c 'cp /usr/local/bin/bun /out/bun && ln -sf bun /out/bunx'
   local zip=()
-  if [[ -n "${COMPACTC_ZIP:-}" ]]; then zip=(-v "$COMPACTC_ZIP:/in/compactc.zip:ro" -e COMPACTC_ZIP=/in/compactc.zip); fi
+  for v in 0_35_0 0_34_0; do
+    local var="COMPACTC_ZIP_$v"
+    if [[ -n "${!var:-}" ]]; then zip+=(-v "${!var}:/in/compactc-$v.zip:ro" -e "$var=/in/compactc-$v.zip"); fi
+  done
+  if [[ -n "${DOCKER_CHECK_MEMORY:-}" ]]; then
+    zip+=(--memory "$DOCKER_CHECK_MEMORY" --memory-swap "$DOCKER_CHECK_MEMORY")
+  fi
   docker run -d --name "$C" --init \
     -v "$ROOT:/src:ro" -v "$APP:/app" -v "$BUNV:/opt/bun:ro" ${zip[@]+"${zip[@]}"} \
     -e PATH=/opt/bun:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

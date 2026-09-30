@@ -11,6 +11,7 @@
   "dependencies": {
     "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
     "@midnight-ntwrk/compact-runtime": "0.19.0",
+    "@midnight-ntwrk/compact-runtime-0.20": "npm:@midnight-ntwrk/compact-runtime@0.20.0",
     "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
     "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
     "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
@@ -30,6 +31,7 @@
     "@scure/bip39": "2.0.1",
     "hono": "4.13.9",
     "rxjs": "7.8.2",
+    "tweetnacl": "1.0.3",
     "ws": "8.19.0",
     "zod": "4.6.5"
   },

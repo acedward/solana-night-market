@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: bun install --frozen-lockfile
-      - name: Compile the Passport contracts' JavaScript (compactc 0.34.0, SHA-256 checked, no keys)
+      - name: Compile the Passport contracts' JavaScript (account compactc 0.35.0, callees 0.34.0, SHA-256 checked, no keys)
         run: bun run contracts
       - run: bun run format:check
       - run: bun run lint
@@ -149,7 +149,9 @@ jobs:
         run: |
           found="$(docker run --rm --entrypoint sh nightmarket/key-volume:ci -c 'find / -xdev \( -name "*.prover" -o -name "*.verifier" \) -print 2>/dev/null' || true)"
           if [ -n "$found" ]; then echo "keys found in the image:"; echo "$found"; exit 1; fi
-          docker run --rm --entrypoint /opt/compactc/compactc nightmarket/key-volume:ci --version | grep -qx 0.34.0
+          docker run --rm --entrypoint /opt/compactc-0.35.0/compactc nightmarket/key-volume:ci --version | grep -qx '0.35.0 (debb05f94 2026-09-29)'
+          docker run --rm --entrypoint /opt/compactc-0.34.0/compactc nightmarket/key-volume:ci --version | grep -qx 0.34.0
+          docker run --rm --entrypoint bun nightmarket/key-volume:ci -e "console.log(require('/app/node_modules/@midnight-ntwrk/compact-runtime-0.20/package.json').version)" | grep -qx 0.20.0
           docker run --rm --entrypoint bun nightmarket/key-volume:ci relay/src/tools/key-volume.ts marker-inputs /tmp
           docker image inspect nightmarket/web:ci nightmarket/key-volume:ci --format '{{.RepoTags}} {{.Size}} bytes'
 

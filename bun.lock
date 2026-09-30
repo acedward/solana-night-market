@@ -25,9 +25,11 @@
       "version": "0.1.0",
       "dependencies": {
         "@midnight-ntwrk/compact-runtime": "0.19.0",
+        "@midnight-ntwrk/compact-runtime-0.20": "npm:@midnight-ntwrk/compact-runtime@0.20.0",
         "@noble/curves": "2.2.0",
         "@noble/hashes": "2.2.0",
         "@scure/base": "2.0.0",
+        "tweetnacl": "1.0.3",
         "zod": "4.6.5",
       },
     },
@@ -37,6 +39,7 @@
       "dependencies": {
         "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
         "@midnight-ntwrk/compact-runtime": "0.19.0",
+        "@midnight-ntwrk/compact-runtime-0.20": "npm:@midnight-ntwrk/compact-runtime@0.20.0",
         "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",
         "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0-beta.7",
         "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0-beta.7",
@@ -56,6 +59,7 @@
         "@scure/bip39": "2.0.1",
         "hono": "4.13.9",
         "rxjs": "7.8.2",
+        "tweetnacl": "1.0.3",
         "ws": "8.19.0",
         "zod": "4.6.5",
       },
@@ -177,6 +181,8 @@
     "@midnight-ntwrk/compact-js": ["@midnight-ntwrk/compact-js@2.5.5-rc.8", "", { "dependencies": { "@effect/platform": "^0.97.0", "@midnight-ntwrk/compact-runtime": "0.19.0-rc.0", "@midnight-ntwrk/platform-js": "^3.0.0", "@midnightntwrk/ledger-v9": "^1.0.0-rc.3", "@noble/hashes": "^2.3.0", "effect": "^3.22.1", "tslib": "^2.8.1" } }, "sha512-7CGWGCTL+8IvqFUI/srHRwAWxGVLD2ytHLjSyvOcNi6UX1QLeG5vUtGlXQAKSJXvjPwndosqIFdW39OgkNH/Mg=="],
 
     "@midnight-ntwrk/compact-runtime": ["@midnight-ntwrk/compact-runtime@0.19.0", "", { "dependencies": { "@midnightntwrk/onchain-runtime-v4": "^4.0.0-rc.3", "@noble/curves": "^2.2.0", "@noble/hashes": "^2.0.1", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-0q1ZOlyPdCCEasAxlHxagO6Sb+Db5GM6qYPQ+c+cp71NRxQgiY0Wd0/LIoshQTs+OBISb4XTjiNQ1lxcKR79qQ=="],
+
+    "@midnight-ntwrk/compact-runtime-0.20": ["@midnight-ntwrk/compact-runtime@0.20.0", "", { "dependencies": { "@midnightntwrk/onchain-runtime-v4": "^4.0.0-rc.3", "@noble/curves": "^2.2.0", "@noble/hashes": "^2.0.1", "@types/object-inspect": "^1.8.1", "object-inspect": "^1.12.3" } }, "sha512-vtwZ6PiqPy6sUHmXJlrv/3SyjEsKVdQaRroWowTGgu55CJlJXONUplHyst/dRVKe9C6sApveIo2FgbXoBMiMeQ=="],
 
     "@midnight-ntwrk/midnight-js-contracts": ["@midnight-ntwrk/midnight-js-contracts@5.0.0-beta.7", "", { "dependencies": { "@midnight-ntwrk/midnight-js-network-id": "5.0.0-beta.7", "@midnight-ntwrk/midnight-js-protocol": "5.0.0-beta.7", "@midnight-ntwrk/midnight-js-types": "5.0.0-beta.7", "@midnight-ntwrk/midnight-js-utils": "5.0.0-beta.7", "effect": "^3.22.1" } }, "sha512-dWM+u2SEShctUb6BvR38wiXWPr4JkYAughEM33RpthP+mnqGP+C5oOq9FOPLzdKvlYg6Ne5Fk+OMiJjaG0AZQg=="],
 
@@ -808,6 +814,8 @@
 
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
+    "tweetnacl": ["tweetnacl@1.0.3", "", {}, "sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw=="],
+
     "type-check": ["type-check@0.4.0", "", { "dependencies": { "prelude-ls": "^1.2.1" } }, "sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew=="],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
@@ -855,6 +863,10 @@
     "@midnight-ntwrk/compact-js/@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@midnight-ntwrk/compact-runtime/@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
+
+    "@midnight-ntwrk/compact-runtime-0.20/@noble/curves": ["@noble/curves@2.4.0", "", { "dependencies": { "@noble/hashes": "2.4.0" } }, "sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew=="],
+
+    "@midnight-ntwrk/compact-runtime-0.20/@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@midnight-ntwrk/midnight-js-indexer-public-data-provider/ws": ["ws@8.22.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg=="],
 

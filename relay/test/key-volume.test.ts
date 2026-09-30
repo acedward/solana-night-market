@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_KEPT_PROVERS,
+  KEYED_BUNDLES,
+  KEY_VOLUME_BUNDLES,
   checkExpectedVk,
   compareDeployed,
   deployedVerifierDigests,
@@ -124,23 +126,23 @@ describe('check 2: against the deployed verifier keys', () => {
 });
 
 describe('prune, re-stamp and completeness', () => {
+  it('holds the account bundle alone: the callees are compile-time inputs only (B1.5)', () => {
+    expect([...KEY_VOLUME_BUNDLES]).toEqual(['account']);
+    expect([...KEYED_BUNDLES]).toEqual(['account']);
+    for (const kept of DEFAULT_KEPT_PROVERS) expect(kept).toMatch(/^account\//);
+  });
+
   it('prunes every prover key not kept, re-stamps the manifest, and keeps the fingerprint', () => {
     const root = tree({
       account: { circuits: ['activate', 'withdraw', 'rotate'], provers: ['activate', 'withdraw', 'rotate'] },
-      Erc20Vault: { circuits: ['startDeposit', 'initialise'], provers: ['startDeposit', 'initialise'] },
-      SignetSigner: { circuits: ['signBidirectional'], provers: ['signBidirectional'] },
     });
     const before = scanKeyTree(root).fingerprint;
-    const kept = ['account/activate', 'account/withdraw', 'Erc20Vault/startDeposit', 'SignetSigner/signBidirectional'];
+    const kept = ['account/activate', 'account/withdraw'];
     const doomed = proversToPrune(root, kept);
-    expect(doomed.map((f) => f.slice(root.length + 1)).sort()).toEqual([
-      'Erc20Vault/keys/initialise.prover',
-      'account/keys/rotate.prover',
-    ]);
+    expect(doomed.map((f) => f.slice(root.length + 1)).sort()).toEqual(['account/keys/rotate.prover']);
     for (const f of doomed) rmSync(f);
     expect(restampManifest(join(root, 'account'))).toBe(1);
-    expect(restampManifest(join(root, 'Erc20Vault'))).toBe(1);
-    expect(restampManifest(join(root, 'SignetSigner'))).toBe(0);
+    expect(restampManifest(join(root, 'account'))).toBe(0);
     const manifest = JSON.parse(readFileSync(join(root, 'account', 'compiler', 'contract-manifest.json'), 'utf8'));
     expect(Object.keys(manifest.keys).sort()).toEqual([
       'activate.prover',

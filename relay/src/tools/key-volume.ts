@@ -116,6 +116,11 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
       source: env('KV_SOURCE') ?? null,
       compactc: env('KV_COMPACTC_VERSION') ?? null,
       compactcArchiveSha256: env('KV_COMPACTC_ARCHIVE_SHA256') ?? null,
+      // The account's declared callees (compile-time inputs only; not installed) and the runtime the
+      // account module is pinned to (AA 00047 B1.5).
+      calleeCompactc: env('KV_CALLEE_COMPACTC_VERSION') ?? null,
+      calleeCompactcArchiveSha256: env('KV_CALLEE_COMPACTC_ARCHIVE_SHA256') ?? null,
+      contractRuntime: env('KV_CONTRACT_RUNTIME') ?? null,
       sigNetMidnight: env('KV_SIGNET_VERSION') ?? null,
       passportCommit: env('KV_PASSPORT_COMMIT') ?? null,
       accountSourceSha256: env('KV_ACCOUNT_SHA256') ?? null,

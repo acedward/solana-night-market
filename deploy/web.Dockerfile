@@ -20,10 +20,11 @@ COPY relay/package.json relay/
 COPY web/package.json web/
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY tsconfig.base.json ./
-COPY scripts/fetch-compactc.sh scripts/compile-contracts.sh scripts/
+COPY scripts/fetch-compactc.sh scripts/compile-contracts.sh scripts/pin-contract-runtime.mjs scripts/
 COPY vendor/passport/contract vendor/passport/contract
-# The light compile: the contracts' JavaScript for the browser (compactc 0.34.0, SHA-256 checked,
-# --skip-zk: no keys).
+# The light compile: the contracts' JavaScript for the browser (--skip-zk: no keys). The account with
+# compactc 0.35.0, its declared callees with 0.34.0, both SHA-256 checked; the account module then
+# resolves compact-runtime 0.20.0 (the bundle's only runtime: the browser loads nothing else of it).
 RUN bash scripts/compile-contracts.sh
 COPY packages/core packages/core
 COPY web web

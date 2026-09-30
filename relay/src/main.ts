@@ -1,24 +1,35 @@
 // The relay's entry point (Bun): load the configuration, register every secret with the log
 // redactor, check the key volume (and refuse to start when it lacks any circuit the relay proves,
 // plan P4-A), open the sponsor wallet (under the funding lock when one is configured), wire the
-// device arm when this build has one (lane B3: ./passport/arm.ts `wiredArm`), and serve.
+// Ed25519 arm and the Solana envelope scheme when the key volume is loaded (lane B3:
+// ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, and serve.
 
 import { readFileSync } from 'node:fs';
 
-import { accountCatalogue, defaultCatalogue, withTrade } from './actions/catalogue.js';
+import { accountCatalogue, defaultCatalogue, withDemoTokens, withTrade } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
 import { createApp } from './app.js';
 import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
 import { DigestReplayGuard } from './auth/verifiers.js';
 import { IndexerClient } from './chain/indexer.js';
-import { IndexerChainReader, notImplementedChainReader, type ChainReader } from './chain/reader.js';
+import {
+  IndexerChainReader,
+  notImplementedChainReader,
+  type ChainReader,
+  type ContractBalances,
+} from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
+import { demoTokens, demoTokensInfo } from './demo/action.js';
+import { DemoTokenClaims } from './demo/claims.js';
+import { DemoFaucets } from './demo/faucet.js';
+import { resolvePack, type ResolvedPackItem } from './demo/pack.js';
 import { healthCollector, httpProbes } from './health.js';
 import { Redactor, createLogger } from './log.js';
 import { ProofServerClient } from './prover/client.js';
 import { cachedKeyCheck, checkKeyVolume, keyVolumeProblems } from './prover/keys.js';
-import { RELAY_PROVEN_CIRCUITS } from './prover/required.js';
+import { DEMO_TOKEN_PROVEN_CIRCUITS, RELAY_PROVEN_CIRCUITS } from './prover/required.js';
+import { accountKeysChecker, type OnChainAccountState } from './passport/account-keys.js';
 import { wiredArm } from './passport/arm.js';
 import { PassportRuntime, PassportRuntimeError } from './passport/runtime.js';
 import { JobQueue } from './queue/jobs.js';
@@ -49,7 +60,11 @@ async function main(): Promise<void> {
   // fails, the relay does not start: a missing key would otherwise surface only in a customer's job.
   // (No deployed callee is checked: MN Bank checked the bridge vault's keys; Night Market has none.)
   const deployed: Record<string, string> = {};
-  const keys = () => checkKeyVolume(config.managedPath, config.keysFingerprint, RELAY_PROVEN_CIRCUITS, deployed);
+  // The demo-token endpoint also proves the faucet's mint and the account's deposit (B3).
+  const required = config.demoTokens.enabled
+    ? [...RELAY_PROVEN_CIRCUITS, ...DEMO_TOKEN_PROVEN_CIRCUITS]
+    : RELAY_PROVEN_CIRCUITS;
+  const keys = () => checkKeyVolume(config.managedPath, config.keysFingerprint, required, deployed);
   const keyCheck = keys();
   if (config.managedPath && !keyCheck.present && !config.requireKeys) {
     // The image names a default key path; with nothing mounted there the relay runs keyless (CI,
@@ -66,12 +81,12 @@ async function main(): Promise<void> {
     if (problems.length > 0) {
       log.error(
         `the key volume is incomplete or does not match; refusing to start (${problems.length} problem${problems.length === 1 ? '' : 's'})`,
-        { problems, fingerprint: keyCheck.fingerprint, circuitsChecked: RELAY_PROVEN_CIRCUITS.length },
+        { problems, fingerprint: keyCheck.fingerprint, circuitsChecked: required.length },
       );
       process.exit(78);
     }
     log.info('key volume complete', {
-      circuits: RELAY_PROVEN_CIRCUITS.length,
+      circuits: required.length,
       fingerprint: keyCheck.fingerprint,
       deployedKeysChecked: Object.keys(deployed).length,
     });
@@ -134,15 +149,63 @@ async function main(): Promise<void> {
   }
   const indexer = new IndexerClient({ indexerUrl: config.network.midnight.indexerUrl });
   const chain: ChainReader = runtime
-    ? new IndexerChainReader((account) => runtime!.ledgerState(account), indexer)
+    ? new IndexerChainReader(
+        (account) => runtime!.ledgerState(account),
+        indexer,
+        undefined,
+        async (account) => (await runtime!.contractState(account)) as ContractBalances | null,
+      )
     : notImplementedChainReader;
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
 
-  // The device arm (lane B3): Track A's Ed25519 arm and the Solana wallet's envelope scheme. This
-  // build wires none yet, so every action answers "not supported" (the default catalogue).
-  const wired = wiredArm();
-  if (!wired)
-    log.warn('no device arm is wired in this build (plan lane B3): account and trade actions are unavailable');
+  // The device arm (lane B3): Track A's Ed25519 arm (each account call authorised by its own F3
+  // signature) and the Solana wallet's envelope scheme (registration, demo tokens), with FR-005's
+  // check that every account it acts on carries the pinned verifier keys and a retired authority.
+  // Without a key volume there is nothing to prove with: the default catalogue answers "not
+  // available" for every action.
+  const accountKeys =
+    runtime && config.managedPath
+      ? accountKeysChecker({
+          managedPath: config.managedPath,
+          circuits: (runtime.client.shape as { accountCircuitIds(): string[] }).accountCircuitIds(),
+          readState: async (a) => (await runtime!.contractState(a)) as OnChainAccountState | null,
+          log: log.child({ component: 'account-keys' }),
+        })
+      : undefined;
+  const wired = runtime
+    ? await wiredArm({
+        network: config.network.name,
+        tokens: config.tokens,
+        ...(accountKeys ? { accountKeys } : {}),
+      })
+    : null;
+  if (!wired) log.warn('no key volume is loaded: account, trade and demo-token actions are unavailable');
+
+  // The demo-token endpoint (spec FR-007): its pack, its claims store (the relay's only persistent
+  // state, one relay per data dir), and the faucets it mints from.
+  let demoPack: ResolvedPackItem[] = [];
+  let claims: DemoTokenClaims | null = null;
+  if (config.demoTokens.enabled) {
+    try {
+      demoPack = resolvePack(config.demoTokens.pack, config.tokens);
+      claims = new DemoTokenClaims({
+        file: config.demoTokens.claimsFile,
+        dailyCap: config.demoTokens.dailyCap,
+        onRecovered: (n) =>
+          log.warn('released demo-token reservations left by a previous run (it stopped mid-job)', { count: n }),
+      });
+      claims.lock();
+    } catch (e) {
+      log.error('the demo-token endpoint cannot start; refusing to start', { error: e });
+      process.exit(78);
+    }
+    log.info('demo tokens enabled', {
+      pack: demoPack.map((p) => `${p.symbol}:${p.amount}`).join(','),
+      dailyCap: config.demoTokens.dailyCap,
+      path: config.demoTokens.path,
+      claimedToday: claims.claimedToday(),
+    });
+  }
 
   // Security review F-B3: `append-inbox` is sponsored only against a single-use entitlement the
   // relay issued for a change coin (./actions/entitlements.ts); the MAC key comes from the seed.
@@ -178,43 +241,71 @@ async function main(): Promise<void> {
     cacheSeconds: config.healthCacheSeconds,
     batcherRefusal: () => batcherRefusal,
   });
+  let catalogue = wired
+    ? withTrade(
+        accountCatalogue({
+          runtime: () => runtime,
+          arm: wired.arm,
+          scheme: wired.scheme,
+          sponsor,
+          network: config.network.name,
+          withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
+          replay,
+          entitlements,
+          log: log.child({ component: 'accounts' }),
+        }),
+        {
+          runtime: () => runtime,
+          arm: wired.arm,
+          sponsor,
+          kernelUrl: config.network.zswap.kernelUrl,
+          batcherUrl: config.network.zswap.batcherUrl,
+          batcherTarget: config.network.zswap.batcherTarget,
+          replay,
+          log: log.child({ component: 'trade' }),
+          onBatcherRefusal: (httpStatus) => {
+            batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
+          },
+        },
+      )
+    : defaultCatalogue();
+  if (wired && runtime && claims) {
+    const faucets = new DemoFaucets(runtime, log.child({ component: 'demo-tokens' }));
+    catalogue = withDemoTokens(
+      catalogue,
+      demoTokens({
+        runtime: () => runtime,
+        sponsor,
+        claims,
+        pack: demoPack,
+        path: config.demoTokens.path,
+        arm: wired.arm,
+        ...(accountKeys ? { accountKeys } : {}),
+        mint: (o) =>
+          o.path === 'direct'
+            ? faucets.direct({ ...o, networkId: config.network.midnightNetworkId })
+            : faucets.viaSponsor(o),
+        log: log.child({ component: 'demo-tokens' }),
+      }),
+    );
+  }
   const app = createApp({
     config,
     version: RELAY_VERSION,
     log,
     nonces,
     queue,
-    catalogue: wired
-      ? withTrade(
-          accountCatalogue({
-            runtime: () => runtime,
-            arm: wired.arm,
-            scheme: wired.scheme,
-            sponsor,
-            network: config.network.name,
-            replay,
-            entitlements,
-            log: log.child({ component: 'accounts' }),
-          }),
-          {
-            runtime: () => runtime,
-            arm: wired.arm,
-            sponsor,
-            kernelUrl: config.network.zswap.kernelUrl,
-            batcherUrl: config.network.zswap.batcherUrl,
-            batcherTarget: config.network.zswap.batcherTarget,
-            replay,
-            log: log.child({ component: 'trade' }),
-            onBatcherRefusal: (httpStatus) => {
-              batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
-            },
-          },
-        )
-      : defaultCatalogue(),
+    catalogue,
     sponsor,
     health,
     chain,
     ...(wired ? { scheme: wired.scheme, passportCall: passportCallAuthoriser(() => runtime, wired.arm, replay) } : {}),
+    demoTokens: demoTokensInfo({
+      claims: claims ?? new DemoTokenClaims({ file: null, dailyCap: config.demoTokens.dailyCap }),
+      pack: demoPack,
+      enabled: config.demoTokens.enabled && !!wired && !!claims,
+      dailyCap: config.demoTokens.dailyCap,
+    }),
   });
 
   const sweeper = setInterval(() => {
@@ -237,6 +328,7 @@ async function main(): Promise<void> {
     log.info('shutting down', { signal });
     clearInterval(sweeper);
     await server.stop();
+    claims?.unlock();
     await sponsor.stop().catch((e: unknown) => log.warn('sponsor stop failed', { error: e }));
     process.exit(0);
   };

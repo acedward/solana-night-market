@@ -12,6 +12,7 @@ AA 00047; it rebuilds the harness on the Ed25519 arm.
 | File | What it does |
 |---|---|
 | `fund-account.ts` | Funds a Passport account with a shielded coin the way any third party would, with `deposit_shielded(coin, entry)` (arm-agnostic). |
+| `b3/` | The relay's own flows (account opening, demo tokens, withdrawals, an offer) with Solana-signed requests on a ledger-9 localnet, and a tiny stagenet faucet check (lane B3, `b3/README.md`). |
 
 None of this runs in GitHub's hosted CI: a local ledger-9 stack needs far more memory and disk than
 a hosted runner has.

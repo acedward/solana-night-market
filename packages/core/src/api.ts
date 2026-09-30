@@ -175,5 +175,9 @@ export const PublicConfigSchema = z.object({
     authMaxTtlSeconds: z.number().int(),
     jobTtlSeconds: z.number().int(),
   }),
+  /** Security review F-B6 (AA 00047 questions Q13): true when the relay requires a SECOND signature
+   *  (a Solana envelope over the whole body) for a shielded withdrawal that names a recipient
+   *  encryption key. False by default: one wallet prompt per action. */
+  withdrawRecipientEnvelope: z.boolean().optional(),
 });
 export type PublicConfig = z.infer<typeof PublicConfigSchema>;

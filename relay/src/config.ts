@@ -8,6 +8,8 @@
 import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
 import {
+  DEMO_TOKEN_PATHS,
+  type DemoTokenPath,
   type NetworkOverrides,
   type NetworkProfile,
   type TokenRegistry,
@@ -79,8 +81,53 @@ export interface RelayConfig {
     /** The most inbox appends the market pays for per account in any rolling 24 h (F-B3 backstop). */
     appendsPerAccountPerDay: number;
   };
+  /** Security review F-B6 (questions Q13): require a second signature (a Solana envelope over the
+   *  whole body) for a withdrawal that names a recipient encryption key. Off by default: one wallet
+   *  prompt per action, the encryption key rides the request unsigned (RUNBOOK §F-B6). */
+  withdrawRecipientEnvelope: boolean;
+  /** Where the relay keeps its only persistent state (the demo-token claims); null: none. */
+  dataDir: string | null;
+  demoTokens: DemoTokensConfig;
   healthCacheSeconds: number;
   logLevel: LogLevel;
+}
+
+/** The demo-token endpoint (spec FR-007, plan B3). */
+export interface DemoTokensConfig {
+  enabled: boolean;
+  /** The pack, as configured: a symbol and a whole-token amount each ("twUSDC:1000"). Resolved against
+   *  the registry (decimals, faucet contract, domain separator) by relay/src/demo/pack.ts. */
+  pack: { symbol: string; amount: string }[];
+  /** Claims admitted in any rolling 24 hours, across all keys. */
+  dailyCap: number;
+  /** How the pack reaches the account (packages/core/src/demo-tokens.ts). */
+  path: DemoTokenPath;
+  /** The claims store: `<RELAY_DATA_DIR>/demo-token-claims.json`. */
+  claimsFile: string | null;
+}
+
+/** The default pack (spec US3): 1,000 twUSDC, 0.1 twBTC, 1 twETH. */
+export const DEFAULT_DEMO_PACK = 'twUSDC:1000,twBTC:0.1,twETH:1';
+
+/** Parse DEMO_TOKENS_PACK: comma-separated `SYMBOL:AMOUNT` (a whole-token decimal amount). */
+export function parseDemoPack(value: string): { symbol: string; amount: string }[] {
+  const items = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const m = /^([A-Za-z0-9._-]{1,16}):([0-9]+(?:\.[0-9]+)?)$/.exec(item);
+      if (!m) throw new ConfigError(`DEMO_TOKENS_PACK: "${item}" is not SYMBOL:AMOUNT`);
+      return { symbol: m[1]!, amount: m[2]! };
+    });
+  if (items.length === 0) throw new ConfigError('DEMO_TOKENS_PACK names no token');
+  const seen = new Set<string>();
+  for (const i of items) {
+    const k = i.symbol.toLowerCase();
+    if (seen.has(k)) throw new ConfigError(`DEMO_TOKENS_PACK names ${i.symbol} twice`);
+    seen.add(k);
+  }
+  return items;
 }
 
 export interface RelaySecrets {
@@ -242,6 +289,15 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
   const fundingLockFile = str(env.SPONSOR_FUNDING_LOCK_FILE) ?? null;
   const dedicated = bool(env.SPONSOR_DEDICATED_WALLET, false, 'SPONSOR_DEDICATED_WALLET');
 
+  const dataDir = str(env.RELAY_DATA_DIR) ?? null;
+  const demoEnabled = bool(env.DEMO_TOKENS_ENABLED, false, 'DEMO_TOKENS_ENABLED');
+  // `direct` (one transaction per token) is the default since B3's localnet run (questions Q17).
+  const demoPath = (str(env.DEMO_TOKENS_PATH) ?? 'direct') as DemoTokenPath;
+  if (!DEMO_TOKEN_PATHS.includes(demoPath))
+    throw new ConfigError(`DEMO_TOKENS_PATH must be one of ${DEMO_TOKEN_PATHS.join(', ')}`);
+  if (demoEnabled && !dataDir)
+    throw new ConfigError('DEMO_TOKENS_ENABLED needs RELAY_DATA_DIR (the claims store is its only persistent state)');
+
   const config: RelayConfig = {
     network,
     tokens,
@@ -296,6 +352,15 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         'APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY',
         1,
       ),
+    },
+    withdrawRecipientEnvelope: bool(env.RELAY_WITHDRAW_RECIPIENT_ENVELOPE, false, 'RELAY_WITHDRAW_RECIPIENT_ENVELOPE'),
+    dataDir,
+    demoTokens: {
+      enabled: demoEnabled,
+      pack: parseDemoPack(str(env.DEMO_TOKENS_PACK) ?? DEFAULT_DEMO_PACK),
+      dailyCap: int(env.DEMO_TOKENS_DAILY_CAP, 100, 'DEMO_TOKENS_DAILY_CAP', 1, 1_000_000),
+      path: demoPath,
+      claimsFile: dataDir ? `${dataDir.replace(/\/+$/, '')}/demo-token-claims.json` : null,
     },
     healthCacheSeconds: int(env.HEALTH_CACHE_SECONDS, 15, 'HEALTH_CACHE_SECONDS', 0, 600),
     logLevel,

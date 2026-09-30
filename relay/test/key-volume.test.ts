@@ -52,11 +52,11 @@ function tree(bundles: Record<string, { circuits: string[]; provers: string[] }>
 }
 
 describe('the kept prover list', () => {
-  it('defaults to the relay set plus deposit_shielded, and nothing of the bridge vault', () => {
+  it('defaults to the relay set plus the demo pack (deposit_shielded, faucet/mint), and nothing of the bridge vault', () => {
     const kept = parseKeptProvers(undefined);
     expect(kept).toEqual([...DEFAULT_KEPT_PROVERS]);
     expect(kept).toContain('account/deposit_shielded');
-    expect(kept.filter((k) => !k.startsWith('account/'))).toEqual([]);
+    expect(kept.filter((k) => !k.startsWith('account/'))).toEqual(['faucet/mint']);
     expect(parseKeptProvers('  ')).toEqual([...DEFAULT_KEPT_PROVERS]);
   });
 
@@ -67,9 +67,9 @@ describe('the kept prover list', () => {
   });
 
   it('keeps every circuit the relay proves (relay/src/prover/required.ts)', () => {
-    expect(RELAY_PROVEN_CIRCUITS.length).toBe(4);
+    expect(RELAY_PROVEN_CIRCUITS.length).toBe(5);
     for (const r of RELAY_PROVEN_CIRCUITS) expect(DEFAULT_KEPT_PROVERS).toContain(r);
-    expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 1);
+    expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 2);
   });
 });
 
@@ -126,10 +126,10 @@ describe('check 2: against the deployed verifier keys', () => {
 });
 
 describe('prune, re-stamp and completeness', () => {
-  it('holds the account bundle alone: the callees are compile-time inputs only (B1.5)', () => {
-    expect([...KEY_VOLUME_BUNDLES]).toEqual(['account']);
-    expect([...KEYED_BUNDLES]).toEqual(['account']);
-    for (const kept of DEFAULT_KEPT_PROVERS) expect(kept).toMatch(/^account\//);
+  it('holds the account and the demo faucet: the callees are compile-time inputs only (B1.5, B3)', () => {
+    expect([...KEY_VOLUME_BUNDLES]).toEqual(['account', 'faucet']);
+    expect([...KEYED_BUNDLES]).toEqual(['account', 'faucet']);
+    for (const kept of DEFAULT_KEPT_PROVERS) expect(kept).toMatch(/^(account\/|faucet\/mint$)/);
   });
 
   it('prunes every prover key not kept, re-stamps the manifest, and keeps the fingerprint', () => {

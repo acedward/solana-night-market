@@ -36,7 +36,10 @@ COPY relay/src relay/src
 # `@midnight-ntwrk/compact-runtime-0.20` alias installed above; everything else keeps 0.19.0.
 COPY vendor/passport/contract/package.json vendor/passport/contract/
 COPY vendor/passport/contract/src vendor/passport/contract/src
-RUN mkdir -p vendor/passport/contract/contracts/managed
+# The key volume's mount point, and the relay's data dir (the demo-token claims; a new named volume
+# mounted there takes this ownership, so the unprivileged relay can write it).
+RUN mkdir -p vendor/passport/contract/contracts/managed /var/lib/night-market \
+ && chown bun:bun /var/lib/night-market && chmod 0700 /var/lib/night-market
 ENV MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed
 USER bun
 EXPOSE 8080

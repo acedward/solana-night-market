@@ -1,67 +1,193 @@
 // The Ed25519 arm on the relay (AA 00047): a Solana wallet's key controls the account, on Track A's
 // client (acedward/passport branch 00047-solana-ed25519-arm, vendor/passport; docs/ED25519-ARM.md).
 //
-// B1.5 wires what is fixed by Track A's API:
-//   - the arm's circuits and the circuit's trailing arguments (`ed25519AuthArgs`: pk, use_counter,
-//     sig, show);
-//   - the device a registration enrols: `Ed25519Device` from the wallet's 32-byte public key alone
-//     (activation is permissionless: the boot commitment binds the key), strictly decoded, with the
-//     market's label and token display (`@nightmarket/core/passport`), so its `entryAt` is the arm's
-//     own rolling-entry derivation.
-// Lane B3 writes the two call checks (TODO(B3) below). Each is Track A's relay-side pattern:
+// REQUEST AUTH IS THE CALL'S OWN SIGNATURE (lane B3): the browser sends the wallet's 64-byte
+// signature over the call's F3 message (PassportAuth), and the relay accepts the request only when
+// that signature verifies over the message IT rebuilds from the call's arguments and the account's
+// current public state. It is the very signature the circuit verifies, so every account action is
+// one Phantom prompt, and a request the relay accepts is a call the account will accept. Each check:
 //   1. `preflightCall` (./arm.ts): the account, the body, the PassportAuth's shape, the account's
-//      state (booted, at the auth nonce the call binds);
-//   2. `ed25519DeviceForCheck(passport, display).sign(ctx, request, counter)` (or `signOffer` with
-//      `openSwapArgs(payload)`) with `ctx` = the account, its auth nonce and its sealed network salt
-//      (`evm_domain_salt`): it rebuilds the challenge and the F3 message from the call's own
-//      arguments, compares them with the contract's own rendering, and verifies the browser's
-//      signature with tweetnacl (strict R, s unreduced) before any proving time is spent;
-//   3. the device's rolling entry at the signed use counter is a live member of `ledger.devices`
-//      (`device.entryAt(account, ledger.device_epoch, counter)`);
-//   4. the result's `digestHex` for the replay guard (the rendered message's digest).
+//      state (booted, at the auth nonce the call binds: an approval for an older nonce is refused
+//      as `expired`, never replayed);
+//   2. the account is a market account (spec FR-005, ./account-keys.ts): its on-chain verifier keys
+//      are the relay's pinned key set and its maintenance authority is retired;
+//   3. `ed25519DeviceForCheck(passport, display).sign(ctx, request, counter)` (or `signOffer` with
+//      `openSwapArgs(payload)`), `ctx` = the account, its auth nonce and its sealed network salt
+//      (`evm_domain_salt`): Track A's device rebuilds the challenge and the F3 message (label =
+//      the relay's network label, symbols and decimals from the relay's registry), compares them
+//      with the contract's own rendering, refuses anything a wallet could read as a Solana
+//      transaction, verifies the browser's signature with tweetnacl, decodes R strictly (not the
+//      identity) and refuses s >= L, all before any proving time is spent. Another key, other
+//      bytes, another account, another network (label or salt) all fail here;
+//   4. the device's rolling entry at the signed use counter is a live member of `ledger.devices`;
+//   5. `digestHex` (SHA-256 of the signed message) for the replay guard: the same approval can be
+//      queued once (relay/src/auth/verifiers.ts `DigestReplayGuard`), and the on-chain `auth_nonce`
+//      makes it single use for good once the call lands.
 //
 // Track A's client loads the compiled account module (in a deployment, the key volume's), so it is
 // imported here at run time only: a relay without a key volume still starts and serves reads.
 
+import { createHash } from 'node:crypto';
+
 import type { NetworkName, TokenRegistry } from '@nightmarket/core';
 
-import type { Ed25519Authorisation } from '../../../vendor/passport/contract/src/wallet/ed25519.js';
-import { ARM_CIRCUITS, DEVICE_ARM, type DeviceArm, type GatedCheckFail } from './arm.js';
+import type * as CorePassport from '@nightmarket/core/passport';
+
+import type { Ed25519Authorisation, Ed25519Device } from '../../../vendor/passport/contract/src/wallet/ed25519.js';
+import type { CallContext } from '../../../vendor/passport/contract/src/wallet/signer.js';
+import {
+  ARM_CIRCUITS,
+  DEVICE_ARM,
+  parseGatedPayload,
+  parseTradePayload,
+  preflightCall,
+  type AccountKeysCheck,
+  type CallCheckOk,
+  type DeviceArm,
+  type GatedAction,
+  type GatedCheckFail,
+  type TradeAction,
+} from './arm.js';
+import type { AccountLedger, PassportRuntime } from './runtime.js';
 
 export interface Ed25519ArmOptions {
   /** The network, for the label every message starts with (`marketLabel`). */
   network: NetworkName;
   /** The market's token registry, for the symbols and decimals the messages show. It must be the
-   *  registry the browser renders with (TODO(B2/B3): one source for both sides). */
+   *  registry the browser renders with (questions Q12: the relay's registry is the source). */
   tokens: TokenRegistry;
+  /** FR-005: the account is a market account with the pinned verifier keys (./account-keys.ts).
+   *  Absent in unit tests that exercise the signature checks alone. */
+  accountKeys?: AccountKeysCheck;
 }
 
 /** The trailing arguments of every `_with_ed25519` gated circuit and of the offer circuit (Track A's
  *  `ed25519AuthArgs`; relay/test/ed25519-arm.test.ts holds the two equal). */
 export const ed25519ArmAuthArgs = (a: Ed25519Authorisation): unknown[] => [a.pk, a.use_counter, a.sig, a.show];
 
-export const CHECK_NOT_WIRED =
-  'the Ed25519 call check is not wired yet (plan lane B3): the relay does not prove Solana-signed calls';
+const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+const unhex = (h: string) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ''), 'hex'));
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const notWired = async (): Promise<GatedCheckFail> => ({ ok: false, code: 'not-supported', reason: CHECK_NOT_WIRED });
+/** Why Track A's device refused to rebuild a call, as a check failure. */
+function refusal(e: unknown): GatedCheckFail {
+  const m = errorText(e);
+  // The call cannot be displayed (an amount of 10^24 base units or more, a label or symbol the arm
+  // cannot render): nothing a wallet signed can authorise it.
+  if (e instanceof RangeError) return { ok: false, code: 'malformed', reason: `the call cannot be approved: ${m}` };
+  return {
+    ok: false,
+    code: 'bad-signature',
+    reason: `the signature does not approve this call on this account (${m.slice(0, 240)})`,
+  };
+}
 
-/** The Ed25519 arm (its call checks are lane B3's: TODO(B3)). */
+type Rebuild = (device: Ed25519Device, ctx: CallContext, counter: bigint) => Promise<Ed25519Authorisation>;
+
+/** The Ed25519 arm (lane B3). */
 export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
+  const display = { network: options.network, tokens: options.tokens };
+
+  async function check<P extends { authNonce: string }>(
+    runtime: PassportRuntime,
+    accountRaw: string | undefined,
+    payload: P | null,
+    passportRaw: unknown,
+    rebuild: (payload: P, core: typeof CorePassport) => Rebuild,
+  ): Promise<CallCheckOk<P> | GatedCheckFail> {
+    const pre = await preflightCall(runtime, accountRaw, payload, passportRaw);
+    if (!pre.ok) return pre;
+    const { account, passport, ledger } = pre;
+
+    if (options.accountKeys) {
+      const keys = await options.accountKeys(account);
+      if (!keys.ok) return { ok: false, code: 'wrong-account', reason: keys.reason };
+    }
+
+    const core = await import('@nightmarket/core/passport');
+    let device: Ed25519Device;
+    try {
+      device = core.ed25519DeviceForCheck(passport, display);
+    } catch (e) {
+      return { ok: false, code: 'wrong-signer', reason: `the signing key is not a valid device key: ${errorText(e)}` };
+    }
+    const ctx = core.callContext({
+      account,
+      authNonce: ledger.auth_nonce,
+      networkSalt: hex(Uint8Array.from(ledger.evm_domain_salt)),
+    });
+    const counter = BigInt(passport.useCounter);
+    let auth: Ed25519Authorisation;
+    try {
+      auth = await rebuild(pre.payload, core)(device, ctx, counter);
+    } catch (e) {
+      return refusal(e);
+    }
+    if (!isLiveDevice(ledger, device, account, counter)) {
+      return {
+        ok: false,
+        code: 'wrong-signer',
+        reason: 'the signing key is not a live device of this account at the signed use counter',
+      };
+    }
+    return {
+      ok: true,
+      account,
+      signer: passport.owner,
+      payload: pre.payload,
+      passport,
+      auth,
+      digestHex: createHash('sha256').update(auth.message).digest('hex'),
+      ledger,
+    };
+  }
+
   return {
     name: DEVICE_ARM,
     circuits: ARM_CIRCUITS,
-    // TODO(B3): steps 1–4 of the header, over `parseGatedPayload(action, payload)` and
-    // `withdrawRequest` / `appendInboxRequest` (@nightmarket/core/passport).
-    checkGatedCall: notWired,
-    // TODO(B3): the same over `parseTradePayload(action, payload)` and `openSwapArgs(payload)`, with
-    // `signOffer` (one swap-circuit call, signed once; a take keeps 00039's fully guaranteed
-    // transcript steering).
-    checkTradeCall: notWired,
+    checkGatedCall<A extends GatedAction>(
+      runtime: PassportRuntime,
+      action: A,
+      account: string | undefined,
+      payload: unknown,
+      passportAuth: unknown,
+    ) {
+      const parsed = parseGatedPayload(action, payload);
+      return check(runtime, account, parsed, passportAuth, (p, core) => {
+        const request =
+          action === 'withdraw'
+            ? core.withdrawRequest(p as never)
+            : action === 'withdraw-unshielded'
+              ? core.withdrawUnshieldedRequest(p as never)
+              : core.appendInboxRequest(p as never);
+        return (device, ctx, counter) => device.sign(ctx, request, counter);
+      }) as never;
+    },
+    checkTradeCall<A extends TradeAction>(
+      runtime: PassportRuntime,
+      action: A,
+      account: string | undefined,
+      payload: unknown,
+      passportAuth: unknown,
+    ) {
+      // A make and a take are the same swap-circuit call, signed once (the take's `offerId` is not
+      // signed: the take executor checks the maker's offer is exactly this call's complement).
+      const parsed = parseTradePayload(action, payload);
+      return check(runtime, account, parsed, passportAuth, (p, core) => {
+        const { call, coin } = core.openSwapArgs(p);
+        return (device, ctx, counter) => device.signOffer(ctx, call, coin, counter);
+      }) as never;
+    },
     authArgs: ed25519ArmAuthArgs,
     async registrationDevice(_runtime, { deviceKey }) {
       const { ed25519DeviceForKey } = await import('@nightmarket/core/passport');
-      const device = ed25519DeviceForKey(deviceKey, options);
+      const device = ed25519DeviceForKey(deviceKey, display);
       return { device, entryAt: (account, epoch, counter) => device.entryAt(account, epoch, counter) };
     },
   };
+}
+
+/** Whether `device`'s rolling entry at `counter` (under the account's current epoch) is live. */
+export function isLiveDevice(ledger: AccountLedger, device: Ed25519Device, account: string, counter: bigint): boolean {
+  return ledger.devices.member(device.entryAt(unhex(account), ledger.device_epoch, counter));
 }

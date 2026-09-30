@@ -6,11 +6,12 @@
 // refuses before any authorisation is used up. Read routes leak nothing secret.
 //
 // Two authorisations exist (relay/src/auth/verifiers.ts):
-//   relay-action   register: a RelayAction envelope with a relay-issued nonce;
-//   passport-call  withdraw, append-inbox, open-swap, take: the call's own Passport signature; its
-//                  "nonce" is the account's on-chain auth nonce.
-// The arm and the envelope scheme are the TEST ones (./fake-arm.ts, the core test scheme): the
-// Ed25519 arm and the Solana scheme are lane B3's. The route rules do not depend on them.
+//   relay-action   register, demo-tokens: a RelayAction envelope with a relay-issued nonce;
+//   passport-call  withdraw, withdraw-unshielded, append-inbox, open-swap, take: the call's own
+//                  Passport signature; its "nonce" is the account's on-chain auth nonce.
+// The arm and the envelope scheme are the TEST ones (./fake-arm.ts, the core test scheme): the route
+// rules do not depend on them. The Ed25519 arm's own checks are relay/test/ed25519-arm.test.ts, the
+// Solana scheme's packages/core/test/solana-auth.test.ts.
 
 import { randomBytes } from 'node:crypto';
 
@@ -27,10 +28,13 @@ import {
   type RelayActionName,
   type TakePayload,
   type WithdrawPayload,
+  type WithdrawUnshieldedPayload,
 } from '@nightmarket/core';
 
 import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
-import { accountCatalogue, withTrade } from '../src/actions/catalogue.js';
+import { accountCatalogue, withDemoTokens, withTrade } from '../src/actions/catalogue.js';
+import { demoTokens } from '../src/demo/action.js';
+import { DemoTokenClaims } from '../src/demo/claims.js';
 import { createApp } from '../src/app.js';
 import { NonceStore } from '../src/auth/nonces.js';
 import { passportCallAuthoriser } from '../src/auth/passport-call.js';
@@ -55,8 +59,8 @@ const KIND: Record<RelayActionName, Kind> = {
   'append-inbox': 'passport-call',
   'open-swap': 'passport-call',
   take: 'passport-call',
+  'withdraw-unshielded': 'passport-call',
   'demo-tokens': 'relay-action',
-  'withdraw-unshielded': 'relay-action', // lane B3 makes it a passport-call (packages/core/src/unshielded.ts)
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -78,7 +82,13 @@ type Device = ReturnType<typeof newDevice>;
 
 /** The relay as main.ts wires it once an arm is wired, with fakes at the edges (runtime, sponsor). */
 function productionRelay(
-  opts: { env?: Record<string, string>; sponsor?: CountingSponsor; appendsPerDay?: number } = {},
+  opts: {
+    env?: Record<string, string>;
+    sponsor?: CountingSponsor;
+    appendsPerDay?: number;
+    /** F-B6's second signature for a withdrawal's encryption key (questions Q13; off by default). */
+    fb6?: boolean;
+  } = {},
 ) {
   const device = newDevice();
   const config = loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', ...opts.env }, () =>
@@ -98,6 +108,7 @@ function productionRelay(
       scheme: testScheme,
       sponsor,
       network: 'undeployed',
+      withdrawRecipientEnvelope: opts.fb6 ?? false,
       replay,
       entitlements,
       log,
@@ -111,6 +122,20 @@ function productionRelay(
       replay,
       log,
     },
+  );
+  const claims = new DemoTokenClaims({ file: null, dailyCap: 100 });
+  withDemoTokens(
+    catalogue,
+    demoTokens({
+      runtime: () => rt,
+      sponsor,
+      claims,
+      pack: [],
+      path: 'via-sponsor',
+      arm: testArm,
+      mint: async () => ({}),
+      log,
+    }),
   );
   const health = async (): Promise<HealthResponse> => {
     throw new Error('not used here');
@@ -158,10 +183,6 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
   switch (action) {
     case 'register':
       return { encPublicKey: (n % 2 ? 'cd' : 'ab').repeat(32) };
-    case 'demo-tokens':
-      return {};
-    case 'withdraw-unshielded':
-      return { recipient: '12'.repeat(32), color: COLOUR_A, amount, authNonce: a };
     case 'withdraw':
       return {
         recipient: '11'.repeat(32),
@@ -172,6 +193,10 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
       } satisfies WithdrawPayload;
     case 'append-inbox':
       return { entry: (0xcd + (n % 16)).toString(16).repeat(192), authNonce: a } satisfies AppendInboxPayload;
+    case 'withdraw-unshielded':
+      return { recipient: '44'.repeat(32), color: COLOUR_A, amount, authNonce: a } satisfies WithdrawUnshieldedPayload;
+    case 'demo-tokens':
+      return {};
     case 'open-swap':
     case 'take': {
       const make: OpenSwapPayload = {
@@ -210,6 +235,8 @@ async function body(r: Relay, action: RelayActionName, t: Tamper = {}) {
   const signer = t.signer ?? r.device;
   const owner = t.owner ?? signer;
   const account = action === 'register' ? undefined : ACCOUNT;
+  // demo-tokens is claimed once per key: a variant `n` is a different key's claim in these tests
+  // only where the test says so; its body is always empty.
   if (KIND[action] === 'relay-action') {
     const payload = payloadFor(action, t.n);
     const nonce =
@@ -366,7 +393,17 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (acti
   });
 });
 
-describe('a withdrawal to a wallet binds its encryption key (security review F-B6)', () => {
+describe('one prompt per withdrawal by default (questions Q13 option B)', () => {
+  it('accepts a withdrawal to a wallet with its encryption key and no second signature', async () => {
+    const r = productionRelay();
+    const b = await body(r, 'withdraw');
+    const res = await post(r, 'withdraw', { ...b, payload: { ...b.payload, recipientEncryptionKey: '55'.repeat(32) } });
+    expect(res.status).toBe(202);
+    expect(r.queued()).toBe(1);
+  });
+});
+
+describe('a withdrawal to a wallet binds its encryption key when F-B6 is on (RELAY_WITHDRAW_RECIPIENT_ENVELOPE)', () => {
   const KEY = '55'.repeat(32);
   /** A withdraw to a wallet: the Passport call (which cannot cover the key) and, optionally, a
    *  RelayAction envelope over the whole body by `envelopeSigner`, for `signedKey`. */
@@ -394,22 +431,22 @@ describe('a withdrawal to a wallet binds its encryption key (security review F-B
   }
 
   it('accepts the call with an envelope over the whole body, by the same device', async () => {
-    const r = productionRelay();
+    const r = productionRelay({ fb6: true });
     expect((await post(r, 'withdraw', await withdrawTo(r))).status).toBe(202);
     expect(r.queued()).toBe(1);
   });
 
   it('refuses a changed encryption key after signing, a missing envelope, or another signer, before any work', async () => {
-    let r = productionRelay();
+    let r = productionRelay({ fb6: true });
     await refused(
       r,
       await post(r, 'withdraw', await withdrawTo(r, { sentKey: '66'.repeat(32) })),
       401,
       'payload-mismatch',
     );
-    r = productionRelay();
+    r = productionRelay({ fb6: true });
     await refused(r, await post(r, 'withdraw', await withdrawTo(r, { envelopeSigner: null })), 401, 'malformed');
-    r = productionRelay();
+    r = productionRelay({ fb6: true });
     await refused(
       r,
       await post(r, 'withdraw', await withdrawTo(r, { envelopeSigner: newDevice() })),

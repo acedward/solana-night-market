@@ -90,6 +90,9 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
       expect((await post(h, action, tampered)).status).toBe(400);
       const swapped = { ...body, payload: { encPublicKey: 'cd'.repeat(32) } };
       await expect401(await post(h, action, swapped), 'payload-mismatch');
+    } else if (action === 'demo-tokens') {
+      // the claim's body is strictly empty: anything added is refused before the signature is checked
+      expect((await post(h, action, tampered)).status).toBe(400);
     } else {
       await expect401(await post(h, action, tampered), 'payload-mismatch');
     }
@@ -112,7 +115,7 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
   });
 });
 
-describe('before a wallet arm is wired (lane B3)', () => {
+describe('a relay without the Ed25519 arm (no key volume: no scheme, no Passport-call check)', () => {
   it.each(RELAY_ACTIONS)('refuses %s as not supported, whatever it carries, and queues nothing', async (action) => {
     const h = harness({ scheme: null });
     const body = await signedBody(h, action, newWallet());
@@ -204,7 +207,7 @@ describe('reads', () => {
     expect((await h.app.request('/health')).status).toBe(200);
     const cfg = (await (await h.app.request('/v1/config')).json()) as Record<string, unknown>;
     expect(cfg).toMatchObject({ network: 'undeployed', relayVersion: 'test' });
-    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion']);
+    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion', 'withdrawRecipientEnvelope']);
     expect((await h.app.request('/v1/queue')).status).toBe(200);
     expect((await h.app.request('/v1/jobs/zz')).status).toBe(400);
     expect((await h.app.request(`/v1/jobs/${'0'.repeat(32)}`)).status).toBe(404);

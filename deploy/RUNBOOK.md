@@ -185,7 +185,7 @@ P6 of AA 00047 re-measures the Ed25519 arm):
 | Action | DUST from the sponsor |
 |---|---|
 | Open an account (two deploys and an activation) | about 60 |
-| Demo tokens | about 1 per transaction: one transaction per token (`direct`) or two (`via-sponsor`), section 7 |
+| Demo tokens | about 1 per transaction: one transaction per token (`direct`, the default) or two (`via-sponsor`), section 7 |
 | Withdrawal (shielded or unshielded), change re-filing | about 1 each |
 | Make an offer; take an offer | 0 (the batcher pays the settlement) |
 
@@ -363,7 +363,7 @@ account. The faucets are permissionless and the tokens cost nothing; the sponsor
 | `DEMO_TOKENS_ENABLED` | `true` (in `.env.example`) | Off: `GET /v1/demo-tokens` says `enabled: false` and the action is refused. |
 | `DEMO_TOKENS_PACK` | `twUSDC:1000,twBTC:0.1,twETH:1` | Whole-token amounts. Every symbol must be a **shielded** registry token with a faucet contract (the stagenet registry has four). |
 | `DEMO_TOKENS_DAILY_CAP` | `100` | Claims admitted in any rolling 24 hours, across all keys. |
-| `DEMO_TOKENS_PATH` | `via-sponsor` | How the pack reaches the account (below). |
+| `DEMO_TOKENS_PATH` | `direct` | How the pack reaches the account (below). |
 | `RELAY_DATA_DIR` | `/var/lib/night-market` (compose) | Where the claims file lives. |
 
 **Limits.** Once per Solana key, ever (whatever the account), within the daily cap, and the
@@ -379,10 +379,13 @@ deployment; losing it lets every key claim once more. To let one key claim again
 remove that key's record from the file, and start it. A reservation found at start (the relay
 stopped mid-job) is released, with a warning in the log.
 
-**The two paths.** `direct`: each token is ONE transaction, the faucet's `mint` to the account's
-contract address composed with the account's `deposit_shielded` that receives it. `via-sponsor`:
-the faucet mints to the sponsor wallet, which then deposits a coin of that colour into the account
-(two transactions per token; the way any third party funds an account). Either way the account's
+**The two paths.** `direct` (the default): each token is ONE transaction, the faucet's `mint` to the
+account's contract address composed with the account's `deposit_shielded` that receives it, as two
+calls of one intent (no issuer-call claim is needed). `via-sponsor`: the faucet mints to the sponsor
+wallet, which then deposits a coin of that colour into the account (two transactions per token; the
+way any third party funds an account). Both passed on a ledger-9 localnet on 2026-09-30 (a
+two-token pack: `direct` 2 transactions in 36 s, `via-sponsor` 4 in 82 s). If stagenet ever refuses
+the composed transaction, set `DEMO_TOKENS_PATH=via-sponsor`: no code change. Either way the account's
 inbox gets an entry sealed to its own key, so its owner finds the coins. Before a faucet's first
 use the relay checks that its on-chain `mint` verifier key is the key volume's.
 
@@ -418,7 +421,7 @@ value; request bodies are never logged).
 
 | Limit | Value | Effect |
 |---|---|---|
-| Proofs | one at a time, market-wide | Every signed action holds the prover lane; others queue, and the page shows the position. A demo-token pack holds it for all its tokens (about a minute per token on `via-sponsor`). |
+| Proofs | one at a time, market-wide | Every signed action holds the prover lane; others queue, and the page shows the position. A demo-token pack holds it for all its tokens (about 20 s per token on `direct`, 40 s on `via-sponsor`, measured locally). |
 | Batcher | 1,000 requests per 24 hours per IP per target, and 1,000 for all clients together | Every take the relay settles is one request, so at most 1,000 takes a day. |
 | Kernel | 600 requests per minute per IP | Browsers read prices directly; the relay posts offers. |
 | Relay, per client address | reads 240/min, `/health` 60/min, nonces 30/min, actions 10/min; actions per Solana key 5/min | `RATE_LIMIT_*`. |

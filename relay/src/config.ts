@@ -291,7 +291,8 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
 
   const dataDir = str(env.RELAY_DATA_DIR) ?? null;
   const demoEnabled = bool(env.DEMO_TOKENS_ENABLED, false, 'DEMO_TOKENS_ENABLED');
-  const demoPath = (str(env.DEMO_TOKENS_PATH) ?? 'via-sponsor') as DemoTokenPath;
+  // `direct` (one transaction per token) is the default since B3's localnet run (questions Q17).
+  const demoPath = (str(env.DEMO_TOKENS_PATH) ?? 'direct') as DemoTokenPath;
   if (!DEMO_TOKEN_PATHS.includes(demoPath))
     throw new ConfigError(`DEMO_TOKENS_PATH must be one of ${DEMO_TOKEN_PATHS.join(', ')}`);
   if (demoEnabled && !dataDir)

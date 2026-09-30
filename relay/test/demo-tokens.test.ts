@@ -150,7 +150,7 @@ describe('the pack', () => {
     expect(config.demoTokens).toMatchObject({
       enabled: true,
       dailyCap: 100,
-      path: 'via-sponsor',
+      path: 'direct',
       claimsFile: '/var/lib/nm/demo-token-claims.json',
     });
     expect(() => loadConfig({ ...env, RELAY_DATA_DIR: '/d', DEMO_TOKENS_PATH: 'magic' }, () => '')).toThrow(

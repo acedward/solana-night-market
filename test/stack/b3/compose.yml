@@ -95,7 +95,7 @@ services:
       SPONSOR_FEE_BLOCKS_MARGIN: '20'
       DEMO_TOKENS_ENABLED: 'true'
       DEMO_TOKENS_PACK: ${DEMO_TOKENS_PACK:-twUSDC:1000,twBTC:0.1}
-      DEMO_TOKENS_PATH: ${DEMO_TOKENS_PATH:-via-sponsor}
+      DEMO_TOKENS_PATH: ${DEMO_TOKENS_PATH:-direct}
       DEMO_TOKENS_DAILY_CAP: '10'
       RELAY_DATA_DIR: /var/lib/night-market
       RATE_LIMIT_ACTIONS_PER_MIN: '100'

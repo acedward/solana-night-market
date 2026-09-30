@@ -122,8 +122,14 @@ export const HealthResponseSchema = z.object({
     configured: z.boolean(),
     state: z.string(),
     synced: z.boolean(),
-    /** DUST balance in specks (10^-15 DUST), decimal string; null when unknown. */
+    /** DUST balance in specks (10^-15 DUST), decimal string; null when unknown. The settled
+     *  balance (issue 00049): a DUST output locked by one of the sponsor's transactions in flight
+     *  counts at its value minus that transaction's fee (in full until the fee is known), so the
+     *  balance does not dip mid-transaction. */
     dustSpecks: z.string().nullable(),
+    /** The part of `dustSpecks` held by transactions in flight, decimal string ("0" when idle).
+     *  Optional so a page tolerates an older relay. */
+    dustInFlightSpecks: z.string().optional(),
     dustLow: z.boolean(),
   }),
   /** The CONTRACT prover (proof server 9.0.0-rc.8): the account's circuits, with the key volume. */

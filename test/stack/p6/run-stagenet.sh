@@ -141,9 +141,11 @@ relay_up() {
   printf '%s\n' "$h" >"$OUT/health-start-$(date -u +%H%M%S).json"
   say "relay health: $(head -c 900 <<<"$h")"
 }
-# The sponsor's DUST, only while the relay is idle: while a transaction is in flight the wallet
-# counts the whole DUST output it spends as gone until the change comes back (a drop of thousands of
-# DUST for a fee of a few), so a reading mid-job is not a spend.
+# The sponsor's DUST, only while the relay is idle. The wallet itself counts the whole DUST output
+# a transaction spends as gone until the change comes back (a drop of thousands of DUST for a fee of
+# a few). Since P7.5 (issue 00049) the relay's /health reports the settled balance instead, which
+# does not dip. The idle filter stays: an idle reading also has every fee known and every change
+# back, so it is exact.
 dust_now() {
   curl -s "http://127.0.0.1:$RELAY_PORT/health" |
     python3 -c '

@@ -1,0 +1,118 @@
+# Local-stack harness (AA 00047 B3): the smallest ledger-9 localnet for the relay's own flows, from
+# Track A's recipe (acedward/passport `contract/infra/docker-compose.ed25519.yml`: the node is
+# stagenet's build; rc.6 proves the wallets' DUST, rc.8 the account's circuits), plus the relay
+# (its image and the key volume) and a mock kernel. Driven by test/stack/b3/run-local.sh.
+#
+# Every host port is bound to 127.0.0.1 and chosen by the caller. Never run two of these at once on
+# one host (memory: a k=18 proof peaks near 9.4 GiB in rc.8).
+services:
+  node:
+    # midnight-node 2.0.0-rc.4 multiarch index; reports 2.0.0-d9729c13, stagenet's build.
+    image: docker.io/midnightntwrk/midnight-node@sha256:caf93d6f9fb3630c906ef3e714c151655377f3d28f907d17545de1870514da2e
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ['no-new-privileges:true']
+    ports: ['127.0.0.1:${NODE_PORT:?}:9944']
+    volumes: [node-data:/node]
+    environment:
+      CFG_PRESET: 'dev'
+      SIDECHAIN_BLOCK_BENEFICIARY: '04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e'
+      THRESHOLD: '0'
+    healthcheck:
+      test:
+        - 'CMD-SHELL'
+        - >
+          curl -fs -H 'Content-Type: application/json' -d
+          '{"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[1]}' http://localhost:9944 | grep -q
+          '"result":"0x'
+      interval: 2s
+      timeout: 5s
+      retries: 45
+      start_period: 120s
+
+  indexer:
+    # indexer-standalone 4.4.0-rc.3 (Track A's evidence run used the effectstream/binaries 0.3.120 build).
+    image: ${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc.3}
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    ports: ['127.0.0.1:${INDEXER_PORT:?}:8088']
+    volumes: [indexer-data:/data]
+    environment:
+      RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,info'
+      APP__APPLICATION__NETWORK_ID: 'undeployed'
+      APP__APPLICATION__CONCURRENCY_LIMIT: '1'
+      APP__INFRA__STORAGE__MAX_CONNECTIONS: '8'
+      APP__INFRA__NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: 'localnet-not-using-spo'
+      APP__INFRA__SPO_NODE__RECONNECT_MAX_DELAY: '24h'
+      APP__INFRA__SECRET: '303132333435363738393031323334353637383930313233343536373839303132'
+    depends_on:
+      node:
+        condition: service_healthy
+
+  proof-server:
+    # 9.0.0-rc.6: the wallets' DUST proofs (dust/9).
+    image: midnightntwrk/proof-server@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    environment:
+      PORT: '6300'
+      MIDNIGHT_PP: /params
+    volumes: ['${PS_PARAMS:?}:/params']
+    mem_limit: 6g
+
+  proof-server-rc8:
+    # 9.0.0-rc.8: the account's circuits (ZKIR 3.1) and the faucet's mint.
+    image: midnightntwrk/proof-server:9.0.0-rc.8
+    environment:
+      PORT: '6300'
+      MIDNIGHT_PP: /params
+    volumes: ['${PS8_PARAMS:?}:/params']
+    mem_limit: 14g
+
+  kernel:
+    image: ${BUN_IMAGE:-oven/bun:1.3.11}
+    working_dir: /app
+    command: ['bun', 'test/stack/b3/mock-kernel.ts']
+    environment:
+      PORT: '9999'
+    volumes: ['app:/app:ro']
+    profiles: [relay]
+
+  relay:
+    image: ${RELAY_IMAGE:?}
+    user: '1000:1000'
+    environment:
+      HOME: /tmp
+      RELAY_NETWORK: undeployed
+      TOKENS_FILE: /run/nm/tokens.json
+      MIDNIGHT_CONTRACT_PROOF_SERVER_URL: http://proof-server-rc8:6300
+      MIDNIGHT_DUST_PROOF_SERVER_URL: http://proof-server:6300
+      MIDNIGHT_MANAGED_PATH: /app/vendor/passport/contract/contracts/managed
+      RELAY_REQUIRE_KEYS: 'true'
+      RELAY_KEYS_FINGERPRINT: ${RELAY_KEYS_FINGERPRINT:-}
+      SPONSOR_ENABLED: 'true'
+      SPONSOR_SEED_FILE: /run/nm/sponsor.seed
+      SPONSOR_FEE_BLOCKS_MARGIN: '20'
+      DEMO_TOKENS_ENABLED: 'true'
+      DEMO_TOKENS_PACK: ${DEMO_TOKENS_PACK:-twUSDC:1000,twBTC:0.1}
+      DEMO_TOKENS_PATH: ${DEMO_TOKENS_PATH:-via-sponsor}
+      DEMO_TOKENS_DAILY_CAP: '10'
+      RELAY_DATA_DIR: /var/lib/night-market
+      RATE_LIMIT_ACTIONS_PER_MIN: '100'
+      RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN: '100'
+      LOG_LEVEL: info
+    volumes:
+      - '${KEYS_DIR:?}:/app/vendor/passport/contract/contracts/managed:ro'
+      - '${RUN_DIR:?}:/run/nm:ro'
+      - relay-data:/var/lib/night-market
+    ports: ['127.0.0.1:${RELAY_PORT:?}:8080']
+    profiles: [relay]
+
+volumes:
+  node-data:
+  indexer-data:
+  relay-data:
+  # The repository with its node_modules and the light compile (scripts/docker-check.sh's volume).
+  app:
+    external: true
+    name: ${APP_VOLUME:?}

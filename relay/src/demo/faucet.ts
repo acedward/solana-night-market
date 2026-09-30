@@ -134,14 +134,13 @@ export class DemoFaucets {
     };
   }
 
-  /** `via-sponsor`: mint to the sponsor wallet, wait for the coin, deposit it into the account. */
-  async viaSponsor(o: {
+  /** The first half of `via-sponsor`: mint `item` to the sponsor wallet's own coin key and wait
+   *  until the wallet holds it. Returns the mint's transaction id. */
+  async mintToSponsor(o: {
     wallet: SponsorWalletHandle;
-    account: string;
-    encKey: Uint8Array;
     item: ResolvedPackItem;
-    stage: (name: string, detail?: Record<string, string>) => void;
-  }): Promise<MintOutcome> {
+    stage?: (name: string, detail?: Record<string, string>) => void;
+  }): Promise<string> {
     const { compiled, zk } = await this.load();
     await this.checkFaucet(o.item.faucet);
     const { submitCallTx } = await import('@midnight-ntwrk/midnight-js-contracts');
@@ -149,7 +148,6 @@ export class DemoFaucets {
     const base = await this.rt.providers(o.wallet);
     const wp = base.walletProvider as RelayWalletProvider;
     const before = await shieldedBalance(o.wallet, o.item.colour);
-
     const minted = (await (submitCallTx as unknown as (p: unknown, opts: unknown) => Promise<unknown>)(
       this.providersFor(base, zk),
       {
@@ -160,10 +158,22 @@ export class DemoFaucets {
       },
     )) as { public?: { txId?: string } };
     const mintTx = String(minted.public?.txId ?? '');
-    o.stage('minted', { symbol: o.item.symbol, tx: mintTx });
-
+    o.stage?.('minted', { symbol: o.item.symbol, tx: mintTx });
     await waitForShieldedBalance(o.wallet, o.item.colour, before + amount, 180_000);
+    return mintTx;
+  }
 
+  /** `via-sponsor`: mint to the sponsor wallet, wait for the coin, deposit it into the account. */
+  async viaSponsor(o: {
+    wallet: SponsorWalletHandle;
+    account: string;
+    encKey: Uint8Array;
+    item: ResolvedPackItem;
+    stage: (name: string, detail?: Record<string, string>) => void;
+  }): Promise<MintOutcome> {
+    const mintTx = await this.mintToSponsor(o);
+    const amount = BigInt(o.item.amount);
+    const base = await this.rt.providers(o.wallet);
     const { sealEntryPortable } = await import('@nightmarket/core/passport');
     const coin = { nonce: new Uint8Array(randomBytes(32)), color: unhex(o.item.colour), value: amount };
     const entry = await sealEntryPortable(o.encKey, coin);
@@ -202,6 +212,7 @@ export class DemoFaucets {
       submitTx(p: unknown, opts: unknown): Promise<{ txId?: string }>;
     };
     const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as LedgerV9;
+    const types = (await import('@midnight-ntwrk/midnight-js-types')) as unknown as MidnightJsTypes;
     const amount = BigInt(o.item.amount);
     const base = await this.rt.providers(o.wallet);
 
@@ -236,8 +247,8 @@ export class DemoFaucets {
 
     const ttl = new Date(Date.now() + 60 * 60 * 1000);
     const intent = ledger.Intent.new(ttl)
-      .addCall(prototype(ledger, o.item.faucet, FAUCET_MINT_CIRCUIT, faucetState, mintCall))
-      .addCall(prototype(ledger, o.account, 'deposit_shielded', accountState, depositCall));
+      .addCall(prototype(ledger, types, o.item.faucet, FAUCET_MINT_CIRCUIT, faucetState, mintCall))
+      .addCall(prototype(ledger, types, o.account, 'deposit_shielded', accountState, depositCall));
     const receiverTx = depositCall.private.unprovenTx as {
       guaranteedOffer?: unknown;
       fallibleOffer?: Map<number, unknown>;
@@ -281,15 +292,28 @@ interface LedgerV9Intent {
   addCall(c: unknown): LedgerV9Intent;
 }
 
+/**
+ * One call of the composed intent. Its key location is midnight-js's CONTRACT key location (the
+ * address, the circuit and its verifier key's hash), as `createUnprovenCallTx` gives a call: the
+ * relay's proof provider resolves the bundle by it (a bare circuit id would read as a protocol
+ * builtin, and the proof server refuses its check).
+ */
 function prototype(
   ledger: LedgerV9,
+  types: MidnightJsTypes,
   address: string,
   circuitId: string,
   state: { serialize(): Uint8Array },
   call: RawCall,
 ): unknown {
-  const operation = ledger.ContractState.deserialize(state.serialize()).operation(circuitId);
-  if (!operation) throw new FaucetError(`no ${circuitId} operation at ${address.slice(0, 16)}…`);
+  const operation = ledger.ContractState.deserialize(state.serialize()).operation(circuitId) as
+    { verifierKey?: Uint8Array } | undefined;
+  if (!operation?.verifierKey) throw new FaucetError(`no ${circuitId} operation at ${address.slice(0, 16)}…`);
+  const keyLocation = types.encodeContractKeyLocation({
+    contractAddress: address,
+    circuitId,
+    verifierKeyHash: types.hashVerifierKey(operation.verifierKey),
+  });
   return new ledger.ContractCallPrototype(
     address,
     circuitId,
@@ -300,8 +324,13 @@ function prototype(
     call.private.input,
     call.private.output,
     ledger.communicationCommitmentRandomness(),
-    circuitId,
+    keyLocation,
   );
+}
+
+interface MidnightJsTypes {
+  encodeContractKeyLocation(o: { contractAddress: string; circuitId: string; verifierKeyHash: string }): string;
+  hashVerifierKey(vk: Uint8Array): string;
 }
 
 /** A ZK config provider that serves the faucet's `mint` from the faucet bundle and every other

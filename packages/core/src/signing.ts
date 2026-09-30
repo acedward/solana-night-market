@@ -14,8 +14,9 @@
 // (../passport/ed25519.ts: `ed25519DeviceOf(signer, display)` turns a DeviceSigner into Track A's
 // `Ed25519Device`, whose `signMessage` callback this interface's `signMessage` is). That module is
 // kept out of this package's root on purpose: it loads the compiled account module.
-// The relay ENVELOPE's message format is still lane B3's (`RelayActionScheme` in ./auth.ts,
-// TODO(B3)).
+// The relay ENVELOPE's message (opening an account, claiming demo tokens) is the Solana scheme of
+// `@nightmarket/core/solana-auth` (../solana-auth.ts, lane B3, questions Q14): Track A's possession
+// message carrying the envelope's digest; the wallet signs its bytes with this same `signMessage`.
 
 import { base58 } from '@scure/base';
 

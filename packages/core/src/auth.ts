@@ -13,7 +13,7 @@
 //
 // THE SIGNATURE SCHEME is `RelayActionScheme`: it turns an envelope into the exact bytes the wallet
 // signs and checks a signature over them. The Solana wallet's scheme (AA 00047 lane B3, questions
-// Q14) is ./solana-auth.ts: Track A's proof-of-key-possession message, whose nonce field carries the
+// Q14) is ./solana-auth.ts (entry `@nightmarket/core/solana-auth`): Track A's proof-of-key-possession message, whose nonce field carries the
 // envelope's digest, verified strictly. Only the actions that have no account call of their own use
 // an envelope: opening an account and claiming demo tokens (and a withdrawal's recipient, only when a
 // deployment turns F-B6's switch on, Q13). Every account CALL is authorised by its own F3 message

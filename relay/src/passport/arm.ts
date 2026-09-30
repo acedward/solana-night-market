@@ -29,7 +29,6 @@ import {
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
-  solanaRelayActionScheme,
   type AppendInboxPayload,
   type NetworkName,
   type OpenSwapPayload,
@@ -210,6 +209,9 @@ export async function wiredArm(options: {
   tokens: TokenRegistry;
   accountKeys?: AccountKeysCheck;
 }): Promise<{ arm: DeviceArm; scheme: RelayActionScheme }> {
+  // Both at run time: the arm loads the compiled account, the scheme the pinned client's message
+  // module; neither is in the key-volume image, which imports this file for the circuit names.
   const { ed25519Arm } = await import('./ed25519-arm.js');
+  const { solanaRelayActionScheme } = await import('@nightmarket/core/solana-auth');
   return { arm: ed25519Arm(options), scheme: solanaRelayActionScheme };
 }

@@ -34,7 +34,7 @@ Work in progress on the `00047-solana-night-market` branch (draft pull request i
 | B1 | Rebrand; remove Sepolia, EVM and the bridge; the mint-test-tokens registry; generic pairs | done |
 | Track A | The Passport account's Ed25519 arm (`acedward/passport`, branch `00047-solana-ed25519-arm`) | in progress |
 | B2 | Web: Phantom connect, account opening, the market UI, the signing screens | next |
-| B3 | Relay: Ed25519 actions, both proof servers, key pins, the demo-token endpoint | next |
+| B3 | Relay: Ed25519 actions (one wallet prompt each), both proof servers, key pins, the demo-token endpoint | done (lane `00047-lane-relay`) |
 | P6 | Integration and stagenet acceptance | after A, B2, B3 |
 
 Until B2 and B3 land, the site browses the order books; connecting a wallet says that Solana
@@ -47,7 +47,8 @@ to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a si
 - **Web app**: a static site. It connects the Solana wallet, holds the customer's records in local
   storage, and computes balances and prices in the browser.
 - **Relay**: a stateless service. It proves each transaction and pays the Midnight fees from a
-  sponsor wallet. It stores nothing about individual customers.
+  sponsor wallet. It stores nothing about individual customers except which Solana keys have
+  received their demo tokens (a small claims file, `deploy/RUNBOOK.md` section 7).
 - **Network**: Midnight stagenet, a test network.
 
 ## How this branch works
@@ -118,9 +119,10 @@ scripts/docker-check.sh down         # remove the container and volumes
 verifies the relay's proving keys, two proof servers (9.0.0-rc.8 for the account's circuits,
 9.0.0-rc.6 for the sponsor wallet's DUST, until stagenet moves to dust/10), the relay and the web
 site.
-[`deploy/.env.example`](deploy/.env.example) documents every setting. The operator's runbook
-[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) is MN Bank's and is being rewritten for Night Market
-(lane B3). Every domain must be served over https.
+[`deploy/.env.example`](deploy/.env.example) documents every setting (including the pinned key-set
+fingerprint and the demo-token endpoint). The operator's runbook is
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md); a host without Docker, [`deploy/SYSTEMD.md`](deploy/SYSTEMD.md).
+Every domain must be served over https.
 
 ## Checks and the secret scan
 

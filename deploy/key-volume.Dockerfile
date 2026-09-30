@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # The key-volume job (deploy/compose.yml service `keys`): compactc 0.35.0 (the account) and 0.34.0
-# (its declared callees, compile-time only), the pinned Passport sources, and the relay's
+# (its declared callees, compile-time only, and the demo-token faucet), the pinned Passport sources
+# and the vendored faucet source, and the relay's
 # dependencies (the Signet Compact module, compact-runtime 0.20.0 for the account module, and the
 # verification's ledger-v9). It builds the relay's prover and verifier keys INTO A VOLUME at run
 # time (deploy/key-volume/build.sh); the image itself carries no keys.
@@ -49,6 +50,8 @@ COPY vendor/passport/contract/contracts/account.compact vendor/passport/contract
 COPY vendor/passport/contract/contracts/modules vendor/passport/contract/contracts/modules
 COPY vendor/passport/contract/contracts/erc20-vault/src/erc20-vault.compact vendor/passport/contract/contracts/erc20-vault/src/
 COPY vendor/passport/contract/contracts/erc20-vault/src/vendor vendor/passport/contract/contracts/erc20-vault/src/vendor
+# The demo-token faucet (mint-test-tokens v2, vendored; contracts/faucet/PROVENANCE.md).
+COPY contracts/faucet/shielded-token.compact contracts/faucet/
 # The step that points the compiled account module at compact-runtime 0.20.0 (only it).
 COPY scripts/pin-contract-runtime.mjs scripts/
 COPY deploy/key-volume/build.sh /usr/local/bin/nightmarket-key-volume

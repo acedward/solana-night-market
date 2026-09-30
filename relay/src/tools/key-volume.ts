@@ -4,6 +4,7 @@
 //
 //   bun relay/src/tools/key-volume.ts prune <root>            delete the prover keys not kept, re-stamp
 //   bun relay/src/tools/key-volume.ts marker-inputs <root>    print the installed set's input stamp
+//   bun relay/src/tools/key-volume.ts kept-provers <bundle>   print the kept prover keys' circuits of a bundle
 //   bun relay/src/tools/key-volume.ts verify <root> [--inputs <stamp>] [--write-marker] [--recheck]
 //
 // `verify` runs the checks of relay/src/prover/key-volume.ts and prints a JSON report. It
@@ -142,6 +143,12 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
 
 async function main(): Promise<number> {
   const [cmd, root, ...rest] = process.argv.slice(2);
+  if (cmd === 'kept-provers' && root) {
+    // (`root` is the bundle name here: an import copies only these prover keys, build.sh.)
+    const kept = parseKeptProvers(env('KEYS_KEEP_PROVERS'));
+    for (const k of kept) if (k.startsWith(`${root}/`)) process.stdout.write(`${k.slice(root.length + 1)}\n`);
+    return 0;
+  }
   if (!cmd || !root) {
     say('usage: key-volume.ts prune|marker-inputs|verify <root> [options]');
     return 64;

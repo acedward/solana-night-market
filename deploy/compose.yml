@@ -1,7 +1,7 @@
 # Night Market: the deployment bundle (carried over from MN Bank, plan 00039 P4-B). The runbook is
-# deploy/RUNBOOK.md (lane B3 rewrites it for the Ed25519 arm). Lane B1 removed Sepolia and the
-# bridge; B1.5 moved the keys to compactc 0.35.0 and split the proof server in two (the rc.8
-# contract prover beside the rc.6 DUST prover).
+# deploy/RUNBOOK.md. Lane B1 removed Sepolia and the bridge; B1.5 moved the keys to compactc 0.35.0
+# and split the proof server in two (the rc.8 contract prover beside the rc.6 DUST prover); B3 wired
+# the Ed25519 arm, the demo-token faucet bundle and the relay's claims volume.
 #
 #   cp deploy/.env.example deploy/.env         # then edit it; secrets stay in files, never here
 #   docker compose -f deploy/compose.yml build
@@ -11,10 +11,10 @@
 #
 # Services, in start order:
 #   keys          one-shot: builds the relay's prover/verifier keys into the `keys` volume (the
-#                 account with compactc 0.35.0; its declared callees with 0.34.0, compile-time only),
-#                 verifies them (account keys = compiled expectedVk; fingerprint =
-#                 RELAY_KEYS_FINGERPRINT), then exits 0. Later starts only re-verify. A failure
-#                 stops everything below.
+#                 account with compactc 0.35.0; its declared callees with 0.34.0, compile-time only;
+#                 the demo-token faucet with 0.34.0, its mint key checked against the deployed one),
+#                 verifies them (keys = compiled expectedVk; fingerprint = RELAY_KEYS_FINGERPRINT),
+#                 then exits 0. Later starts only re-verify. A failure stops everything below.
 #   proof-server-contracts  midnightntwrk/proof-server 9.0.0-rc.8 (pinned by digest): proves the
 #                 account's circuits (compactc 0.35.0 = ZKIR 3.1, which rc.6 cannot read). Internal.
 #   proof-server-dust       midnightntwrk/proof-server 9.0.0-rc.6 (pinned by digest): proves the
@@ -57,6 +57,7 @@ services:
       KEYS_MIN_FREE_GB: ${KEYS_MIN_FREE_GB:-16}
       KEYS_IMPORT_DIR: ${KEYS_IMPORT_DIR:-}
       KEYS_ACCOUNT_SOURCE_SHA256: ${KEYS_ACCOUNT_SOURCE_SHA256:-}
+      KEYS_FAUCET_MINT_VK_SHA256: ${KEYS_FAUCET_MINT_VK_SHA256:-}
       MIDNIGHT_PP: /zk-params
     volumes:
       - keys:/app/vendor/passport/contract/contracts/managed
@@ -122,10 +123,13 @@ services:
       # A deployment never runs keyless: no key volume, or an incomplete one, stops the relay.
       RELAY_REQUIRE_KEYS: 'true'
       SPONSOR_SEED_FILE: /run/secrets/sponsor_seed
+      # The demo-token claims store (the relay's only persistent state; one relay per data dir).
+      RELAY_DATA_DIR: /var/lib/night-market
     secrets:
       - sponsor_seed
     volumes:
       - keys:/app/vendor/passport/contract/contracts/managed:ro
+      - relay-data:/var/lib/night-market
     user: ${RELAY_USER:-1000:1000}
     read_only: true
     tmpfs:
@@ -193,13 +197,15 @@ services:
 
 volumes:
   # The compiled contracts with the relay's prover keys, written by `keys` (MN Bank's set was about
-  # 3.6 GB; the Ed25519 set's size is measured when it is first built, plan P6.1).
+  # 3.6 GB; the Ed25519 set with the demo faucet is 2.2 GB, measured 2026-09-30).
   keys: {}
   # The proving system's public parameters (SRS) the key compile fetches (about 0.2 GB).
   zk-params: {}
   # Each proof server's parameters and zswap keys (about 0.3 GB each), fetched at its first start.
   contract-proof-params: {}
   dust-proof-params: {}
+  # The relay's demo-token claims (a small JSON file; back it up with the deployment).
+  relay-data: {}
 
 secrets:
   sponsor_seed:

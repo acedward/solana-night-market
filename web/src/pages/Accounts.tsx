@@ -4,9 +4,10 @@
 // from the coins this browser keeps, rebuilt from chain data by an inbox walk decrypted here. Each
 // token is shown in its own units: nothing is totalled in a "home" currency (no token is special).
 //
-// The trading itself is on Trade; this page is the holdings side panel of the market, the pending
-// items, the job tracker and the "Open your account" card. Signing goes through the Solana wallet
-// (lane B2); until a wallet can connect, the page says so.
+// The trading itself is on Trade; this page is the account's full view: opening it (one Solana
+// wallet signature, the relay deploys and activates), the holdings (shielded coins and unshielded
+// balances), withdrawals to a Midnight wallet (shielded or unshielded, one signature each), demo
+// tokens, the pending items and the job tracker (AA 00047 lane B2).
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 
@@ -20,7 +21,11 @@ import {
   type NetworkProfile,
   type StoredCoin,
   type TokenRegistry,
+  type UnshieldedBalancesView,
 } from '@nightmarket/core';
+
+import { useUnshieldedBalances } from '../account/useAccountView.js';
+import { DemoTokens } from '../demo/DemoTokens.js';
 
 import {
   AssetCell,
@@ -34,6 +39,7 @@ import {
   PageHead,
   Panel,
   PendingItem,
+  Segmented,
   Select,
   StageTracker,
   StatementTable,
@@ -53,6 +59,7 @@ import {
   syncAccount,
   unsecuredCoins,
   withdrawToWallet,
+  withdrawUnshieldedToWallet,
   type OperationEnv,
 } from '../passport/operations.js';
 import { findAccount, listJobs, readCoins, readSecret } from '../passport/records.js';
@@ -84,8 +91,10 @@ const STAGE_TEXT: Record<string, string> = {
 
 const JOB_TITLE: Record<string, string> = {
   register: 'Opening your account',
-  withdraw: 'Sending from your account',
+  withdraw: 'Withdrawing from your account',
+  'withdraw-unshielded': 'Withdrawing from your account (unshielded)',
   'append-inbox': 'Recording the change in your inbox',
+  'demo-tokens': 'Delivering your demo tokens',
 };
 
 /** "14:06" UTC from the relay's Unix seconds. */
@@ -153,7 +162,15 @@ function JobTracker({ job }: { job: JobView }) {
   );
 }
 
-function PassportHoldings({ coins, tokens }: { coins: StoredCoin[]; tokens: TokenRegistry | null }) {
+function PassportHoldings({
+  coins,
+  tokens,
+  unshielded,
+}: {
+  coins: StoredCoin[];
+  tokens: TokenRegistry | null;
+  unshielded: Array<{ colour: string; amount: bigint }>;
+}) {
   // Listed in the market's token order (the registry's); unknown colours last.
   const order = (colour: string) => {
     const i = tokens?.tokens.findIndex((t) => t.midnightColour === colour) ?? -1;
@@ -162,7 +179,11 @@ function PassportHoldings({ coins, tokens }: { coins: StoredCoin[]; tokens: Toke
   const rows = holdingsByColour(coins)
     .map((h) => ({ h, token: tokens?.byColour(h.color) }))
     .sort((a, b) => order(a.h.color) - order(b.h.color));
-  if (rows.length === 0) {
+  const open = unshielded
+    .filter((u) => u.amount > 0n)
+    .map((u) => ({ u, token: tokens?.byColour(u.colour) }))
+    .sort((a, b) => order(a.u.colour) - order(b.u.colour));
+  if (rows.length === 0 && open.length === 0) {
     return (
       <EmptyState data-testid="passport-empty" title="No tokens in this account yet">
         Tokens sent to your account appear here once they land.
@@ -196,7 +217,116 @@ function PassportHoldings({ coins, tokens }: { coins: StoredCoin[]; tokens: Toke
           </tr>
         );
       })}
+      {open.map(({ u, token: t }) => (
+        <tr
+          key={`u-${u.colour}`}
+          data-testid="passport-row"
+          data-kind="unshielded"
+          data-colour={u.colour}
+          data-symbol={t?.symbol ?? ''}
+        >
+          <AssetCell symbol={t?.symbol ?? short(u.colour)} name={t?.name} origin="unshielded balance" />
+          <Cell label="Quantity" align="right">
+            <span className="num" data-testid="passport-amount" data-raw={u.amount.toString()}>
+              {formatUnits(u.amount, t?.decimals ?? 0, { minFractionDigits: 2, grouping: true })}
+            </span>
+          </Cell>
+        </tr>
+      ))}
     </StatementTable>
+  );
+}
+
+/** A withdrawal from the unshielded balance to an unshielded wallet (`mn_addr_…`): one signature. */
+function UnshieldedWithdrawForm({
+  balances,
+  tokens,
+  onSend,
+  busy,
+}: {
+  balances: Array<{ colour: string; amount: bigint }>;
+  tokens: TokenRegistry | null;
+  onSend: (color: string, amount: bigint, recipient: string, balance: bigint) => void;
+  busy: boolean;
+}) {
+  const [color, setColor] = useState('');
+  const [amount, setAmount] = useState('');
+  const [recipient, setRecipient] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const chosen = color || balances[0]?.colour || '';
+  const token = tokens?.byColour(chosen);
+  const balance = balances.find((b) => b.colour === chosen)?.amount ?? 0n;
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    try {
+      const raw = parseUnits(amount, token?.decimals ?? 0);
+      if (raw > balance) {
+        setError(`The account holds ${formatUnits(balance, token?.decimals ?? 0)} ${token?.symbol ?? ''} unshielded.`);
+        return;
+      }
+      onSend(chosen, raw, recipient.trim(), balance);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Enter an amount.');
+    }
+  };
+  if (balances.length === 0)
+    return (
+      <p className="small muted" data-testid="withdraw-unshielded-empty">
+        The account holds no unshielded tokens.
+      </p>
+    );
+  return (
+    <form onSubmit={submit} data-testid="withdraw-unshielded">
+      <div className="form-grid">
+        <Field label="Token" htmlFor="wu-token">
+          <Select id="wu-token" value={chosen} onChange={(e) => setColor(e.target.value)} data-testid="wu-token">
+            {balances.map((b) => (
+              <option key={b.colour} value={b.colour}>
+                {tokens?.byColour(b.colour)?.symbol ?? short(b.colour)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field
+          label="Amount"
+          htmlFor="wu-amount"
+          hint={<span data-testid="wu-balance">Balance: {formatUnits(balance, token?.decimals ?? 0)}</span>}
+        >
+          <UnitInput
+            id="wu-amount"
+            unit={token?.symbol ?? 'units'}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            inputMode="decimal"
+            autoComplete="off"
+            data-testid="wu-amount"
+          />
+        </Field>
+      </div>
+      <Field label="Recipient" htmlFor="wu-recipient" hint="An unshielded wallet address, mn_addr_…">
+        <TextInput
+          id="wu-recipient"
+          className="mono"
+          value={recipient}
+          onChange={(e) => setRecipient(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          data-testid="wu-recipient"
+        />
+      </Field>
+      <p className="small muted panel-intro">
+        You sign once: your wallet shows the amount, the token and the recipient before you approve.
+      </p>
+      {error && (
+        <Notice tone="danger" role="alert" data-testid="wu-error" className="panel-intro">
+          {error}
+        </Notice>
+      )}
+      <Button type="submit" disabled={busy} data-testid="wu-submit">
+        Withdraw
+      </Button>
+    </form>
   );
 }
 
@@ -238,11 +368,15 @@ function SendForm({
       setError(err instanceof Error ? err.message : 'Enter an amount.');
     }
   };
-  if (held.length === 0) return null;
+  if (held.length === 0)
+    return (
+      <p className="small muted" data-testid="send-empty">
+        The account holds no shielded tokens yet.
+      </p>
+    );
   return (
-    <details className="disclosure" data-testid="send-midnight">
-      <summary>Send to a Midnight wallet (advanced)</summary>
-      <form className="disclosure-body" onSubmit={submit}>
+    <div data-testid="send-midnight">
+      <form onSubmit={submit}>
         <p className="panel-intro small">Pays a shielded Midnight wallet straight from your account.</p>
         <div className="form-grid">
           <Field label="Token" htmlFor="send-token">
@@ -286,9 +420,9 @@ function SendForm({
           />
         </Field>
         <p className="small muted panel-intro">
-          You sign twice to send: once for the payment, and once to confirm the recipient&apos;s address to the market.
-          The change stays in your account; the market then asks for one more signature to record it in your
-          account&apos;s inbox, so it can be restored from the chain.
+          You sign once for the payment: your wallet shows the amount, the token and the recipient. The change stays in
+          your account; the market then asks for one more signature to record it in your account&apos;s inbox, so it can
+          be restored from the chain.
         </p>
         {error && (
           <Notice tone="danger" role="alert" data-testid="send-error" className="panel-intro">
@@ -296,10 +430,10 @@ function SendForm({
           </Notice>
         )}
         <Button type="submit" disabled={busy} data-testid="send-submit">
-          Send
+          Withdraw
         </Button>
       </form>
-    </details>
+    </div>
   );
 }
 
@@ -332,6 +466,25 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
   // customer's action (an unrecorded change coin, under Pending) shows whatever it is.
   const assets = useAssetFilter();
   const shownCoins = useMemo(() => coins.filter((c) => assets.showsColour(c.color)), [coins, assets]);
+  // The unshielded balances (public contract balances, read from the relay; AA 00047).
+  const unshieldedRead = useUnshieldedBalances(relay, account && hasSecret ? account.address : null, revision);
+  const unshielded = useMemo(
+    () =>
+      (unshieldedRead.view as UnshieldedBalancesView | null)?.balances
+        .map((b) => ({ colour: b.colour, amount: BigInt(b.amount) }))
+        .filter((b) => b.amount > 0n && assets.showsColour(b.colour)) ?? [],
+    [unshieldedRead.view, assets],
+  );
+  const [withdrawKind, setWithdrawKind] = useState<'shielded' | 'unshielded'>('shielded');
+  // Whether a withdrawal to a wallet also needs F-B6's envelope (questions Q13: off by default).
+  const [recipientEnvelope, setRecipientEnvelope] = useState(false);
+  useEffect(() => {
+    let live = true;
+    relay.signingPolicy().then((p) => live && setRecipientEnvelope(p.withdrawRecipientEnvelope));
+    return () => {
+      live = false;
+    };
+  }, [relay]);
   const pendingJobs = useMemo(
     () => (store && scope ? listJobs(store, scope) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -398,7 +551,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     run('withdraw', async (e) => {
       if (!account) return;
       if (!confirmCancelsOffer('withdraw')) return;
-      const r = await withdrawToWallet(e, account.address, { color, amount, recipient });
+      const r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
       markLiveOffersCancelled(e, account.address);
       setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}). Recording the change in your inbox…` });
       await syncAccount(e, account.address);
@@ -408,6 +561,16 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
         await syncAccount(e, account.address);
         setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}); the change is recorded in your inbox.` });
       }
+    });
+
+  const sendUnshielded = (color: string, amount: bigint, recipient: string, balance: bigint) =>
+    run('withdraw-unshielded', async (e) => {
+      if (!account) return;
+      if (!confirmCancelsOffer('withdraw')) return;
+      const r = await withdrawUnshieldedToWallet(e, account.address, { color, amount, recipient, balance });
+      markLiveOffersCancelled(e, account.address);
+      unshieldedRead.reload();
+      setMessage({ kind: 'ok', text: `Withdrawn (tx ${short(r.txId)}).` });
     });
 
   const secure = (coin: StoredCoin) =>
@@ -486,7 +649,12 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                 </Notice>
               )}
               <div data-testid="account" data-account={account.address}>
-                <PassportHoldings coins={shownCoins} tokens={tokens} />
+                <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} />
+                {!unshieldedRead.served && (
+                  <p className="table-note" data-testid="unshielded-not-served">
+                    This market does not report unshielded balances yet.
+                  </p>
+                )}
                 <p className="table-note">
                   One payment can use only one coin, so the largest single payment can be less than the balance.
                 </p>
@@ -500,6 +668,23 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                     Key: your Solana wallet {shortSolanaAddress(solanaAddressOf(account.device))}
                   </span>
                 </p>
+              </div>
+            </Panel>
+          )}
+          {account && hasSecret && (
+            <Panel title="Withdraw to a Midnight wallet" data-testid="withdraw-section">
+              <Field label="From">
+                <Segmented<'shielded' | 'unshielded'>
+                  label="From"
+                  options={[
+                    { value: 'shielded', label: 'Shielded tokens', testId: 'withdraw-kind-shielded' },
+                    { value: 'unshielded', label: 'Unshielded tokens', testId: 'withdraw-kind-unshielded' },
+                  ]}
+                  value={withdrawKind}
+                  onChange={setWithdrawKind}
+                />
+              </Field>
+              {withdrawKind === 'shielded' ? (
                 <SendForm
                   coins={shownCoins}
                   tokens={tokens}
@@ -507,7 +692,14 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                   onSend={(c, a, r) => void send(c, a, r)}
                   busy={!!busy}
                 />
-              </div>
+              ) : (
+                <UnshieldedWithdrawForm
+                  balances={unshielded}
+                  tokens={tokens}
+                  onSend={(c, a, r, b) => void sendUnshielded(c, a, r, b)}
+                  busy={!!busy}
+                />
+              )}
             </Panel>
           )}
         </div>
@@ -553,11 +745,14 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
 
           {job && <JobTracker job={job} />}
 
+          {account && <DemoTokens network={network} relayUrl={relayUrl} />}
+
           {!account && (
             <Card title="Open your account" data-testid="no-account">
               <p className="panel-intro">
-                This wallet has no Night Market account in this browser. Your Solana wallet signs once to open one; the
-                market pays every Midnight fee, and you need no Midnight wallet and no SOL.
+                This wallet has no Night Market account in this browser. Your Solana wallet signs once, to prove it
+                holds the key the account will answer to (it moves no funds); the market then creates and activates the
+                account on Midnight and pays every fee. You need no Midnight wallet and no SOL.
               </p>
               {storageStatus !== 'ok' && (
                 <Notice tone="danger" className="panel-intro" data-testid="open-account-storage">

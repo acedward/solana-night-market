@@ -14,7 +14,7 @@
 // offers, the stage tracker for a trade in progress. The market's status (plan P4-A error states)
 // pauses the actions it cannot carry out, with the reason, before anything is signed.
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
   type BookEntry,
@@ -59,6 +59,7 @@ import {
   type PillStatus,
   type TrackerStage,
 } from '../design/index.js';
+import { HoldingsPanel } from '../account/HoldingsPanel.js';
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useMarkets } from '../market/MarketContext.js';
 import { askText, bidText } from '../market/view.js';
@@ -320,10 +321,22 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       </section>
     );
   }
+  // The market layout: trading first, the holdings panel beside it (AA 00047 lane B2).
+  const layout = (main: ReactNode) => (
+    <section data-testid="section-trade">
+      {head}
+      <div className="market-layout">
+        <div className="market-main">{main}</div>
+        <div className="market-side">
+          <HoldingsPanel network={network} relayUrl={relayUrl} />
+        </div>
+      </div>
+    </section>
+  );
+
   if (wallet.status !== 'connected' || !scope) {
-    return (
-      <section data-testid="section-trade">
-        {head}
+    return layout(
+      <>
         <EmptyState title="Connect your Solana wallet">
           <span data-testid="trade-connect">
             {wallet.supported
@@ -331,20 +344,19 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               : 'Trading with a Solana wallet is coming to this site. Until then, browse the order books on Markets.'}
           </span>
         </EmptyState>
-      </section>
+      </>,
     );
   }
   if (!account || !hasSecret) {
-    return (
-      <section data-testid="section-trade">
-        {head}
+    return layout(
+      <>
         <EmptyState title="No account in this browser">
           <span data-testid="trade-no-account">
             Open an account on <a href="#account">Account</a> (or import your export on <a href="#local">Local data</a>)
             to trade.
           </span>
         </EmptyState>
-      </section>
+      </>,
     );
   }
 
@@ -563,9 +575,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     );
   })();
 
-  return (
-    <section data-testid="section-trade">
-      {head}
+  return layout(
+    <>
       {message && (
         <Notice
           tone={message.kind === 'error' ? 'danger' : 'success'}
@@ -600,6 +611,56 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       )}
 
       <div className="trade-grid">
+        <Panel title="Take an offer" meta={`${base.symbol} / ${quote.symbol}`} data-testid="take-section">
+          <p className="small muted panel-intro">
+            Offers are all or nothing: you pay and receive exactly the amounts shown, from one coin.
+          </p>
+          <ButtonRow stretch>
+            <Button
+              data-testid="buy-best-ask"
+              disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
+              onClick={() => bestAsk && startTake(bestAsk)}
+            >
+              Buy at best ask{bestAsk ? ` (${askText(bestAsk.price)})` : ''}
+            </Button>
+            <Button
+              variant="secondary"
+              data-testid="sell-best-bid"
+              disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
+              onClick={() => bestBid && startTake(bestBid)}
+            >
+              Sell at best bid{bestBid ? ` (${bidText(bestBid.price)})` : ''}
+            </Button>
+          </ButtonRow>
+          {market?.status === 'no-liquidity' && (
+            <Notice className="section-gap" data-testid="trade-no-liquidity">
+              No liquidity: nobody is offering to buy or sell {base.symbol} for {quote.symbol} right now. You can make
+              an offer instead.
+            </Notice>
+          )}
+          {pickedGone && (
+            <Notice tone="warning" className="section-gap" data-testid="picked-gone">
+              The offer you picked is no longer on the exchange.
+            </Notice>
+          )}
+          {pickedEntry && !confirmTake && (
+            <ButtonRow className="section-gap">
+              <Button
+                variant="secondary"
+                data-testid="take-picked"
+                disabled={!!busy}
+                onClick={() => startTake(pickedEntry)}
+              >
+                Review the offer you picked
+              </Button>
+            </ButtonRow>
+          )}
+          {takeConfirm}
+          <div className="book-stack section-gap">
+            {bookSide(asks, 'asks')}
+            {bookSide(bids, 'bids')}
+          </div>
+        </Panel>
         <Panel as="form" title="New offer" onSubmit={submitMake} data-testid="make-section" noValidate>
           <Field label="Side">
             <Segmented
@@ -705,57 +766,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             sign. Signing anything else from this account before then cancels it.
           </p>
         </Panel>
-
-        <Panel title="Take an offer" meta={`${base.symbol} / ${quote.symbol}`} data-testid="take-section">
-          <p className="small muted panel-intro">
-            Offers are all or nothing: you pay and receive exactly the amounts shown, from one coin.
-          </p>
-          <ButtonRow stretch>
-            <Button
-              data-testid="buy-best-ask"
-              disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
-              onClick={() => bestAsk && startTake(bestAsk)}
-            >
-              Buy at best ask{bestAsk ? ` (${askText(bestAsk.price)})` : ''}
-            </Button>
-            <Button
-              variant="secondary"
-              data-testid="sell-best-bid"
-              disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
-              onClick={() => bestBid && startTake(bestBid)}
-            >
-              Sell at best bid{bestBid ? ` (${bidText(bestBid.price)})` : ''}
-            </Button>
-          </ButtonRow>
-          {market?.status === 'no-liquidity' && (
-            <Notice className="section-gap" data-testid="trade-no-liquidity">
-              No liquidity: nobody is offering to buy or sell {base.symbol} for {quote.symbol} right now. You can make
-              an offer instead.
-            </Notice>
-          )}
-          {pickedGone && (
-            <Notice tone="warning" className="section-gap" data-testid="picked-gone">
-              The offer you picked is no longer on the exchange.
-            </Notice>
-          )}
-          {pickedEntry && !confirmTake && (
-            <ButtonRow className="section-gap">
-              <Button
-                variant="secondary"
-                data-testid="take-picked"
-                disabled={!!busy}
-                onClick={() => startTake(pickedEntry)}
-              >
-                Review the offer you picked
-              </Button>
-            </ButtonRow>
-          )}
-          {takeConfirm}
-          <div className="book-stack section-gap">
-            {bookSide(asks, 'asks')}
-            {bookSide(bids, 'bids')}
-          </div>
-        </Panel>
       </div>
 
       {job && <Tracker job={job} />}
@@ -818,6 +828,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           )}
         </StatementTable>
       </Panel>
-    </section>
+    </>,
   );
 }

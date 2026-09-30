@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-import { shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
+import { registryFor, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
 
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
@@ -34,6 +34,9 @@ import { RelayNotices, RelayStatusProvider } from './relay/RelayStatus.js';
 import { storageText } from './store/messages.js';
 import { StoreProvider, useStore } from './store/StoreContext.js';
 import { WalletProvider, useWallet, type WalletAdapter } from './wallet/WalletContext.js';
+import { solanaWalletAdapter } from './wallet/phantom-adapter.js';
+import { SignPromptStore } from './wallet/sign-prompt.js';
+import { SigningPrompt } from './wallet/SigningPrompt.js';
 
 export const SECTIONS = [
   { id: 'markets', label: 'Markets' },
@@ -165,7 +168,15 @@ function ProfileRecorder({ network }: { network: string }) {
   return null;
 }
 
-function Shell({ network, config }: { network: NetworkProfile; config: SiteConfig }) {
+function Shell({
+  network,
+  config,
+  prompts,
+}: {
+  network: NetworkProfile;
+  config: SiteConfig;
+  prompts: SignPromptStore;
+}) {
   const [section, setSection] = useState<SectionId>(sectionFromHash);
   useEffect(() => {
     const on = () => setSection(sectionFromHash());
@@ -202,7 +213,7 @@ function Shell({ network, config }: { network: NetworkProfile; config: SiteConfi
         ) : section === 'account' ? (
           <Accounts network={network} relayUrl={config.relayUrl} />
         ) : section === 'markets' ? (
-          <Markets />
+          <Markets network={network} relayUrl={config.relayUrl} />
         ) : section === 'trade' ? (
           <Trade network={network} relayUrl={config.relayUrl} />
         ) : (
@@ -216,12 +227,27 @@ function Shell({ network, config }: { network: NetworkProfile; config: SiteConfi
       </main>
       <SiteFooter networkName={`Midnight ${network.name}`} />
       <ProfileRecorder network={network.name} />
+      <SigningPrompt prompts={prompts} timeoutSeconds={config.walletTimeoutSeconds} />
     </div>
   );
 }
 
-/** The wallet adapter this build ships: none yet (lane B2 adds Phantom's). */
-const WALLET_ADAPTER: WalletAdapter | null = null;
+/** The Solana wallet adapter (AA 00047 lane B2): Phantom, and any Wallet Standard wallet that signs
+ *  Solana messages. Its messages use the network's label and the site's token list (the same one the
+ *  relay renders with, questions Q12); without a token list there is nothing to trade, and no adapter. */
+function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletAdapter | null {
+  let tokens;
+  try {
+    tokens = registryFor(config.network.name, config.tokens);
+  } catch {
+    return null;
+  }
+  return solanaWalletAdapter({
+    display: { network: config.network.name, tokens },
+    prompts,
+    timeoutMs: config.walletTimeoutSeconds * 1000,
+  });
+}
 
 export function App() {
   const [config, setConfig] = useState<SiteConfig | null>(null);
@@ -229,6 +255,8 @@ export function App() {
   useEffect(() => {
     loadSiteConfig().then(setConfig, (e: unknown) => setFailed(e instanceof Error ? e.message : 'configuration error'));
   }, []);
+  const prompts = useMemo(() => new SignPromptStore(), []);
+  const adapter = useMemo(() => (config ? walletAdapterFor(config, prompts) : null), [config, prompts]);
   if (failed)
     return (
       <div className="wrap app-banner">
@@ -245,11 +273,11 @@ export function App() {
     );
   return (
     <StoreProvider>
-      <WalletProvider adapter={WALLET_ADAPTER}>
+      <WalletProvider adapter={adapter}>
         <RelayStatusProvider relayUrl={config.relayUrl}>
           <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
             <AssetFilterProvider site={config.assets}>
-              <Shell network={config.network} config={config} />
+              <Shell network={config.network} config={config} prompts={prompts} />
             </AssetFilterProvider>
           </MarketProvider>
         </RelayStatusProvider>

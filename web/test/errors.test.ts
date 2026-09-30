@@ -56,7 +56,12 @@ describe('the relay’s refusals, in words', () => {
     expect(t('unauthorised', { status: 401, detail: 'wrong-signer' })).toMatch(/not from a device of this account/);
     expect(t('unauthorised', { status: 401, detail: 'unknown-nonce' })).toMatch(/restarted since this was signed/);
     // Until a Solana wallet arm is wired (lanes B2/B3), the relay refuses every action as not supported.
-    expect(t('unauthorised', { status: 401, detail: 'not-supported' })).toMatch(/not available on this site yet/);
+    expect(t('unauthorised', { status: 401, detail: 'not-supported' })).toMatch(/not accepting wallet signatures/);
+    expect(t('unauthorised', { status: 401, detail: 'bad-signature' })).toMatch(/could not verify your wallet/);
+    // The demo-token claim's refusals (AA 00047).
+    expect(t('demo-already-claimed', { status: 409 })).toMatch(/one pack per wallet/);
+    expect(t('demo-daily-cap', { status: 429 })).toMatch(/all given out/);
+    expect(t('demo-disabled', { status: 503 })).toMatch(/not handing out demo tokens/);
     expect(relayErrorText({ status: 502, code: 'error', message: '' })).toBe(
       'The market answered with an error (HTTP 502). Try again later.',
     );

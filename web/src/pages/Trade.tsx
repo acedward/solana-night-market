@@ -1,20 +1,17 @@
-// The Trade section (plan L-TRD, generic since AA 00047): on any listed pair BASE/QUOTE, buy or sell
-// the base at a price in the quote, either by making an offer ("Sell N at P" / "Buy N at P",
-// pre-filled from the best ask or bid) or by taking one whole offer from the book. Every trade is
-// ONE wallet signature (the Solana wallet's, lane B2); the exact legs are shown before it. The
-// account's offers (My offers) are reconciled from the chain and the exchange.
+// The Trade section (plan L-TRD, generic since AA 00047; the consumer layout of P8.1, spec FR-006b):
+// on any listed pair BASE/QUOTE, buy or sell the base at a price in the quote, either by taking one
+// whole offer from the book ("Buy or sell now") or by publishing your own ("Create offer", pre-filled
+// from the best price). Every trade is ONE wallet signature (the Solana wallet's, lane B2); the exact
+// amounts are shown before it, and the signing modal follows the market's part to the end. The
+// account's offers (Your offers and trades) are reconciled from the chain and the exchange.
 //
 // The seam limits are enforced and explained here (Q9, FR-019): one live offer at a time, each
 // payment from one coin (an offer the account cannot pay keeps a greyed Buy or Sell that says why
 // on hover, focus and tap: "Not enough twBTC. You hold 0.10 twBTC.", AA 00044), and a warning
-// before a take cancels a live offer (L-TRD.3).
-//
-// Styled with the design system carried over from MN Bank (web/README.md "Adopting the design
-// system"): the order form and the book side by side, statement tables for the book and My
-// offers, the stage tracker for a trade in progress. The market's status (plan P4-A error states)
-// pauses the actions it cannot carry out, with the reason, before anything is signed.
+// before a take cancels a live offer (L-TRD.3). The market's status (plan P4-A error states) pauses
+// the actions it cannot carry out, with the reason, before anything is signed.
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
   type BookEntry,
@@ -35,23 +32,32 @@ import {
   takeLegs,
 } from '@nightmarket/core';
 
+import { useActivity } from '../activity/ActivityContext.js';
+import type { ActivityKind } from '../activity/activity.js';
+import { PortfolioDock, PortfolioToggle } from '../account/PortfolioDock.js';
+import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import {
   Button,
+  ButtonLink,
   ButtonRow,
   Cell,
   EmptyState,
   Field,
   Hash,
+  Icon,
   NoValue,
   Notice,
   PageHead,
+  PairIcon,
   Panel,
   Segmented,
   Select,
+  Skeleton,
   StageTracker,
   StatementTable,
   StatusPill,
   Sub,
+  Toast,
   Tooltip,
   UnitInput,
   YoursBadge,
@@ -59,10 +65,8 @@ import {
   type PillStatus,
   type TrackerStage,
 } from '../design/index.js';
-import { HoldingsPanel } from '../account/HoldingsPanel.js';
-import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useMarkets } from '../market/MarketContext.js';
-import { askText, bidText } from '../market/view.js';
+import { askText, bidText, lastTradeText, spreadText } from '../market/view.js';
 import { syncAccount, type OperationEnv } from '../passport/operations.js';
 import { findAccount, readCoins, readSecret } from '../passport/records.js';
 import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
@@ -70,6 +74,7 @@ import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import { guardFor, makeOffer, reconcileOffers, takeOffer } from '../trade/operations.js';
 import { liveOffer, readTrades, type TradeRecord } from '../trade/records.js';
+import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet } from '../wallet/WalletContext.js';
 
 const short = (s: string, head = 8, tail = 6) =>
@@ -81,11 +86,11 @@ const placed = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('
 const STAGE_TEXT: Record<string, string> = {
   queued: 'Waiting in line',
   running: 'Started',
-  proving: 'Preparing the offer’s proof (about a minute)',
-  proven: 'Offer proven',
+  proving: 'Creating the zero-knowledge proof (about a minute)',
+  proven: 'Proof ready',
   posted: 'Sent to the exchange',
   listed: 'Listed on the exchange',
-  'offer-checked': 'The offer is still there and is exactly the one you chose',
+  'offer-checked': 'The offer is still there, and exactly the one you chose',
   merged: 'Your side and the offer combined into one transaction',
   settled: 'Settled',
   succeeded: 'Done',
@@ -109,11 +114,11 @@ const STATE_PILL: Record<TradeRecord['status'], PillStatus> = {
 };
 
 const PREFILL_HINT: Record<TradeSide, string> = {
-  sell: 'Use the best ask',
-  buy: 'Use the best bid',
+  sell: 'Use the best price',
+  buy: 'Use the best price',
 };
 
-/** `#trade?pair=twBTC/twUSDC&offer=<id>`: the Markets page's Take buttons link here. */
+/** `#trade?pair=twBTC/twUSDC&offer=<id>`: the Markets page's Buy and Sell links come here. */
 function hashParams(): URLSearchParams {
   const q = window.location.hash.split('?')[1] ?? '';
   return new URLSearchParams(q);
@@ -152,7 +157,7 @@ function Tracker({ job }: { job: JobView }) {
       meta={
         <span className="small">
           {STAGE_TEXT[job.stage] ?? job.stage}
-          {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in the queue` : ''}
+          {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : ''}
         </span>
       }
       data-testid="trade-tracker"
@@ -164,7 +169,7 @@ function Tracker({ job }: { job: JobView }) {
   );
 }
 
-/** The exact legs of an order or a take, as in the mockup: what leaves the account, what arrives. */
+/** The exact amounts of an order or a take: what leaves the account, what arrives. */
 function LegsPreview({
   legs,
   base,
@@ -181,13 +186,13 @@ function LegsPreview({
   return (
     <div className="legs" data-testid="legs" aria-label="What this trade does">
       <div className="leg">
-        <span className="k">You give</span>
+        <span className="k">You pay</span>
         <span className="v num" data-testid="legs-give" data-raw={legs.give.amount.toString()}>
           {amt(legs.give.amount, giveT)} {giveT.symbol}
         </span>
       </div>
       <div className="leg">
-        <span className="k">You receive</span>
+        <span className="k">You get</span>
         <span className="v num" data-testid="legs-want" data-raw={legs.want.amount.toString()}>
           {amt(legs.want.amount, wantT)} {wantT.symbol}
         </span>
@@ -204,10 +209,39 @@ function LegsPreview({
   );
 }
 
+/** The pair's best prices at a glance, beside the market picker. */
+function PairStats({ market, quote }: { market: Market | null; quote: TokenEntry }) {
+  const value = (v: string | null | undefined, cls?: string) =>
+    market === null ? <Skeleton width="4.5em" /> : v ? <span className={cls}>{v}</span> : <NoValue>—</NoValue>;
+  return (
+    <dl className="pair-stats" data-testid="pair-stats">
+      <div>
+        <dt>Buy at</dt>
+        <dd>{value(market?.asks.best ? askText(market.asks.best.price) : null, 'price-ask')}</dd>
+      </div>
+      <div>
+        <dt>Sell at</dt>
+        <dd>{value(market?.bids.best ? bidText(market.bids.best.price) : null, 'price-bid')}</dd>
+      </div>
+      <div>
+        <dt>Spread</dt>
+        <dd>{value(market ? spreadText(market) : null)}</dd>
+      </div>
+      <div>
+        <dt>Last trade</dt>
+        <dd>{value(market ? lastTradeText(market.lastTrade) : null)}</dd>
+      </div>
+      <div className="sr-only">Prices in {quote.symbol}</div>
+    </dl>
+  );
+}
+
 export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
   const { state, registry, pairs: allPairs } = useMarkets();
   const { store, revision } = useStore();
   const wallet = useWallet();
+  const connect = useConnectPrompt();
+  const activity = useActivity();
   const relayStatus = useRelayStatus();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const kernel = useMemo(() => new KernelClient({ baseUrl: network.zswap.kernelUrl }), [network]);
@@ -224,6 +258,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmTake, setConfirmTake] = useState<BookEntry | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const dismiss = useCallback(() => setMessage(null), []);
 
   const pair = pairs.find((p) => p.id === pairId) ?? pairs[0] ?? null;
   const base = pair?.base ?? null;
@@ -261,8 +298,17 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
 
   const env = useCallback((): OperationEnv | null => {
     if (!store || !scope || !wallet.signing) return null;
-    return { relay, store, scope, signing: wallet.signing, onJob: setJob };
-  }, [store, scope, wallet.signing, relay]);
+    return {
+      relay,
+      store,
+      scope,
+      signing: wallet.signing,
+      onJob: (j) => {
+        setJob(j);
+        activity.job(j);
+      },
+    };
+  }, [store, scope, wallet.signing, relay, activity]);
 
   // Reconcile My offers and the coins when the page opens, and every 30 s while an offer is live.
   const accountAddress = account?.address;
@@ -289,15 +335,21 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountAddress, owner, !!live]);
 
+  // Bring the review into view when an offer is picked (on a phone it sits above the book).
+  useEffect(() => {
+    if (confirmTake) confirmRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [confirmTake]);
+
   const head = (
     <PageHead
       eyebrow="Make and take offers"
       title="Trade"
       lede={
         pair
-          ? `Trade ${pair.base.symbol} for ${pair.quote.symbol}, at a price in ${pair.quote.symbol}, or pick another market. Take an existing offer now, or place your own at your price. You sign once per trade; the market pays the network fees.`
-          : 'Every trade is one token against another, on a listed market. Take an existing offer now, or place your own at your price.'
+          ? `Buy or sell ${pair.base.symbol} for ${pair.quote.symbol}: take an offer from the book now, or create your own at your price. One approval in Phantom per trade; the market pays the network fees.`
+          : 'Every trade is one token against another. Take an offer from the book now, or create your own at your price.'
       }
+      actions={<PortfolioToggle open={drawer} onClick={() => setDrawer(true)} />}
     />
   );
 
@@ -305,7 +357,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     return (
       <section data-testid="section-trade">
         {head}
-        <EmptyState data-testid="trade-filtered-empty" title="No market in this view">
+        <EmptyState data-testid="trade-filtered-empty" icon="markets" title="No market in this view">
           A market shows only when both of its tokens are listed. {assetFilterText(assets)}
         </EmptyState>
       </section>
@@ -316,47 +368,59 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       <section data-testid="section-trade">
         {head}
         <Notice tone="danger" role="alert">
-          Trading is not configured for this network.
+          Trading is not set up for this network.
         </Notice>
       </section>
     );
   }
-  // The market layout: trading first, the holdings panel beside it (AA 00047 lane B2).
+  // The market layout: trading first, the portfolio beside it (docked, or a drawer on narrow screens).
   const layout = (main: ReactNode) => (
     <section data-testid="section-trade">
       {head}
       <div className="market-layout">
         <div className="market-main">{main}</div>
-        <div className="market-side">
-          <HoldingsPanel network={network} relayUrl={relayUrl} />
-        </div>
+        <PortfolioDock network={network} relayUrl={relayUrl} open={drawer} onClose={() => setDrawer(false)} />
       </div>
     </section>
   );
 
   if (wallet.status !== 'connected' || !scope) {
     return layout(
-      <>
-        <EmptyState title="Connect your Solana wallet">
-          <span data-testid="trade-connect">
-            {wallet.supported
-              ? 'Connect your Solana wallet to trade. It only signs messages: it needs no SOL.'
-              : 'Trading with a Solana wallet is coming to this site. Until then, browse the order books on Markets.'}
-          </span>
-        </EmptyState>
-      </>,
+      <EmptyState
+        icon="wallet"
+        title="Connect your wallet to trade"
+        action={
+          connect ? (
+            <Button data-testid="trade-connect-cta" onClick={connect}>
+              <Icon name="wallet" /> Connect Phantom
+            </Button>
+          ) : undefined
+        }
+      >
+        <span data-testid="trade-connect">
+          {wallet.supported
+            ? 'Connect your Solana wallet to trade. It only signs messages: it needs no SOL.'
+            : 'Trading with a Solana wallet is coming to this site. Until then, browse the order books on Markets.'}
+        </span>
+      </EmptyState>,
     );
   }
   if (!account || !hasSecret) {
     return layout(
-      <>
-        <EmptyState title="No account in this browser">
-          <span data-testid="trade-no-account">
-            Open an account on <a href="#account">Account</a> (or import your export on <a href="#local">Local data</a>)
-            to trade.
-          </span>
-        </EmptyState>
-      </>,
+      <EmptyState
+        icon="portfolio"
+        title="Open your free account to trade"
+        action={
+          <ButtonLink variant="primary" href="#account" data-testid="trade-open-account">
+            Open your account
+          </ButtonLink>
+        }
+      >
+        <span data-testid="trade-no-account">
+          Open an account on <a href="#account">Portfolio</a> (or import your backup on <a href="#local">Your data</a>)
+          to trade. It takes one approval in Phantom, and the market pays every fee.
+        </span>
+      </EmptyState>,
     );
   }
 
@@ -376,7 +440,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     try {
       legs = orderLegs(side, base, quote, parseUnits(quantity, base.decimals), parsePrice(price, quote));
     } catch (e) {
-      legsError = e instanceof Error ? e.message : 'Enter a quantity and a price.';
+      legsError = e instanceof Error ? e.message : 'Enter an amount and a price.';
     }
   }
   const makeFunding = legs ? fundWithOneCoin(coins, legs.give, legs.side === 'sell' ? base : quote) : null;
@@ -387,14 +451,14 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const batcherDown = relayStatus.health ? !relayStatus.health.batcher.reachable : false;
   const exchangeDown = state.status === 'unavailable';
 
-  const run = async (label: string, fn: (e: OperationEnv) => Promise<void>) => {
+  const run = async (label: string, kind: ActivityKind, fn: (e: OperationEnv) => Promise<void>) => {
     const e = env();
     if (!e) return;
     setBusy(label);
     setMessage(null);
     setJob(null);
     try {
-      await fn(e);
+      await activity.run(kind, () => fn(e));
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Something went wrong.' });
     } finally {
@@ -406,7 +470,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     ev.preventDefault();
     if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused) return;
     const l = legs;
-    void run('make', async (e) => {
+    void run('make', 'open-swap', async (e) => {
       const rec = await makeOffer(e, account.address, l, pair);
       setMessage({ kind: 'ok', text: `Your offer is on the exchange: ${rec.summary} (offer ${short(rec.offerId)}).` });
       setQuantity('');
@@ -426,7 +490,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     setConfirmTake(e);
   };
   const doTake = (e: BookEntry) =>
-    void run('take', async (env2) => {
+    void run('take', 'take', async (env2) => {
       setConfirmTake(null);
       const rec = await takeOffer(env2, account.address, e, pair);
       setMessage({
@@ -444,7 +508,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
 
   const bookColumns = (kind: 'asks' | 'bids'): Column[] => [
     { label: 'Price', sub: quote.symbol },
-    { label: 'Quantity', sub: base.symbol, align: 'right' },
+    { label: 'Amount', sub: base.symbol, align: 'right' },
     { label: kind === 'asks' ? 'You pay' : 'You get', sub: quote.symbol, align: 'right' },
     { label: 'Action', srOnly: true, align: 'right' },
   ];
@@ -455,7 +519,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       <div>
         <div className="book-side-head">
           <h4 id={headId}>
-            {kind === 'asks' ? 'Asks' : 'Bids'}{' '}
+            {kind === 'asks' ? 'Sellers' : 'Buyers'}{' '}
             <span className="small muted">{kind === 'asks' ? '— you buy' : '— you sell'}</span>
           </h4>
           <span className="small muted">
@@ -473,7 +537,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             <tbody>
               <tr className="row-empty">
                 <td colSpan={4}>
-                  <NoValue>no {kind}</NoValue>
+                  <NoValue>{kind === 'asks' ? 'nobody is selling' : 'nobody is buying'}</NoValue>
                 </td>
               </tr>
             </tbody>
@@ -486,8 +550,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                 // One row group per offer.
                 <tbody key={e.offerId} data-testid="trade-line" data-offer={e.offerId}>
                   <tr
-                    aria-selected={picked === e.offerId}
-                    className={picked === e.offerId ? 'row-selected' : undefined}
+                    aria-selected={picked === e.offerId || confirmTake?.offerId === e.offerId}
+                    className={picked === e.offerId || confirmTake?.offerId === e.offerId ? 'row-selected' : undefined}
                   >
                     <td className="num">
                       <span className={kind === 'asks' ? 'price-ask' : 'price-bid'}>
@@ -502,7 +566,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                       ) : t.funding.ok ? (
                         <Button
                           size="small"
-                          variant={picked === e.offerId ? 'primary' : 'secondary'}
+                          variant={kind === 'asks' ? 'buy' : 'sell'}
                           data-testid="take-line"
                           disabled={cannotTake}
                           onClick={() => startTake(e)}
@@ -537,21 +601,20 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const takeConfirm = (() => {
     if (!confirmTake) return null;
     const t = takeability(confirmTake);
+    const verb = t.legs.side === 'buy' ? 'Buy' : 'Sell';
     return (
-      <Panel
-        as="div"
-        tone="quiet"
-        headingLevel={4}
-        className="section-gap"
-        title={`${t.legs.side === 'buy' ? 'Buy' : 'Sell'} — the whole offer`}
-        data-testid="take-confirm"
-        data-offer={confirmTake.offerId}
-      >
+      <div ref={confirmRef} data-testid="take-confirm" data-offer={confirmTake.offerId}>
+        <p className="panel-intro small">
+          <strong>
+            {verb} {amt(confirmTake.baseRaw, base)} {base.symbol}
+          </strong>{' '}
+          — the whole offer, in one step.
+        </p>
         <LegsPreview
           legs={t.legs}
           base={base}
           quote={quote}
-          foot="All or nothing: you pay and receive exactly these amounts, from one coin"
+          foot="All or nothing: you pay and get exactly these amounts, from one coin"
         />
         {!t.funding.ok && (
           <Notice tone="danger" role="alert" className="panel-intro" data-testid="take-not-fundable">
@@ -564,32 +627,39 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           </Notice>
         )}
         <ButtonRow stretch>
-          <Button data-testid="take-sign" disabled={cannotTake || !t.funding.ok} onClick={() => doTake(confirmTake)}>
-            {takeGuard.kind === 'warn' ? 'Cancel my offer and sign' : 'Sign and take'}
+          <Button
+            variant={t.legs.side === 'buy' ? 'buy' : 'sell'}
+            className="btn-block"
+            data-testid="take-sign"
+            disabled={cannotTake || !t.funding.ok}
+            onClick={() => doTake(confirmTake)}
+          >
+            {takeGuard.kind === 'warn' ? `Cancel my offer and ${verb.toLowerCase()}` : `${verb} now`}
           </Button>
-          <Button variant="secondary" onClick={() => setConfirmTake(null)}>
+          <Button variant="secondary" className="btn-block" onClick={() => setConfirmTake(null)}>
             Back
           </Button>
         </ButtonRow>
-      </Panel>
+        <p className="xsmall muted gap-top">You approve once in Phantom; the market pays the network fees.</p>
+      </div>
     );
   })();
 
   return layout(
     <>
       {message && (
-        <Notice
-          tone={message.kind === 'error' ? 'danger' : 'success'}
-          role={message.kind === 'error' ? 'alert' : 'status'}
-          className="panel-intro"
+        <Toast
+          tone={message.kind === 'error' ? 'error' : 'success'}
+          onClose={dismiss}
+          timerKey={message.text}
           data-testid="trade-message"
         >
           {message.text}
-        </Notice>
+        </Toast>
       )}
       {exchangeDown && state.status === 'unavailable' && (
         <Notice tone="danger" role="alert" className="panel-intro" data-testid="trade-exchange-unavailable">
-          Exchange unavailable: {state.reason}. You cannot trade until it answers again.
+          Exchange unavailable: {state.reason}. You can trade again as soon as it answers.
         </Notice>
       )}
       <RelayNotices place="trade" className="panel-intro" />
@@ -601,178 +671,218 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       {live && (
         <Notice
           tone="warning"
-          title="One live offer per account."
+          title="One live offer at a time."
           className="panel-intro"
           data-testid="live-offer-banner"
         >
-          You have a live offer: {live.summary}, until {clock(live.expiresAt)}. Any other signed action (a take or a
-          withdrawal) cancels it; we ask you before it happens.
+          Your offer is live: {live.summary}, until {clock(live.expiresAt)}. Any other approval (a take or a withdrawal)
+          cancels it; we ask you first.
         </Notice>
       )}
 
+      <div className="pair-bar">
+        <div className="pair-picker">
+          <PairIcon base={base.symbol} quote={quote.symbol} />
+          <label className="sr-only" htmlFor="tr-pair">
+            Market
+          </label>
+          <Select
+            id="tr-pair"
+            value={pair.id}
+            onChange={(e) => {
+              setPairId(e.target.value);
+              setPicked(null);
+              setConfirmTake(null);
+            }}
+            data-testid="trade-pair"
+          >
+            {pairs.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.base.symbol} / {p.quote.symbol}
+              </option>
+            ))}
+          </Select>
+          <span className="pair-name small muted">{base.name}</span>
+        </div>
+        <PairStats market={state.status === 'ready' ? market : null} quote={quote} />
+      </div>
+
       <div className="trade-grid">
-        <Panel title="Take an offer" meta={`${base.symbol} / ${quote.symbol}`} data-testid="take-section">
-          <p className="small muted panel-intro">
-            Offers are all or nothing: you pay and receive exactly the amounts shown, from one coin.
-          </p>
-          <ButtonRow stretch>
-            <Button
-              data-testid="buy-best-ask"
-              disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
-              onClick={() => bestAsk && startTake(bestAsk)}
-            >
-              Buy at best ask{bestAsk ? ` (${askText(bestAsk.price)})` : ''}
-            </Button>
-            <Button
-              variant="secondary"
-              data-testid="sell-best-bid"
-              disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
-              onClick={() => bestBid && startTake(bestBid)}
-            >
-              Sell at best bid{bestBid ? ` (${bidText(bestBid.price)})` : ''}
-            </Button>
-          </ButtonRow>
+        <Panel title="Order book" meta={`prices in ${quote.symbol}`} data-testid="trade-book">
           {market?.status === 'no-liquidity' && (
-            <Notice className="section-gap" data-testid="trade-no-liquidity">
-              No liquidity: nobody is offering to buy or sell {base.symbol} for {quote.symbol} right now. You can make
-              an offer instead.
+            <Notice className="panel-intro" data-testid="trade-no-liquidity">
+              No offers yet: nobody is buying or selling {base.symbol} for {quote.symbol} right now. Create the first
+              offer.
             </Notice>
           )}
-          {pickedGone && (
-            <Notice tone="warning" className="section-gap" data-testid="picked-gone">
-              The offer you picked is no longer on the exchange.
-            </Notice>
-          )}
-          {pickedEntry && !confirmTake && (
-            <ButtonRow className="section-gap">
-              <Button
-                variant="secondary"
-                data-testid="take-picked"
-                disabled={!!busy}
-                onClick={() => startTake(pickedEntry)}
-              >
-                Review the offer you picked
-              </Button>
-            </ButtonRow>
-          )}
-          {takeConfirm}
-          <div className="book-stack section-gap">
+          <div className="book-stack">
             {bookSide(asks, 'asks')}
+            {market && spreadText(market) !== null && (
+              <p className="spread-line">
+                <span>Spread</span>
+                <strong>
+                  {spreadText(market)} {quote.symbol}
+                </strong>
+              </p>
+            )}
             {bookSide(bids, 'bids')}
           </div>
+          <p className="table-note">
+            Offers are all or nothing: you pay and get exactly the amounts shown, from one coin.
+          </p>
         </Panel>
-        <Panel as="form" title="New offer" onSubmit={submitMake} data-testid="make-section" noValidate>
-          <Field label="Side">
-            <Segmented
-              label="Side"
-              options={[
-                { value: 'buy', label: `Buy ${base.symbol}`, testId: 'side-buy' },
-                { value: 'sell', label: `Sell ${base.symbol}`, testId: 'side-sell' },
-              ]}
-              value={side}
-              onChange={(v) => {
-                setSide(v);
-                prefill(v);
-              }}
-            />
-          </Field>
-          <Field label="Market" htmlFor="tr-pair">
-            <Select
-              id="tr-pair"
-              value={pair.id}
-              onChange={(e) => {
-                setPairId(e.target.value);
-                setPicked(null);
-              }}
-              data-testid="trade-pair"
-            >
-              {pairs.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.base.symbol} / {p.quote.symbol} — {p.base.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <div className="form-grid">
-            <Field label="Quantity" htmlFor="tr-qty">
-              <UnitInput
-                id="tr-qty"
-                unit={base.symbol}
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                inputMode="decimal"
-                autoComplete="off"
-                data-testid="make-quantity"
+
+        <div className="trade-side">
+          <Panel
+            title="Buy or sell now"
+            meta={`${base.symbol} / ${quote.symbol}`}
+            tone="accent"
+            data-testid="take-section"
+          >
+            {takeConfirm ?? (
+              <>
+                <div className="quick-actions">
+                  <Button
+                    variant="buy"
+                    data-testid="buy-best-ask"
+                    disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
+                    onClick={() => bestAsk && startTake(bestAsk)}
+                  >
+                    <span>Buy {base.symbol}</span>
+                    <span className="price">{bestAsk ? `at ${askText(bestAsk.price)}` : 'nobody is selling'}</span>
+                  </Button>
+                  <Button
+                    variant="sell"
+                    data-testid="sell-best-bid"
+                    disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
+                    onClick={() => bestBid && startTake(bestBid)}
+                  >
+                    <span>Sell {base.symbol}</span>
+                    <span className="price">{bestBid ? `at ${bidText(bestBid.price)}` : 'nobody is buying'}</span>
+                  </Button>
+                </div>
+                <p className="xsmall muted gap-top">
+                  Takes the best whole offer from the book. Or pick any line in the book.
+                </p>
+                {pickedGone && (
+                  <Notice tone="warning" className="gap-top" data-testid="picked-gone">
+                    The offer you picked is no longer on the exchange.
+                  </Notice>
+                )}
+                {pickedEntry && (
+                  <ButtonRow className="gap-top">
+                    <Button
+                      variant="secondary"
+                      className="btn-block"
+                      data-testid="take-picked"
+                      disabled={!!busy}
+                      onClick={() => startTake(pickedEntry)}
+                    >
+                      Review the offer you picked
+                    </Button>
+                  </ButtonRow>
+                )}
+              </>
+            )}
+          </Panel>
+
+          <Panel as="form" title="Create offer" onSubmit={submitMake} data-testid="make-section" noValidate>
+            <Field label="I want to">
+              <Segmented
+                label="Side"
+                options={[
+                  { value: 'buy', label: `Buy ${base.symbol}`, testId: 'side-buy' },
+                  { value: 'sell', label: `Sell ${base.symbol}`, testId: 'side-sell' },
+                ]}
+                value={side}
+                onChange={(v) => {
+                  setSide(v);
+                  prefill(v);
+                }}
               />
             </Field>
-            <Field
-              label={`Price per ${base.symbol}`}
-              htmlFor="tr-price"
-              hint={
-                <Button variant="link" onClick={() => prefill(side)} data-testid="make-prefill">
-                  {PREFILL_HINT[side]}
-                  {side === 'sell' && bestAsk ? ` (${askText(bestAsk.price)})` : ''}
-                  {side === 'buy' && bestBid ? ` (${bidText(bestBid.price)})` : ''}
-                </Button>
-              }
-            >
-              <UnitInput
-                id="tr-price"
-                unit={quote.symbol}
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                inputMode="decimal"
-                autoComplete="off"
-                data-testid="make-price"
+            <div className="form-grid">
+              <Field label="Amount" htmlFor="tr-qty">
+                <UnitInput
+                  id="tr-qty"
+                  unit={base.symbol}
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  placeholder="0.00"
+                  data-testid="make-quantity"
+                />
+              </Field>
+              <Field
+                label={`Price per ${base.symbol}`}
+                htmlFor="tr-price"
+                hint={
+                  <Button variant="link" onClick={() => prefill(side)} data-testid="make-prefill">
+                    {PREFILL_HINT[side]}
+                    {side === 'sell' && bestAsk ? ` (${askText(bestAsk.price)})` : ''}
+                    {side === 'buy' && bestBid ? ` (${bidText(bestBid.price)})` : ''}
+                  </Button>
+                }
+              >
+                <UnitInput
+                  id="tr-price"
+                  unit={quote.symbol}
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  placeholder="0.00"
+                  data-testid="make-price"
+                />
+              </Field>
+            </div>
+            {legsError && (
+              <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-error">
+                {legsError}
+              </Notice>
+            )}
+            {legs && (
+              <LegsPreview
+                legs={legs}
+                base={base}
+                quote={quote}
+                {...(makeFunding?.ok
+                  ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the market pays them' }
+                  : {})}
               />
-            </Field>
-          </div>
-          {legsError && (
-            <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-error">
-              {legsError}
-            </Notice>
-          )}
-          {legs && (
-            <LegsPreview
-              legs={legs}
-              base={base}
-              quote={quote}
-              {...(makeFunding?.ok
-                ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the market pays them' }
-                : {})}
-            />
-          )}
-          {legs && makeFunding && !makeFunding.ok && (
-            <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-not-fundable">
-              {makeFunding.reason}
-            </Notice>
-          )}
-          {makeGuard.kind === 'refuse' && (
-            <Notice tone="warning" role="alert" className="panel-intro" data-testid="make-refused">
-              {makeGuard.message}
-            </Notice>
-          )}
-          <ButtonRow stretch>
+            )}
+            {legs && makeFunding && !makeFunding.ok && (
+              <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-not-fundable">
+                {makeFunding.reason}
+              </Notice>
+            )}
+            {makeGuard.kind === 'refuse' && (
+              <Notice tone="warning" role="alert" className="panel-intro" data-testid="make-refused">
+                {makeGuard.message}
+              </Notice>
+            )}
             <Button
               type="submit"
+              className="btn-block"
               data-testid="make-sign"
               disabled={!!busy || !!paused || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'}
             >
-              {busy === 'make' ? 'Publishing…' : 'Sign and publish offer'}
+              {busy === 'make' ? 'Publishing…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
             </Button>
-          </ButtonRow>
-          <p className="small muted section-gap">
-            Your offer stays on the exchange until someone takes it (all of it) or it expires, about an hour after you
-            sign. Signing anything else from this account before then cancels it.
-          </p>
-        </Panel>
+            <p className="xsmall muted gap-top">
+              Your offer stays on the exchange until someone takes all of it, or for about an hour. Approving anything
+              else from this account before then cancels it.
+            </p>
+          </Panel>
+        </div>
       </div>
 
       {job && <Tracker job={job} />}
 
       <Panel
         className="section-gap"
-        title="My offers and trades"
+        title="Your offers and trades"
         meta={
           <Button
             variant="secondary"
@@ -787,9 +897,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         data-testid="my-offers"
       >
         <StatementTable
-          caption="My offers and trades"
+          caption="Your offers and trades"
           columns={[
-            { label: 'Placed' },
+            { label: 'Placed', sub: 'UTC' },
             { label: 'Trade' },
             { label: 'Kind' },
             { label: 'Status', align: 'right' },
@@ -800,7 +910,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           {shownTrades.length === 0 ? (
             <tr className="row-empty">
               <td colSpan={6}>
-                <NoValue>No trades yet.</NoValue>
+                <NoValue>No trades yet. Your offers and takes show here.</NoValue>
               </td>
             </tr>
           ) : (
@@ -810,7 +920,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                   {placed(t.createdAt)}
                 </Cell>
                 <Cell label="Trade">{t.summary}</Cell>
-                <Cell label="Kind">{t.role === 'make' ? 'Your offer' : 'Taken'}</Cell>
+                <Cell label="Kind">{t.role === 'make' ? 'Your offer' : 'You took'}</Cell>
                 <Cell label="Status" align="right" data-testid="my-trade-state">
                   <span className="num-wrap">
                     <StatusPill status={STATE_PILL[t.status]}>{STATE_TEXT[t.status]}</StatusPill>

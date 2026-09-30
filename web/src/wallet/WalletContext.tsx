@@ -61,6 +61,8 @@ export interface WalletState {
   error: string | null;
   connect(option: WalletOption): Promise<void>;
   disconnect(): void;
+  /** The customer closed the error's toast. */
+  dismissError(): void;
 }
 
 const WalletCtx = createContext<WalletState | null>(null);
@@ -116,6 +118,8 @@ export function WalletProvider({ adapter = null, children }: { adapter?: WalletA
     [adapter],
   );
 
+  const dismissError = useCallback(() => setError(null), []);
+
   const connected = status === 'connected' && session !== null;
   const value: WalletState = {
     status,
@@ -128,6 +132,7 @@ export function WalletProvider({ adapter = null, children }: { adapter?: WalletA
     error,
     connect,
     disconnect,
+    dismissError,
   };
   return <WalletCtx.Provider value={value}>{children}</WalletCtx.Provider>;
 }

@@ -196,6 +196,6 @@ describe('local storage blocked or full', () => {
     const store = new LocalStore(full);
     const scope = { network: 'stagenet', owner: '48'.repeat(32) };
     expect(() => store.put(scope, 'profile', { firstSeen: 1 })).toThrow(StoreFullError);
-    expect(() => store.put(scope, 'profile', { firstSeen: 1 })).toThrow(/no room left.*Export your data/);
+    expect(() => store.put(scope, 'profile', { firstSeen: 1 })).toThrow(/no room left.*Back up your data/);
   });
 });

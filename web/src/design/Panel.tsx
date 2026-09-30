@@ -2,10 +2,10 @@
 //
 //   <PageHead eyebrow="Statement" title="Accounts" lede="…" actions={<Button …>Refresh</Button>} />
 //   <Panel title="Midnight stagenet" meta={<>Account <span className="mono">4847…e56b</span></>}>…</Panel>
-//   <Panel tone="quiet" as="aside" title="Pending">…</Panel>      the ivory-grey side box
-//   <Card title="Open your Passport account">…</Card>               a panel with the gold top rule
+//   <Panel tone="quiet" as="aside" title="Pending">…</Panel>      a raised side card
+//   <Card title="Open your free account">…</Card>                    a panel with the violet glow
 //
-// Headings: the masthead's "Night Market" is the page's h1, a page title is an h2, a panel title an h3.
+// Headings: the header's "Night Market" is the page's h1, a page title is an h2, a panel title an h3.
 
 import { useId, type HTMLAttributes, type ReactNode } from 'react';
 
@@ -86,7 +86,7 @@ export function Panel({
   );
 }
 
-/** A panel with the gold top rule, for the one card that invites an action. */
+/** A panel with the violet glow, for the one card that invites an action. */
 export function Card(props: Omit<PanelProps, 'tone'>) {
   return <Panel tone="accent" {...props} />;
 }

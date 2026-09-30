@@ -1,6 +1,7 @@
 // Buttons, at least 44 px tall (the small size grows to 44 px on touch screens).
 //
-//   <Button onClick={…}>Open account</Button>                       primary (navy)
+//   <Button onClick={…}>Open account</Button>                       primary (violet → indigo)
+//   <Button variant="buy">Buy</Button> / <Button variant="sell">Sell</Button>   the trade actions
 //   <Button variant="secondary" size="small">Refresh</Button>
 //   <Button variant="danger">CLEAR ALL</Button>
 //   <Button variant="link">Close</Button>                           an inline text action
@@ -11,7 +12,7 @@ import type { AnchorHTMLAttributes, ButtonHTMLAttributes, HTMLAttributes } from 
 
 import { cx } from './format.js';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'inverse' | 'link';
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'inverse' | 'link' | 'buy' | 'sell';
 export type ButtonSize = 'normal' | 'small';
 
 export function buttonClass(variant: ButtonVariant = 'primary', size: ButtonSize = 'normal', extra?: string): string {

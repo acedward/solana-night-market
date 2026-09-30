@@ -1,60 +1,54 @@
-// The frame every page sits in: the navy masthead (the "NM" monogram, "Night Market", "Create and
-// trade on Midnight", and the customer's identity on the right), the white tab bar, and the
-// testnet footer. The design system is MN Bank's, carried over (AA 00047).
+// The frame every page sits in (AA 00047 P8.1, spec FR-006b): a wallet-first header (the Night
+// Market mark and name, the network, the sections, and the wallet on the right), and a short
+// testnet footer. On a phone the sections move to a tab bar at the bottom of the screen.
 //
-//   <Masthead>
-//     <IdentityChip label="Solana wallet" value={<span title={addr}>7xKX…gAsU</span>} />
-//     <IdentityChip label="Account" value="e8d3…2d09" badge={<NetworkBadge network="midnight">Midnight stagenet</NetworkBadge>} />
+//   <Masthead network={<span className="net-pill">Midnight stagenet</span>}
+//             nav={<TabNav items={SECTIONS} current="markets" />}>
+//     <ConnectButton />                         the wallet area (App.tsx)
 //   </Masthead>
-//   <TabNav items={[{ id: 'markets', label: 'Markets' }, …]} current="markets" />
-//   <SiteFooter />
+//   <SiteFooter networkName="Midnight stagenet" />
 
-import type { HTMLAttributes, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
-import { cx } from './format.js';
+import { Icon, LogoMark, type IconName } from './Icon.js';
 
-export function Masthead({ homeHref = '#markets', children }: { homeHref?: string; children?: ReactNode }) {
+export function Masthead({
+  homeHref = '#markets',
+  network,
+  nav,
+  children,
+}: {
+  homeHref?: string;
+  /** The network pill, beside the name. */
+  network?: ReactNode;
+  /** The sections (a TabNav). */
+  nav?: ReactNode;
+  /** The wallet area, at the right. */
+  children?: ReactNode;
+}) {
   return (
-    <header className="masthead">
-      <div className="wrap masthead-inner">
-        <h1 className="brand">
-          <a href={homeHref}>
-            <span className="monogram" aria-hidden="true">
-              NM
-            </span>
-            <span>
-              <span className="brand-name">Night Market</span>{' '}
-              <span className="brand-tagline">Create and trade on Midnight</span>
-            </span>
-          </a>
-        </h1>
-        {children ? <div className="identity">{children}</div> : null}
+    <header className="app-header">
+      <div className="wrap app-header-inner">
+        <div className="brand-block">
+          <h1 className="brand">
+            <a href={homeHref}>
+              <LogoMark />
+              <span className="brand-name">Night Market</span>
+            </a>
+          </h1>
+          {network}
+        </div>
+        {nav}
+        <div className="header-end">{children}</div>
       </div>
     </header>
-  );
-}
-
-export function IdentityChip({
-  label,
-  value,
-  badge,
-  className,
-  children,
-  ...rest
-}: Omit<HTMLAttributes<HTMLDivElement>, 'title'> & { label: ReactNode; value?: ReactNode; badge?: ReactNode }) {
-  return (
-    <div className={cx('id-chip', className)} {...rest}>
-      <span className="id-label">{label}</span>
-      {value}
-      {badge}
-      {children}
-    </div>
   );
 }
 
 export interface TabItem {
   id: string;
   label: ReactNode;
+  icon?: IconName;
 }
 
 export function TabNav({
@@ -67,18 +61,17 @@ export function TabNav({
   label?: string;
 }) {
   return (
-    <nav className="tabs" aria-label={label}>
-      <div className="wrap">
-        <ul>
-          {items.map((t) => (
-            <li key={t.id}>
-              <a href={`#${t.id}`} aria-current={current === t.id ? 'page' : undefined} data-testid={`tab-${t.id}`}>
-                {t.label}
-              </a>
-            </li>
-          ))}
-        </ul>
-      </div>
+    <nav className="nav" aria-label={label}>
+      <ul>
+        {items.map((t) => (
+          <li key={t.id}>
+            <a href={`#${t.id}`} aria-current={current === t.id ? 'page' : undefined} data-testid={`tab-${t.id}`}>
+              {t.icon ? <Icon name={t.icon} className="nav-icon" /> : null}
+              <span>{t.label}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
     </nav>
   );
 }
@@ -91,8 +84,8 @@ export function SiteFooter({ networkName = 'Midnight stagenet' }) {
           Testnet only — {networkName}. Tokens have no real value. A proof of concept.
         </p>
         <p>
-          The tokens are Midnight test tokens with public faucets. Your Solana wallet only signs messages: this app
-          never sends a Solana transaction, and never asks for your wallet&apos;s seed or private key.
+          The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night Market
+          never sends a Solana transaction, and never asks for your seed phrase or private key.
         </p>
       </div>
     </footer>

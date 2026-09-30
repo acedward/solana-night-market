@@ -65,7 +65,12 @@ export function Select({
   ref,
   ...rest
 }: SelectHTMLAttributes<HTMLSelectElement> & { ref?: Ref<HTMLSelectElement> }) {
-  return <select ref={ref} className={cx('input', className)} {...rest} />;
+  // The wrapper draws the chevron (the native arrow is hidden: it ignores the dark theme).
+  return (
+    <span className="select-wrap">
+      <select ref={ref} className={cx('input', className)} {...rest} />
+    </span>
+  );
 }
 
 /** A number input with its unit as a suffix ("50.00 [stkB]"); the unit is announced with it. */
@@ -185,6 +190,7 @@ export function Segmented<T extends string>({
           aria-checked={o.value === value}
           tabIndex={o.value === value ? 0 : -1}
           disabled={disabled}
+          data-value={o.value}
           data-testid={o.testId}
           onClick={() => onChange(o.value)}
           onKeyDown={(e) => {

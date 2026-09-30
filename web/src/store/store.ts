@@ -67,7 +67,7 @@ export class StoreFullError extends Error {
   override name = 'StoreFullError';
   constructor() {
     super(
-      'This browser has no room left for Night Market’s records, so the last change was not saved. Export your data under Local data, free some site data, then reload.',
+      'This browser has no room left for Night Market’s records, so the last change was not saved. Back up your data under Your data, free some site data, then reload.',
     );
   }
 }

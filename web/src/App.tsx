@@ -1,28 +1,37 @@
-// The application shell: the Night Market masthead (brand, the connected Solana wallet, the
-// account with its "Midnight stagenet" badge), the tab bar, the four sections and the testnet
-// footer, in the design system carried over from MN Bank. The pieces come from ./design; this file
-// only wires them to the wallet and the store.
+// The application shell (AA 00047 P8.1, spec FR-006b): a wallet-first header (the Night Market
+// mark, the network, the sections, and Connect Phantom or the connected wallet's pill), the
+// market's standing notices, the four sections, the testnet footer, the toasts and the signing
+// modal. The pieces come from ./design; this file only wires them to the wallet and the store.
 //
 // A create-and-trade market: the order books (Markets) and making and taking offers (Trade) come
-// first; the holdings (Account) and the browser's records (Local data) after.
+// first; the holdings (Portfolio, route #account) and the browser's records (Your data, route
+// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 import { registryFor, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
 
+import { ActivityProvider } from './activity/ActivityContext.js';
+import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
+  Avatar,
   Button,
   EmptyState,
-  IdentityChip,
+  Icon,
+  LogoMark,
   Masthead,
-  NetworkBadge,
   Notice,
   PageHead,
   SiteFooter,
+  Spinner,
   TabNav,
+  Toast,
+  ToastProvider,
+  copyText,
   shortHex,
+  type TabItem,
 } from './design/index.js';
 import { MarketProvider } from './market/MarketContext.js';
 import { Accounts } from './pages/Accounts.js';
@@ -34,16 +43,17 @@ import { RelayNotices, RelayStatusProvider } from './relay/RelayStatus.js';
 import { storageText } from './store/messages.js';
 import { StoreProvider, useStore } from './store/StoreContext.js';
 import { WalletProvider, useWallet, type WalletAdapter } from './wallet/WalletContext.js';
+import { ConnectPromptContext } from './wallet/connect-prompt.js';
 import { solanaWalletAdapter } from './wallet/phantom-adapter.js';
 import { SignPromptStore } from './wallet/sign-prompt.js';
 import { SigningPrompt } from './wallet/SigningPrompt.js';
 
 export const SECTIONS = [
-  { id: 'markets', label: 'Markets' },
-  { id: 'trade', label: 'Trade' },
-  { id: 'account', label: 'Account' },
-  { id: 'local', label: 'Local data' },
-] as const;
+  { id: 'markets', label: 'Markets', icon: 'markets' },
+  { id: 'trade', label: 'Trade', icon: 'trade' },
+  { id: 'account', label: 'Portfolio', icon: 'portfolio' },
+  { id: 'local', label: 'Your data', icon: 'data' },
+] as const satisfies ReadonlyArray<TabItem>;
 type SectionId = (typeof SECTIONS)[number]['id'];
 
 const sectionFromHash = (): SectionId => {
@@ -52,11 +62,45 @@ const sectionFromHash = (): SectionId => {
   return (SECTIONS.find((s) => s.id === h)?.id ?? 'markets') as SectionId;
 };
 
-/** The right-hand side of the masthead: who is connected, on which network. */
-function Identity({ network }: { network: NetworkProfile }) {
+/** Close a menu on Escape or a click outside it. */
+function useDismiss(open: boolean, close: () => void, ref: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onDown);
+    };
+  }, [open, close, ref]);
+}
+
+/** The right-hand side of the header: Connect Phantom, or the connected wallet. */
+function WalletArea({
+  network,
+  choosing,
+  setChoosing,
+}: {
+  network: NetworkProfile;
+  choosing: boolean;
+  setChoosing: (v: boolean) => void;
+}) {
   const w = useWallet();
   const { store, revision } = useStore();
-  const [choosing, setChoosing] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const area = useRef<HTMLDivElement>(null);
+  const closeAll = useCallback(() => {
+    setMenu(false);
+    setChoosing(false);
+  }, [setChoosing]);
+  useDismiss(menu || choosing, closeAll, area);
   // The account this wallet has in this browser (read-only; `revision` follows writes).
   const account = useMemo(
     () =>
@@ -66,91 +110,133 @@ function Identity({ network }: { network: NetworkProfile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, w.status, w.deviceKey, network.name, revision],
   );
-  const midnight = (
-    <NetworkBadge network="midnight" data-testid="network-name">
-      Midnight {network.name}
-    </NetworkBadge>
-  );
 
   if (w.status === 'connected' && w.address) {
+    const address = w.address;
     return (
-      <>
-        <IdentityChip
-          label="Solana wallet"
+      <div className="wallet-area" ref={area}>
+        <button
+          type="button"
+          className="wallet-pill"
           data-testid="wallet-connected"
-          value={
-            <span className="id-value" data-testid="wallet-address" title={w.address}>
-              {shortSolanaAddress(w.address)}
-            </span>
-          }
+          aria-haspopup="menu"
+          aria-expanded={menu}
+          onClick={() => setMenu((m) => !m)}
         >
-          <Button variant="link" onClick={w.disconnect}>
-            Disconnect
-          </Button>
-        </IdentityChip>
-        <IdentityChip
-          label="Account"
-          value={
-            account ? (
-              <span className="id-value" title={account.address} data-testid="masthead-account">
-                {shortHex(account.address, 4, 4)}
+          <Avatar seed={address} />
+          <span className="wallet-pill-text">
+            <span className="id-value" data-testid="wallet-address" title={address}>
+              {shortSolanaAddress(address)}
+            </span>
+            {account ? (
+              <span className="id-sub">
+                Account{' '}
+                <span className="mono" title={account.address} data-testid="masthead-account">
+                  {shortHex(account.address, 4, 4)}
+                </span>
               </span>
             ) : (
-              <span className="id-none">none in this browser</span>
-            )
-          }
-          badge={midnight}
-        />
-      </>
-    );
-  }
-  return (
-    <>
-      <IdentityChip label="Network" badge={midnight} />
-      <div className="wallet-area">
-        <Button
-          variant="inverse"
-          data-testid="connect"
-          aria-expanded={choosing}
-          aria-haspopup="menu"
-          disabled={w.status === 'connecting'}
-          onClick={() => setChoosing((c) => !c)}
-        >
-          {w.status === 'connecting' ? 'Connecting…' : 'Connect Solana wallet'}
-        </Button>
-        {choosing && (
-          <div className="wallet-menu" role="menu" aria-label="Choose a wallet" data-testid="wallet-menu">
-            {!w.supported ? (
-              <p className="small" data-testid="wallet-unsupported">
-                Solana wallets (Phantom) are coming to this site. You can already browse the order books.
-              </p>
-            ) : w.options.length === 0 ? (
-              <p className="small" data-testid="wallet-none">
-                No Solana wallet found in this browser. Install Phantom, then reload.
-              </p>
-            ) : (
-              <>
-                <p className="wallet-menu-title">Choose a wallet</p>
-                {w.options.map((o) => (
-                  <Button
-                    variant="secondary"
-                    role="menuitem"
-                    key={o.id}
-                    data-testid="wallet-option"
-                    onClick={() => {
-                      setChoosing(false);
-                      void w.connect(o);
-                    }}
-                  >
-                    {o.icon && <img src={o.icon} alt="" width={20} height={20} />} {o.name}
-                  </Button>
-                ))}
-              </>
+              <span className="id-sub">No account yet</span>
             )}
+          </span>
+          <Icon name="chevron" className="chevron" />
+        </button>
+        {menu && (
+          <div className="menu" role="menu" aria-label="Your wallet" data-testid="account-menu">
+            <div className="menu-head">
+              <Avatar seed={address} size="lg" />
+              <div>
+                <p className="mono small break">{shortSolanaAddress(address)}</p>
+                <p className="xsmall muted">Solana wallet · {w.walletName ?? 'connected'}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item"
+              data-testid="copy-address"
+              onClick={() => void copyText(address).then(setCopied)}
+            >
+              <Icon name={copied ? 'check' : 'copy'} />
+              {copied ? 'Address copied' : 'Copy address'}
+            </button>
+            <a role="menuitem" className="menu-item" href="#account" onClick={() => setMenu(false)}>
+              <Icon name="portfolio" /> Portfolio
+            </a>
+            <a role="menuitem" className="menu-item" href="#local" onClick={() => setMenu(false)}>
+              <Icon name="data" /> Your data
+            </a>
+            <div className="menu-sep" />
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item menu-danger"
+              data-testid="disconnect"
+              onClick={() => {
+                setMenu(false);
+                w.disconnect();
+              }}
+            >
+              <Icon name="logout" /> Disconnect
+            </button>
           </div>
         )}
       </div>
-    </>
+    );
+  }
+  return (
+    <div className="wallet-area" ref={area}>
+      <Button
+        data-testid="connect"
+        aria-expanded={choosing}
+        aria-haspopup="menu"
+        disabled={w.status === 'connecting'}
+        onClick={() => setChoosing(!choosing)}
+      >
+        <Icon name="wallet" />
+        {w.status === 'connecting' ? (
+          'Connecting…'
+        ) : (
+          <>
+            <span className="connect-long">Connect Phantom</span>
+            <span className="connect-short">Connect</span>
+          </>
+        )}
+      </Button>
+      {choosing && (
+        <div className="menu" role="menu" aria-label="Choose a wallet" data-testid="wallet-menu">
+          {!w.supported ? (
+            <p className="small" data-testid="wallet-unsupported">
+              Solana wallets (Phantom) are coming to this site. You can already browse the order books.
+            </p>
+          ) : w.options.length === 0 ? (
+            <p className="small" data-testid="wallet-none">
+              No Solana wallet found in this browser. Install Phantom, then reload.
+            </p>
+          ) : (
+            <>
+              <p className="menu-title">Choose a wallet</p>
+              {w.options.map((o) => (
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  key={o.id}
+                  data-testid="wallet-option"
+                  onClick={() => {
+                    setChoosing(false);
+                    void w.connect(o);
+                  }}
+                >
+                  {o.icon ? <img src={o.icon} alt="" width={20} height={20} /> : <Icon name="wallet" />} {o.name}
+                </button>
+              ))}
+              <p className="xsmall muted">Night Market only asks your wallet to sign messages. It needs no SOL.</p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -174,10 +260,12 @@ function Shell({
   network,
   config,
   prompts,
+  activity,
 }: {
   network: NetworkProfile;
   config: SiteConfig;
   prompts: SignPromptStore;
+  activity: ActivityStore;
 }) {
   const [section, setSection] = useState<SectionId>(sectionFromHash);
   useEffect(() => {
@@ -185,52 +273,67 @@ function Shell({
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
+  // The wallet signed: the modal moves on to the market's part of the action.
+  useEffect(() => prompts.onSigned(() => activity.approved()), [prompts, activity]);
+  const [choosing, setChoosing] = useState(false);
+  const openConnect = useCallback(() => {
+    window.scrollTo({ top: 0 });
+    setChoosing(true);
+  }, []);
   const { status } = useStore();
   const wallet = useWallet();
   const pending = SECTIONS.find((s) => s.id === section)?.label ?? '';
   const storage = status === 'ok' ? null : storageText(status);
   return (
-    <div className="app">
-      <Masthead>
-        <Identity network={network} />
-      </Masthead>
-      <TabNav items={SECTIONS} current={section} />
-      <div className="wrap app-banner app-banner-stack">
-        {storage && (
-          <Notice tone="danger" role="alert" title={storage.title} data-testid="storage-banner" data-status={status}>
-            {storage.text}
-          </Notice>
-        )}
+    <ConnectPromptContext.Provider value={openConnect}>
+      <div className="app">
+        <Masthead
+          network={
+            <span className="net-pill" data-testid="network-name">
+              Midnight {network.name}
+            </span>
+          }
+          nav={<TabNav items={SECTIONS} current={section} />}
+        >
+          <WalletArea network={network} choosing={choosing} setChoosing={setChoosing} />
+        </Masthead>
+        <div className="wrap app-banner app-banner-stack">
+          {storage && (
+            <Notice tone="danger" role="alert" title={storage.title} data-testid="storage-banner" data-status={status}>
+              {storage.text}
+            </Notice>
+          )}
+          <RelayNotices place="shell" />
+          <AssetFilterNote />
+        </div>
         {wallet.error && (
-          <Notice tone="danger" role="alert" data-testid="wallet-error">
+          <Toast tone="error" title="Wallet" onClose={wallet.dismissError} data-testid="wallet-error">
             {wallet.error}
-          </Notice>
+          </Toast>
         )}
-        <RelayNotices place="shell" />
-        <AssetFilterNote />
+        <main className="wrap app-main">
+          {section === 'local' ? (
+            <LocalData network={network.name} relayUrl={config.relayUrl} />
+          ) : section === 'account' ? (
+            <Accounts network={network} relayUrl={config.relayUrl} />
+          ) : section === 'markets' ? (
+            <Markets network={network} relayUrl={config.relayUrl} />
+          ) : section === 'trade' ? (
+            <Trade network={network} relayUrl={config.relayUrl} />
+          ) : (
+            <section data-testid={`section-${section}`}>
+              <PageHead title={pending} />
+              <EmptyState title="Coming soon">
+                This section is being built. Your records are under <a href="#local">Your data</a>.
+              </EmptyState>
+            </section>
+          )}
+        </main>
+        <SiteFooter networkName={`Midnight ${network.name}`} />
+        <ProfileRecorder network={network.name} />
+        <SigningPrompt prompts={prompts} activity={activity} timeoutSeconds={config.walletTimeoutSeconds} />
       </div>
-      <main className="wrap">
-        {section === 'local' ? (
-          <LocalData network={network.name} relayUrl={config.relayUrl} />
-        ) : section === 'account' ? (
-          <Accounts network={network} relayUrl={config.relayUrl} />
-        ) : section === 'markets' ? (
-          <Markets network={network} relayUrl={config.relayUrl} />
-        ) : section === 'trade' ? (
-          <Trade network={network} relayUrl={config.relayUrl} />
-        ) : (
-          <section data-testid={`section-${section}`}>
-            <PageHead title={pending} />
-            <EmptyState title="Coming soon">
-              This section is being built. Your records are under <a href="#local">Local data</a>.
-            </EmptyState>
-          </section>
-        )}
-      </main>
-      <SiteFooter networkName={`Midnight ${network.name}`} />
-      <ProfileRecorder network={network.name} />
-      <SigningPrompt prompts={prompts} timeoutSeconds={config.walletTimeoutSeconds} />
-    </div>
+    </ConnectPromptContext.Provider>
   );
 }
 
@@ -251,6 +354,17 @@ function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletA
   });
 }
 
+function Loading({ children }: { children: ReactNode }) {
+  return (
+    <div className="wrap app-loading" role="status">
+      <LogoMark />
+      <p className="small">
+        <Spinner /> {children}
+      </p>
+    </div>
+  );
+}
+
 export function App() {
   const [config, setConfig] = useState<SiteConfig | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -258,6 +372,7 @@ export function App() {
     loadSiteConfig().then(setConfig, (e: unknown) => setFailed(e instanceof Error ? e.message : 'configuration error'));
   }, []);
   const prompts = useMemo(() => new SignPromptStore(), []);
+  const activity = useMemo(() => new ActivityStore(), []);
   const adapter = useMemo(() => (config ? walletAdapterFor(config, prompts) : null), [config, prompts]);
   if (failed)
     return (
@@ -267,19 +382,18 @@ export function App() {
         </Notice>
       </div>
     );
-  if (!config)
-    return (
-      <p className="wrap app-banner muted" role="status">
-        Loading…
-      </p>
-    );
+  if (!config) return <Loading>Loading Night Market…</Loading>;
   return (
     <StoreProvider>
       <WalletProvider adapter={adapter}>
         <RelayStatusProvider relayUrl={config.relayUrl}>
           <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
             <AssetFilterProvider site={config.assets}>
-              <Shell network={config.network} config={config} prompts={prompts} />
+              <ActivityProvider store={activity}>
+                <ToastProvider>
+                  <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                </ToastProvider>
+              </ActivityProvider>
             </AssetFilterProvider>
           </MarketProvider>
         </RelayStatusProvider>

@@ -47,6 +47,7 @@ export class SignPromptStore {
   private current: SignPrompt | null = null;
   private hidden = false;
   private readonly listeners = new Set<() => void>();
+  private readonly signedListeners = new Set<() => void>();
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -64,11 +65,20 @@ export class SignPromptStore {
     return this.current;
   }
 
-  close(): void {
+  /** The wallet answered (`signed`: with a signature the page accepted) or the request ended. */
+  close(outcome: 'signed' | 'ended' = 'ended'): void {
     this.current = null;
     this.hidden = false;
     this.emit();
+    if (outcome === 'signed') for (const l of this.signedListeners) l();
   }
+
+  /** Called each time the wallet signs a request the page accepted (the signing modal then moves
+   *  on to the market's part of the action, AA 00047 P8.1). */
+  readonly onSigned = (listener: () => void): (() => void) => {
+    this.signedListeners.add(listener);
+    return () => this.signedListeners.delete(listener);
+  };
 
   /** The customer closed the panel; the wallet's request stays open until it answers or times out. */
   hide(): void {

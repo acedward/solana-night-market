@@ -16,69 +16,16 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { x25519 } from '@noble/curves/ed25519.js';
 import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { formatUnshieldedAddress } from '../../packages/core/src/unshielded.js';
 import { shortSolanaAddress } from '../../packages/core/src/signing.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
-import { encodeRecord, recordKey } from '../../web/src/store/schema.js';
-import { connectPhantom, installMockPhantom, type MockPhantom } from './mock-phantom.js';
-import { ACCOUNT, DEMO_PACK, MockRelay, RELAY } from './mock-relay.js';
-import { seedRecords, serveExchange } from './visual-fixtures.js';
+import { connectPhantom, type MockPhantom } from './mock-phantom.js';
+import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
-
-async function setup(
-  page: Page,
-  opts: { walletTimeoutSeconds?: number; injected?: boolean; standard?: boolean; seeded?: boolean } = {},
-) {
-  const ex = await serveExchange(page);
-  const phantom = await installMockPhantom(page, {
-    ...(opts.injected ? { injected: true } : {}),
-    ...(opts.standard === false ? { standard: false } : {}),
-  });
-  const relay = new MockRelay();
-  await page.route(`${RELAY}/**`, (r) => relay.handle(r));
-  await page.route('**/config.json', (r) =>
-    r.fulfill({
-      json: { network: 'stagenet', relayUrl: RELAY, walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20 },
-    }),
-  );
-  if (opts.seeded) await seedAccount(page, phantom, relay);
-  return { ex, phantom, relay };
-}
-
-/** An account that exists on chain and in this browser (its records as the page writes them),
- *  holding the demo pack, plus 25 utwUSDC unshielded. */
-async function seedAccount(page: Page, phantom: MockPhantom, relay: MockRelay) {
-  const sk = x25519.utils.randomSecretKey();
-  const pk = Buffer.from(x25519.getPublicKey(sk)).toString('hex');
-  relay.existing(phantom.deviceKey, pk);
-  await relay.deposit(
-    DEMO_PACK.map((t, i) => ({ nonce: (0xa0 + i).toString(16).repeat(32), color: t.colour, value: BigInt(t.amount) })),
-  );
-  relay.unshielded.set(COLOUR.utwUSDC, 25_000_000n);
-  const scope = { network: 'stagenet', owner: phantom.deviceKey };
-  const now = Date.now();
-  await seedRecords(page, [
-    [
-      recordKey(scope, 'account', { account: ACCOUNT }),
-      encodeRecord(
-        'account',
-        { address: ACCOUNT, device: phantom.deviceKey, network: 'stagenet', createdAt: now },
-        now,
-      ),
-    ],
-    [
-      recordKey(scope, 'secret', { account: ACCOUNT }),
-      encodeRecord('secret', { encSecretKey: Buffer.from(sk).toString('hex'), encPublicKey: pk }, now),
-    ],
-    [recordKey(scope, 'roster', { account: ACCOUNT }), encodeRecord('roster', { useCounter: '0' }, now)],
-    [recordKey(scope, 'coins', { account: ACCOUNT }), encodeRecord('coins', [], now)],
-  ]);
-}
 
 const holding = (page: Page, symbol: string, kind = 'shielded') =>
   page.locator(`[data-testid=holding][data-symbol="${symbol}"][data-kind="${kind}"]`);

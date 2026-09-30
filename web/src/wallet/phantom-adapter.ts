@@ -45,6 +45,7 @@ export function walletSigner(
     address: wallet.address,
     async signMessage(message: Uint8Array): Promise<Uint8Array> {
       opts.prompts.open(message, name);
+      let signed = false;
       try {
         let out: { signature: Uint8Array; signedMessage?: Uint8Array };
         try {
@@ -58,9 +59,10 @@ export function walletSigner(
           throw new WalletError('hardware');
         }
         if (verdict !== 'ok') throw new WalletError('bad-signature');
+        signed = true;
         return out.signature;
       } finally {
-        opts.prompts.close();
+        opts.prompts.close(signed ? 'signed' : 'ended');
       }
     },
   };

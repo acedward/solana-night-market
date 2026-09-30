@@ -26,6 +26,9 @@ export const AccountStateViewSchema = z.object({
   inboxCount: decimal,
   /** The account's encryption PUBLIC key (X25519, 64 hex). */
   encKey: z.string().regex(/^[0-9a-f]{64}$/),
+  /** The account's network salt (its sealed `evm_domain_salt`, 64 hex): every Ed25519 challenge
+   *  binds it (../passport/gated.ts `GatedContext`). */
+  networkSalt: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type AccountStateView = z.infer<typeof AccountStateViewSchema>;
 

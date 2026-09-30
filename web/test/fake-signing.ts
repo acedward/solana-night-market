@@ -1,8 +1,9 @@
 // A TEST Solana wallet for the browser operations: an `ActionSigning` (../src/wallet/signing.ts)
 // over a random Ed25519 key. The relay envelope is signed in the core TEST scheme; an account call
-// is signed over a test message of the call (Track A's message builder is lane B2's); the device's
-// use counter is found through a test entry derivation. It records every signature asked for, so
-// the tests can check "one signature per action".
+// is signed over a test message of the call, and the device's use counter is found through a test
+// entry derivation, so these tests need no compiled account state (the real arm path,
+// `ed25519ActionSigning`, has its own tests: ed25519-signing.test.ts). It records every signature
+// asked for, so the tests can check "one signature per action".
 
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -38,6 +39,9 @@ export function fakeSigning(opts: { onSign?: (what: string) => void } = {}) {
       calls.push('relayAction');
       opts.onSign?.('relayAction');
       return device.signEnvelope(message);
+    },
+    preview(ctx, call) {
+      return { text: `fake call ${bytesToHex(fakeCallMessage(ctx, call))}` };
     },
     async authorise(ctx, call, useCounter) {
       calls.push(`authorise:${call.kind === 'gated' ? call.request.op : call.action}`);

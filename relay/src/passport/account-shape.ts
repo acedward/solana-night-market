@@ -1,33 +1,36 @@
-// The shape of every Night Market account: the device arm's circuits (./arm.ts, Track A's Ed25519
-// arm) and the offer circuit, deployed in the Passport client's default waves for that arm. MN
-// Bank's accounts also carried the five bridge circuits and the `evm` arm; Night Market has no
-// bridge and no EVM arm (AA 00047).
+// The shape of every Night Market account: Track A's market account (`ed25519AccountWaves({ withSwap:
+// true })`, `contractForEd25519Account`): the deposits, the Ed25519 arm's activation and seven gated
+// circuits, and the offer circuit, in the client's two waves (the offer circuit rides the
+// maintenance update that retires the authority). MN Bank's accounts also carried the five bridge
+// circuits and the `evm` arm; Night Market has no bridge and no EVM arm (AA 00047).
 //
 // The circuit ids are the deployed contract's IDENTITY: a client whose compiled contract lists
 // circuits the account does not carry cannot connect to it (findDeployedContract compares every
 // verifier key), so this list must stay equal to what is deployed. relay/test/account-shape.test.ts
 // checks it against the compiled contract once the submodule carries the arm (plan P6.1).
 
-import { accountCircuits, defaultWaves } from '../../../vendor/passport/contract/src/wallet/wave-deploy.js';
-import { ARM_CIRCUITS, DEVICE_ARM } from './arm.js';
+import {
+  ED25519_SWAP_CIRCUIT,
+  ed25519AccountCircuits,
+  ed25519AccountWaves,
+} from '../../../vendor/passport/contract/src/wallet/wave-deploy.js';
 
-/** The offer circuit, the arm's make/take call. */
-export const SWAP_CIRCUIT = ARM_CIRCUITS.openSwap;
+/** The offer circuit, the arm's make/take call (Track A's `ED25519_SWAP_CIRCUIT`). */
+export const SWAP_CIRCUIT: string = ED25519_SWAP_CIRCUIT;
 
-// The pinned client's `Arm` type predates the Ed25519 arm: lane B3 / P6.1 moves the pin to the arm's
-// branch, whose client names it.
-const arm = DEVICE_ARM as never;
+/** A market account: Track A's Ed25519 account shape with the offer circuit. */
+const MARKET_ACCOUNT = { withSwap: true } as const;
 
-/** Wave 1 (the node's measured ceiling of 8 operations) and wave 2 (the arm's overflow and the
- *  offer circuit, inserted by the maintenance update that retires the authority). */
+/** Wave 1 (the node's measured ceiling of 8 operations: the deposits, the activation and five gated
+ *  circuits) and wave 2 (the device-lifecycle pair and the offer circuit, inserted by the
+ *  maintenance update that retires the authority). */
 export function accountWaves(): { waveOne: string[]; waveTwo: string[] } {
-  const waves = defaultWaves(arm);
-  return { waveOne: waves.waveOne, waveTwo: [...waves.waveTwo, SWAP_CIRCUIT] };
+  return ed25519AccountWaves(MARKET_ACCOUNT);
 }
 
 /** Every circuit a Night Market account carries. */
 export function accountCircuitIds(): string[] {
-  return [...accountCircuits([arm]), SWAP_CIRCUIT];
+  return ed25519AccountCircuits(MARKET_ACCOUNT);
 }
 
 /** The compiled account contract restricted to the circuits a Night Market account carries. */

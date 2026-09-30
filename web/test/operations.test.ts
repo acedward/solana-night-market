@@ -193,6 +193,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
       authNonce: '7',
       inboxCount: '3',
       encKey: bytesToHex(pk),
+      networkSalt: '5a'.repeat(32),
     };
     const c60 = { nonce: '01'.repeat(32), color: COLOUR, value: 60_000_000n };
     const c40 = { nonce: '02'.repeat(32), color: COLOUR, value: 40_000_000n };
@@ -254,7 +255,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     // The device signed exactly this call: the account, its auth nonce and the withdrawal's request.
     expect(pa.owner).toBe(signing.deviceKey);
     const message = fakeCallMessage(
-      { account: ACCOUNT, authNonce: 7n },
+      { account: ACCOUNT, authNonce: 7n, networkSalt: '5a'.repeat(32) },
       { kind: 'gated', request: withdrawRequest(sub.request.payload as never) },
     );
     expect(ed25519.verify(unhex(pa.signature), message, unhex(signing.deviceKey))).toBe(true);

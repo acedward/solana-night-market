@@ -9,10 +9,13 @@
 //   - a DeviceSigner is anything that signs bytes with that key and returns the 64-byte signature
 //     (in the browser: Phantom's `signMessage`, lane B2; in tests: tweetnacl or noble).
 //
-// What it does NOT hold yet, on purpose: the exact bytes the wallet is asked to sign for an account
-// call (the readable F3 action text, or the F1 prefix and digest; plan A3), which Track A's message
-// builder defines, and the relay envelope's message format, which lane B3 defines with it
-// (`RelayActionScheme` in ./auth.ts).
+// The exact bytes the wallet signs for an ACCOUNT CALL are Track A's readable F3 message (plan A3,
+// questions Q11), rendered by the arm client that `@nightmarket/core/passport` wires in
+// (../passport/ed25519.ts: `ed25519DeviceOf(signer, display)` turns a DeviceSigner into Track A's
+// `Ed25519Device`, whose `signMessage` callback this interface's `signMessage` is). That module is
+// kept out of this package's root on purpose: it loads the compiled account module.
+// The relay ENVELOPE's message format is still lane B3's (`RelayActionScheme` in ./auth.ts,
+// TODO(B3)).
 
 import { base58 } from '@scure/base';
 
@@ -54,9 +57,11 @@ export function shortSolanaAddress(address: string, head = 4, tail = 4): string 
 }
 
 /**
- * Something that signs with a device key: the connected Solana wallet in the browser (lane B2),
- * a test key in tests. `signMessage` returns the raw 64-byte Ed25519 signature over exactly
- * `message` (RFC 8032, as Phantom's `signMessage` does).
+ * Something that signs with a device key: the connected Solana wallet in the browser (lane B2:
+ * Phantom's `signMessage(message, 'utf8')`, TODO(B2)), a test key in tests. `signMessage` returns
+ * the raw 64-byte Ed25519 signature over exactly `message` (RFC 8032, as Phantom's `signMessage`
+ * does): it is Track A's `Ed25519SignFn`. The arm verifies every signature with tweetnacl before
+ * anything is proven, so a Ledger-wrapped signature or another key fails at once.
  */
 export interface DeviceSigner {
   /** The device key, 64 lowercase hex. */

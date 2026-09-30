@@ -11,8 +11,14 @@
 //     request), yielding the circuit's trailing authorisation arguments;
 //   - the device a registration enrols.
 //
-// Until lane B3 implements `DeviceArm` (and P6.1 points vendor/passport at the arm's branch), main.ts
-// wires no arm: the account and trade actions answer "not supported yet", and nothing is proven.
+// B1.5 typed the seam with Track A's client (vendor/passport @ 05be272): a check's `auth` is Track A's
+// `Ed25519Authorisation` and a registration's device its `Ed25519Device`. `./ed25519-arm.ts` is the
+// arm: its device and circuit arguments are real, its two call checks are lane B3's (TODO(B3)). Until
+// B3 finishes them and defines the Solana envelope scheme, main.ts wires no arm: the account and
+// trade actions answer "not supported yet", and nothing is proven.
+//
+// Only TYPES come from the client here: its modules load the compiled account (the key volume's, in a
+// deployment), so the relay imports them at run time only (./runtime.ts, ./ed25519-arm.ts).
 
 import {
   AppendInboxPayloadSchema,
@@ -29,13 +35,15 @@ import {
   type WithdrawPayload,
 } from '@nightmarket/core';
 
+import type { Ed25519Authorisation, Ed25519Device } from '../../../vendor/passport/contract/src/wallet/ed25519.js';
 import type { AccountLedger, PassportRuntime } from './runtime.js';
 
 /** The arm every Night Market account carries. */
 export const DEVICE_ARM = 'ed25519';
 
-/** The arm's circuits the relay proves, by plan A2's names (lane B3 aligns them with the arm as
- *  Track A builds it). */
+/** The arm's circuits the relay proves: Track A's `_with_ed25519` circuits (relay/test/account-shape
+ *  checks each against the compiled contract and against Track A's own account shape). Lane B3 adds
+ *  the ones it proves beyond these (e.g. `withdraw_unshielded_with_ed25519`). */
 export const ARM_CIRCUITS = {
   /** Registration: the first device's activation. */
   activate: 'activate_initial_device_with_ed25519',
@@ -89,9 +97,10 @@ export interface CallCheckOk<P> {
   signer: string;
   payload: P;
   passport: PassportAuth;
-  /** The circuit's trailing authorisation arguments, as the Passport client takes them (its
-   *  `*WithAuth` methods and `signer.authArgs`). Opaque here: the arm builds it. */
-  auth: unknown;
+  /** The rebuilt authorisation, as the Passport client takes it (its `*WithAuth` methods and
+   *  `signer.authArgs`): Track A's `Ed25519Authorisation`, which the arm's check builds with the
+   *  browser's signature (every check of `Ed25519Device.sign` re-run on the relay). */
+  auth: Ed25519Authorisation;
   /** What the replay guard remembers (the signed message's digest, hex). */
   digestHex: string;
   ledger: AccountLedger;
@@ -157,20 +166,23 @@ export interface DeviceArm {
     passportAuth: unknown,
   ): Promise<TradeCheckOk<A> | GatedCheckFail>;
   /** The circuit's trailing authorisation arguments a checked call's `auth` expands to (for the
-   *  calls the relay builds by hand: the swap circuit, and a withdrawal to a third party). */
-  authArgs(auth: unknown): unknown[];
+   *  calls the relay builds by hand: the swap circuit, and a withdrawal to a third party): Track A's
+   *  `ed25519AuthArgs`, `(pk, use_counter, sig, show)`. */
+  authArgs(auth: Ed25519Authorisation): unknown[];
   /** The device a registration enrols, as the Passport client's device object (the one
    *  `CustodyAccount.deployDormant` and `activate` take), from the verified registration: its
    *  device key and body. */
   registrationDevice(
     runtime: PassportRuntime,
     registration: { deviceKey: string; body: Record<string, unknown> },
-  ): Promise<{ device: unknown; entryAt(account: Uint8Array, epoch: bigint, counter: bigint): Uint8Array }>;
+  ): Promise<{ device: Ed25519Device; entryAt(account: Uint8Array, epoch: bigint, counter: bigint): Uint8Array }>;
 }
 
 /**
  * The arm (and the relay envelope's signature scheme) this build wires into the relay: NONE yet.
- * Lane B3 returns Track A's Ed25519 arm and the Solana wallet's envelope scheme here; until then
+ * TODO(B3): once `ed25519Arm` (./ed25519-arm.ts) checks calls and the Solana envelope scheme exists
+ * (packages/core/src/auth.ts `RelayActionScheme`), return
+ * `{ arm: ed25519Arm({ network, tokens }), scheme }` here (from the relay's config). Until then
  * main.ts serves the default catalogue, whose account and trade actions answer "not supported".
  */
 export function wiredArm(): { arm: DeviceArm; scheme: RelayActionScheme } | null {

@@ -236,7 +236,7 @@ export async function gatedContext(env: OperationEnv, account: string) {
   const hint = BigInt(readRoster(env.store, env.scope, account)?.useCounter ?? '0');
   const counter = env.signing.useCounter(state, hint);
   if (counter === null) throw new OperationError('This wallet is not a device of this account.');
-  const ctx: GatedContext = { account, authNonce: BigInt(state.authNonce) };
+  const ctx: GatedContext = { account, authNonce: BigInt(state.authNonce), networkSalt: state.networkSalt };
   return { state, counter, ctx };
 }
 

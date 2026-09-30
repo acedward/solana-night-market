@@ -5,7 +5,8 @@
 // sent) and checks the signature against a live device of the account. This module holds the
 // arm-agnostic half: the call context and the `AuthRequest` of each action body, in the pinned
 // Passport client's own shapes. The arm-specific half (the message the Solana wallet signs, and its
-// check) is Track A's Ed25519 arm client (plan A3/A4), plugged in by lanes B2 and B3.
+// check) is Track A's Ed25519 arm client (./ed25519.ts): its `Ed25519Device.sign(callContext(ctx),
+// request, counter)` takes exactly what this module builds.
 //
 // The coin a spend consumes is part of the signed challenge (AUTH-10), `mt_index` included, so
 // the browser resolves the coin's exact position BEFORE it builds the call (../coins.ts).
@@ -20,12 +21,17 @@ export interface GatedContext {
   account: string;
   /** The auth nonce the call executes against. */
   authNonce: bigint;
+  /** The account's network salt, 64 hex: its sealed `evm_domain_salt` (AccountStateView
+   *  `networkSalt`). The Ed25519 arm binds it into every challenge, so a signature for one network
+   *  (or one deployment) can never be used on another. */
+  networkSalt: string;
 }
 
 /** The Passport client's call context for `ctx`. */
 export const callContext = (ctx: GatedContext): CallContext => ({
   contractAddress: hexToBytes(normaliseHex32(ctx.account), 32),
   authNonce: ctx.authNonce,
+  evmDomainSalt: hexToBytes(normaliseHex32(ctx.networkSalt), 32),
 });
 
 /** The AuthRequest of a `withdraw` action body. */

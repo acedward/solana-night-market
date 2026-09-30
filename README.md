@@ -68,7 +68,7 @@ draft until the work is complete.
 | `docs/` | Reference notes: `PERFORMANCE.md` (MN Bank's proof times and DUST per action). |
 | `scripts/` | The contract light compile, the Docker check runner and the secret scan. |
 | `test/` | Browser end-to-end tests (Playwright) and the take gate's offline half. |
-| `vendor/passport` | A git submodule: [`acedward/passport`](https://github.com/acedward/passport), pinned. The account contract and its client come from here. |
+| `vendor/passport` | A git submodule: [`acedward/passport`](https://github.com/acedward/passport), pinned to the Ed25519 arm's branch `00047-solana-ed25519-arm`. The account contract and its client (the Solana device, its readable messages and checks) come from here. |
 
 ## Configuration
 
@@ -97,8 +97,13 @@ bun run check                        # format, lint, typecheck, unit tests
 bun run build:web
 ```
 
-`bun run contracts` downloads the pinned Compact compiler (0.34.0) into `.tools/` and checks its
-SHA-256 first. It builds JavaScript and type declarations only, never proving keys.
+`bun run contracts` downloads the pinned Compact compilers into `.tools/` and checks each release
+archive's SHA-256 first: 0.35.0 (`--feature-zkir-v3`) for the account, whose Ed25519 arm needs its
+`ed25519Verify`, and 0.34.0 for the vault and Signet contracts the account declares (compile-time
+inputs only). It builds JavaScript and type declarations only, never proving keys, and points the
+compiled account module at compact-runtime 0.20.0 (`scripts/pin-contract-runtime.mjs`): that module
+alone uses 0.20.0, through the `@midnight-ntwrk/compact-runtime-0.20` alias; the relay's Midnight
+SDK keeps 0.19.0.
 
 To run everything in Docker instead (`node_modules` stays in a Docker volume):
 
@@ -110,7 +115,9 @@ scripts/docker-check.sh down         # remove the container and volumes
 ## Deployment
 
 `deploy/compose.yml` is the deployment bundle for stagenet: a one-shot job that builds and
-verifies the relay's proving keys, the proof server, the relay and the web site.
+verifies the relay's proving keys, two proof servers (9.0.0-rc.8 for the account's circuits,
+9.0.0-rc.6 for the sponsor wallet's DUST, until stagenet moves to dust/10), the relay and the web
+site.
 [`deploy/.env.example`](deploy/.env.example) documents every setting. The operator's runbook
 [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) is MN Bank's and is being rewritten for Night Market
 (lane B3). Every domain must be served over https.

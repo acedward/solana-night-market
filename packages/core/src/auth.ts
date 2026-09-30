@@ -12,10 +12,18 @@
 //   - an EXPIRY (unix seconds); the relay also caps how far ahead it may be.
 //
 // THE SIGNATURE SCHEME IS A SEAM (plan lane B3). `RelayActionScheme` turns an envelope into the exact
-// bytes the wallet signs and checks a signature over them. The Solana scheme (Ed25519 over a
-// domain-separated message that can never parse as a Solana transaction or a sign-in message, shown
-// in the wallet next to the decoded action) plugs in there, alongside Track A's message builder for
-// the account's own calls. Until a scheme is given, every envelope is refused as `not-supported`.
+// bytes the wallet signs and checks a signature over them. TODO(B3): the Solana scheme, from Track
+// A's arm client in `@nightmarket/core/passport` (../passport/ed25519.ts):
+//   - `messageBytes` must be printable ASCII the wallet shows as text (Phantom `display: 'utf8'`),
+//     start with the market's label (`marketLabel(network)`), and pass
+//     `assertSafeEd25519Message` (never a Solana transaction, an off-chain message or a Sign-In With
+//     Solana request); Track A's `ed25519PossessionMessage` is the arm's own shape for an off-chain
+//     proof of key (it authorises nothing on chain);
+//   - `verify` checks the 64-byte signature strictly (tweetnacl `sign.detached.verify` over the
+//     owner's 32-byte key, as the arm's pre-check does) and refuses an owner key that does not decode
+//     (`assertDeviceKeyDecodes`).
+// The account's own calls are not signed here: each carries the arm's F3 message (PassportAuth).
+// Until a scheme is given, every envelope is refused as `not-supported`.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';

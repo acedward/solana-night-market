@@ -19,9 +19,14 @@ const payload: WithdrawPayload = {
 const bytes = (hex: string) => Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16)));
 
 describe('gated call arguments', () => {
-  it('the call context is the account and the auth nonce, with no EVM domain salt', () => {
-    const cc = callContext({ account: `0x${ACCOUNT.toUpperCase()}`, authNonce: 3n });
-    expect(cc).toEqual({ contractAddress: bytes(ACCOUNT), authNonce: 3n });
+  it("the call context is the account, the auth nonce and the account's network salt (the Ed25519 arm binds it)", () => {
+    const cc = callContext({
+      account: `0x${ACCOUNT.toUpperCase()}`,
+      authNonce: 3n,
+      networkSalt: `0x${'AB'.repeat(32)}`,
+    });
+    expect(cc).toEqual({ contractAddress: bytes(ACCOUNT), authNonce: 3n, evmDomainSalt: bytes('ab'.repeat(32)) });
+    expect(() => callContext({ account: ACCOUNT, authNonce: 3n, networkSalt: 'ab' })).toThrow();
   });
 
   it('a withdrawal binds the recipient, the amount and the exact coin', () => {

@@ -41,6 +41,7 @@ export interface LedgerView {
   readonly auth_nonce: bigint;
   readonly inbox_count: bigint;
   readonly enc_key: Uint8Array;
+  readonly evm_domain_salt: Uint8Array;
   devices: { [Symbol.iterator](): Iterator<Uint8Array> };
   inbox: { member(k: bigint): boolean; lookup(k: bigint): Uint8Array };
 }
@@ -57,6 +58,7 @@ export function accountStateView(account: string, l: LedgerView): AccountStateVi
     authNonce: l.auth_nonce.toString(10),
     inboxCount: l.inbox_count.toString(10),
     encKey: hex(l.enc_key),
+    networkSalt: hex(l.evm_domain_salt),
   };
 }
 

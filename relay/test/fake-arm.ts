@@ -9,6 +9,8 @@ import { createHash } from 'node:crypto';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { canonicalJson, type PassportAuth } from '@nightmarket/core';
 
+import type { Ed25519Authorisation, Ed25519Device } from '../../vendor/passport/contract/src/wallet/ed25519.js';
+
 import {
   ARM_CIRCUITS,
   DEVICE_ARM,
@@ -91,7 +93,13 @@ async function check(
     signer: passport.owner,
     payload: pre.payload,
     passport,
-    auth: { arm: 'test', pk: passport.owner, use_counter: BigInt(passport.useCounter), sig: passport.signature },
+    // A test stand-in for Track A's `Ed25519Authorisation` (the executors pass it through opaquely).
+    auth: {
+      arm: 'test',
+      pk: passport.owner,
+      use_counter: BigInt(passport.useCounter),
+      sig: passport.signature,
+    } as unknown as Ed25519Authorisation,
     digestHex: hex(message),
     ledger,
   };
@@ -105,11 +113,11 @@ export const testArm: DeviceArm = {
   checkTradeCall: (rt, action, account, payload, passportAuth) =>
     check(rt, action, account, parseTradePayload(action, payload), passportAuth) as never,
   authArgs: (auth) => {
-    const a = auth as { pk: string; use_counter: bigint; sig: string };
+    const a = auth as unknown as { pk: string; use_counter: bigint; sig: string };
     return [a.pk, a.use_counter, a.sig];
   },
   registrationDevice: async (_rt, { deviceKey }) => ({
-    device: { arm: 'test', deviceKey },
+    device: { arm: 'test', deviceKey } as unknown as Ed25519Device,
     entryAt: (account, epoch, counter) => unhex(testDeviceEntry(hex(account), deviceKey, epoch, counter)),
   }),
 };

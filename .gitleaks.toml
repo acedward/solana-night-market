@@ -57,6 +57,15 @@ paths = ['''(^|/)packages/core/src/tokens/deployments/[a-z0-9-]+\.json$''']
 regexTarget = "match"
 regexes = ['''^(?:mpcResponseKey|mpcRootPublicKey|deployerPublicKey|publishTokenMetadata|verifierKeySha256)"''']
 
+# The vendored effectstream/mint-test-tokens registry (PROVENANCE.md, byte for byte): the values the
+# rule flags there are PUBLIC token types (each token's colour, `tokenId`). Scoped to that rule,
+# that file AND that field.
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''(^|/)packages/core/src/tokens/mint-test-tokens/metadata\.stagenet\.json$''']
+regexTarget = "match"
+regexes = ['''^tokenId"''']
+
 # The staging kernel's GET /v1/known-tokens, captured verbatim (a test fixture): the values the
 # rule flags there are PUBLIC token colours. Scoped to that rule, that capture AND that field.
 [[rules.allowlists]]

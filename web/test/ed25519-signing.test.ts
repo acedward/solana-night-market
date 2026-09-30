@@ -8,10 +8,10 @@ import {
   bytesToHex,
   hexToBytes,
   registryFor,
-  solanaRelayActionScheme,
   type DeviceSigner,
   type OpenSwapPayload,
 } from '@nightmarket/core';
+import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
 import { ed25519DeviceForCheck, withdrawRequest, callContext } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 

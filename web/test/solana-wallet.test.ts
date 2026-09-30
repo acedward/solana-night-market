@@ -13,9 +13,9 @@ import {
   hexToBytes,
   registryFor,
   solanaAddressOf,
-  solanaRelayActionScheme,
   type RelayActionMessage,
 } from '@nightmarket/core';
+import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
 
 import { solanaWalletAdapter } from '../src/wallet/phantom-adapter.js';
 import { SignPromptStore, messageFingerprint, type SignPrompt } from '../src/wallet/sign-prompt.js';

@@ -18,7 +18,8 @@
 // Phantom adapter (./phantom-adapter.ts) hands it the wallet's `signMessage` (which already refuses
 // a Ledger-wrapped or mismatched signature, ./solana-signature.ts); the tests hand it a tweetnacl key.
 
-import { bytesToHex, hexToBytes, solanaRelayActionScheme } from '@nightmarket/core';
+import { bytesToHex, hexToBytes } from '@nightmarket/core';
+import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
 import type {
   AccountStateView,
   DeviceSigner,

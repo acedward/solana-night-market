@@ -109,6 +109,7 @@ describe('the account key check (FR-005)', () => {
     let reads = 0;
     const check = accountKeysChecker({
       managedPath: '/unused',
+      circuits,
       ours: { ...ours, some_other_arm_circuit: sha256('x') },
       readState: async () => {
         reads++;

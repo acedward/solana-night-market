@@ -167,6 +167,7 @@ async function main(): Promise<void> {
     runtime && config.managedPath
       ? accountKeysChecker({
           managedPath: config.managedPath,
+          circuits: (runtime.client.shape as { accountCircuitIds(): string[] }).accountCircuitIds(),
           readState: async (a) => (await runtime!.contractState(a)) as OnChainAccountState | null,
           log: log.child({ component: 'account-keys' }),
         })

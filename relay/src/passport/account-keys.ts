@@ -18,7 +18,6 @@ import { join } from 'node:path';
 
 import type { Logger } from '../log.js';
 import { compareDeployed, deployedVerifierDigests, verifierDigests } from '../prover/key-volume.js';
-import { accountCircuitIds } from './account-shape.js';
 import type { AccountKeysCheck } from './arm.js';
 
 /** The slice of a deserialised on-chain `ContractState` this check reads. */
@@ -34,8 +33,9 @@ export interface AccountKeysOptions {
   /** The account's on-chain state, or null when there is no contract at the address. */
   readState(account: string): Promise<OnChainAccountState | null>;
   log?: Logger;
-  /** The market shape's circuits (default: ./account-shape.ts). */
-  circuits?: readonly string[];
+  /** The market shape's circuits (./account-shape.ts `accountCircuitIds`, which loads the compiled
+   *  account: the caller passes them from the loaded runtime, so a keyless relay can import this). */
+  circuits: readonly string[];
   /** For tests: the volume's verifier-key digests (default: read from `<managedPath>/account`). */
   ours?: Record<string, string>;
 }
@@ -50,7 +50,7 @@ export function authorityRetired(state: OnChainAccountState): boolean | null {
 }
 
 export function accountKeysChecker(o: AccountKeysOptions): AccountKeysCheck {
-  const shape = new Set(o.circuits ?? accountCircuitIds());
+  const shape = new Set(o.circuits);
   let ours: Record<string, string> | null = null;
   const pinned = () => {
     if (ours) return ours;

@@ -26,10 +26,6 @@ export const AccountStateViewSchema = z.object({
   inboxCount: decimal,
   /** The account's encryption PUBLIC key (X25519, 64 hex). */
   encKey: z.string().regex(/^[0-9a-f]{64}$/),
-  /** The vault sealed at construction (64 hex; all zero for none). */
-  vault: z.string().regex(/^[0-9a-f]{64}$/),
-  /** The EIP-712 domain salt sealed at construction (64 hex). */
-  evmDomainSalt: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type AccountStateView = z.infer<typeof AccountStateViewSchema>;
 
@@ -81,15 +77,16 @@ export const RegisterPayloadSchema = z
   .strict();
 export type RegisterPayload = z.infer<typeof RegisterPayloadSchema>;
 
-/** A gated call's own Passport authorisation: the wallet's signature over the call's EIP-712
- *  digest, and the device's use counter (the rolling entry the call consumes, AUTH-9). The
- *  relay recomputes the digest from the call's arguments and the account's state, and recovers
- *  the device's public point from this signature. */
+/** A gated call's own Passport authorisation: the device's Ed25519 signature over the call's
+ *  message (built by the account arm's message builder, plan A3/A4), and the device's use counter
+ *  (the rolling entry the call consumes, AUTH-9). The relay rebuilds the message from the call's
+ *  arguments and the account's state, and checks the signature against the named device (lane B3). */
 export const PassportAuthSchema = z
   .object({
-    /** The device (the connected EOA) the call is signed by; the typed data names it. */
-    owner: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-    signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+    /** The device key (64 lowercase hex) the call is signed by. */
+    owner: z.string().regex(/^[0-9a-f]{64}$/),
+    /** The Ed25519 signature, 64 bytes (128 lowercase hex). */
+    signature: z.string().regex(/^[0-9a-f]{128}$/),
     useCounter: decimal,
   })
   .strict();
@@ -97,7 +94,7 @@ export type PassportAuth = z.infer<typeof PassportAuthSchema>;
 
 export const QualifiedCoinSchema = z.object({ nonce: hex32, color: hex32, value: decimal, mtIndex: decimal }).strict();
 
-/** `withdraw_shielded_with_evm`: pay `amount` of `color` from ONE coin (the browser's choice,
+/** The arm's shielded withdrawal: pay `amount` of `color` from ONE coin (the browser's choice,
  *  L-ACC.5) to a shielded wallet (its coin public key, plus its encryption public key so the
  *  wallet can see the coin: midnight-js refuses a recipient it cannot seal to, upstream Q42). */
 export const WithdrawPayloadSchema = z
@@ -117,22 +114,22 @@ export const WithdrawPayloadSchema = z
 export type WithdrawPayload = z.infer<typeof WithdrawPayloadSchema>;
 
 /**
- * A single-use APPEND ENTITLEMENT (security review F-B3): the bank sponsors an `append-inbox`
- * only for a coin it saw created without a correct inbox entry (a withdrawal's change, a bridge
- * withdrawal's change, a bridge coin whose entry does not describe it). The relay issues it in
+ * A single-use APPEND ENTITLEMENT (security review F-B3): the market sponsors an `append-inbox`
+ * only for a coin it saw created without a correct inbox entry (a withdrawal's change). The relay
+ * issues it in
  * that operation's result, the browser keeps it with the coin, and sends it back to file the
  * entry: `ae1.<account>.<operation id>.<expiry>.<relay MAC>`, all lowercase hex / decimal.
  */
 export const APPEND_ENTITLEMENT_PATTERN = /^ae1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9]{1,12}\.[0-9a-f]{64}$/;
 export const AppendEntitlementSchema = z.string().regex(APPEND_ENTITLEMENT_PATTERN);
 
-/** `append_inbox_with_evm`: file one 192-byte inbox entry (Q13: a withdrawal's change). */
+/** The arm's `append_inbox`: file one 192-byte inbox entry (Q13: a withdrawal's change). */
 export const AppendInboxPayloadSchema = z
   .object({
     entry: hex(192),
     authNonce: decimal,
-    /** The entitlement the bank issued for this coin (F-B3). Not part of the signed challenge (the
-     *  contract's typed data is fixed); the relay refuses an append without a valid one. */
+    /** The entitlement the market issued for this coin (F-B3). Not part of the signed challenge (the
+     *  contract's message is fixed); the relay refuses an append without a valid one. */
     entitlement: AppendEntitlementSchema.optional(),
   })
   .strict();
@@ -142,7 +139,7 @@ export type AppendInboxPayload = z.infer<typeof AppendInboxPayloadSchema>;
 
 export interface RegisterResult {
   account: string;
-  /** The device (the EOA), lowercase 0x hex. */
+  /** The device key (64 lowercase hex). */
   device: string;
   txs: { waveOne: string; waveTwo: string; activation: string };
   seconds: { waveOne: number; waveTwo: number; activation: number; total: number };

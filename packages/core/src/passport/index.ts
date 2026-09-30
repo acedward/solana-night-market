@@ -5,9 +5,14 @@
 // cannot load in a browser, and `./browser` drags in ledger-v9 (+10 MB of WASM). The set below
 // is the one plan P0.4 proved byte-identical in Chromium, Node and Bun.
 //
-// Two pieces are vendored shims (Q18 option B), because their upstream modules cannot load in a
-// browser: the OpenSwapShielded codec (./vendor/offer-codec.ts) and the deposit-address
-// derivation (./vendor/signet-derive.ts). Each carries its upstream source and commit.
+// Only the ARM-AGNOSTIC pieces are exported: the account's encryption keys and inbox entries, the
+// compiled contract's pure circuits, the call arguments and the offer's client-side pieces. The
+// device arm (how a call is signed and checked) is Track A's Ed25519 arm, which lanes B2 and B3 plug
+// in (../signing.ts); MN Bank's EVM arm is gone (AA 00047).
+//
+// One piece is a vendored shim (Q18 option B), because its upstream module cannot load in a
+// browser: the offer codec's client-side section (./vendor/offer-codec.ts). It carries its upstream
+// source and commit.
 //
 // Needs the light compile first (`bun run contracts`): contract.ts imports the generated account
 // module from the submodule's git-ignored contracts/managed/.
@@ -24,34 +29,7 @@ export {
   ENTRY_SUITE,
   type PlainCoin,
 } from '../../../../vendor/passport/contract/src/wallet/entry-format.js';
-export {
-  DOMAIN_NAME as PASSPORT_DOMAIN_NAME,
-  DOMAIN_VERSION as PASSPORT_DOMAIN_VERSION,
-  buildTypedData,
-  computeDigest,
-  evmDomainSaltFor,
-  type EvmOp,
-  type TypedDataV4,
-} from '../../../../vendor/passport/contract/src/wallet/eip712.js';
-export {
-  EvmDevice,
-  eip191Digest,
-  eip1193Backend,
-  evmChallengeFor,
-  evmTypedMessage,
-  type AuthRequest,
-  type CallContext,
-  type Eip1193Provider,
-  type EvmAuthorisation,
-  type EvmSigningBackend,
-} from '../../../../vendor/passport/contract/src/wallet/signer.js';
-export {
-  recoverPoint,
-  parseSignature,
-  ethereumAddress,
-  pointFromUncompressed,
-  type EvmPoint,
-} from '../../../../vendor/passport/contract/src/wallet/evm-signature.js';
+export type { AuthRequest, CallContext } from '../../../../vendor/passport/contract/src/wallet/signer.js';
 export {
   pureCircuits,
   type QualifiedCoin,
@@ -61,7 +39,6 @@ export {
 export * from './gated.js';
 export * from './offer-call.js';
 export * from './vendor/offer-codec.js';
-export * from './vendor/signet-derive.js';
 
 /** The upstream commit the client code above comes from. */
 export const PASSPORT_CLIENT_COMMIT = '51c1fb4ad164af034c8ed60fbb047e43cdd509f5';

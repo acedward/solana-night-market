@@ -1,23 +1,24 @@
-// The token registry: which tokens the bank shows and trades, with their roles.
+// The token registry: every token the market lists.
 //
-// Every trade is USDC against exactly one stock (spec FR-008), so each token has a ROLE:
-// `usdc` (the quote currency; exactly one) or `stock`. The stagenet registry is built from the
-// PR #4 deployment records vendored beside this file; the local stack's registry is supplied
-// as configuration (its vault and colours are new on every stack).
+// No token is special (owner rule): a token has a symbol, a name, its decimals, its privacy and
+// its colour on Midnight, and nothing else. Which tokens trade against which is the configured
+// list of pairs (./pairs.ts), never a property of a token.
+//
+// The stagenet registry is the mint-test-tokens faucet registry, vendored beside this file byte for
+// byte (mint-test-tokens/PROVENANCE.md): six native test tokens, each with a permissionless faucet
+// contract. Configuration may add tokens the market deploys itself (same faucet contract, other
+// names), or replace the list entirely (a local stack, whose colours are new on every run).
 
-import { getAddress } from 'ethers';
 import { z } from 'zod';
 
 import { normaliseHex32 } from '../hex.js';
 import type { NetworkName } from '../network.js';
-// Named imports, so a browser bundle carries only these fields of the vendored records.
-import { tokens as sepoliaStkTokens } from './deployments/sepolia-stk.json';
-import { bridgedTokens, vaultContractAddress } from './deployments/stagenet-vault.json';
+import stagenetRecord from './mint-test-tokens/metadata.stagenet.json';
 
-export const TOKEN_ROLES = ['usdc', 'stock'] as const;
-export type TokenRole = (typeof TOKEN_ROLES)[number];
+export const TOKEN_PRIVACIES = ['shielded', 'unshielded'] as const;
+export type TokenPrivacy = (typeof TOKEN_PRIVACIES)[number];
 
-/** Where a registry entry came from, shown as "bridged from Sepolia 0x…" (spec edge cases). */
+/** Where a registry entry came from. */
 export interface TokenSource {
   repo: string;
   commit: string;
@@ -25,26 +26,22 @@ export interface TokenSource {
 }
 
 export interface TokenEntry {
-  /** The Sepolia ERC20 symbol: stkA, USDC, TBILL, … */
+  /** The token's symbol: twUSDC, twBTC, … Unique in a registry (without regard to case). */
   symbol: string;
-  /** The bridged token's name on Midnight: wStkA, wUSDC, TBILL, … (as the vault's record lists it). */
-  midnightName: string;
-  role: TokenRole;
+  /** Its full name ("Test-wrapped USDC"). */
+  name: string;
   decimals: number;
-  /** Checksummed ERC20 address on Sepolia; '' when the token has no Sepolia side (local). */
-  sepoliaAddress: string;
-  /** The shielded colour on Midnight, 64 lowercase hex characters. */
+  /** Shielded tokens trade on the exchange (the swap circuit is `open_swap_shielded`); unshielded
+   *  ones are held and shown only. */
+  privacy: TokenPrivacy;
+  /** The token's raw type on Midnight (the colour its coins carry), 64 lowercase hex. */
   midnightColour: string;
-  /** The vault that mints the bridged colour; '' when not bridged (local test tokens). */
-  vault: string;
-  /** True while an entry is not yet confirmed by its owner's canonical list. Every stagenet entry
-   *  is confirmed (PR #4's description lists them); configuration may still set it. */
-  provisional: boolean;
+  /** The issuer (faucet) contract's address, 64 lowercase hex; '' when unknown. */
+  contract: string;
+  /** The issuer's domain separator (`mint-test-tokens:<symbol>`); '' when unknown. */
+  domainSeparator: string;
   source: TokenSource | null;
 }
-
-/** Sepolia's native currency, for the EVM holdings view. */
-export const SEPOLIA_ETH = { symbol: 'ETH', name: 'Sepolia ether', decimals: 18 } as const;
 
 export class TokenRegistryError extends Error {
   override name = 'TokenRegistryError';
@@ -53,45 +50,26 @@ export class TokenRegistryError extends Error {
 export class TokenRegistry {
   readonly tokens: readonly TokenEntry[];
   private readonly byColourMap: Map<string, TokenEntry>;
-  private readonly byAddressMap: Map<string, TokenEntry>;
+  private readonly bySymbolMap: Map<string, TokenEntry>;
 
   constructor(
     readonly network: NetworkName,
     tokens: readonly TokenEntry[],
   ) {
-    const usdc = tokens.filter((t) => t.role === 'usdc');
-    if (usdc.length !== 1)
-      throw new TokenRegistryError(`a registry needs exactly one usdc token, found ${usdc.length}`);
-    if (!tokens.some((t) => t.role === 'stock')) throw new TokenRegistryError('a registry needs at least one stock');
+    if (tokens.length === 0) throw new TokenRegistryError('a registry needs at least one token');
     this.byColourMap = new Map();
-    this.byAddressMap = new Map();
-    const names = new Set<string>();
+    this.bySymbolMap = new Map();
     for (const t of tokens) {
       if (!Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 18) {
-        throw new TokenRegistryError(`${t.midnightName}: decimals ${t.decimals} out of range`);
+        throw new TokenRegistryError(`${t.symbol}: decimals ${t.decimals} out of range`);
       }
       if (this.byColourMap.has(t.midnightColour)) throw new TokenRegistryError(`duplicate colour ${t.midnightColour}`);
-      if (names.has(t.midnightName)) throw new TokenRegistryError(`duplicate token name ${t.midnightName}`);
-      names.add(t.midnightName);
+      const key = t.symbol.toLowerCase();
+      if (this.bySymbolMap.has(key)) throw new TokenRegistryError(`duplicate symbol ${t.symbol}`);
       this.byColourMap.set(t.midnightColour, t);
-      if (t.sepoliaAddress !== '') {
-        const key = t.sepoliaAddress.toLowerCase();
-        if (this.byAddressMap.has(key)) throw new TokenRegistryError(`duplicate Sepolia address ${t.sepoliaAddress}`);
-        this.byAddressMap.set(key, t);
-      }
+      this.bySymbolMap.set(key, t);
     }
     this.tokens = Object.freeze([...tokens]);
-  }
-
-  /** The quote currency. */
-  usdc(): TokenEntry {
-    const t = this.tokens.find((x) => x.role === 'usdc');
-    if (!t) throw new TokenRegistryError('no usdc token');
-    return t;
-  }
-
-  stocks(): TokenEntry[] {
-    return this.tokens.filter((t) => t.role === 'stock');
   }
 
   /** The entry for a Midnight colour (any hex case, with or without 0x), or undefined. */
@@ -103,108 +81,142 @@ export class TokenRegistry {
     }
   }
 
-  bySepoliaAddress(address: string): TokenEntry | undefined {
-    return this.byAddressMap.get(address.toLowerCase());
+  /** The entry for a symbol, without regard to case, or undefined. */
+  bySymbol(symbol: string): TokenEntry | undefined {
+    return this.bySymbolMap.get(symbol.trim().toLowerCase());
   }
 
-  byMidnightName(name: string): TokenEntry | undefined {
-    return this.tokens.find((t) => t.midnightName === name);
-  }
-
-  /** A pair the bank trades: USDC against exactly one stock. */
-  isTradablePair(colourA: string, colourB: string): boolean {
-    const a = this.byColour(colourA);
-    const b = this.byColour(colourB);
-    return (
-      !!a && !!b && a !== b && ((a.role === 'usdc' && b.role === 'stock') || (a.role === 'stock' && b.role === 'usdc'))
-    );
+  /** The tokens that can trade on the exchange, in registry order. */
+  shielded(): TokenEntry[] {
+    return this.tokens.filter((t) => t.privacy === 'shielded');
   }
 }
 
-// ── The stagenet registry, from the vendored PR #4 records ──────────────────
+// ── The stagenet registry, from the vendored mint-test-tokens file ──────────
 
 export const STAGENET_SOURCE: TokenSource = {
-  repo: 'acedward/passport',
-  commit: '6c7505a4d2ec223fce5eb10266c331576805465a',
-  file: 'contract/contracts/erc20-vault/deployments/stagenet-vault.json',
+  repo: 'effectstream/mint-test-tokens',
+  commit: 'a51cf3ad46520d1ded938fb86db8b7b99373ce56',
+  file: 'metadata/metadata.stagenet.json',
 };
 
-/** Symbols whose ERC20 is the quote currency. */
-const USDC_SYMBOLS = new Set(['USDC']);
+/** The part of the upstream registry file the market reads (the rest is kept, unread). */
+const RegistryFileSchema = z.object({
+  status: z.literal('ready'),
+  network: z.object({ key: z.string() }),
+  tokens: z.array(
+    z.object({
+      symbol: z.string().min(1),
+      name: z.string().min(1),
+      decimals: z.number().int().min(0).max(18),
+      privacy: z.enum(TOKEN_PRIVACIES),
+      domainSeparator: z.string().min(1),
+      activeDeploymentId: z.string().min(1),
+      deployments: z.array(
+        z.object({
+          deploymentId: z.string(),
+          status: z.string(),
+          contractAddress: z.string().regex(/^[0-9a-f]{64}$/),
+          tokenId: z.string().regex(/^[0-9a-f]{64}$/),
+        }),
+      ),
+    }),
+  ),
+});
 
-export function stagenetRegistry(): TokenRegistry {
-  const stk = new Map(sepoliaStkTokens.map((t) => [t.address.toLowerCase(), t]));
-  const tokens = bridgedTokens.map((b): TokenEntry => {
-    const sepolia = stk.get(b.erc20Address.toLowerCase());
-    if (sepolia && (sepolia.decimals !== b.decimals || sepolia.midnightColour !== b.midnightColour)) {
-      throw new TokenRegistryError(`${b.erc20}: sepolia-stk.json and stagenet-vault.json disagree`);
-    }
+/** The registry a mint-test-tokens registry file describes: each token's ACTIVE deployment. */
+export function registryFromMintTestTokens(network: NetworkName, file: unknown, source: TokenSource): TokenRegistry {
+  const parsed = RegistryFileSchema.safeParse(file);
+  if (!parsed.success) throw new TokenRegistryError('the mint-test-tokens registry is not in the expected shape');
+  if (parsed.data.network.key !== network) {
+    throw new TokenRegistryError(`the mint-test-tokens registry is for ${parsed.data.network.key}, not ${network}`);
+  }
+  const tokens = parsed.data.tokens.map((t): TokenEntry => {
+    const active = t.deployments.find((d) => d.deploymentId === t.activeDeploymentId && d.status === 'active');
+    if (!active) throw new TokenRegistryError(`${t.symbol}: no active deployment`);
     return {
-      symbol: b.erc20,
-      midnightName: b.midnightName,
-      role: USDC_SYMBOLS.has(b.erc20) ? 'usdc' : 'stock',
-      decimals: b.decimals,
-      sepoliaAddress: getAddress(b.erc20Address),
-      midnightColour: normaliseHex32(b.midnightColour),
-      vault: normaliseHex32(vaultContractAddress),
-      // Canonical: PR #4's description lists every one of these (PROVENANCE.md).
-      provisional: false,
-      source: STAGENET_SOURCE,
+      symbol: t.symbol,
+      name: t.name,
+      decimals: t.decimals,
+      privacy: t.privacy,
+      midnightColour: normaliseHex32(active.tokenId),
+      contract: normaliseHex32(active.contractAddress),
+      domainSeparator: t.domainSeparator,
+      source,
     };
   });
-  return new TokenRegistry('stagenet', tokens);
+  return new TokenRegistry(network, tokens);
 }
 
-// ── Registries from configuration (the local stack, or an owner override) ───
+export function stagenetRegistry(): TokenRegistry {
+  return registryFromMintTestTokens('stagenet', stagenetRecord, STAGENET_SOURCE);
+}
+
+// ── Registries from configuration (market-deployed tokens, or a local stack) ─
 
 export const TokenConfigSchema = z.object({
+  /** `extend` (the default) adds these tokens to the network's built-in list; `replace` makes them
+   *  the whole list (a local stack). A network with no built-in list always takes them as the list. */
+  mode: z.enum(['extend', 'replace']).default('extend'),
   tokens: z
     .array(
       z.object({
-        symbol: z.string().min(1),
-        midnightName: z.string().min(1),
-        role: z.enum(TOKEN_ROLES),
+        symbol: z.string().regex(/^[A-Za-z0-9._-]{1,16}$/),
+        name: z.string().min(1).max(64).optional(),
         decimals: z.number().int().min(0).max(18),
-        sepoliaAddress: z
-          .string()
-          .regex(/^(0x[0-9a-fA-F]{40})?$/)
-          .default(''),
+        privacy: z.enum(TOKEN_PRIVACIES).default('shielded'),
         midnightColour: z.string().regex(/^(0x)?[0-9a-fA-F]{64}$/),
-        vault: z
+        contract: z
           .string()
           .regex(/^([0-9a-fA-F]{64})?$/)
           .default(''),
-        provisional: z.boolean().default(false),
+        domainSeparator: z.string().max(64).default(''),
       }),
     )
-    .min(2),
+    .min(1),
 });
 export type TokenConfig = z.input<typeof TokenConfigSchema>;
 
-/** Build a registry from JSON configuration (for example the local stack's test colours
- *  mapped to the USDC and stock roles). */
-export function registryFromConfig(network: NetworkName, config: unknown): TokenRegistry {
+function configuredTokens(config: unknown): { mode: 'extend' | 'replace'; tokens: TokenEntry[] } {
   const parsed = TokenConfigSchema.safeParse(config);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new TokenRegistryError(`invalid token configuration: ${issues}`);
   }
-  return new TokenRegistry(
-    network,
-    parsed.data.tokens.map((t) => ({
-      ...t,
-      sepoliaAddress: t.sepoliaAddress === '' ? '' : getAddress(t.sepoliaAddress),
+  return {
+    mode: parsed.data.mode,
+    tokens: parsed.data.tokens.map((t) => ({
+      symbol: t.symbol,
+      name: t.name ?? t.symbol,
+      decimals: t.decimals,
+      privacy: t.privacy,
       midnightColour: normaliseHex32(t.midnightColour),
-      vault: t.vault === '' ? '' : normaliseHex32(t.vault),
+      contract: t.contract === '' ? '' : normaliseHex32(t.contract),
+      domainSeparator: t.domainSeparator,
       source: null,
     })),
-  );
+  };
 }
 
-/** The registry for a network: stagenet's from the vendored records unless configuration is
- *  given; the local stack always needs configuration. */
+/** The built-in token list of a network, or null when it has none (the local stack). */
+function builtIn(network: NetworkName): TokenRegistry | null {
+  return network === 'stagenet' ? stagenetRegistry() : null;
+}
+
+/** Build a registry from JSON configuration alone (a local stack's colours). */
+export function registryFromConfig(network: NetworkName, config: unknown): TokenRegistry {
+  return new TokenRegistry(network, configuredTokens(config).tokens);
+}
+
+/** The registry for a network: its built-in list, extended (or replaced) by `config` when given.
+ *  The local stack has no built-in list, so it always needs configuration. */
 export function registryFor(network: NetworkName, config?: unknown): TokenRegistry {
-  if (config !== undefined) return registryFromConfig(network, config);
-  if (network === 'stagenet') return stagenetRegistry();
-  throw new TokenRegistryError(`the ${network} network has no built-in token list; pass a token configuration`);
+  const base = builtIn(network);
+  if (config === undefined) {
+    if (base) return base;
+    throw new TokenRegistryError(`the ${network} network has no built-in token list; pass a token configuration`);
+  }
+  const { mode, tokens } = configuredTokens(config);
+  if (mode === 'replace' || !base) return new TokenRegistry(network, tokens);
+  return new TokenRegistry(network, [...base.tokens, ...tokens]);
 }

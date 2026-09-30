@@ -1,18 +1,20 @@
-// The live markets: reads the exchange, derives every stock's USDC market, and keeps it fresh
+// The live markets: reads the exchange, derives every listed pair's market, and keeps it fresh
 // on the kernel's offer stream, polling when the stream is down.
 //
-// One refresh is: every live offer with a USDC leg (`/v1/offers?token=<USDC>`, keyset-paged;
-// every offer the bank prices has a USDC leg), `/v1/pairs`, and `/v1/chart/stats` per stock,
-// in parallel. The book decides whether the exchange is available; a failed pairs or stats
-// request only makes the last trade "unknown".
+// One refresh is: the live offers of each pair's quote token (`/v1/offers?token=<quote>`, one
+// keyset-paged read per DISTINCT quote token, merged by offer id: every offer a pair prices has a
+// leg in its quote token), `/v1/pairs`, and `/v1/chart/stats` per pair, in parallel. The books
+// decide whether the exchange is available; a failed pairs or stats request only makes the last
+// trade "unknown". No token is special: the quote tokens are whatever the listed pairs name.
 //
 // Cadence: an offer event on the stream triggers a (debounced) refresh, with a slow safety
 // refresh while the stream is live; without the stream the feed polls. A 429 cool-down
-// stretches the next refresh. At the defaults a refresh is 5 requests (one book page, the pair
-// list, three stats), far inside the kernel's 600 a minute.
+// stretches the next refresh. With the stagenet default pairs (two quote tokens, four pairs) a
+// refresh is 7 requests at one page per book, far inside the kernel's 600 a minute.
 
+import type { MarketPair } from '../tokens/pairs.js';
 import type { TokenRegistry } from '../tokens/registry.js';
-import { KernelError, type KernelClient } from './kernel-client.js';
+import { type AllOffers, KernelError, type KernelClient } from './kernel-client.js';
 import { type MarketsSnapshot, type TradeData, deriveMarkets } from './prices.js';
 import { BOOK_EVENTS, type ChartStats, type Pair } from './wire.js';
 
@@ -25,9 +27,9 @@ export type FeedState =
       snapshot: MarketsSnapshot;
       /** False when the book had more pages than the feed reads (`maxPages`). */
       complete: boolean;
-      /** Offer rows the bank could not read. */
+      /** Offer rows the market could not read. */
       skipped: number;
-      /** False when the pair list or a stock's stats could not be read (last trade unknown). */
+      /** False when the pair list or a pair's stats could not be read (last trade unknown). */
       tradeDataOk: boolean;
       updatedAt: number;
       stream: StreamState;
@@ -44,6 +46,8 @@ export type FeedState =
 export interface MarketFeedOptions {
   client: KernelClient;
   registry: TokenRegistry;
+  /** The listed pairs (../tokens/pairs.ts), in display order. */
+  pairs: readonly MarketPair[];
   /** Follow `/v1/offers/stream` (default true). */
   useStream?: boolean;
   /** Refresh interval while the stream is down, ms (default 15 s). */
@@ -70,7 +74,7 @@ export function describeKernelError(err: unknown): string {
     case 'rate-limited':
       return 'the exchange asked this browser to slow down';
     case 'invalid-response':
-      return 'the exchange sent data the bank cannot read';
+      return 'the exchange sent data the market cannot read';
     case 'http':
       return `the exchange answered ${err.details.status ?? 'with an error'}`;
     case 'aborted':
@@ -78,9 +82,30 @@ export function describeKernelError(err: unknown): string {
   }
 }
 
+/** Several book reads as one: offers merged by id (an offer with legs in two quote tokens is read
+ *  twice), complete only when every read was, skipped rows summed. */
+function mergeBooks(books: readonly AllOffers[]): AllOffers {
+  const seen = new Set<string>();
+  const offers: AllOffers['offers'][number][] = [];
+  for (const b of books)
+    for (const o of b.offers) {
+      const id = o.offerId.toLowerCase();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      offers.push(o);
+    }
+  return {
+    offers,
+    complete: books.every((b) => b.complete),
+    pages: books.reduce((t, b) => t + b.pages, 0),
+    skipped: books.reduce((t, b) => t + b.skipped, 0),
+  };
+}
+
 export class MarketFeed {
   private readonly client: KernelClient;
   private readonly registry: TokenRegistry;
+  private readonly pairs: readonly MarketPair[];
   private readonly useStream: boolean;
   private readonly pollMs: number;
   private readonly safetyRefreshMs: number;
@@ -108,6 +133,7 @@ export class MarketFeed {
   constructor(options: MarketFeedOptions) {
     this.client = options.client;
     this.registry = options.registry;
+    this.pairs = options.pairs;
     this.useStream = options.useStream ?? true;
     this.pollMs = options.pollMs ?? 15_000;
     this.safetyRefreshMs = options.safetyRefreshMs ?? 60_000;
@@ -193,13 +219,22 @@ export class MarketFeed {
 
   private async readOnce(): Promise<void> {
     const signal = this.abort?.signal;
-    const usdc = this.registry.usdc();
-    const stocks = this.registry.stocks();
-    const [book, pairs, ...stats] = await Promise.allSettled([
-      this.client.allOffers({ token: usdc.midnightColour, maxPages: this.maxPages }, signal),
+    const pairs = this.pairs;
+    const quotes = [...new Set(pairs.map((p) => p.quote.midnightColour))];
+    const [pairRows, ...rest] = await Promise.allSettled([
       this.client.pairs(signal),
-      ...stocks.map((s) => this.client.chartStats(s.midnightColour, usdc.midnightColour, signal)),
+      ...quotes.map((q) => this.client.allOffers({ token: q, maxPages: this.maxPages }, signal)),
+      ...pairs.map((p) => this.client.chartStats(p.base.midnightColour, p.quote.midnightColour, signal)),
     ]);
+    const books = rest.slice(0, quotes.length) as Array<PromiseSettledResult<AllOffers>>;
+    const stats = rest.slice(quotes.length);
+    const failed = books.find((b) => b.status === 'rejected');
+    const book: PromiseSettledResult<AllOffers> =
+      failed ??
+      ({
+        status: 'fulfilled',
+        value: mergeBooks(books.map((b) => (b as PromiseFulfilledResult<AllOffers>).value)),
+      } as const);
     if (!this.running) return;
     this.refreshes++;
     const at = this.now();
@@ -215,15 +250,15 @@ export class MarketFeed {
       });
       return;
     }
-    const pairList: Pair[] | null = pairs.status === 'fulfilled' ? (pairs.value as Pair[]) : null;
+    const pairList: Pair[] | null = pairRows.status === 'fulfilled' ? (pairRows.value as Pair[]) : null;
     const statsBy = new Map<string, ChartStats | null>();
-    stocks.forEach((s, i) => {
+    pairs.forEach((p, i) => {
       const r = stats[i]!;
-      statsBy.set(s.midnightColour, r.status === 'fulfilled' ? (r.value as ChartStats) : null);
+      statsBy.set(p.id, r.status === 'fulfilled' ? (r.value as ChartStats) : null);
     });
-    const snapshot = deriveMarkets(book.value.offers, this.registry, (stock): TradeData => ({
+    const snapshot = deriveMarkets(book.value.offers, this.registry, pairs, (pair): TradeData => ({
       pairs: pairList,
-      stats: statsBy.get(stock.midnightColour) ?? null,
+      stats: statsBy.get(pair.id) ?? null,
     }));
     this.setState({
       status: 'ready',

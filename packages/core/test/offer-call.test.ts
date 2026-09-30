@@ -1,17 +1,13 @@
-// Plan L-TRD: one trade = one wallet signature. The OpenSwapShielded typed data the wallet signs
-// and the digest the relay rebuilds are the same thing, bound to the coin (mt_index included) and
-// to every term of the offer. Also: the kernel client's two new calls (status, publish).
+// Plan L-TRD: a swap call's arm-agnostic arguments (the OPEN shape, the coin with its mt_index),
+// and the kernel client's two calls for offers (status, publish). The arm's signed challenge over
+// these arguments is Track A's (lanes B2/B3).
 
-import { TypedDataEncoder, Wallet, recoverAddress } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
 import { KernelClient } from '../src/market/kernel-client.js';
-import { openSwapArgs, openSwapGatedCall } from '../src/passport/index.js';
+import { openSwapArgs } from '../src/passport/index.js';
 import type { OpenSwapPayload } from '../src/trade.js';
 
-const ACCOUNT = '5e'.repeat(32);
-const SALT = '9a'.repeat(32);
-const ctx = { account: ACCOUNT, authNonce: 2n, evmDomainSalt: SALT };
 const payload: OpenSwapPayload = {
   giveColor: 'a1'.repeat(32),
   giveAmount: '2000000',
@@ -25,41 +21,7 @@ const payload: OpenSwapPayload = {
   authNonce: '2',
 };
 
-const ethersDigest = (td: { domain: object; types: object; message: object }) => {
-  const { EIP712Domain: _d, ...types } = td.types as Record<string, never>;
-  return TypedDataEncoder.hash(td.domain as never, types, td.message as never);
-};
-
-describe('openSwapGatedCall', () => {
-  it('builds OpenSwapShielded typed data whose EIP-712 hash is the relay’s digest, and a wallet signature recovers', async () => {
-    const w = Wallet.createRandom();
-    const call = openSwapGatedCall(ctx, w.address, payload);
-    const td = call.typedData as unknown as { primaryType: string; domain: object; types: object; message: object };
-    expect(td.primaryType).toBe('OpenSwapShielded');
-    expect(ethersDigest(td)).toBe(call.digestHex);
-    const { EIP712Domain: _d, ...types } = td.types as Record<string, never>;
-    const sig = await w.signTypedData(td.domain as never, types, td.message as never);
-    expect(recoverAddress(call.digestHex, sig)).toBe(w.address);
-  });
-
-  it('binds every term: the coin (mt_index, value), both legs, the want nonce, the entries, the nonce and the owner', () => {
-    const owner = `0x${'77'.repeat(20)}`;
-    const base = openSwapGatedCall(ctx, owner, payload).digestHex;
-    const variants: Array<Partial<OpenSwapPayload>> = [
-      { coin: { ...payload.coin, mtIndex: '10' } },
-      { coin: { ...payload.coin, value: '3000001' } },
-      { giveAmount: '2000001' },
-      { wantAmount: '2100001' },
-      { wantColor: 'b3'.repeat(32) },
-      { wantNonce: '12'.repeat(32) },
-      { wantEntry: '23'.repeat(192) },
-      { changeEntry: '01'.repeat(192) },
-    ];
-    for (const v of variants) expect(openSwapGatedCall(ctx, owner, { ...payload, ...v }).digestHex).not.toBe(base);
-    expect(openSwapGatedCall({ ...ctx, authNonce: 3n }, owner, payload).digestHex).not.toBe(base);
-    expect(openSwapGatedCall(ctx, `0x${'78'.repeat(20)}`, payload).digestHex).not.toBe(base);
-  });
-
+describe('openSwapArgs', () => {
   it('is always the OPEN shape (anyone may take it)', () => {
     const { call, coin } = openSwapArgs(payload);
     expect(call.recipientKind).toBe(0n);

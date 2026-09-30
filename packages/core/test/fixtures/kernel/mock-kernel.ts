@@ -1,4 +1,4 @@
-// A mock offer-files kernel: answers the read routes the bank uses with the kernel's exact
+// A mock offer-files kernel: answers the read routes the market uses with the kernel's exact
 // shapes and semantics (`ledger-v9` @ 5d46e8d, packages/node/api.ts): keyset paging on
 // (blockHeight, offerId) newest first, `limit` capped at 100, `after_hash` resolved or refused
 // with 400 INVALID_CURSOR, `token`/`direction` filters, 404 NOT_FOUND for an unknown offer,
@@ -7,7 +7,7 @@
 // It is a pure responder, so the Node tests serve it over HTTP (../../mock-kernel-server.ts)
 // and the Playwright test serves it through `page.route`.
 
-import { PAIRS, STATS, BOOK, COLOUR, matchesFilter, type WireOffer } from './book.js';
+import { PAIRS, STATS, BOOK, matchesFilter, type WireOffer } from './book.js';
 
 export interface MockResponse {
   status: number;
@@ -39,6 +39,7 @@ export class KernelFixture {
   /** Offers that left the book (a cursor on one still resolves, as in the kernel). */
   history: WireOffer[] = [];
   pairs: unknown[];
+  /** Chart stats by `<base>|<quote>` colours. */
   stats: Record<string, object>;
   knownTokens: unknown[] = [];
   /** Every request seen: path and query. */
@@ -47,11 +48,14 @@ export class KernelFixture {
   constructor(init: { book?: WireOffer[]; pairs?: unknown[]; stats?: Record<string, object> } = {}) {
     this.book = [...(init.book ?? BOOK)];
     this.pairs = init.pairs ?? PAIRS;
-    this.stats = init.stats ?? {
-      [COLOUR.wStkA]: STATS.wStkA,
-      [COLOUR.wStkB]: STATS.wStkB,
-      [COLOUR.wStkC]: STATS.wStkC,
-    };
+    this.stats =
+      init.stats ??
+      Object.fromEntries(
+        Object.values(STATS).map((s) => {
+          const { base, quote } = s as { base: string; quote: string };
+          return [`${base}|${quote}`, s];
+        }),
+      );
   }
 
   /** Answer one GET, as the kernel would. `target` is the path with its query string. */
@@ -66,8 +70,8 @@ export class KernelFixture {
       const base = (q.get('base') ?? '').toLowerCase();
       const quote = (q.get('quote') ?? '').toLowerCase();
       if (!base || !quote) return json(400, { error: 'VALIDATION', reason: 'base and quote are required' });
-      const s = this.stats[base] as { quote?: string } | undefined;
-      if (s && s.quote === quote) return json(200, s);
+      const s = this.stats[`${base}|${quote}`];
+      if (s) return json(200, s);
       return json(200, { base, quote, last: 0, change24: 0, high: 0, low: 0, volume_base: 0, volume_quote: 0 });
     }
     const m = /^\/v1\/offers\/([^/]+)$/.exec(url.pathname);

@@ -19,10 +19,6 @@ export const API_PATHS = {
   accountState: (account: string) => `/v1/accounts/${account}/state`,
   accountInbox: (account: string) => `/v1/accounts/${account}/inbox`,
   accountZswap: (account: string) => `/v1/accounts/${account}/zswap`,
-  /** `?kind=deposit|withdraw&account=<64 hex>[&erc20=<0x…>]`: the Sepolia fields to sign (plan L-BRG). */
-  bridgeQuote: '/v1/bridge/quote',
-  /** A bridge request the relay closed recently (plan P4-A, Q21 A): public chain facts only. */
-  bridgeClosed: (requestId: string) => `/v1/bridge/closed/${requestId}`,
 } as const;
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -51,17 +47,18 @@ export type NonceResponse = z.infer<typeof NonceResponseSchema>;
 
 // ── Actions and jobs ────────────────────────────────────────────────────────
 
-/** A lane is the queue a job waits in (plan P1.3): proofs one at a time; bridge deposits one
- *  at a time per account (they share the account's deposit address); bridge withdrawals one
- *  at a time across the whole relay (they share the vault's EVM account). */
-export const JOB_LANES = ['prover', 'deposit', 'withdrawal'] as const;
+/** A lane is the queue a job waits in: `prover`, one job at a time across the relay (every
+ *  sponsor-paid call holds it); `account`, one job at a time PER ACCOUNT, proving through the
+ *  prover lane only around its proofs; `relay`, one job at a time across the relay, also proving
+ *  only around its proofs. Every action today runs on the prover lane. */
+export const JOB_LANES = ['prover', 'account', 'relay'] as const;
 export type JobLane = (typeof JOB_LANES)[number];
 
 export const JOB_STATES = ['queued', 'running', 'succeeded', 'failed'] as const;
 export type JobState = (typeof JOB_STATES)[number];
 
 export const JobStageSchema = z.object({
-  /** A short stable id, e.g. `queued`, `proving`, `submitted`, `mpc-signature`. */
+  /** A short stable id, e.g. `queued`, `proving`, `submitted`, `settled`. */
   stage: z.string(),
   at: z.number().int(),
   /** Public details only: transaction hashes, request ids, heights. Never a secret. */
@@ -69,15 +66,12 @@ export const JobStageSchema = z.object({
 });
 export type JobStage = z.infer<typeof JobStageSchema>;
 
-/** Jobs the relay runs on its own, never requested through a route (plan P4-A, Q21 A): closing a
- *  bridge request its owner left open. `POST /v1/actions/bridge-close` does not exist. */
-export const INTERNAL_JOB_ACTIONS = ['bridge-close'] as const;
-export type InternalJobAction = (typeof INTERNAL_JOB_ACTIONS)[number];
-export type JobActionName = RelayActionName | InternalJobAction;
+/** The actions a job can run (every one is requested through a route). */
+export type JobActionName = RelayActionName;
 
 export const JobViewSchema = z.object({
   requestId: z.string().regex(/^[0-9a-f]{32}$/),
-  action: z.enum([...RELAY_ACTIONS, ...INTERNAL_JOB_ACTIONS]),
+  action: z.enum(RELAY_ACTIONS),
   lane: z.enum(JOB_LANES),
   state: z.enum(JOB_STATES),
   /** The newest stage. */
@@ -103,7 +97,7 @@ export const ActionRequestSchema = z.object({
     .optional(),
   /** The action's arguments. Bytes are hex strings, amounts decimal strings. */
   payload: z.record(z.string(), z.unknown()),
-  /** The relay authorisation (a RelayAction signature). */
+  /** The relay authorisation (a RelayAction envelope, signed by the device). */
   auth: SignedRelayActionSchema.optional(),
   /** A gated call's own Passport authorisation, for routes that accept it instead. */
   passportAuth: z.record(z.string(), z.unknown()).optional(),
@@ -113,7 +107,7 @@ export type ActionRequest = z.infer<typeof ActionRequestSchema>;
 export const ActionResponseSchema = z.object({ job: JobViewSchema });
 export type ActionResponse = z.infer<typeof ActionResponseSchema>;
 
-// ── Health (FR-013) ─────────────────────────────────────────────────────────
+// ── Health ─────────────────────────────────────────────────────────
 
 export const HEALTH_STATUSES = ['ok', 'degraded', 'down'] as const;
 
@@ -156,49 +150,6 @@ export const HealthResponseSchema = z.object({
      *  500 = a generic failure (a replayed settlement answers 500 too). Null when none. */
     lastRefusal: z.object({ httpStatus: z.number().int(), at: z.number().int() }).nullable().optional(),
   }),
-  vaultGas: z.object({
-    address: z.string(),
-    balanceWei: z.string().nullable(),
-    low: z.boolean().nullable(),
-  }),
-  /** The bridge (plan P4-A): the MPC's recent behaviour and the stale-request closer (Q21 A). */
-  bridge: z
-    .object({
-      available: z.boolean(),
-      mpc: z.object({
-        /** Seconds the MPC took to sign the last request this relay drove; null before any. */
-        lastSignatureAfterSeconds: z.number().int().nullable(),
-        /** Requests whose signature did not arrive within the 20-minute budget, last 24 h. */
-        timeouts24h: z.number().int(),
-        /** Requests being driven now (waiting for the MPC or Sepolia). */
-        inFlight: z.number().int(),
-      }),
-      staleRequests: z.object({
-        enabled: z.boolean(),
-        lastScanAt: z.number().int().nullable(),
-        /** Open in the vault right now (every requester, not only this bank's customers). */
-        open: z.object({ deposit: z.number().int(), withdraw: z.number().int() }),
-        /** Stale requests of this bank's accounts, waiting to be closed. */
-        waiting: z.number().int(),
-        closing: z.number().int(),
-        /** Settle or abandonDeposit transactions the sponsor paid for closing stale requests, last 24 h. */
-        closed24h: z.number().int(),
-        maxPerDay: z.number().int(),
-        /** The newest closes (public ids only). */
-        recent: z.array(
-          z.object({
-            kind: z.enum(['deposit', 'withdraw']),
-            requestId: z.string(),
-            circuit: z.string(),
-            tx: z.string(),
-            at: z.number().int(),
-          }),
-        ),
-        /** Why the closer is holding back, when it is (the sponsor is low, the daily cap is reached). */
-        paused: z.string().nullable(),
-      }),
-    })
-    .optional(),
 });
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
@@ -206,12 +157,7 @@ export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
 export const PublicConfigSchema = z.object({
   network: z.string(),
-  chainId: z.number().int(),
   relayVersion: z.string(),
-  bridge: z.object({
-    vaultAddress: z.string(),
-    vaultEvmAddress: z.string(),
-  }),
   limits: z.object({
     authMaxTtlSeconds: z.number().int(),
     jobTtlSeconds: z.number().int(),

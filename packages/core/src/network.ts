@@ -1,30 +1,15 @@
-// Network profiles. Every endpoint is configuration (spec FR-014): a profile is a set of
-// defaults, and any field can be overridden by the relay's env or the site's config.json.
+// Network profiles. Every endpoint is configuration: a profile is a set of defaults, and any field
+// can be overridden by the relay's env or the site's config.json.
 //
-// Only PUBLIC endpoints live here. The Sepolia RPC (it carries a key), the sponsor seed and
-// the proof server's internal URL are relay-only configuration and never reach the browser.
+// Only PUBLIC endpoints live here. The sponsor seed and the proof servers' internal URLs are
+// relay-only configuration and never reach the browser.
 
 import { z } from 'zod';
-
-// Named imports, so a browser bundle carries only these fields of the vendored record.
-import {
-  explorer as stagenetBridgeExplorer,
-  mpcOutputCacheUrl,
-  mpcRootPublicKey,
-  signetSingleton,
-  vaultContractAddress,
-  vaultEvmAddress,
-} from './tokens/deployments/stagenet-vault.json';
-
-export const SEPOLIA_CHAIN_ID = 11155111;
-export const SEPOLIA_CHAIN_ID_HEX = '0xaa36a7';
 
 export const NETWORK_NAMES = ['undeployed', 'stagenet'] as const;
 export type NetworkName = (typeof NETWORK_NAMES)[number];
 
 const url = z.url();
-const hex32 = z.string().regex(/^[0-9a-f]{64}$/, 'expected 64 lowercase hex characters');
-const evmAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'expected a 0x-prefixed 20-byte address');
 
 export const NetworkProfileSchema = z.object({
   name: z.enum(NETWORK_NAMES),
@@ -47,37 +32,10 @@ export const NetworkProfileSchema = z.object({
     /** The public exchange site, for links. */
     siteUrl: url.optional(),
   }),
-  evm: z.object({
-    chainId: z.number().int().positive(),
-    chainIdHex: z.string().regex(/^0x[0-9a-f]+$/),
-    chainName: z.string().min(1),
-    explorerUrl: url,
-    /** Public RPC offered to wallets in `wallet_addEthereumChain`. Never a keyed URL. */
-    publicRpcUrl: url,
-  }),
-  bridge: z.object({
-    /** The ERC20 vault contract on Midnight. Empty until the stack or the deployment names it. */
-    vaultAddress: hex32.or(z.literal('')),
-    vaultEvmAddress: evmAddress.or(z.literal('')),
-    signetSingleton: hex32.or(z.literal('')),
-    /** Uncompressed secp256k1 MPC root key (0x04…). */
-    mpcRootPublicKey: z.string().regex(/^(0x04[0-9a-fA-F]{128})?$/),
-    mpcOutputCacheUrl: url.or(z.literal('')),
-    explorerUrl: url.optional(),
-  }),
 });
 export type NetworkProfile = z.infer<typeof NetworkProfileSchema>;
 
-const SEPOLIA = {
-  chainId: SEPOLIA_CHAIN_ID,
-  chainIdHex: SEPOLIA_CHAIN_ID_HEX,
-  chainName: 'Sepolia',
-  explorerUrl: 'https://sepolia.etherscan.io',
-  publicRpcUrl: 'https://rpc.sepolia.org',
-} as const;
-
-/** The live staging network: the stagenet node and indexer, the staging ZSwap exchange, and
- *  the PR #4 vault (from the vendored deployment record). */
+/** The live staging network: the stagenet node and indexer, and the staging ZSwap exchange. */
 export const STAGENET: NetworkProfile = {
   name: 'stagenet',
   midnightNetworkId: 'stagenet',
@@ -93,20 +51,10 @@ export const STAGENET: NetworkProfile = {
     batcherTarget: 'midnight-balancer',
     siteUrl: 'https://stagenet.zswap.zkdojo.com',
   },
-  evm: { ...SEPOLIA },
-  bridge: {
-    vaultAddress: vaultContractAddress,
-    vaultEvmAddress,
-    signetSingleton,
-    mpcRootPublicKey,
-    mpcOutputCacheUrl,
-    explorerUrl: stagenetBridgeExplorer,
-  },
 };
 
-/** The local ledger-9 stack (plan P0.5 recipe): in-network DNS names, as a relay container on
- *  `${COMPOSE_PROJECT_NAME}_default` sees them. The vault is deployed fresh by every stack,
- *  so the bridge fields are empty until the harness passes the stack's receipt. */
+/** The local ledger-9 stack: in-network DNS names, as a relay container on
+ *  `${COMPOSE_PROJECT_NAME}_default` sees them. */
 export const UNDEPLOYED: NetworkProfile = {
   name: 'undeployed',
   midnightNetworkId: 'undeployed',
@@ -121,24 +69,23 @@ export const UNDEPLOYED: NetworkProfile = {
     batcherUrl: 'http://batcher:3334',
     batcherTarget: 'midnight-balancer',
   },
-  evm: { ...SEPOLIA },
-  bridge: {
-    vaultAddress: '',
-    vaultEvmAddress: '',
-    signetSingleton: '',
-    mpcRootPublicKey: '',
-    mpcOutputCacheUrl: '',
-  },
 };
 
 export const PROFILES: Readonly<Record<NetworkName, NetworkProfile>> = { stagenet: STAGENET, undeployed: UNDEPLOYED };
 
 /** Each network's default asset set (plan 00046): the symbols a site shows when its
  *  `config.json` names no `assets` of its own. This is DATA beside the profiles, never a rule in
- *  code: no symbol here is special, and a new token shows once it is listed here or in a site's
- *  `assets`. `null` shows every token of the registry (the local stack). */
+ *  code: no symbol here is special. `null` shows every token of the registry. */
 export const NETWORK_DEFAULT_ASSETS: Readonly<Record<NetworkName, readonly string[] | null>> = {
-  stagenet: ['USDC', 'stkA', 'stkB', 'stkC'],
+  stagenet: null,
+  undeployed: null,
+};
+
+/** Each network's default pairs (`BASE/QUOTE`), when a site's `config.json` names no `pairs`. DATA,
+ *  like the asset sets: any two shielded tokens make a pair, and none is special. `null` lists every
+ *  pair of shielded tokens (the local stack). */
+export const NETWORK_DEFAULT_PAIRS: Readonly<Record<NetworkName, readonly string[] | null>> = {
+  stagenet: ['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC'],
   undeployed: null,
 };
 
@@ -186,10 +133,4 @@ export function resolveNetwork(name: string, overrides: NetworkOverrides = {}): 
     throw new NetworkConfigError(`invalid ${name} network settings: ${issues}`);
   }
   return parsed.data;
-}
-
-/** Whether the bridge settings are complete enough to derive deposit addresses. */
-export function bridgeConfigured(profile: NetworkProfile): boolean {
-  const b = profile.bridge;
-  return b.vaultAddress !== '' && b.vaultEvmAddress !== '' && b.mpcRootPublicKey !== '';
 }

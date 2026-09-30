@@ -2,7 +2,7 @@
 // effectstream/zswap-offerfiles-kernel `ledger-v9` @ 5d46e8d; captured read-only from
 // https://stagenet.api-zswap.zkdojo.com on 2026-09-27, see test/fixtures/kernel/).
 //
-// Parsing is strict about what the bank relies on and tolerant of everything else: unknown
+// Parsing is strict about what the market relies on and tolerant of everything else: unknown
 // fields are dropped, and a single unreadable offer row is skipped (and counted) rather than
 // taking the whole market down.
 
@@ -143,7 +143,7 @@ export const PairsSchema = z.array(PairSchema);
 
 /** `GET /v1/chart/stats?base=&quote=`: re-oriented to the caller's base; `last` is a raw
  *  base-unit ratio quote ÷ base. When the pair has never filled, the kernel reports the MID of
- *  the open book as `last` (or 0), which the bank never shows as a trade (FR-007). */
+ *  the open book as `last` (or 0), which the market never shows as a trade. */
 export const ChartStatsSchema = z.object({
   base: Hex64,
   quote: Hex64,

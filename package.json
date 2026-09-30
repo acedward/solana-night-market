@@ -1,8 +1,8 @@
 {
-  "name": "passport-evm-dapp",
+  "name": "solana-night-market",
   "private": true,
   "type": "module",
-  "description": "MN Bank: a bank-style dApp for Passport accounts on Midnight, driven by an EVM wallet.",
+  "description": "Night Market: a create-and-trade market on Midnight, controlled by Solana wallets (POC).",
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.11",
   "workspaces": [
@@ -26,6 +26,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.62.0",
+    "@sig-net/midnight": "0.23.0",
     "@types/node": "24.19.0",
     "eslint": "10.11.0",
     "eslint-plugin-react-hooks": "7.1.1",

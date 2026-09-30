@@ -55,10 +55,12 @@ describe('the captured staging responses parse', () => {
     const known = await c.knownTokens();
     expect(known.map((t) => t.name)).toEqual(['NIGHT', 'TWBTC', 'TWETH', 'TWUSDC', 'TWUSDM', 'UTWUSDC', 'UTWBTC']);
     expect(known.find((t) => t.name === 'NIGHT')?.token_color).toBe(COLOUR.NIGHT);
-    const stats = await c.chartStats(COLOUR.wStkA, COLOUR.wUSDC);
-    expect(stats).toMatchObject({ base: COLOUR.wStkA, quote: COLOUR.wUSDC, last: '0', volume_base: '0' });
+    // The captured pair is MN Bank's bridged wStkA/wUSDC (unlisted here; any pair answers alike).
+    const [base, quote] = [COLOUR.UNLISTED, 'e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d'];
+    const stats = await c.chartStats(base, quote);
+    expect(stats).toMatchObject({ base, quote, last: '0', volume_base: '0' });
     // The mock's zero-stats answer is byte-identical to what staging sent for this pair.
-    const served = kernel.fixture.respond(`/v1/chart/stats?base=${COLOUR.wStkA}&quote=${COLOUR.wUSDC}`).body;
+    const served = kernel.fixture.respond(`/v1/chart/stats?base=${base}&quote=${quote}`).body;
     expect(served).toBe(await staging('chart-stats-wstka-wusdc.json'));
   });
 
@@ -82,7 +84,7 @@ describe('GET /v1/offers', () => {
 
   it('walks every page with the keyset cursor, and de-duplicates', async () => {
     const many: WireOffer[] = [];
-    for (let n = 1; n <= 250; n++) many.push(offerRow(1000 + n, [leg(COLOUR.wStkA, n)], [leg(COLOUR.wUSDC, n * 2)]));
+    for (let n = 1; n <= 250; n++) many.push(offerRow(1000 + n, [leg(COLOUR.twUSDM, n)], [leg(COLOUR.twUSDC, n * 2)]));
     kernel.fixture.book = many;
     const all = await fast().allOffers();
     expect(all).toMatchObject({ complete: true, pages: 3, skipped: 0 });
@@ -109,15 +111,15 @@ describe('GET /v1/offers', () => {
 
   it('passes the token and direction filters, normalised', async () => {
     const c = fast();
-    const giving = await c.offersPage({ token: `0x${COLOUR.wStkA.toUpperCase()}`, direction: 'GIVING' });
+    const giving = await c.offersPage({ token: `0x${COLOUR.twUSDM.toUpperCase()}`, direction: 'GIVING' });
     const q = kernel.fixture.requests.at(-1)!.query;
-    expect([q.get('token'), q.get('direction')]).toEqual([COLOUR.wStkA, 'GIVING']);
-    expect(giving.offers.every((o) => o.computed.gives.some((l) => l.token === COLOUR.wStkA))).toBe(true);
+    expect([q.get('token'), q.get('direction')]).toEqual([COLOUR.twUSDM, 'GIVING']);
+    expect(giving.offers.every((o) => o.computed.gives.some((l) => l.token === COLOUR.twUSDM))).toBe(true);
     expect(giving.offers).toHaveLength(3);
-    const wanting = await c.offersPage({ token: COLOUR.wStkA, direction: 'WANTING' });
+    const wanting = await c.offersPage({ token: COLOUR.twUSDM, direction: 'WANTING' });
     expect(wanting.offers).toHaveLength(2);
-    const usdc = await c.allOffers({ token: COLOUR.wUSDC });
-    expect(usdc.offers).toHaveLength(9); // every offer with a wUSDC leg, whatever its layer
+    const usdc = await c.allOffers({ token: COLOUR.twUSDC });
+    expect(usdc.offers).toHaveLength(9); // every offer with a twUSDC leg, whatever its layer
   });
 
   it('refuses bad queries before sending them', async () => {
@@ -138,13 +140,13 @@ describe('GET /v1/offers', () => {
   });
 
   it('skips and counts a row it cannot read; refuses a broken envelope', async () => {
-    const good = offerRow(1, [leg(COLOUR.wStkA, 1)], [leg(COLOUR.wUSDC, 1)]);
+    const good = offerRow(1, [leg(COLOUR.twUSDM, 1)], [leg(COLOUR.twUSDC, 1)]);
     const page = parseOffersPage({
       offers: [
         good,
         { ...good, offerId: 'x' },
-        { ...good, computed: { ...good.computed, gives: [{ token: COLOUR.wStkA, amount: '-1', type: 'SHIELDED' }] } },
-        { ...good, computed: { ...good.computed, gives: [{ token: COLOUR.wStkA, amount: 1e30, type: 'SHIELDED' }] } },
+        { ...good, computed: { ...good.computed, gives: [{ token: COLOUR.twUSDM, amount: '-1', type: 'SHIELDED' }] } },
+        { ...good, computed: { ...good.computed, gives: [{ token: COLOUR.twUSDM, amount: 1e30, type: 'SHIELDED' }] } },
       ],
       nextCursor: null,
     });
@@ -160,7 +162,7 @@ describe('GET /v1/offers', () => {
       fetch: async () =>
         new Response(
           JSON.stringify({
-            offers: [offerRow(1, [leg(COLOUR.wStkA, 1)], [leg(COLOUR.wUSDC, 1)])],
+            offers: [offerRow(1, [leg(COLOUR.twUSDM, 1)], [leg(COLOUR.twUSDC, 1)])],
             nextCursor: 'cd'.repeat(32),
           }),
           {
@@ -184,18 +186,18 @@ describe('GET /v1/offers/:offerId, /v1/pairs, /v1/chart/stats', () => {
   it('pairs with numeric-string prices; stats oriented to the asked base', async () => {
     const c = fast();
     const pairs = await c.pairs();
-    expect(pairs.find((p) => p.base_color === COLOUR.wUSDC)).toMatchObject({
-      quote_color: COLOUR.wStkB,
+    expect(pairs.find((p) => p.base_color === COLOUR.twETH)).toMatchObject({
+      quote_color: COLOUR.twUSDC,
       trade_count: 1,
-      last_price: '102.04081632653061224490',
+      last_price: '0.00000000250000000000',
     });
-    const s = await c.chartStats(COLOUR.wStkA, COLOUR.wUSDC);
-    expect(s).toMatchObject({ base: COLOUR.wStkA, last: '1.02', volume_base: '30000000' });
+    const s = await c.chartStats(COLOUR.twUSDM, COLOUR.twUSDC);
+    expect(s).toMatchObject({ base: COLOUR.twUSDM, last: '1.02', volume_base: '30000000' });
     const req = kernel.fixture.requests.at(-1)!;
     expect([req.path, req.query.get('base'), req.query.get('quote')]).toEqual([
       '/v1/chart/stats',
-      COLOUR.wStkA,
-      COLOUR.wUSDC,
+      COLOUR.twUSDM,
+      COLOUR.twUSDC,
     ]);
   });
 

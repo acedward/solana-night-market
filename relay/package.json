@@ -1,9 +1,9 @@
 {
-  "name": "@mnbank/relay",
+  "name": "@nightmarket/relay",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The MN Bank relay: authenticated, rate-limited, stateless per user. Proves, pays DUST from a sponsor wallet, and submits.",
+  "description": "The Night Market relay: authenticated, rate-limited, stateless per user. Proves, pays DUST from a sponsor wallet, and submits.",
   "license": "Apache-2.0",
   "scripts": {
     "start": "bun src/main.ts"
@@ -25,9 +25,8 @@
     "@midnightntwrk/wallet-sdk-hd": "3.1.0-beta.1",
     "@midnightntwrk/wallet-sdk-shielded": "4.0.0-beta.2",
     "@midnightntwrk/wallet-sdk-unshielded-wallet": "4.0.0-beta.2",
-    "@mnbank/core": "workspace:*",
+    "@nightmarket/core": "workspace:*",
     "@scure/bip39": "2.0.1",
-    "ethers": "6.17.0",
     "hono": "4.13.9",
     "rxjs": "7.8.2",
     "ws": "8.19.0",

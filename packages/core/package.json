@@ -1,9 +1,9 @@
 {
-  "name": "@mnbank/core",
+  "name": "@nightmarket/core",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Shared, environment-neutral code for the MN Bank dApp: network profiles, the token registry, amount maths, the relay's action authorisation and API types, and the browser-safe Passport client surface.",
+  "description": "Shared, environment-neutral code for Night Market: network profiles, the token registry and pairs, amount maths, the relay's action authorisation seam and API types, and the browser-safe Passport client surface.",
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/index.ts",
@@ -15,8 +15,6 @@
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
     "@scure/base": "2.0.0",
-    "@sig-net/midnight": "0.23.0",
-    "ethers": "6.17.0",
     "zod": "4.6.5"
   }
 }

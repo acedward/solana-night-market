@@ -1,5 +1,5 @@
-// The exchange: a read-only kernel client, USDC prices derived from the live offers, the live
-// markets feed and the holdings valuation (plan L-MKT, spec US2/US3, FR-007/FR-008).
+// The exchange: a read-only kernel client, each listed pair's prices derived from the live offers,
+// and the live markets feed (plan L-MKT).
 
 export * from './feed.js';
 export * from './kernel-client.js';

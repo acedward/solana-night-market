@@ -9,8 +9,12 @@ export interface SponsorStatus {
   configured: boolean;
   state: SponsorState;
   synced: boolean;
-  /** DUST balance in specks (10^-15 DUST), or null when unknown. */
+  /** DUST balance in specks (10^-15 DUST), or null when unknown. The settled balance: it includes
+   *  the outputs a transaction in flight locks, so it does not dip mid-transaction (issue 00049). */
   dustSpecks: bigint | null;
+  /** The part of `dustSpecks` locked by transactions in flight (0 when idle); absent when the
+   *  session does not track it. */
+  dustInFlightSpecks?: bigint;
   /** A public, secret-free description of the last failure. */
   error?: string;
 }

@@ -2,8 +2,8 @@
 
 | File | What it does |
 |---|---|
-| `market-flows.ts` | The browser stand-in for TWO accounts, over the relay's HTTP API, with throwaway Ed25519 keys signing in Phantom's scheme (tweetnacl over the exact bytes). Steps: `open-a`, `open-b` (the Solana envelope, then the relay deploys and activates), `demo-a`, `demo-b` (the demo-token pack), `make` (A offers one token for another; the exchange's book must list it), `take` (B takes exactly that offer through the batcher; both accounts' balances must move by exactly the legs), `withdraw` (A withdraws the coin it received to a Midnight shielded key; the recipient's keys must open the output), `negatives` (the live relay refuses another key, another account, another network salt, an old nonce, a flipped bit, S+L, R = identity, a payload changed after signing, and identity/small-order owner keys; no transaction is sent). Secret state (the two device seeds, the inbox keys, the recipient's seed) lives in `$STATE_DIR/state.json` (mode 600); public results are merged into `$OUT/market-flows.json`. |
-| `tamper-live.ts` | Spec SC-002 at the node: account B's honest `append_inbox_with_ed25519` approval and proof, then one byte of the disclosed entry flipped in the proven transaction. The node must answer `InvalidProof` (Custom error 115); nothing lands. Opens the sponsor wallet itself, so the relay must be stopped. |
+| `market-flows.ts` | The browser stand-in for TWO accounts, over the relay's HTTP API, with throwaway Ed25519 keys signing in Phantom's scheme (tweetnacl over the exact bytes). Steps: `open-a`, `open-b` (the Solana envelope, then the relay deploys and activates), `demo-a`, `demo-b` (the demo-token pack), `make` (A offers one token for another; the exchange's book must list it), `book` (the exchange's view of that offer again), `take` (B takes exactly that offer through the batcher; both accounts' balances must move by exactly the legs), `withdraw` (A withdraws the coin it received to a Midnight shielded key; the recipient's keys must open the output), `negatives` (the live relay refuses another key, another account, another network salt, an old nonce, a flipped bit, S+L, R = identity, a payload changed after signing, and identity/small-order owner keys; no transaction is sent). Secret state (the two device seeds, the inbox keys, the recipient's seed) lives in `$STATE_DIR/state.json` (mode 600); public results are merged into `$OUT/market-flows.json`. |
+| `tamper-live.ts` | Spec SC-002 at the node: account B's honest `append_inbox_with_ed25519` approval and proof, then one byte of the disclosed entry flipped in the proven transaction. The node must answer `InvalidProof` (Custom error 115); nothing lands. `HONEST=1` submits the same call untampered (the control; it lands and pays its fee). Opens the sponsor wallet itself, so the relay must be stopped. |
 | `mock-exchange.ts` | Localnet only: a kernel stand-in (stores and serves offers) and a batcher stand-in that adds DUST from its own development wallet (as `midnight-balancer` does) and submits, so a take settles on the localnet. |
 | `compose.yml`, `run-local.sh` | The localnet (lane B3's recipe) with the relay image, the key volume and the mock exchange; runs every step of `market-flows.ts`, then `tamper-live.ts`, and tears everything down. |
 | `run-stagenet.sh` | One capped stagenet run: takes the shared funding-wallet lock (waits politely), starts rc.8 + rc.6 proof servers and the relay image against stagenet and the staging exchange, runs the chosen steps (`STEPS=open-a,demo-a`, …, `tamper`), stops the relay when the sponsor's DUST has dropped by `DUST_CAP_SPECKS` (default 100 DUST), and releases the lock. The relay's demo-token claims persist in a named volume between runs. |
@@ -24,3 +24,14 @@ STATE_DIR=~/.config/<project>/p6-stagenet OUT=<dir> STEPS=open-a,demo-a test/sta
 … STEPS=open-b,demo-b …
 … STEPS=make,take,withdraw,negatives,tamper …
 ```
+
+## Results (2026-09-30)
+
+- **Localnet**: every step for two accounts, the take settled through the mock batcher, balances exact, the
+  withdrawn coin opened by the recipient's keys, a tampered proof refused with `Custom error: 115`.
+- **Stagenet** (the relay image built from this branch, margin 5, about 60 DUST over seven runs): accounts
+  `453b2b8d…3751` and `57351491…412e`; demo tokens by the one-transaction path; A's offer
+  `3d622fc9…4276` listed by the staging kernel; B's take settled by the staging batcher in
+  `4464f3f4a8b35999350418c4741cc2c4aa4fce44913c8982e8bf137cb5b7620c` (block 685,773; the kernel marked
+  the offer consumed; balances exact); A's withdrawal `002320179fcc…5334` arrived; a tampered proof
+  refused by the stagenet node (`Custom error: 115`); eleven refusals by the live relay.

@@ -17,7 +17,8 @@
 # Cap: the sponsor's DUST is read from the relay's /health before the run and every 20 s; when the
 # drop reaches DUST_CAP (default 100 DUST) the relay is stopped. SPONSOR_FEE_BLOCKS_MARGIN defaults
 # to 5 (the declared fee is the estimate x 1.046^margin, and the ledger consumes all of it).
-# STEPS=tamper stops the relay and runs tamper-live.ts (a tampered proof; nothing lands).
+# STEPS=tamper stops the relay and runs tamper-live.ts (a tampered proof; nothing lands; HONEST=1
+# submits the same call untampered as the control, which lands and pays its fee).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -134,14 +135,24 @@ relay_up() {
   local h=""
   for _ in $(seq 1 200); do
     h="$(curl -s "http://127.0.0.1:$RELAY_PORT/health" || true)"
-    if grep -q '"synced":true' <<<"$h" && grep -q '"dustSpecks":"[0-9]' <<<"$h"; then break; fi
+    if python3 -c 'import json,sys; s=json.loads(sys.argv[1]).get("sponsor",{}); sys.exit(0 if s.get("synced") is True and s.get("state")=="synced" else 1)' "$h" 2>/dev/null; then break; fi
     sleep 6
   done
   printf '%s\n' "$h" >"$OUT/health-start-$(date -u +%H%M%S).json"
   say "relay health: $(head -c 900 <<<"$h")"
 }
+# The sponsor's DUST, only while the relay is idle: while a transaction is in flight the wallet
+# counts the whole DUST output it spends as gone until the change comes back (a drop of thousands of
+# DUST for a fee of a few), so a reading mid-job is not a spend.
 dust_now() {
-  curl -s "http://127.0.0.1:$RELAY_PORT/health" | sed -n 's/.*"dustSpecks":"\([0-9]*\)".*/\1/p'
+  curl -s "http://127.0.0.1:$RELAY_PORT/health" |
+    python3 -c '
+import json, sys
+h = json.load(sys.stdin)
+s = h.get("sponsor", {})
+lanes = h.get("queue", {}).get("lanes", {})
+idle = all(l.get("running", 0) == 0 and l.get("waiting", 0) == 0 for l in lanes.values())
+print(s["dustSpecks"] if s.get("synced") is True and s.get("dustSpecks") and idle else "")' 2>/dev/null
 }
 # DUST amounts in specks exceed bash's 64-bit integers: compare and subtract in Python.
 drop() { python3 -c 'import sys; print(int(sys.argv[1]) - int(sys.argv[2]))' "$1" "$2"; }
@@ -164,10 +175,13 @@ if ((${#FLOW_STEPS[@]} > 0)); then
   # The cap guard: stop the relay when the sponsor's DUST has dropped by the cap.
   (
     set +e
+    over=0
     while sleep 20; do
       d="$(dust_now)"
-      [[ -n "$d" ]] || continue
-      if capped "$START_DUST" "$d" "$DUST_CAP_SPECKS"; then
+      if [[ -z "$d" ]]; then over=0; continue; fi
+      if capped "$START_DUST" "$d" "$DUST_CAP_SPECKS"; then over=$((over + 1)); else over=0; fi
+      # Three idle readings in a row (a minute) below the cap: the change has had time to return.
+      if ((over >= 3)); then
         echo "== cap reached: sponsor DUST $d (start $START_DUST); stopping the relay" >>"$OUT/cap.log"
         docker stop "$PREFIX-relay" >/dev/null 2>&1
         break
@@ -186,8 +200,17 @@ if ((${#FLOW_STEPS[@]} > 0)); then
     say "flows FAILED ($flow_steps)"
     status=1
   fi
-  sleep 30 # let the wallet see the last fee
-  END_DUST="$(dust_now)"
+  # The settled balance: idle readings 20 s apart until two agree (the last change has returned).
+  END_DUST=""
+  prev=""
+  for _ in $(seq 1 15); do
+    sleep 20
+    cur="$(dust_now)"
+    [[ -n "$cur" ]] || continue
+    if [[ "$cur" == "$prev" ]]; then END_DUST="$cur"; break; fi
+    prev="$cur"
+  done
+  END_DUST="${END_DUST:-$prev}"
   printf '%s\n' "$END_DUST" >"$OUT/dust-end.txt"
   say "sponsor DUST at end: ${END_DUST:-unknown} specks (drop $(drop "$START_DUST" "${END_DUST:-$START_DUST}"))"
   kill "$WATCH_PID" 2>/dev/null || true
@@ -202,6 +225,7 @@ if [[ "$TAMPER" == 1 ]]; then
     -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$STATE_DIR:/state:ro" -v "$OUT:/out" \
     --mount "type=bind,source=$SEED_FILE,target=/run/secrets/sponsor-seed,readonly" \
     -e NETWORK=stagenet -e STATE_DIR=/state -e OUT=/out -e WHO="${TAMPER_WHO:-B}" \
+    ${HONEST:+-e HONEST="$HONEST"} ${TAMPER_OUT_NAME:+-e OUT_NAME="$TAMPER_OUT_NAME"} \
     -e SPONSOR_SEED_FILE=/run/secrets/sponsor-seed -e SPONSOR_FEE_BLOCKS_MARGIN="$MARGIN" \
     -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
     -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-contracts:6300 \

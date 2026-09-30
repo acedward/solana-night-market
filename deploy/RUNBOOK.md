@@ -179,17 +179,21 @@ DUST is not transferred; it is **generated** by NIGHT registered for DUST genera
 (read 2026-09-27): a cap of 5 DUST per NIGHT, about 0.714 DUST per NIGHT per day while under it
 (7 days from empty to the cap). `sponsor-wallet status` prints the live parameters.
 
-What the market spends (margin 20; MN Bank's stagenet measurements for the same account machinery;
-P6 of AA 00047 re-measures the Ed25519 arm):
+What the market spends, measured on stagenet by AA 00047 P6 (2026-09-30, the Ed25519 arm, this relay):
+the required fee is what the indexer reports as `paidFees`, and the sponsor pays that times
+1.046^`SPONSOR_FEE_BLOCKS_MARGIN` (the ledger keeps the whole declared fee).
 
-| Action | DUST from the sponsor |
-|---|---|
-| Open an account (two deploys and an activation) | about 60 |
-| Demo tokens | about 1 per transaction: one transaction per token (`direct`, the default) or two (`via-sponsor`), section 7 |
-| Withdrawal (shielded or unshielded), change re-filing | about 1 each |
-| Make an offer; take an offer | 0 (the batcher pays the settlement) |
+| Action | Transactions | Required fee (DUST) | Paid at margin 5 | Paid at margin 20 (default) |
+|---|---|---|---|---|
+| Open an account | deploy wave 1, wave 2 (maintenance update), activation | 16.5–17.1 (11.7–12.1 + 4.5–4.7 + 0.26) | about 21 | about 41 |
+| Demo tokens (`direct`) | one per token | 0.49–0.57 each | about 0.65 each | about 1.3 each |
+| Withdrawal (shielded) | one | 0.34 | 0.42 | 0.83 |
+| Change re-filing (append inbox) | one | 0.60 | 0.75 | 1.5 |
+| Make an offer; take an offer | none from the sponsor | 0 (the batcher pays the settlement: 0.32) | 0 | 0 |
 
-Registration dominates: 1,000 NIGHT gives about 714 DUST a day, about 11 new accounts a day.
+Margin 5 was enough for every call in P6: the wallet estimates the fee on a proof-erased copy, and for
+the arm's k=18 calls that estimate is only about 4% below the real fee. Registration dominates: 1,000
+NIGHT gives about 714 DUST a day, about 17 new accounts a day at margin 20 or 34 at margin 5.
 
 ### 4.4 Fund and register it
 

@@ -137,6 +137,29 @@ async function main() {
         const t0 = Date.now();
         const proven = await inner.proveTx(tx, cfg);
         result.proveSeconds = (Date.now() - t0) / 1000;
+        // The fee of the proven call with its real proofs, and as the wallet estimates it (on a
+        // proof-erased copy): a larger gap than the fee margin makes the node refuse the DUST
+        // payment (`138`) before it looks at the proof.
+        try {
+          const pdp = rt.publicDataProvider as {
+            queryZSwapAndContractState(a: string): Promise<readonly unknown[] | null>;
+          };
+          const params = (await pdp.queryZSwapAndContractState(party.account!))?.[2];
+          const p = proven as unknown as { fees(x: unknown): bigint; eraseProofs(): { fees(x: unknown): bigint } };
+          const withProofs = p.fees(params);
+          const erased = p.eraseProofs().fees(params);
+          result.fees = {
+            withProofsSpecks: withProofs,
+            proofsErasedSpecks: erased,
+            ratio: Number(withProofs) / Number(erased),
+            margin: Number(process.env.SPONSOR_FEE_BLOCKS_MARGIN ?? '5'),
+            marginFactor: 1.0459512 ** Number(process.env.SPONSOR_FEE_BLOCKS_MARGIN ?? '5'),
+          };
+        } catch (e) {
+          result.fees = { error: String(e).slice(0, 300) };
+        }
+        // HONEST=1: the control, the same call submitted untampered (it lands; it costs its fee).
+        if (process.env.HONEST === '1') return proven;
         const bytes = proven.serialize();
         const buf = Buffer.from(bytes);
         // The entry is a disclosed Bytes<192>; the transcript stores it as one value atom (trailing
@@ -178,16 +201,22 @@ async function main() {
     const t0 = Date.now();
     try {
       const r = await custody.handle.callTx['append_inbox_with_ed25519']!(entry, ...ed25519ArmAuthArgs(auth as never));
-      result.outcome = 'ACCEPTED (a tampered proof landed: this is a failure)';
-      result.accepted = r;
-      process.exitCode = 1;
+      const txId = (r as { public?: { txId?: string } })?.public?.txId ?? null;
+      if (process.env.HONEST === '1') {
+        result.outcome = 'CONTROL: the untampered call landed';
+        result.txId = txId;
+      } else {
+        result.outcome = 'ACCEPTED (a tampered proof landed: this is a failure)';
+        result.txId = txId;
+        process.exitCode = 1;
+      }
     } catch (e) {
       const m = String((e as Error)?.stack ?? e);
       result.outcome = /Custom error: 115|InvalidProof|Invalid proof/i.test(m)
         ? 'REFUSED: InvalidProof'
         : 'REFUSED (other)';
       result.error = m.slice(0, 4000);
-      if (result.outcome !== 'REFUSED: InvalidProof') process.exitCode = 1;
+      if (result.outcome !== 'REFUSED: InvalidProof' || process.env.HONEST === '1') process.exitCode = 1;
     }
     result.seconds = (Date.now() - t0) / 1000;
     // The account did not move.

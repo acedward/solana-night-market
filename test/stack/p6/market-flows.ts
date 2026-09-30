@@ -276,7 +276,10 @@ const ctxOf = (s: AccountStateView, salt?: string) =>
   callContext({ account: s.account, authNonce: BigInt(s.authNonce), networkSalt: salt ?? s.networkSalt });
 
 async function indexerTx(id: string): Promise<Record<string, unknown> | null> {
-  const query = `{ transactions(offset: {identifier: "${id}"}) { hash block { height timestamp } ... on RegularTransaction { identifiers fees { paidFees estimatedFees } transactionResult { status } } } }`;
+  // A relay job reports a transaction identifier (33 bytes, 0x00-prefixed); the batcher reports the
+  // transaction hash (32 bytes).
+  const by = id.length === 64 ? 'hash' : 'identifier';
+  const query = `{ transactions(offset: {${by}: "${id}"}) { hash block { height timestamp } ... on RegularTransaction { identifiers fees { paidFees estimatedFees } transactionResult { status } } } }`;
   for (let i = 0; i < 10; i++) {
     try {
       const res = await fetch(INDEXER_URL, {
@@ -455,15 +458,25 @@ async function make() {
     makerCoin: held.nonce,
   };
   saveState();
-  // The exchange's own view: the offer's detail and its place on the public book.
+  out.kernel = await kernelView(offerId, payload.giveColor);
+  say(`the exchange: ${json(out.kernel)}`);
+  put('make', out);
+}
+
+const json = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString(10) : x));
+
+/** The exchange's own view of an offer: its detail (legs as the kernel decoded them), whether the
+ *  public book lists it (paging the offers that give its token), and its status. */
+async function kernelView(offerId: string, giveColor: string): Promise<Record<string, unknown>> {
   const kernel = new KernelClient({ baseUrl: KERNEL_URL, retries: 2, timeoutMs: 20_000 });
   const detail = await kernel.offer(offerId).catch((e: unknown) => ({ error: String(e) }));
   let onBook = false;
+  let bookError: string | undefined;
   try {
     let cursor: string | null | undefined = undefined;
     for (let page = 0; page < 20 && !onBook; page++) {
       const p = await kernel.offersPage({
-        token: payload.giveColor,
+        token: giveColor,
         direction: 'GIVING',
         limit: 100,
         ...(cursor ? { afterHash: cursor } : {}),
@@ -473,9 +486,10 @@ async function make() {
       if (!cursor) break;
     }
   } catch (e) {
-    out.bookError = String(e);
+    bookError = String(e);
   }
-  out.kernel = {
+  return {
+    at: new Date().toISOString(),
     detail:
       detail && 'offerId' in detail
         ? {
@@ -486,10 +500,18 @@ async function make() {
           }
         : detail,
     onBook,
+    ...(bookError ? { bookError } : {}),
     status: await kernel.offerStatus(offerId).catch(() => 'unknown'),
   };
-  say(`the exchange: ${JSON.stringify(out.kernel)}`);
-  put('make', out);
+}
+
+async function book() {
+  const o = state.offer;
+  if (!o) throw new Error('no offer of A recorded (run make first)');
+  step(`book: the exchange's view of A's offer ${o.offerId}`);
+  const view = await kernelView(o.offerId, o.giveColor);
+  say(`the exchange: ${json(view)}`);
+  put('book', view);
 }
 
 async function take() {
@@ -890,6 +912,9 @@ async function main() {
         break;
       case 'make':
         await make();
+        break;
+      case 'book':
+        await book();
         break;
       case 'take':
         await take();

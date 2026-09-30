@@ -55,6 +55,8 @@ const KIND: Record<RelayActionName, Kind> = {
   'append-inbox': 'passport-call',
   'open-swap': 'passport-call',
   take: 'passport-call',
+  'demo-tokens': 'relay-action',
+  'withdraw-unshielded': 'relay-action', // lane B3 makes it a passport-call (packages/core/src/unshielded.ts)
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -156,6 +158,10 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
   switch (action) {
     case 'register':
       return { encPublicKey: (n % 2 ? 'cd' : 'ab').repeat(32) };
+    case 'demo-tokens':
+      return {};
+    case 'withdraw-unshielded':
+      return { recipient: '12'.repeat(32), color: COLOUR_A, amount, authNonce: a };
     case 'withdraw':
       return {
         recipient: '11'.repeat(32),

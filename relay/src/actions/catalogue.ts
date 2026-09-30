@@ -82,6 +82,14 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('append-inbox', 'prover', 'B3'),
     def('open-swap', 'prover', 'B3'),
     def('take', 'prover', 'B3'),
+    // Added by AA 00047 lane B2 as placeholders; lane B3 defines them in the production catalogue:
+    //   - the demo-token claim (spec FR-007; wire contract packages/core/src/demo-tokens.ts:
+    //     `DemoTokensPayloadSchema`, authorised by its RelayAction envelope);
+    //   - a withdrawal from the account's unshielded balance (spec US3; wire contract
+    //     packages/core/src/unshielded.ts: `WithdrawUnshieldedPayloadSchema`, authorised by the
+    //     call's own signature, `passport-call`, like `withdraw`).
+    def('demo-tokens', 'prover', 'B3'),
+    def('withdraw-unshielded', 'prover', 'B3'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);

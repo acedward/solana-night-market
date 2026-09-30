@@ -11,9 +11,11 @@
 //     accepted at most once, ever;
 //   - an EXPIRY (unix seconds); the relay also caps how far ahead it may be.
 //
-// THE SIGNATURE SCHEME IS A SEAM (plan lane B3). `RelayActionScheme` turns an envelope into the exact
-// bytes the wallet signs and checks a signature over them. TODO(B3): the Solana scheme, from Track
-// A's arm client in `@nightmarket/core/passport` (../passport/ed25519.ts):
+// THE SIGNATURE SCHEME IS A SEAM. `RelayActionScheme` turns an envelope into the exact bytes the
+// wallet signs and checks a signature over them. The Solana scheme is `solanaRelayActionScheme` in
+// `@nightmarket/core/passport` (../passport/relay-envelope.ts, AA 00047 lane B2; lane B3 wires it
+// into the relay's routes). It meets these constraints, on Track A's arm client
+// (../passport/ed25519.ts):
 //   - `messageBytes` must be printable ASCII the wallet shows as text (Phantom `display: 'utf8'`),
 //     start with the market's label (`marketLabel(network)`), and pass
 //     `assertSafeEd25519Message` (never a Solana transaction, an off-chain message or a Sign-In With
@@ -31,8 +33,19 @@ import { z } from 'zod';
 import { bytesToHex } from './hex.js';
 import { DEVICE_KEY_PATTERN } from './signing.js';
 
-/** Every action the relay knows. The executors are wired per network; the names are the contract. */
-export const RELAY_ACTIONS = ['register', 'withdraw', 'append-inbox', 'open-swap', 'take'] as const;
+/** Every action the relay knows. The executors are wired per network; the names are the contract.
+ *  Added by AA 00047 lane B2 (their executors are lane B3's): `demo-tokens`, the once-per-key
+ *  demo-token claim (spec FR-007, wire contract ./demo-tokens.ts), and `withdraw-unshielded`, a
+ *  withdrawal from the account's unshielded balance (spec US3, wire contract ./unshielded.ts). */
+export const RELAY_ACTIONS = [
+  'register',
+  'withdraw',
+  'append-inbox',
+  'open-swap',
+  'take',
+  'demo-tokens',
+  'withdraw-unshielded',
+] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 
 /** The message as it travels in JSON: every value a string. */

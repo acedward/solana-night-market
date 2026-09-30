@@ -13,7 +13,12 @@ import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
 import { DigestReplayGuard } from './auth/verifiers.js';
 import { IndexerClient } from './chain/indexer.js';
-import { IndexerChainReader, notImplementedChainReader, type ChainReader } from './chain/reader.js';
+import {
+  IndexerChainReader,
+  notImplementedChainReader,
+  type ChainReader,
+  type ContractBalances,
+} from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
 import { demoTokens, demoTokensInfo } from './demo/action.js';
 import { DemoTokenClaims } from './demo/claims.js';
@@ -144,7 +149,12 @@ async function main(): Promise<void> {
   }
   const indexer = new IndexerClient({ indexerUrl: config.network.midnight.indexerUrl });
   const chain: ChainReader = runtime
-    ? new IndexerChainReader((account) => runtime!.ledgerState(account), indexer)
+    ? new IndexerChainReader(
+        (account) => runtime!.ledgerState(account),
+        indexer,
+        undefined,
+        async (account) => (await runtime!.contractState(account)) as ContractBalances | null,
+      )
     : notImplementedChainReader;
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
 

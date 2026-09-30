@@ -9,6 +9,7 @@
 //   GET  /v1/accounts/:account/state    public ledger reads (L-ACC)
 //   GET  /v1/accounts/:account/inbox    public inbox ciphertexts (L-ACC)
 //   GET  /v1/accounts/:account/zswap    the account's Zswap leaves (exact positions) and spends (L-ACC)
+//   GET  /v1/accounts/:account/unshielded  the account's unshielded balances (B3, for B2's holdings)
 //   GET  /v1/demo-tokens[?owner=<key>]  the demo-token pack, its limits, and whether a key claimed (B3)
 //
 // Request bodies are never logged. Errors are JSON: {"error": {"code", "message", "detail"?}}.
@@ -148,6 +149,7 @@ export function createApp(deps: AppDeps): Hono {
       network: config.network.name,
       relayVersion: deps.version,
       limits: { authMaxTtlSeconds: limits.authMaxTtlSeconds, jobTtlSeconds: limits.jobTtlSeconds },
+      withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
     };
     return c.json(body);
   });
@@ -196,7 +198,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.queue.stats());
   });
 
-  const accountRead = (kind: 'state' | 'inbox' | 'zswap') => async (c: Context) => {
+  const accountRead = (kind: 'state' | 'inbox' | 'zswap' | 'unshielded') => async (c: Context) => {
     const refused = limited(readLimiter, clientAddress(c), c);
     if (refused) return refused;
     const account = c.req.param('account')?.replace(/^0x/, '').toLowerCase() ?? '';
@@ -210,6 +212,10 @@ export function createApp(deps: AppDeps): Hono {
       if (kind === 'zswap') {
         const z = await deps.chain.zswap(account);
         return z ? c.json(z) : apiError(c, 404, 'not-found', 'no such account');
+      }
+      if (kind === 'unshielded') {
+        const u = await deps.chain.unshielded(account);
+        return u ? c.json(u) : apiError(c, 404, 'not-found', 'no such account');
       }
       const from = Number(c.req.query('from') ?? '0');
       const limit = Math.min(Number(c.req.query('limit') ?? '100'), 500);
@@ -236,6 +242,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/accounts/:account/state', accountRead('state'));
   app.get('/v1/accounts/:account/inbox', accountRead('inbox'));
   app.get('/v1/accounts/:account/zswap', accountRead('zswap'));
+  app.get('/v1/accounts/:account/unshielded', accountRead('unshielded'));
 
   // ── the one state-changing route ─────────────────────────────────────────
 

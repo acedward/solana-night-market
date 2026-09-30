@@ -32,13 +32,12 @@ Work in progress on the `00047-solana-night-market` branch (draft pull request i
 | Step | What | State |
 |---|---|---|
 | B1 | Rebrand; remove Sepolia, EVM and the bridge; the mint-test-tokens registry; generic pairs | done |
-| Track A | The Passport account's Ed25519 arm (`acedward/passport`, branch `00047-solana-ed25519-arm`) | in progress |
-| B2 | Web: Phantom connect, account opening, the market UI, the signing screens | next |
+| Track A | The Passport account's Ed25519 arm (`acedward/passport`, branch `00047-solana-ed25519-arm`) | done (draft PR acedward/passport#6) |
+| B2 | Web: Phantom connect, account opening, the market UI, the signing screens | done (lane `00047-lane-web`) |
 | B3 | Relay: Ed25519 actions (one wallet prompt each), both proof servers, key pins, the demo-token endpoint | done (lane `00047-lane-relay`) |
 | P6 | Integration and stagenet acceptance | after A, B2, B3 |
 
-Until B2 and B3 land, the site browses the order books; connecting a wallet says that Solana
-wallets are coming. The signing seams are `packages/core/src/signing.ts` (the device key and
+The signing seams are `packages/core/src/signing.ts` (the device key and
 signature types), `web/src/wallet/signing.ts` (`ActionSigning`, what the browser asks the wallet
 to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a signed call).
 

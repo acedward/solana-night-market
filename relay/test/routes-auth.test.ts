@@ -207,7 +207,7 @@ describe('reads', () => {
     expect((await h.app.request('/health')).status).toBe(200);
     const cfg = (await (await h.app.request('/v1/config')).json()) as Record<string, unknown>;
     expect(cfg).toMatchObject({ network: 'undeployed', relayVersion: 'test' });
-    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion']);
+    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion', 'withdrawRecipientEnvelope']);
     expect((await h.app.request('/v1/queue')).status).toBe(200);
     expect((await h.app.request('/v1/jobs/zz')).status).toBe(400);
     expect((await h.app.request(`/v1/jobs/${'0'.repeat(32)}`)).status).toBe(404);

@@ -68,6 +68,12 @@ export class IndexerClient {
     return body.data;
   }
 
+  /** The chain tip's height. */
+  async tip(): Promise<number> {
+    const data = await this.graphql<{ block: { height: number } | null }>('query Tip { block { height } }', {});
+    return data.block?.height ?? 0;
+  }
+
   /** The account's transactions (deduplicated, oldest first) and the chain tip. */
   async accountTransactions(account: string): Promise<{ txs: RawActionTx[]; tip: number } | null> {
     const limit = Math.min(this.options.maxActions ?? 500, 500);

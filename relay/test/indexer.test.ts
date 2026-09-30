@@ -3,6 +3,7 @@
 // an unknown account, 501 without a key volume, 503 when the chain cannot be read, and 501
 // `history-too-long` for an account with a full indexer page of actions (no paging yet, Q27).
 
+import { UnshieldedBalancesViewSchema, unshieldedBalancesPath } from '@nightmarket/core';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -13,8 +14,15 @@ import {
   type DecodedEvent,
   type RawActionTx,
 } from '../src/chain/indexer.js';
-import { accountStateView, inboxPageOf, type ChainReader, type LedgerView } from '../src/chain/reader.js';
-import { harness } from './harness.js';
+import {
+  IndexerChainReader,
+  accountStateView,
+  inboxPageOf,
+  unshieldedBalancesOf,
+  type ChainReader,
+  type LedgerView,
+} from '../src/chain/reader.js';
+import { harness, testConfig } from './harness.js';
 
 const ME = 'aa'.repeat(32);
 const OTHER = 'bb'.repeat(32);
@@ -172,7 +180,59 @@ describe('GET /v1/accounts/:account/*', () => {
     accountState: async () => null,
     inbox: async () => null,
     zswap: async () => null,
+    unshielded: async () => null,
     ...over,
+  });
+
+  it('serves the unshielded balances (B3, for the holdings panel): unshielded rows only, non-zero, sorted', async () => {
+    const balance = new Map<{ tag: string; raw?: string }, bigint>([
+      [{ tag: 'unshielded', raw: 'BB'.repeat(32) }, 25_000_000n],
+      [{ tag: 'shielded', raw: 'cc'.repeat(32) }, 7n],
+      [{ tag: 'unshielded', raw: 'aa'.repeat(32) }, 3n],
+      [{ tag: 'unshielded', raw: 'dd'.repeat(32) }, 0n],
+      [{ tag: 'dust' }, 9n],
+    ]);
+    const view = unshieldedBalancesOf(ME, { balance }, 1234);
+    expect(UnshieldedBalancesViewSchema.parse(view)).toEqual({
+      account: ME,
+      balances: [
+        { colour: 'aa'.repeat(32), amount: '3' },
+        { colour: 'bb'.repeat(32), amount: '25000000' },
+      ],
+      blockHeight: 1234,
+    });
+    const h = harness({ chain: chain({ unshielded: async (a) => unshieldedBalancesOf(a, { balance }, 9) }) });
+    const res = await h.app.request(unshieldedBalancesPath(ME));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { balances: unknown[] }).balances).toHaveLength(2);
+    expect((await harness({ chain: chain({}) }).app.request(unshieldedBalancesPath(ME))).status).toBe(404);
+    expect((await harness().app.request(unshieldedBalancesPath(ME))).status).toBe(501);
+  });
+
+  it('reads them from the contract state and the indexer tip', async () => {
+    const indexer = { tip: async () => 77 } as unknown as IndexerClient;
+    const reader = new IndexerChainReader(
+      async () => null,
+      indexer,
+      undefined,
+      async (a) => (a === ME ? { balance: new Map([[{ tag: 'unshielded', raw: 'ee'.repeat(32) }, 5n]]) } : null),
+    );
+    expect(await reader.unshielded(ME)).toEqual({
+      account: ME,
+      balances: [{ colour: 'ee'.repeat(32), amount: '5' }],
+      blockHeight: 77,
+    });
+    expect(await reader.unshielded('00'.repeat(32))).toBeNull();
+    await expect(new IndexerChainReader(async () => null, indexer).unshielded(ME)).rejects.toThrow(/contract balances/);
+  });
+
+  it("tells the page whether withdrawals need F-B6's second signature (Q13)", async () => {
+    const off = (await (await harness().app.request('/v1/config')).json()) as { withdrawRecipientEnvelope?: boolean };
+    expect(off.withdrawRecipientEnvelope).toBe(false);
+    const on = (await (
+      await harness({ config: testConfig({ RELAY_WITHDRAW_RECIPIENT_ENVELOPE: 'true' }) }).app.request('/v1/config')
+    ).json()) as { withdrawRecipientEnvelope?: boolean };
+    expect(on.withdrawRecipientEnvelope).toBe(true);
   });
 
   it('serves the reads, 404 for an unknown account, 503 when the chain fails', async () => {

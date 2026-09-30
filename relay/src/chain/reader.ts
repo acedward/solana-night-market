@@ -4,7 +4,7 @@
 // headers, and the relay keeps the parsing of ledger state and ledger events off the browser
 // (plan P0.4: the browser bundle carries no ledger-v9).
 
-import type { AccountStateView, InboxPage, ZswapActivity } from '@nightmarket/core';
+import type { AccountStateView, InboxPage, UnshieldedBalancesView, ZswapActivity } from '@nightmarket/core';
 
 import { type IndexerClient, ledgerEventDecoder, zswapActivityOf, type EventDecoder } from './indexer.js';
 
@@ -14,6 +14,8 @@ export interface ChainReader {
   accountState(account: string): Promise<AccountStateView | null>;
   inbox(account: string, from: number, limit: number): Promise<InboxPage | null>;
   zswap(account: string): Promise<ZswapActivity | null>;
+  /** The account's public unshielded balances (AA 00047 B3; packages/core/src/unshielded.ts). */
+  unshielded(account: string): Promise<UnshieldedBalancesView | null>;
 }
 
 export class ChainReadNotImplementedError extends Error {
@@ -31,7 +33,29 @@ export const notImplementedChainReader: ChainReader = {
   async zswap() {
     throw new ChainReadNotImplementedError('account reads need the relay key volume (the compiled account)');
   },
+  async unshielded() {
+    throw new ChainReadNotImplementedError('account reads need the relay key volume (the compiled account)');
+  },
 };
+
+/** The part of a contract's on-chain state the unshielded read uses: its public balances, keyed by
+ *  token type (`{ tag: 'unshielded', raw }` for unshielded tokens). */
+export interface ContractBalances {
+  balance: Map<{ tag: string; raw?: string }, bigint>;
+}
+
+/** An account's unshielded balances: one row per unshielded colour with a non-zero balance. */
+export function unshieldedBalancesOf(
+  account: string,
+  state: ContractBalances,
+  blockHeight: number,
+): UnshieldedBalancesView {
+  const balances = [...state.balance.entries()]
+    .filter(([t, v]) => t.tag === 'unshielded' && typeof t.raw === 'string' && v > 0n)
+    .map(([t, v]) => ({ colour: t.raw!.replace(/^0x/, '').toLowerCase(), amount: v.toString(10) }))
+    .sort((a, b) => (a.colour < b.colour ? -1 : a.colour > b.colour ? 1 : 0));
+  return { account, balances, blockHeight };
+}
 
 /** The fields of an account's ledger this reader uses (the compiled contract's `ledger()`). */
 export interface LedgerView {
@@ -80,6 +104,8 @@ export class IndexerChainReader implements ChainReader {
     private readonly ledgerOf: (account: string) => Promise<LedgerView | null>,
     private readonly indexer: IndexerClient,
     decoder?: EventDecoder,
+    /** The contract's on-chain state (for the unshielded balances); absent: the read says 501. */
+    private readonly stateOf?: (account: string) => Promise<ContractBalances | null>,
   ) {
     if (decoder) this.decoder = Promise.resolve(decoder);
   }
@@ -99,5 +125,11 @@ export class IndexerChainReader implements ChainReader {
     if (!found) return null;
     this.decoder ??= ledgerEventDecoder();
     return zswapActivityOf(account, found.txs, await this.decoder, found.tip);
+  }
+
+  async unshielded(account: string): Promise<UnshieldedBalancesView | null> {
+    if (!this.stateOf) throw new ChainReadNotImplementedError('this relay does not read contract balances');
+    const [state, tip] = await Promise.all([this.stateOf(account), this.indexer.tip()]);
+    return state ? unshieldedBalancesOf(account, state, tip) : null;
   }
 }

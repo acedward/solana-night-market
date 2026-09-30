@@ -1,71 +1,81 @@
 /*
- * Night Market design tokens (plan P1.5), taken from the owner-approved mockup (Q16 A).
+ * Night Market design tokens: the night palette (AA 00047 P8.1, spec FR-006b; questions Q20).
  *
- * One primary (navy), ONE muted accent (antique gold, used sparingly: the masthead rule, the
- * monogram, the selected row, the current tracker stage, warnings), slate text on ivory.
- * No gradients, no glass, no shadows beyond a hairline. Every text pair below is checked
- * against WCAG AA by web/test/design-contrast.test.ts, so change a colour there first.
+ * A consumer trading app at night: near-black navy surfaces in four elevation steps, ONE brand
+ * gradient (violet → cyan) used only on non-text parts (the logo, progress bars, highlights, the
+ * wallet avatar), violet → indigo primary buttons, and semantic colours for buy (green), sell
+ * (rose), warnings (amber) and errors. Every text pair below is checked against WCAG AA on its
+ * background by web/test/design-contrast.test.ts, so change a colour there first. Soft fills are
+ * written as solid hex values (the colour already blended over the surface) so the test can read
+ * them.
  */
 :root {
-  /* ── colour: surfaces ─────────────────────────────────────────────── */
-  --paper: #f8f5ee; /* page background, ivory */
-  --surface: #ffffff; /* panels, tables, the tab bar */
-  --surface-alt: #f3efe6; /* quiet fills: the pending box, unit suffixes, copy fields */
-  --overlay: rgb(14 31 61 / 55%); /* behind a dialog: navy-deep at 55 % */
+  color-scheme: dark;
 
-  /* ── colour: brand ────────────────────────────────────────────────── */
-  --navy: #152c55; /* primary */
-  --navy-deep: #0e1f3d;
-  --navy-hover: #1e3b6e;
-  --navy-soft: #e8edf5; /* navy tint: badges, secondary-button hover */
-  --navy-soft-border: #c8d2e3;
-  --gold: #a8864a; /* THE accent: rules, markers, the monogram ring (never text) */
-  --gold-ink: #7a5a1f; /* gold when it has to be text */
-  --gold-soft: #f6efdd;
-  --gold-soft-border: #e3d3ae;
+  /* ── colour: surfaces, darkest to most raised ───────────────────── */
+  --bg: #070b14; /* the page: near-black navy */
+  --surface: #0e1422; /* cards and panels */
+  --surface-2: #141b2d; /* raised: a card inside a card, menus, the dock */
+  --surface-3: #1b2438; /* hover rows, chips, the selected line */
+  --surface-hover: #232e46; /* a hovered secondary button */
+  --field: #0b1120; /* inputs sit a step below their card */
+  --overlay: rgb(3 6 12 / 72%); /* behind a dialog or a drawer */
+
+  /* ── colour: lines ────────────────────────────────────────────────── */
+  --border: #232c42; /* hairlines between parts of a card */
+  --border-strong: #34405c; /* card edges, dividers that must show */
+  --field-border: #636f8d; /* ≥ 3:1 against every surface (WCAG 1.4.11) */
 
   /* ── colour: text ─────────────────────────────────────────────────── */
-  --ink: #1d2733; /* body text, slate-navy */
-  --slate: #465262; /* secondary text */
-  --muted: #5b6573; /* captions, labels */
-  --on-navy: #f7f3ea; /* text on the navy masthead */
-  --on-navy-muted: #c9d1e0;
-  --on-navy-gold: #eadcb9; /* the "Midnight stagenet" badge on navy */
-  --on-accent: #ffffff; /* text on a filled navy or danger button */
+  --ink: #eef1fb; /* primary text */
+  --slate: #b3bdd4; /* secondary text, ledes */
+  --muted: #8f9ab6; /* captions, labels, table heads */
 
-  /* ── colour: rules and fields ─────────────────────────────────────── */
-  --rule: #ddd6c8; /* hairlines */
-  --rule-strong: #a9a08e;
-  --field-border: #767c86; /* ≥ 3:1 against white (WCAG 1.4.11) */
+  /* ── colour: brand ────────────────────────────────────────────────── */
+  --violet: #8b5cf6; /* the accent: indicators, the current step, borders of highlighted cards */
+  --violet-ink: #c4b5fd; /* violet as text: the current tab, badges */
+  --violet-soft: #1f1a3d; /* violet tint: badges, the selected nav pill */
+  --cyan: #22d3ee; /* the second accent: focus rings, live dots, the end of the gradient */
+  --link: #7dd3fc; /* links */
+  --primary: #7c3aed; /* primary buttons, from … */
+  --primary-2: #4f46e5; /* … to (white text ≥ 5.7:1 at both ends) */
+  --primary-hover: #6d28d9;
+  --on-accent: #ffffff; /* text on a primary or danger button */
+  --brand-gradient: linear-gradient(135deg, #8b5cf6 0%, #6366f1 45%, #22d3ee 100%);
+  --button-gradient: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 100%);
 
-  /* ── colour: states ───────────────────────────────────────────────── */
-  --positive: #2c6340;
-  --positive-soft: #e7f0e9;
-  --positive-soft-border: #c3d8c8;
-  --warn-ink: #7a4b00;
-  --warn-soft: #fbf2df;
-  --warn-soft-border: #ead9b5;
-  --danger: #9c2b2b;
-  --danger-hover: #822222;
-  --danger-soft: #f8e9e7;
-  --danger-soft-border: #ebcfcb;
-  --disabled-bg: #e4e1da;
-  --disabled-border: #d2cdc3;
-  --disabled-ink: #545b65;
+  /* ── colour: buy, sell and states ─────────────────────────────────── */
+  --buy: #34d399; /* bids, "Buy", success */
+  --buy-strong: #10b981; /* a filled Buy button (dark text on it) */
+  --buy-soft: #0f2a26;
+  --on-buy: #03150e;
+  --sell: #fb7185; /* asks, "Sell", errors */
+  --sell-strong: #f43f5e; /* a filled Sell button (dark text on it) */
+  --sell-soft: #2d1520;
+  --on-sell: #1c0409;
+  --warn: #fbbf24;
+  --warn-soft: #2a2111;
+  --danger: #fb7185;
+  --danger-strong: #e11d48; /* the CLEAR ALL button (white text) */
+  --danger-hover: #be123c;
+  --danger-soft: #2d1520;
+  --info-soft: #0c2230;
+  --disabled-bg: #1b2233;
+  --disabled-ink: #8a93aa;
 
   /* ── type ─────────────────────────────────────────────────────────── */
-  --serif: 'Libre Caslon Text', Georgia, 'Times New Roman', Times, serif;
   --sans:
-    'Source Sans 3', 'Source Sans Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Helvetica,
-    Arial, sans-serif;
-  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+    'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --text-xs: 0.75rem; /* 12 px: table heads, eyebrows */
   --text-sm: 0.8125rem; /* 13 px: captions, notes */
-  --text-md: 0.875rem; /* 14 px: secondary text */
+  --text-md: 0.875rem; /* 14 px: secondary text, most UI */
   --text-base: 1rem; /* 16 px: body */
-  --text-lg: 1.125rem; /* 18 px: sub-section titles */
-  --text-xl: 1.375rem; /* 22 px: panel titles */
-  --text-2xl: 2rem; /* 32 px: page titles, the big figure */
+  --text-lg: 1.125rem; /* 18 px: card titles */
+  --text-xl: 1.375rem; /* 22 px: prices on cards */
+  --text-2xl: 1.75rem; /* 28 px: page titles */
+  --text-3xl: 2.25rem; /* 36 px: the portfolio's big figure */
+  --tracking-tight: -0.02em;
   --tracking-caps: 0.06em;
 
   /* ── spacing ──────────────────────────────────────────────────────── */
@@ -78,22 +88,36 @@
   --space-7: 28px;
   --space-8: 32px;
   --space-9: 48px;
-  --gutter: 16px; /* 32 px from 768 px up */
-  --page-max: 1120px;
+  --gutter: 16px; /* 24 px from 768 px, 32 px from 1180 px */
+  --page-max: 1360px;
   --tap: 44px; /* minimum touch target (buttons, fields) */
+  --header-h: 64px;
+  --bottom-nav-h: 64px; /* the phone's tab bar */
+  --dock-w: 320px; /* the portfolio panel beside Markets and Trade */
 
-  /* ── rules and shape ──────────────────────────────────────────────── */
-  --rule-hair: 1px solid var(--rule);
-  --rule-head: 1.5px solid var(--navy); /* under a table head */
-  --rule-total: 3px double var(--ink); /* under a subtotal */
-  --radius: 3px;
-  --radius-sm: 2px;
+  /* ── shape and elevation ──────────────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+  --shadow-1: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 10px 30px -18px rgb(0 0 0 / 80%);
+  --shadow-2: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 24px 60px -24px rgb(0 0 0 / 85%);
+  --glow: 0 0 0 1px rgb(139 92 246 / 45%), 0 12px 32px -12px rgb(139 92 246 / 55%);
+  --glow-cyan: 0 0 0 1px rgb(34 211 238 / 40%), 0 12px 32px -14px rgb(34 211 238 / 45%);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--cyan);
 
   /* ── motion (off under prefers-reduced-motion, base.css) ─────────── */
   --motion-fast: 0.12s ease;
+  --motion: 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @media (min-width: 768px) {
+  :root {
+    --gutter: 24px;
+  }
+}
+@media (min-width: 1180px) {
   :root {
     --gutter: 32px;
   }

@@ -1,7 +1,7 @@
 /*
- * Night Market base styles: reset, typography and small utilities. Bare elements get the market's look
- * at zero specificity (:where), so a page that has not adopted the components yet still reads
- * as Night Market; every component class overrides them.
+ * Night Market base styles: reset, typography and small utilities (AA 00047 P8.1, the dark theme).
+ * Bare elements get the market's look at zero specificity (:where), so a page that has not adopted
+ * the components still reads as Night Market; every component class overrides them.
  */
 *,
 *::before,
@@ -11,21 +11,31 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  background: var(--bg);
 }
 body {
   margin: 0;
-  background: var(--paper);
+  min-height: 100vh;
+  background-color: var(--bg);
+  /* The night sky: two faint glows at the top of the page, violet and cyan. Decorative only. */
+  background-image:
+    radial-gradient(1100px 520px at 12% -12%, rgb(139 92 246 / 16%), transparent 60%),
+    radial-gradient(900px 480px at 92% -18%, rgb(34 211 238 / 10%), transparent 60%);
+  background-repeat: no-repeat;
   color: var(--ink);
   font: 400 var(--text-base) / 1.5 var(--sans);
   font-variant-numeric: lining-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   /* No overflow-x clipping here on purpose: layouts are built to fit 375 px, and the visual
      test (test/e2e/visual.spec.ts) must see a real overflow if one ever appears. */
 }
 
 :where(h1, h2, h3, h4) {
-  font-family: var(--serif);
-  font-weight: 400;
-  color: var(--navy);
+  font-family: var(--sans);
+  font-weight: 650;
+  letter-spacing: var(--tracking-tight);
+  color: var(--ink);
   margin: 0;
 }
 :where(h1) {
@@ -41,7 +51,7 @@ body {
   line-height: 1.35;
 }
 :where(h4) {
-  font-size: 1.0625rem;
+  font-size: 1rem;
   line-height: 1.35;
 }
 :where(p) {
@@ -51,14 +61,15 @@ body {
   margin-top: var(--space-2);
 }
 :where(a) {
-  color: var(--navy);
-  text-underline-offset: 2px;
+  color: var(--link);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
 }
 :where(a:hover) {
-  color: var(--navy-hover);
+  color: var(--ink);
 }
 :focus-visible {
-  outline: 2px solid var(--navy);
+  outline: 2px solid var(--cyan);
   outline-offset: 2px;
 }
 :where(code) {
@@ -67,6 +78,10 @@ body {
 }
 :where(small) {
   font-size: var(--text-sm);
+}
+::selection {
+  background: rgb(139 92 246 / 45%);
+  color: var(--ink);
 }
 
 /* ── utilities ─────────────────────────────────────────────────────── */

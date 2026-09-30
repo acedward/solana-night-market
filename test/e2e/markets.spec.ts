@@ -2,7 +2,9 @@
 // exact shapes the staging kernel returns (served through page.route, so nothing reaches the real
 // kernel). The page must equal a manual computation over GET /v1/offers (spec SC-002) for every
 // configured pair, none special (twETH/twBTC, a pair without twUSDC, is read the same way), show
-// "no liquidity" for a pair with no live offer, and "exchange unavailable" when the kernel is down.
+// "No offers yet" for a pair with no live offer, and "exchange unavailable" when the kernel is down.
+// (The words are the plain ones of AA 00047 P8.1, questions Q22: "No offers yet" for "no
+// liquidity", "Active", "Buyers only", "Sellers only", and "no buyers" / "no sellers".)
 
 import { expect, test, type Page } from '@playwright/test';
 
@@ -49,8 +51,8 @@ function manual(offers: WireOffer[], pairId: string) {
   const min = asks.length ? asks.reduce((a, c) => (c < a ? c : a)) : null;
   const max = bids.length ? bids.reduce((a, c) => (c > a ? c : a)) : null;
   return {
-    bestAsk: min === null ? 'no asks' : text(min),
-    bestBid: max === null ? 'no bids' : text(max),
+    bestAsk: min === null ? 'no sellers' : text(min),
+    bestBid: max === null ? 'no buyers' : text(max),
     counts: `${bids.length} / ${asks.length}`,
   };
 }
@@ -78,17 +80,17 @@ test('the Markets page equals a manual computation over /v1/offers, for every pa
   await expect(usdm.getByTestId('best-ask')).toHaveText(EXPECTED['twUSDM/twUSDC'].bestAsk!);
   await expect(usdm.getByTestId('best-bid')).toHaveText(EXPECTED['twUSDM/twUSDC'].bestBid!);
   await expect(usdm.getByTestId('last-trade')).toContainText('1.02');
-  await expect(usdm.getByTestId('market-status')).toHaveText('Two-sided');
-  // A pair with no live offer: no liquidity (its old fill still shows as the last trade).
-  await expect(row(page, 'twETH/twUSDC').getByTestId('market-status')).toHaveText('No liquidity');
+  await expect(usdm.getByTestId('market-status')).toHaveText('Active');
+  // A pair with no live offer: no offers yet (its old fill still shows as the last trade).
+  await expect(row(page, 'twETH/twUSDC').getByTestId('market-status')).toHaveText('No offers yet');
   await expect(row(page, 'twETH/twUSDC').getByTestId('last-trade')).toContainText('2,500.00');
-  // Asks only; the kernel's mid for a never-filled pair is not a trade.
+  // Sellers only; the kernel's mid for a never-filled pair is not a trade.
   await expect(row(page, 'twBTC/twUSDC').getByTestId('best-ask')).toHaveText('60,000.00');
-  await expect(row(page, 'twBTC/twUSDC').getByTestId('market-status')).toHaveText('Asks only');
+  await expect(row(page, 'twBTC/twUSDC').getByTestId('market-status')).toHaveText('Sellers only');
   await expect(row(page, 'twBTC/twUSDC').getByTestId('last-trade')).toHaveText('no trades yet');
   // A pair without twUSDC, priced in twBTC.
   await expect(row(page, 'twETH/twBTC').getByTestId('best-bid')).toHaveText('0.04');
-  await expect(row(page, 'twETH/twBTC').getByTestId('market-status')).toHaveText('Bids only');
+  await expect(row(page, 'twETH/twBTC').getByTestId('market-status')).toHaveText('Buyers only');
   await expect(page.getByTestId('ignored-offers')).toContainText(/\d+ other offers/);
 
   // The book of one pair; each Take opens the Trade section on that offer.
@@ -136,18 +138,18 @@ test('the Markets page equals a manual computation over /v1/offers, for every pa
   expect([...tokens].sort()).toEqual([COLOUR.twBTC, COLOUR.twUSDC].sort());
 });
 
-test('the staging exchange as captured (an empty book): every pair shows no liquidity', async ({ page }) => {
+test('the staging exchange as captured (an empty book): every pair shows no offers yet', async ({ page }) => {
   await serveExchange(page, { fixture: new KernelFixture({ book: [], pairs: [], stats: {} }) });
   await page.goto('/#markets');
   await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
   for (const pair of PAIR_IDS) {
-    await expect(row(page, pair).getByTestId('market-status')).toHaveText('No liquidity');
-    await expect(row(page, pair).getByTestId('best-bid')).toHaveText('no bids');
-    await expect(row(page, pair).getByTestId('best-ask')).toHaveText('no asks');
+    await expect(row(page, pair).getByTestId('market-status')).toHaveText('No offers yet');
+    await expect(row(page, pair).getByTestId('best-bid')).toHaveText('no buyers');
+    await expect(row(page, pair).getByTestId('best-ask')).toHaveText('no sellers');
     await expect(row(page, pair).getByTestId('last-trade')).toHaveText('no trades yet');
   }
   await row(page, 'twBTC/twUSDC').getByTestId('open-book').click();
-  await expect(page.getByTestId('book-empty')).toContainText('No liquidity');
+  await expect(page.getByTestId('book-empty')).toContainText('No offers yet');
 });
 
 test('a stopped exchange shows "exchange unavailable" and no price', async ({ page }) => {

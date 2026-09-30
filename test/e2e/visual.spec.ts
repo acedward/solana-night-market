@@ -1,12 +1,15 @@
-// Plan P1.5 testing: the visual smoke of the Night Market design. Every page at 1280 px and at 375 px
-// (a touch phone), with:
+// Plan P1.5 testing, redone for the dark consumer design (AA 00047 P8.1, spec FR-006b; plan P8
+// testing: 390, 768 and 1440 px): the visual smoke of the Night Market design. Every page at 1440 px
+// (a desktop), 768 px (a touch tablet) and 390 px (a touch phone), with:
 //   - a screenshot per page (saved under $VISUAL_OUT_DIR, default test-results/visual);
 //   - no horizontal page scroll, and no element wider than the page outside its own scroll box;
-//   - every button at least 44 px tall on the phone (and every full-size button on desktop);
-//   - the self-hosted fonts loaded from the page's own origin, and nothing else left it;
-//   - a clean fallback when the font files cannot load (Georgia / the system sans);
-//   - no gradients or glass effects, and motion off under prefers-reduced-motion.
-// The contrast of the colour tokens is checked by web/test/design-contrast.test.ts.
+//   - every button at least 44 px tall on touch screens (and every full-size button on desktop);
+//   - the self-hosted font (Inter) loaded from the page's own origin, and nothing else left it;
+//   - a clean fallback when the font files cannot load (the system sans);
+//   - no glass effects (backdrop blur), and motion off under prefers-reduced-motion.
+// Gradients are allowed now, on decorative parts only (questions Q20: the brand gradient, the
+// primary buttons, the night-sky background); every text colour's contrast, including the labels
+// on both ends of the button gradient, is checked by web/test/design-contrast.test.ts.
 
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -15,17 +18,19 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
-import { installMockPhantom } from './mock-phantom.js';
+import { connectPhantom, installMockPhantom } from './mock-phantom.js';
 import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const OUT = process.env.VISUAL_OUT_DIR ?? `${root}/test-results/visual`;
 mkdirSync(OUT, { recursive: true });
 
 const VIEWPORTS = [
-  { name: 'desktop', width: 1280, height: 900, touch: false },
-  { name: 'phone375', width: 375, height: 812, touch: true },
+  { name: 'desktop', width: 1440, height: 900, touch: false },
+  { name: 'tablet768', width: 768, height: 1024, touch: true },
+  { name: 'phone390', width: 390, height: 844, touch: true },
 ] as const;
 
 /** Layout checks that must hold on every page, at every width. */
@@ -53,7 +58,8 @@ async function assertLayout(page: Page, touch: boolean) {
       .filter((b) => b.getBoundingClientRect().height > 0 && !b.closest('.hash') && !b.classList.contains('btn-link'))
       .map((b) => ({
         text: (b.textContent ?? '').trim().slice(0, 30),
-        h: b.getBoundingClientRect().height,
+        // To 0.01 px: an element mid-animation can measure 43.99994 from floating-point error.
+        h: Math.round(b.getBoundingClientRect().height * 100) / 100,
         small: b.classList.contains('btn-small'),
       }));
     const styled = Array.from(document.querySelectorAll('*')).map((el) => getComputedStyle(el));
@@ -62,7 +68,6 @@ async function assertLayout(page: Page, touch: boolean) {
       vw,
       wide,
       buttons,
-      gradients: styled.filter((s) => s.backgroundImage.includes('gradient')).length,
       glass: styled.filter((s) => s.backdropFilter && s.backdropFilter !== 'none').length,
     };
   });
@@ -71,7 +76,6 @@ async function assertLayout(page: Page, touch: boolean) {
   for (const b of r.buttons) {
     if (touch || !b.small) expect(b.h, `button "${b.text}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
   }
-  expect(r.gradients, 'no gradients').toBe(0);
   expect(r.glass, 'no glass effects').toBe(0);
 }
 
@@ -145,6 +149,31 @@ for (const vp of VIEWPORTS) {
       await shot(page, `${vp.name}-sign-prompt`, false);
       release();
       await expect(page.getByTestId('sign-prompt')).toHaveCount(0);
+    });
+
+    // AA 00047 P8.2 (questions Q24): a make's own progress (Preparing your offer, then Listed on the
+    // market) and the listed offer, which says it is not on-chain.
+    test('Trade: making an offer (preparing, listing, listed)', async ({ page }) => {
+      const { relay } = await setup(page, { seeded: true });
+      await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+      await connectPhantom(page);
+      await page.getByTestId('side-sell').click();
+      await page.getByTestId('make-quantity').fill('0.05');
+      await page.getByTestId('make-price').fill('61500');
+      const hold = relay.holdNextJob();
+      await page.getByTestId('make-sign').click();
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'proving');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-preparing`, false);
+      hold.at(['proving', 'proven', 'posted']);
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'posted', { timeout: 10_000 });
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listing`, false);
+      hold();
+      await expect(page.getByTestId('live-offer-banner')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('my-offers-off-chain')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listed`);
     });
 
     test('Markets with a book open', async ({ page }) => {
@@ -240,9 +269,10 @@ test('the fonts are self-hosted, load, and nothing else leaves the page', async 
     });
     return out;
   });
-  expect(faces).toEqual(expect.arrayContaining(['Libre Caslon Text 400', 'Source Sans 3 400', 'Source Sans 3 600']));
-  expect(await page.evaluate(() => document.fonts.check('400 16px "Source Sans 3"'))).toBe(true);
-  expect(await page.evaluate(() => document.fonts.check('400 22px "Libre Caslon Text"'))).toBe(true);
+  // One variable face (weights 100–900), the Latin subset only: the page's text is English.
+  expect(faces).toEqual(expect.arrayContaining(['Inter Variable 100 900']));
+  expect(await page.evaluate(() => document.fonts.check('400 16px "Inter Variable"'))).toBe(true);
+  expect(await page.evaluate(() => document.fonts.check('650 28px "Inter Variable"'))).toBe(true);
   const fontFiles = requests.filter((u) => /\.woff2?(\?|$)/.test(u));
   expect(fontFiles.length).toBeGreaterThan(0);
   for (const u of fontFiles) expect(new URL(u).hostname).toBe('127.0.0.1');
@@ -253,7 +283,7 @@ test('the fonts are self-hosted, load, and nothing else leaves the page', async 
 test('without the font files the page falls back cleanly', async ({ page }) => {
   await serveExchange(page);
   await page.route(/\.woff2?(\?.*)?$/, (route) => route.abort('failed'));
-  await page.setViewportSize({ width: 375, height: 812 });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/#markets');
   await expect(page.getByRole('heading', { name: 'Night Market' })).toBeVisible();
   await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
@@ -266,15 +296,15 @@ test('without the font files the page falls back cleanly', async ({ page }) => {
     return n;
   });
   expect(loaded).toBe(0);
-  // The stacks name real fallbacks after the web fonts.
+  // The stack names real fallbacks after the web font.
   const families = await page.evaluate(() => ({
     heading: getComputedStyle(document.querySelector('.page-title')!).fontFamily,
     body: getComputedStyle(document.body).fontFamily,
   }));
-  expect(families.heading).toMatch(/^"?Libre Caslon Text"?, Georgia/);
-  expect(families.body).toMatch(/^"?Source Sans 3"?, /);
+  expect(families.heading).toMatch(/^"?Inter Variable"?, Inter, -apple-system/);
+  expect(families.body).toMatch(/^"?Inter Variable"?, Inter, -apple-system/);
   await assertLayout(page, false);
-  await shot(page, 'phone375-markets-font-fallback');
+  await shot(page, 'phone390-markets-font-fallback');
 });
 
 test('restrained motion, and none under prefers-reduced-motion', async ({ page }) => {

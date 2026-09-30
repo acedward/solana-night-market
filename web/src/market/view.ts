@@ -1,6 +1,8 @@
-// What the Markets page shows, as plain text per cell: a pure function of the feed's state, so
-// the wording ("no liquidity", "exchange unavailable", "no bids") is unit-tested in one place.
-// One row per listed pair; no token is special (AA 00047).
+// What the Markets page shows, as plain text per card: a pure function of the feed's state, so
+// the wording ("No offers yet", "Exchange unavailable", "no buyers") is unit-tested in one place.
+// One card per listed pair; no token is special (AA 00047). Plain words for newcomers (AA 00047
+// P8.1, questions Q22): "Buyers only" rather than "Bids only", "No offers yet" rather than "No
+// liquidity".
 
 import {
   type BookEntry,
@@ -17,10 +19,10 @@ import {
 export type MarketStatus = 'two-sided' | 'bids-only' | 'asks-only' | 'no-liquidity' | 'unavailable' | 'loading';
 
 export const STATUS_TEXT: Record<MarketStatus, string> = {
-  'two-sided': 'Two-sided',
-  'bids-only': 'Bids only',
-  'asks-only': 'Asks only',
-  'no-liquidity': 'No liquidity',
+  'two-sided': 'Active',
+  'bids-only': 'Buyers only',
+  'asks-only': 'Sellers only',
+  'no-liquidity': 'No offers yet',
   unavailable: 'Exchange unavailable',
   loading: 'Loading…',
 };
@@ -71,8 +73,8 @@ export function marketRow(m: Market): MarketRowView {
     base: m.base.symbol,
     quote: m.quote.symbol,
     baseName: m.base.name,
-    bestBid: m.bids.best ? bidText(m.bids.best.price) : 'no bids',
-    bestAsk: m.asks.best ? askText(m.asks.best.price) : 'no asks',
+    bestBid: m.bids.best ? bidText(m.bids.best.price) : 'no buyers',
+    bestAsk: m.asks.best ? askText(m.asks.best.price) : 'no sellers',
     lastTrade: lastTradeText(m.lastTrade),
     lastTradeAt: m.lastTrade.state === 'trade' ? whenText(m.lastTrade.at) : null,
     bids: String(m.bids.count),

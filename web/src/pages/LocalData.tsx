@@ -1,9 +1,9 @@
-// The Local data tab (spec US4, FR-004, Q11): every record the market keeps in this browser, with
-// secrets masked until revealed, and Export, Import and CLEAR ALL. Styled with the Night Market design
-// system (plan P1.5): a ruled record table that stacks on a phone, and the CLEAR ALL dialog with
-// "Export first" and a typed confirmation.
+// The Your data tab (route #local; spec US4, FR-004, Q11): every record the market keeps in this
+// browser, with secrets masked until revealed, and Export (back up), Import (restore) and CLEAR ALL.
+// A record table that stacks on a phone, and the CLEAR ALL dialog with "Export first" and a typed
+// confirmation (AA 00047 P8.1: the dark consumer design, plain words).
 
-import { useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { shortSolanaAddress, solanaAddressOf } from '@nightmarket/core';
 
@@ -13,11 +13,13 @@ import {
   ButtonRow,
   Cell,
   EmptyState,
+  Icon,
   Notice,
   PageHead,
   Panel,
   StatementTable,
   Sub,
+  Toast,
   TypedConfirmDialog,
 } from '../design/index.js';
 import { RelayClient } from '../relay/client.js';
@@ -78,6 +80,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const dismiss = useCallback(() => setMessage(null), []);
 
   // `revision` changes on every write here or in another tab.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -102,7 +105,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     download(`night-market-${network}-${solanaAddressOf(scope.owner).slice(0, 8)}-${date}.json`, exportFileText(file));
     setMessage({
       kind: 'ok',
-      text: `Exported ${file.records.length} records. Keep the file safe: it holds your account's viewing secret.`,
+      text: `Backed up ${file.records.length} records. Keep the file private: it holds your account's viewing key.`,
     });
   };
 
@@ -159,9 +162,9 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     <section aria-labelledby="local-data-title" data-testid="local-data">
       <PageHead
         eyebrow="Your records"
-        title="Local data"
+        title="Your data"
         titleId="local-data-title"
-        lede="Everything Night Market keeps about you stays in this browser: your account, its encryption secret, your coins, transfers and offers. The market's servers keep none of it. Without this data your account's funds cannot be spent, so export it and keep the file safe."
+        lede="Everything Night Market knows about you stays in this browser: your account, its viewing key, your coins and your offers. The market's servers keep none of it. You need this data to use your tokens, so back it up and keep the file private."
       />
 
       {status !== 'ok' && (
@@ -182,14 +185,14 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
         </Notice>
       )}
       {message && (
-        <Notice
-          tone={message.kind === 'error' ? 'danger' : 'success'}
-          role="status"
-          className="panel-intro"
+        <Toast
+          tone={message.kind === 'error' ? 'error' : 'success'}
+          onClose={dismiss}
+          timerKey={message.text}
           data-testid="local-message"
         >
           {message.text}
-        </Notice>
+        </Toast>
       )}
 
       <Panel>
@@ -201,7 +204,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
         </p>
 
         {records.length === 0 ? (
-          <EmptyState data-testid="records-empty" title="Nothing stored">
+          <EmptyState data-testid="records-empty" icon="data" title="Nothing stored">
             Night Market keeps nothing in this browser.
           </EmptyState>
         ) : (
@@ -287,7 +290,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
                 onClick={exportMine}
                 disabled={!store || !scope || mine.length === 0}
               >
-                Export this wallet&apos;s data
+                <Icon name="arrowUp" /> Back up (export)
               </Button>
               <Button
                 variant="secondary"
@@ -295,7 +298,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
                 onClick={() => fileInput.current?.click()}
                 disabled={!store || !scope}
               >
-                Import
+                Restore (import)
               </Button>
               <input
                 ref={fileInput}
@@ -308,8 +311,8 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
             </ButtonRow>
             <p className="explain">
               {scope
-                ? `Export saves this wallet's records as a JSON file, including the encryption secret: keep it as safe as a bank card. Import accepts only a file for ${network} and this wallet.`
-                : 'Connect your Solana wallet to export or import its data.'}
+                ? `Back up saves this wallet's records as a JSON file, including your account's viewing key: keep it private. Restore accepts only a file for ${network} and this wallet.`
+                : 'Connect your Solana wallet to back up or restore its data.'}
             </p>
           </div>
           <Button
@@ -318,7 +321,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
             onClick={() => setConfirming(true)}
             disabled={!store || records.length === 0}
           >
-            CLEAR ALL
+            Clear all data
           </Button>
         </div>
       </Panel>
@@ -348,12 +351,12 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
         testIdPrefix="clear"
         warning={
           <>
-            <strong>Without an export you cannot spend these funds again.</strong> Your account&apos;s coins can only be
-            spent with this data: unless you have a recent export, export it first.
+            <strong>Without a backup you cannot use these tokens again.</strong> Your account&apos;s coins can only be
+            spent with this data: unless you have a recent backup, back it up first.
           </>
         }
         onExportFirst={scope && mine.length > 0 ? exportMine : undefined}
-        exportLabel="Export this wallet's data first"
+        exportLabel="Back up this wallet's data first"
         confirmLabel="Clear all data"
         onConfirm={clearAll}
         onCancel={() => setConfirming(false)}

@@ -1,5 +1,5 @@
 // The vertical stage tracker for long jobs (opening an account, a withdrawal): done stages
-// in navy with a tick, the current one ringed in gold, the rest waiting in grey.
+// in green with a tick, the current one ringed in violet, the rest waiting in grey.
 //
 //   <StageTracker label="Withdraw 25.00 twBTC" stages={[
 //     { key: 'sent', title: 'Tokens sent', state: 'done', time: '14:06',

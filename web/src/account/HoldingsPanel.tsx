@@ -1,8 +1,8 @@
-// The market's side panel (AA 00047 lane B2: "a create-and-trade market, not a bank": the books and
-// making or taking offers come first, holdings beside them). Who is connected, what the account
-// holds (each token in its own units, shielded coins and unshielded balances; nothing is totalled in
-// a "home" token), the way to get demo tokens, and the way to the full Account page (withdrawals,
-// pending items). Before a wallet or an account exists it says what to do next.
+// The portfolio panel beside the books (AA 00047 lane B2: "a create-and-trade market, not a bank":
+// the books and making or taking offers come first, holdings beside them; restyled in P8.1). What
+// the account holds (each token in its own units, shielded coins and unshielded balances; nothing
+// is totalled in a "home" token), the free demo pack, and the way to withdraw. Before a wallet or an
+// account exists it walks the newcomer through the three steps to their first trade.
 
 import { useMemo } from 'react';
 
@@ -10,18 +10,39 @@ import { formatUnits, holdingsByColour, shortSolanaAddress, type NetworkProfile 
 
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
 import { DemoTokens } from '../demo/DemoTokens.js';
-import { ButtonLink, Panel } from '../design/index.js';
+import { Button, ButtonLink, Icon, Panel, TokenIcon } from '../design/index.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import { useStore } from '../store/StoreContext.js';
+import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useAccountView, useUnshieldedBalances } from './useAccountView.js';
 
 const short = (s: string) => (s.length <= 15 ? s : `${s.slice(0, 8)}…${s.slice(-6)}`);
+
+/** The three steps from a visit to a first trade. */
+function Onboarding({ done }: { done: 0 | 1 }) {
+  return (
+    <ol className="onboarding">
+      <li>
+        <strong>{done > 0 ? 'Phantom connected' : 'Connect Phantom'}</strong>
+        It only signs messages: no SOL needed.
+      </li>
+      <li>
+        <strong>Open your free account</strong>
+        One approval. The market pays every network fee.
+      </li>
+      <li>
+        <strong>Get demo tokens</strong>A free pack of test tokens to trade with.
+      </li>
+    </ol>
+  );
+}
 
 export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
   const { wallet, account, hasSecret, coins, relay } = useAccountView(network, relayUrl);
   const { revision } = useStore();
   const tokens = useTokenRegistry();
   const assets = useAssetFilter();
+  const connect = useConnectPrompt();
   const unshielded = useUnshieldedBalances(relay, account && hasSecret ? account.address : null, revision);
 
   const rows = useMemo(() => {
@@ -46,24 +67,50 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
 
   if (wallet.status !== 'connected' || !wallet.address) {
     return (
-      <Panel title="Your holdings" tone="quiet" as="aside" data-testid="holdings-panel" data-state="no-wallet">
-        <p className="small">
-          {wallet.supported
-            ? 'Connect your Solana wallet (top right) to make and take offers. It only signs messages: it needs no SOL, and the market pays every Midnight fee.'
-            : 'Accounts controlled by a Solana wallet (Phantom) are coming to this site.'}
-        </p>
+      <Panel title="Start trading" tone="accent" data-testid="holdings-panel" data-state="no-wallet">
+        {wallet.supported ? (
+          <>
+            <p className="small muted">
+              Connect your Solana wallet to make and take offers. It only signs messages: it needs no SOL, and the
+              market pays every Midnight fee.
+            </p>
+            <Onboarding done={0} />
+            {connect && (
+              <Button className="btn-block" data-testid="connect-cta" onClick={connect}>
+                <Icon name="wallet" /> Connect Phantom
+              </Button>
+            )}
+          </>
+        ) : (
+          <p className="small">Accounts controlled by a Solana wallet (Phantom) are coming to this site.</p>
+        )}
       </Panel>
     );
   }
   if (!account || !hasSecret) {
     return (
-      <Panel title="Your holdings" tone="quiet" as="aside" data-testid="holdings-panel" data-state="no-account">
-        <p className="small">
-          {account
-            ? 'This browser does not hold your account’s key: import your export on Local data.'
-            : 'Open your account to trade: one signature, no SOL, and the market pays the fees.'}
-        </p>
-        <ButtonLink variant="primary" href={account ? '#local' : '#account'} data-testid="holdings-next">
+      <Panel
+        title={account ? 'Restore your account' : 'Open your free account'}
+        tone="accent"
+        data-testid="holdings-panel"
+        data-state="no-account"
+      >
+        {account ? (
+          <p className="small muted">
+            This browser does not hold your account&apos;s key. Import your backup file on Your data.
+          </p>
+        ) : (
+          <>
+            <p className="small muted">You&apos;re connected. Two more steps to your first trade:</p>
+            <Onboarding done={1} />
+          </>
+        )}
+        <ButtonLink
+          variant="primary"
+          className="btn-block"
+          href={account ? '#local' : '#account'}
+          data-testid="holdings-next"
+        >
           {account ? 'Import your data' : 'Open your account'}
         </ButtonLink>
       </Panel>
@@ -72,25 +119,24 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
   return (
     <div className="stack-gap" data-testid="holdings-side">
       <Panel
-        title="Your holdings"
-        tone="quiet"
-        as="aside"
+        title="Your tokens"
         data-testid="holdings-panel"
         data-state="account"
         meta={
-          <span className="xsmall muted" title={wallet.address}>
+          <span className="xsmall muted mono" title={wallet.address}>
             {shortSolanaAddress(wallet.address)}
           </span>
         }
       >
         {rows.length === 0 ? (
           <p className="small muted" data-testid="holdings-empty">
-            No tokens yet. Get the demo pack below, or deposit from a Midnight wallet.
+            No tokens yet. Grab the free demo pack below to start trading.
           </p>
         ) : (
           <ul className="holdings-list">
             {rows.map((r) => {
               const t = tokens?.byColour(r.colour);
+              const symbol = t?.symbol ?? short(r.colour);
               return (
                 <li
                   key={`${r.kind}-${r.colour}`}
@@ -99,9 +145,10 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
                   data-kind={r.kind}
                   data-raw={r.amount.toString()}
                 >
+                  <TokenIcon symbol={symbol} small />
                   <span className="sym">
-                    {t?.symbol ?? short(r.colour)}
-                    {r.kind === 'unshielded' && <span className="xsmall muted"> unshielded</span>}
+                    {symbol}
+                    {r.kind === 'unshielded' && <span className="kind-chip">public</span>}
                   </span>
                   <span className="num">
                     {formatUnits(r.amount, t?.decimals ?? 0, { minFractionDigits: 2, grouping: true })}
@@ -111,11 +158,14 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
             })}
           </ul>
         )}
-        <p className="xsmall muted section-gap">
-          <a href="#account" data-testid="holdings-withdraw">
-            Withdraw or see pending items
+        <div className="btn-row gap-top">
+          <ButtonLink variant="secondary" size="small" href="#account" data-testid="holdings-withdraw">
+            <Icon name="arrowUp" /> Withdraw
+          </ButtonLink>
+          <a className="xsmall" href="#account">
+            Full portfolio
           </a>
-        </p>
+        </div>
       </Panel>
       <DemoTokens network={network} relayUrl={relayUrl} />
     </div>

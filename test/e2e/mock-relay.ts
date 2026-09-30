@@ -13,7 +13,8 @@
 //
 // State lives here like a chain would keep it: the account's device entry and auth nonce, its inbox
 // (entries sealed to the account's own encryption key), its Zswap outputs and spends, and its
-// unshielded balances. Jobs succeed on their first poll.
+// unshielded balances. Jobs succeed on their first poll, unless `holdNextJob()` keeps the next one
+// "proving" until the test releases it (the signing modal's progress view, AA 00047 P8.1).
 
 import { randomBytes } from 'node:crypto';
 
@@ -82,6 +83,21 @@ interface Submitted {
   done: boolean;
   result?: Record<string, unknown>;
   stages: string[];
+  /** Held at "proving" (or the stages given to `at`) until released (`holdNextJob`). */
+  held?: Held;
+}
+
+interface Held {
+  released: boolean;
+  since: number;
+  /** The stages shown after "queued" and "running" while held; the last one is the current one. */
+  stages: string[];
+}
+
+/** Releases a held job; `at` moves it to later stages first (a make's "posted": being listed). */
+export interface JobHold {
+  (): void;
+  at(stages: string[]): void;
 }
 
 export class MockRelay {
@@ -99,11 +115,29 @@ export class MockRelay {
   unshielded = new Map<string, bigint>();
   demo = { enabled: true, dailyCap: 25, remainingToday: 7, claimed: new Set<string>() };
   offerStatus: Record<string, string> = {};
+  /** What the exchange says about the next make when the relay stops waiting (`live` = listed). */
+  makeListing = 'live';
   /** Render with another token list than the browser (a symbol the relay does not share): every
    *  account call's rebuilt message then differs, and the check must refuse it (questions Q12). */
   mismatchedTokens = false;
   private nonces = new Set<string>();
   private tx = 0;
+  private nextHeld: Held | null = null;
+
+  /** Keep the NEXT submitted job at "proving" (as the relay reports a proof in progress) until the
+   *  returned function is called; then it completes on its next poll. `hold.at([...])` shows it at
+   *  later stages meanwhile (e.g. a make's `['proving', 'proven', 'posted']`: being listed). */
+  holdNextJob(): JobHold {
+    const h: Held = { released: false, since: Math.floor(Date.now() / 1000), stages: ['proving'] };
+    this.nextHeld = h;
+    const release = (() => {
+      h.released = true;
+    }) as JobHold;
+    release.at = (stages) => {
+      h.stages = stages;
+    };
+    return release;
+  }
 
   /** An account that already exists on chain for `deviceKey` (for pages seeded with its records). */
   existing(deviceKey: string, encKey: string) {
@@ -285,11 +319,12 @@ export class MockRelay {
       }
       case 'open-swap': {
         const offerId = randomBytes(32).toString('hex');
-        this.offerStatus[offerId] = 'live';
-        s.stages = ['proving', 'proven', 'posted', 'listed'];
+        const status = this.makeListing;
+        this.offerStatus[offerId] = status;
+        s.stages = ['proving', 'proven', 'posted', status === 'live' ? 'listed' : `status-${status}`];
         s.result = {
           offerId,
-          kernel: { accepted: true, status: 'live', code: null, reason: null },
+          kernel: { accepted: true, status, code: null, reason: null },
           legSegment: 0,
           proveSeconds: 33,
           expiresAt: Date.now() + 3_600_000,
@@ -340,6 +375,16 @@ export class MockRelay {
       updatedAt: 1,
       expiresAt: 9_999_999_999,
     };
+    if (s.held && !s.held.released) {
+      const at = s.held.since;
+      const stages = ['queued', 'running', ...s.held.stages];
+      return {
+        ...base,
+        state: 'running',
+        stage: stages[stages.length - 1],
+        stages: stages.map((stage) => ({ stage, at })),
+      };
+    }
     if (!s.done)
       return { ...base, state: 'queued', stage: 'queued', position: 1, stages: [{ stage: 'queued', at: 1 }] };
     return {
@@ -420,7 +465,10 @@ export class MockRelay {
           error: { code: 'unauthorised', message: 'the authorisation was refused', detail: verdict },
         });
       }
-      this.submitted.push({ action, body, verified: verdict, done: false, stages: [] });
+      const held = this.nextHeld ?? undefined;
+      this.nextHeld = null;
+      if (held) held.since = Math.floor(Date.now() / 1000);
+      this.submitted.push({ action, body, verified: verdict, done: false, stages: [], ...(held ? { held } : {}) });
       const id = String(this.submitted.length).padStart(32, '0');
       return json(202, { job: this.view(id, this.submitted.at(-1)!) });
     }
@@ -428,7 +476,7 @@ export class MockRelay {
     if (job) {
       const s = this.submitted[Number(job) - 1];
       if (!s) return json(404, { error: { code: 'not-found', message: 'no such job' } });
-      if (!s.done) {
+      if (!s.done && !(s.held && !s.held.released)) {
         await this.complete(s);
         s.done = true;
       }

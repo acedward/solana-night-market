@@ -42,7 +42,7 @@ describe('the markets table', () => {
         pair: 'twBTC/twUSDC',
         base: 'twBTC',
         quote: 'twUSDC',
-        bestBid: 'no bids',
+        bestBid: 'no buyers',
         bestAsk: '60,000.00',
         lastTrade: 'no trades yet',
         lastTradeAt: null,
@@ -54,8 +54,8 @@ describe('the markets table', () => {
         pair: 'twETH/twUSDC',
         base: 'twETH',
         quote: 'twUSDC',
-        bestBid: 'no bids',
-        bestAsk: 'no asks',
+        bestBid: 'no buyers',
+        bestAsk: 'no sellers',
         lastTrade: '2,500.00',
         lastTradeAt: '2026-09-27 10:00 UTC',
         bids: '0',
@@ -79,7 +79,7 @@ describe('the markets table', () => {
         base: 'twETH',
         quote: 'twBTC',
         bestBid: '0.04',
-        bestAsk: 'no asks',
+        bestAsk: 'no sellers',
         lastTrade: 'no trades yet',
         lastTradeAt: null,
         bids: '1',
@@ -88,7 +88,7 @@ describe('the markets table', () => {
       },
     ]);
     expect(marketRows(ready, listed)[0]!.baseName).toBe('Test-wrapped BTC');
-    expect(STATUS_TEXT['no-liquidity']).toBe('No liquidity');
+    expect(STATUS_TEXT['no-liquidity']).toBe('No offers yet');
   });
 
   it('keeps only the pairs the asset filter shows both tokens of', () => {

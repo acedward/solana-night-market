@@ -16,69 +16,16 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { x25519 } from '@noble/curves/ed25519.js';
 import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { formatUnshieldedAddress } from '../../packages/core/src/unshielded.js';
 import { shortSolanaAddress } from '../../packages/core/src/signing.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
-import { encodeRecord, recordKey } from '../../web/src/store/schema.js';
-import { connectPhantom, installMockPhantom, type MockPhantom } from './mock-phantom.js';
-import { ACCOUNT, DEMO_PACK, MockRelay, RELAY } from './mock-relay.js';
-import { seedRecords, serveExchange } from './visual-fixtures.js';
+import { connectPhantom, type MockPhantom } from './mock-phantom.js';
+import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
-
-async function setup(
-  page: Page,
-  opts: { walletTimeoutSeconds?: number; injected?: boolean; standard?: boolean; seeded?: boolean } = {},
-) {
-  const ex = await serveExchange(page);
-  const phantom = await installMockPhantom(page, {
-    ...(opts.injected ? { injected: true } : {}),
-    ...(opts.standard === false ? { standard: false } : {}),
-  });
-  const relay = new MockRelay();
-  await page.route(`${RELAY}/**`, (r) => relay.handle(r));
-  await page.route('**/config.json', (r) =>
-    r.fulfill({
-      json: { network: 'stagenet', relayUrl: RELAY, walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20 },
-    }),
-  );
-  if (opts.seeded) await seedAccount(page, phantom, relay);
-  return { ex, phantom, relay };
-}
-
-/** An account that exists on chain and in this browser (its records as the page writes them),
- *  holding the demo pack, plus 25 utwUSDC unshielded. */
-async function seedAccount(page: Page, phantom: MockPhantom, relay: MockRelay) {
-  const sk = x25519.utils.randomSecretKey();
-  const pk = Buffer.from(x25519.getPublicKey(sk)).toString('hex');
-  relay.existing(phantom.deviceKey, pk);
-  await relay.deposit(
-    DEMO_PACK.map((t, i) => ({ nonce: (0xa0 + i).toString(16).repeat(32), color: t.colour, value: BigInt(t.amount) })),
-  );
-  relay.unshielded.set(COLOUR.utwUSDC, 25_000_000n);
-  const scope = { network: 'stagenet', owner: phantom.deviceKey };
-  const now = Date.now();
-  await seedRecords(page, [
-    [
-      recordKey(scope, 'account', { account: ACCOUNT }),
-      encodeRecord(
-        'account',
-        { address: ACCOUNT, device: phantom.deviceKey, network: 'stagenet', createdAt: now },
-        now,
-      ),
-    ],
-    [
-      recordKey(scope, 'secret', { account: ACCOUNT }),
-      encodeRecord('secret', { encSecretKey: Buffer.from(sk).toString('hex'), encPublicKey: pk }, now),
-    ],
-    [recordKey(scope, 'roster', { account: ACCOUNT }), encodeRecord('roster', { useCounter: '0' }, now)],
-    [recordKey(scope, 'coins', { account: ACCOUNT }), encodeRecord('coins', [], now)],
-  ]);
-}
 
 const holding = (page: Page, symbol: string, kind = 'shielded') =>
   page.locator(`[data-testid=holding][data-symbol="${symbol}"][data-kind="${kind}"]`);
@@ -159,7 +106,12 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('legs-give')).toContainText('0.05 twBTC');
   await expect(page.getByTestId('legs-want')).toContainText('3,000.00 twUSDC');
   await page.getByTestId('make-sign').click();
-  await expect(page.getByTestId('trade-message')).toContainText('Your offer is on the exchange');
+  // Listed on the market, and plainly NOT on-chain (the owner's Q18 finding; questions Q24).
+  await expect(page.getByTestId('trade-message')).toContainText('Your offer is listed on the market');
+  await expect(page.getByTestId('trade-message')).toContainText('Nothing goes on-chain until someone takes your offer');
+  await expect(page.getByTestId('live-offer-banner')).toContainText('It is not on-chain');
+  await expect(page.locator('[data-testid=my-trade][data-role=make]')).toContainText('Listed');
+  await expect(page.getByTestId('my-offers-off-chain')).toContainText('listed on the market, not on-chain');
   expect(phantom.requests).toHaveLength(1);
   const make = lines(phantom.requests[0]!.text);
   expect(make[0]).toBe('Night Market - stagenet '); // the arm's 24-character label field
@@ -176,7 +128,7 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('take-confirm')).toBeVisible();
   await expect(page.getByTestId('take-cancels-offer')).toBeVisible(); // the live offer dies with it
   await page.getByTestId('take-sign').click();
-  await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction');
+  await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction on Midnight');
   expect(phantom.requests).toHaveLength(2);
   const take = lines(phantom.requests[1]!.text);
   expect(take[1]).toBe('Swap offer');
@@ -190,6 +142,24 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');
   await expect(holding(page, 'twBTC')).toContainText('0.14');
   await expect(holding(page, 'twETH')).toHaveCount(0);
+});
+
+test('a make the exchange has not listed yet says so, and that nothing is on-chain (questions Q24)', async ({
+  page,
+}) => {
+  const { relay } = await setup(page, { seeded: true });
+  relay.makeListing = 'unknown';
+  await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+  await connectPhantom(page);
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
+  await page.getByTestId('side-sell').click();
+  await page.getByTestId('make-quantity').fill('0.05');
+  await page.getByTestId('make-price').fill('60000');
+  await page.getByTestId('make-sign').click();
+  await expect(page.getByTestId('trade-message')).toContainText('The market has your offer, but it is not listed yet');
+  await expect(page.getByTestId('trade-message')).toContainText('Nothing goes on-chain until someone takes your offer');
+  // The tokens stayed: the offer's coin is not spent.
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
 });
 
 test('withdraw shielded (one approval, one more to record the change) and unshielded (one approval)', async ({

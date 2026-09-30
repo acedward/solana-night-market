@@ -1,4 +1,4 @@
-// Statement tables: hairline-ruled rows, a navy rule under the head, a double-ruled subtotal.
+// Tables (the order book, records, trades): hairline-ruled rows under a quiet head, a ruled subtotal.
 // At 640 px and below a stacking table turns every row into label / value lines (each Cell's
 // `label` is shown before its value), so nothing scrolls sideways on a phone.
 //

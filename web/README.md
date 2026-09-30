@@ -53,7 +53,7 @@ assets are listed; no asset is special. Symbols match in any case; well-formed s
 does not know yet stay in the list and are named in the note under the tabs, and a list with
 nothing on this site shows the site's whole set. Anything waiting for the customer (a change coin
 to record, a live offer) always shows. `?assets=all` or `?assets=`, **Show all assets** (under the
-tabs, or in Local data) and CLEAR ALL clear it; Export and Import carry it. It only changes what
+tabs, or in Your data) and CLEAR ALL clear it; Export and Import carry it. It only changes what
 the page shows: it is not a security setting, and the relay never sees it. The code is
 `src/assets/`.
 
@@ -89,30 +89,43 @@ answer and another key) against a mock relay that checks every signature as the 
 
 ## The Night Market design system
 
-`src/design/` holds the market's look, taken from the owner-approved mockup: an ivory page, a deep
-navy primary (`#152C55`), ONE antique-gold accent used sparingly (the masthead rule, the monogram,
-the selected row, the current tracker stage, warnings), Libre Caslon Text headings, Source Sans 3
-body text, tabular numerals for every amount, hairline-ruled statement tables with double-ruled
-subtotals, restrained motion (none under `prefers-reduced-motion`), no gradients and no glass.
+`src/design/` holds the market's look: a modern, dark consumer trading UI (AA 00047 P8.1, spec
+FR-006b, questions Q20–Q22). Near-black navy surfaces in four elevation steps (`--bg #070b14`,
+`--surface #0e1422`, `--surface-2 #141b2d`, `--surface-3 #1b2438`), ONE brand gradient (violet
+`#8b5cf6` → cyan `#22d3ee`) on non-text parts only (the logo, progress bars, highlights, the wallet
+avatar), violet → indigo primary buttons (white text ≥ 5.7:1 at both ends), buy green `#34d399`
+and sell rose `#fb7185`, Inter (variable) for everything with tabular numerals for every amount,
+12–20 px radii with subtle borders and glows, restrained motion (none under
+`prefers-reduced-motion`), and no glass (no backdrop blur). The words are plain, everyday ones for
+end users: no bank, custody or statement vocabulary.
+
+The shell is wallet-first: the header carries the mark, the network, the sections (a pill nav on a
+desktop, a tab bar at the bottom below 900 px) and **Connect Phantom**, which becomes the wallet's
+pill (avatar, address, the account) with a menu (copy address, Portfolio, Your data, Disconnect).
+The sections keep their routes: Markets `#markets`, Trade `#trade`, Portfolio `#account`, Your data
+`#local`.
 
 | File                        | What it holds                                                                                                                                                                       |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tokens.css`                | Colour, type, spacing and rule tokens as CSS custom properties. Every text pair is checked for WCAG AA by `test/design-contrast.test.ts`: change a colour there and run the tests. |
 | `base.css`                  | Reset, headings, links, focus ring, utilities (`num`, `tabular`, `mono`, `break`, `eyebrow`, `muted`, `small`, `sr-only`, `wrap`), reduced motion.                                |
 | `components.css`            | The styles behind the components below.                                                                                                                                             |
-| `fonts.ts`                  | The self-hosted fonts (see below).                                                                                                                                                  |
+| `fonts.ts`                  | The self-hosted font (see below).                                                                                                                                                   |
+| `Icon.tsx`, `Identity.tsx`  | Inline SVG icons and the logo mark; the wallet `Avatar`, `TokenIcon` and `PairIcon` (colours from a hash of the text, never the only cue).                                      |
+| `Toast.tsx`, `Progress.tsx` | Toasts (`ToastProvider` once in the shell, `Toast` anywhere); `Skeleton`, `Spinner`, `ProgressBar`, `Stepper`.                                                                  |
 | `index.ts`                  | Every component, imported as `from '../design/index.js'`.                                                                                                                           |
 
-### Fonts: self-hosted, not Google Fonts
+### Fonts: self-hosted, not a font CDN
 
-The fonts come from the `@fontsource/libre-caslon-text` and `@fontsource/source-sans-3` packages
-(SIL Open Font License 1.1; the licence texts ship in `public/licenses/`) and are served from the
+The font is Inter, from the `@fontsource-variable/inter` package (one variable face, weights
+100–900; SIL Open Font License 1.1; the licence text ships in `public/licenses/`), served from the
 site's own origin. Loading them from `fonts.googleapis.com` would hand every visitor's IP address
 to Google before they did anything (a German court found that to breach the GDPR, LG München I,
 3 O 17493/20, 2022), while the market promises its servers keep nothing about the customer. It would
 also break a strict CSP and the browser tests, which refuse any request that leaves the page's
-origin. Only the Latin subset loads, with `font-display: swap`; anything else falls back to
-Georgia / the system sans, and `test/e2e/visual.spec.ts` checks that fallback.
+origin. Each Unicode subset is its own face with a `unicode-range`, so the browser downloads only
+the Latin one for the English UI, with `font-display: swap`; without it the page falls back to the
+system sans, and `test/e2e/visual.spec.ts` checks that fallback.
 
 ### Adopting the design system (every page uses it; follow this for anything new)
 
@@ -135,9 +148,11 @@ pass `data-*`, `id`, `role`, `aria-*` and event props straight through to their 
 Headings: the masthead's "Night Market" is the page's `h1`, a page title is an `h2` (`PageHead`), and
 a panel title an `h3` (`Panel`).
 
-**Panels.** `Panel` (white box; `title`, `meta` on the right, `tone="quiet"` for the ivory-grey
-side box, `as="form"`/`"aside"`/`"div"`), `Card` (a panel with the gold top rule, for the one
-card that invites an action). Two panels side by side: `<div className="form-grid">…</div>`.
+**Panels.** `Panel` (a card; `title`, `meta` on the right, `tone="quiet"` for a raised side card,
+`as="form"`/`"aside"`/`"div"`), `Card` (a panel with the violet glow, for the one card that invites
+an action). Two panels side by side: `<div className="form-grid">…</div>`. Beside Markets and
+Trade, `PortfolioDock` (`src/account/`) docks the holdings panel from 1180 px and turns it into a
+drawer below that, opened by `PortfolioToggle` in the page head.
 
 **Forms.**
 
@@ -152,8 +167,8 @@ card that invites an action). Two panels side by side: `<div className="form-gri
   </Field>
   <Field label="Market" htmlFor="tr-pair"><Select id="tr-pair" …>…</Select></Field>
   <div className="legs">                         {/* the exact legs, as in the mockup */}
-    <div className="leg"><span className="k">You give</span><span className="v num">10.50 twUSDC</span></div>
-    <div className="leg"><span className="k">You receive</span><span className="v num">0.50 twBTC</span></div>
+    <div className="leg"><span className="k">You pay</span><span className="v num">10.50 twUSDC</span></div>
+    <div className="leg"><span className="k">You get</span><span className="v num">0.50 twBTC</span></div>
     <div className="foot">Paid with your twUSDC coin of 11.00; the change stays in your account.</div>
   </div>
   <ButtonRow stretch>
@@ -166,9 +181,11 @@ card that invites an action). Two panels side by side: `<div className="form-gri
 Also: `TextInput`, `CopyField` (a value to copy whole, e.g. a deposit address), `KeyValueList`
 (label / value lines), `Steps` + `Step` (numbered steps the customer drives in order).
 
-**Buttons.** `Button` with `variant` `primary` (default) / `secondary` / `danger` / `link` /
-`inverse` (on the navy masthead) and `size="small"` (32 px on a desktop, 44 px on a phone or touch
-screen). A link that looks like a button (the Markets book's Take): `ButtonLink href=… size="small"`.
+**Buttons.** `Button` with `variant` `primary` (default, the violet → indigo gradient) /
+`secondary` / `buy` / `sell` (the trade actions, dark text on green or rose) / `danger` / `link`,
+and `size="small"` (32 px on a desktop, 44 px below 900 px or on a touch screen); `className`
+`btn-block` for full width, `btn-lg` for the one big action. A link that looks like a button (the
+Markets book's Buy and Sell): `ButtonLink href=… size="small" variant="buy"`.
 
 **Money and prices.** `Money` formats exact BigInt base units with the token's decimals, grouped,
 in tabular numerals, and keeps the raw value in `data-raw`:
@@ -211,13 +228,15 @@ comes from `fundWithOneCoin` (`notEnoughText`). The account's own offer: `<Yours
 offer"). A holdings row: `AssetCell symbol="twBTC" name="Test-wrapped BTC" origin=…`; a subtotal:
 `SubtotalRow` in `foot`.
 
-**Badges and states.** `Badge tone="green|navy|grey|gold|red"` (a market's Two-sided / Bids only /
-No liquidity), `StatusPill status="live|filled|cancelled|progress|refunded|failed|done|idle"` (an
-offer's or job's state, with a dot), `NoValue` for a deliberately absent value ("no
-liquidity", "not valued", "no bids"), `NetworkBadge network="midnight"`.
+**Badges and states.** `Badge tone="green|navy|grey|gold|red"` (a market's Active / Buyers only /
+No offers yet), `StatusPill status="live|filled|cancelled|progress|refunded|failed|done|idle"` (an
+offer's or job's state, with a dot), `NoValue` for a deliberately absent value ("no buyers", "no
+trades yet"), `Skeleton` while a value loads, `NetworkBadge network="midnight"`.
 
-**Messages.** `Notice tone="info|warning|danger|success" title="…"`; give it `role="alert"` for an
-error the customer caused and `role="status"` for a result. The one-live-offer rule (Q9):
+**Messages.** What just happened (a result, or an error the customer caused) is a `Toast`
+(`tone="success|error|info"`, `onClose`, `timerKey`): a success fades after 12 s, an error stays
+until closed, and the toast keeps the page's `data-testid`. A standing explanation is a
+`Notice tone="info|warning|danger|success" title="…"`. The one-live-offer rule (Q9):
 
 ```tsx
 <Notice tone="warning" title="One live offer per account.">
@@ -229,11 +248,27 @@ error the customer caused and `role="status"` for a result. The one-live-offer r
 A confirmation before a signed action that cancels the live offer: `Dialog` (native `<dialog>`,
 Escape closes it) with `actions={<><Button variant="secondary">Keep my offer</Button><Button>…</Button></>}`,
 instead of `window.confirm`. A destructive action with a typed phrase: `TypedConfirmDialog` (as
-Local data's CLEAR ALL). Nothing to show: `EmptyState title="…"`.
+Your data's CLEAR ALL). Nothing to show: `EmptyState icon="…" title="…"`.
 
-**Progress.** `StageTracker` for a long job (done stages ticked in navy, the current one ringed in
-gold), and `Hash` for a transaction hash or id (shortened, with Copy, and a link when `href` is
-given). Pass a stage's test attributes through `data`:
+**Progress.** A signed action runs through the app's `ActivityStore` (`src/activity/`): the page
+wraps it in `activity.run(kind, …)` and reports its relay jobs with `activity.job(job)` (its
+`OperationEnv.onJob`). The signing modal (`src/wallet/SigningPrompt.tsx`) then shows the exact text
+Phantom shows with its fingerprint while the wallet is open (`sign-prompt`), and after the signature
+the action's steps, a bar and the relay's stage (`activity-progress`), with "Continue in background".
+The steps depend on how the action ends (`ACTIVITY_FLOW` in `src/activity/activity.ts`):
+
+- an on-chain action (open an account, demo tokens, a take, a withdrawal, saving a change): Approve →
+  Market prepares it → Confirmed on Midnight, with a bar against the measured duration of that action;
+- making an offer: Approve → Preparing your offer → Listed on the market. A made offer is a proven,
+  signed intent the exchange lists; nothing is on-chain until someone takes it, and the tokens stay
+  in the account until then. The bar covers the preparation (the proof) only, and the step ends when
+  the exchange lists the offer. Every place that shows the account's own offers says so
+  (`src/trade/messages.ts`, `OFFER_OFF_CHAIN`).
+
+On the page,
+`StageTracker` shows a long job (done stages ticked in green, the current one ringed in violet), and
+`Hash` a transaction hash or id (shortened, with Copy, and a link when `href` is given). Pass a
+stage's test attributes through `data`:
 
 ```tsx
 <StageTracker label="Your take" stages={[
@@ -244,10 +279,16 @@ given). Pass a stage's test attributes through `data`:
 ]} />
 ```
 
-**Check it.** `test/e2e/visual.spec.ts` screenshots every page at 1280 px and 375 px and asserts
-no horizontal page scroll, 44 px buttons on a phone, self-hosted fonts and no gradients; add the
-new page there (its fixtures are in `test/e2e/visual-fixtures.ts`). The screenshots land in
-`test-results/visual/` (or `$VISUAL_OUT_DIR`).
+**Check it.** `test/e2e/visual.spec.ts` screenshots every page at 1440 px, 768 px and 390 px and
+asserts no horizontal page scroll, 44 px buttons on touch screens, the self-hosted font and no
+glass; add the new page there (its fixtures are in `test/e2e/visual-fixtures.ts`). The screenshots
+land in `test-results/visual/` (or `$VISUAL_OUT_DIR`). The design review screens (the landing,
+Trade, Create offer, the signing modal approving, the make-offer progress (preparing, then listing)
+and the listed offer, Portfolio, the drawer, demo tokens, an error toast) are
+`test/e2e/screens.spec.ts`, in `test-results/screens/` (or `$SCREENS_OUT_DIR`). The contrast of
+every text pair on the dark surfaces is `test/design-contrast.test.ts`; axe-core (WCAG 2.2 A/AA
+rules) on the key screens, the drawer's focus trap, Escape on every overlay and the focus rings are
+`test/e2e/a11y.spec.ts`.
 
 ## When something is not working (error states)
 

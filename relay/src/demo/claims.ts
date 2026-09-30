@@ -6,7 +6,10 @@
 // (a temporary file, fsync, rename), so a crash leaves either the old or the new file, never a torn
 // one. Concurrency: every decision (`reserve`) is synchronous, and the relay is one process, so two
 // requests racing for the same key or the last slot of the day cannot both pass; a second relay on
-// the same data dir is refused at start by an exclusive lock file.
+// the same data dir is refused at start by an exclusive lock file. Only a lock file that already
+// exists means "held"; any other failure (a data dir the relay's user cannot write, a read-only or
+// full disk) is reported as what it is, with the path, the error code, the relay's uid/gid and the
+// fix (a data dir owned by another uid once looked like a lock conflict: AA 00047 P7.4).
 //
 // A claim is RESERVED at admission (before any queue slot), CONFIRMED when its job succeeds and
 // RELEASED when the route refuses it after admission or its job fails, so a failed pack can be
@@ -26,6 +29,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -51,6 +55,22 @@ export type ReserveOutcome =
   | { ok: true; release: () => void; confirm: (txs: string[]) => void }
   | { ok: false; code: 'already-claimed' | 'daily-cap'; reason: string };
 
+/**
+ * Why the claims store cannot start: its lock is `held` by another live relay, or the data dir
+ * cannot be used (`filesystem`: `code` is the errno name, e.g. EACCES, EROFS, ENOSPC).
+ */
+export class ClaimsStoreError extends Error {
+  constructor(
+    message: string,
+    readonly kind: 'held' | 'filesystem',
+    readonly path: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = 'ClaimsStoreError';
+  }
+}
+
 export interface ClaimsOptions {
   /** The JSON file (null: in memory only, for tests and keyless development). */
   file: string | null;
@@ -70,36 +90,53 @@ export class DemoTokenClaims {
     if (o.file) this.load(o.file);
   }
 
-  /** Take the data dir's lock (one relay per claims file). Throws when another process holds it. */
+  /**
+   * Take the data dir's lock (one relay per claims file). Throws a ClaimsStoreError: `held` when
+   * another live process holds it, `filesystem` when the lock cannot be created at all.
+   */
   lock(): void {
     if (!this.o.file || this.lockFile) return;
     const path = `${this.o.file}.lock`;
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    let fd: number;
     try {
-      fd = openSync(path, 'wx', 0o600);
-    } catch {
-      let holder = 'unknown';
-      try {
-        holder = readFileSync(path, 'utf8').trim();
-      } catch {
-        /* unreadable */
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    } catch (e) {
+      throw filesystemProblem('create its data dir', dirname(path), e, dirname(path));
+    }
+    // A few rounds: a stale lock is removed and taken again, and a lock released between our
+    // attempt and our read is simply taken again. Losing every round to other relays is "held".
+    for (let round = 0; round < 3; round++) {
+      const fd = createExclusive(path);
+      if (fd !== null) {
+        try {
+          writeSync(fd, `${process.pid}\n`);
+        } catch (e) {
+          closeSync(fd);
+          rmSync(path, { force: true });
+          throw filesystemProblem('write its lock file', path, e);
+        }
+        closeSync(fd);
+        this.lockFile = path;
+        return;
       }
+      // The lock file exists (EEXIST): who holds it?
+      const holder = readHolder(path);
+      if (holder === null) continue; // released meanwhile
       // A lock left by a process that no longer exists is stale (a crash), and so is one holding our
-      // own pid (a restarted container: the relay is pid 1 again): take it over. The lock guards
-      // against a second relay on this host; relays in separate containers sharing one data volume
-      // cannot see each other's pids, so the RUNBOOK says one relay per data dir.
+      // own pid (a restarted container: the relay has the same pid again): take it over. The lock
+      // guards against a second relay on this host; relays in separate containers sharing one data
+      // volume cannot see each other's pids, so the RUNBOOK says one relay per data dir.
       const pid = Number(holder);
       if (Number.isInteger(pid) && pid > 0 && (pid === process.pid || !processAlive(pid))) {
-        rmSync(path, { force: true });
-        fd = openSync(path, 'wx', 0o600);
-      } else {
-        throw new Error(`the demo-token claims file is in use by another relay (lock ${path}, holder ${holder})`);
+        try {
+          rmSync(path, { force: true });
+        } catch (e) {
+          throw filesystemProblem('remove a stale lock file', path, e);
+        }
+        continue;
       }
+      throw held(path, holder);
     }
-    writeSync(fd, `${process.pid}\n`);
-    closeSync(fd);
-    this.lockFile = path;
+    throw held(path, readHolder(path) ?? '');
   }
 
   unlock(): void {
@@ -109,7 +146,13 @@ export class DemoTokenClaims {
 
   private load(file: string): void {
     if (!existsSync(file)) return;
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { format?: string; claims?: ClaimRecord[] };
+    let text: string;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (e) {
+      throw filesystemProblem('read its claims file', file, e);
+    }
+    const parsed = JSON.parse(text) as { format?: string; claims?: ClaimRecord[] };
     if (parsed.format !== FORMAT || !Array.isArray(parsed.claims)) {
       throw new Error(`${file} is not a ${FORMAT} file`);
     }
@@ -124,7 +167,11 @@ export class DemoTokenClaims {
     }
     if (recovered > 0) {
       this.o.onRecovered?.(recovered);
-      this.persist();
+      try {
+        this.persist();
+      } catch (e) {
+        throw filesystemProblem('rewrite its claims file', file, e);
+      }
     }
   }
 
@@ -207,6 +254,102 @@ export class DemoTokenClaims {
       },
     };
   }
+}
+
+/** Create the lock file exclusively: its descriptor, or null when it already exists (EEXIST). */
+function createExclusive(path: string): number | null {
+  try {
+    return openSync(path, 'wx', 0o600);
+  } catch (e) {
+    if (errnoCode(e) === 'EEXIST') return null;
+    throw filesystemProblem('create its lock file', path, e);
+  }
+}
+
+/** The pid written in an existing lock file ('' when empty), or null when it has gone meanwhile. */
+function readHolder(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch (e) {
+    if (errnoCode(e) === 'ENOENT') return null;
+    throw filesystemProblem('read its lock file', path, e);
+  }
+}
+
+function held(path: string, holder: string): ClaimsStoreError {
+  return new ClaimsStoreError(
+    `the demo-token claims file is in use by another relay (lock ${path}, holder ${holder || 'unknown'}). ` +
+      'One relay per data dir: stop the other relay or give this one its own RELAY_DATA_DIR. ' +
+      `If no other relay uses this data dir, the lock is left over: remove ${path} and start again.`,
+    'held',
+    path,
+    'EEXIST',
+  );
+}
+
+function errnoCode(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : 'unknown';
+}
+
+/** The relay's own uid and gid, as the kernel sees them. */
+function relayIds(): { uid: number | null; gid: number | null } {
+  return { uid: process.getuid?.() ?? null, gid: process.getgid?.() ?? null };
+}
+
+/** Who owns a path, and its mode ("owned by uid 1000 gid 1000, mode 700"), or why it is unknown. */
+function ownership(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${path} is owned by uid ${st.uid} gid ${st.gid}, mode ${(st.mode & 0o7777).toString(8)}`;
+  } catch (e) {
+    return `${path} cannot be inspected (${errnoCode(e)})`;
+  }
+}
+
+/**
+ * A data-dir failure described as what it is: what the store was doing, the path, the errno, the
+ * relay's uid/gid, who owns the directory, and the fix for the usual causes.
+ */
+function filesystemProblem(action: string, path: string, e: unknown, dir = dirname(path)): ClaimsStoreError {
+  const code = errnoCode(e);
+  // Node's text repeats the code ("EACCES: permission denied, open '…'"): keep what follows it.
+  const detail = (e instanceof Error ? e.message : String(e)).replace(`${code}: `, '');
+  const { uid, gid } = relayIds();
+  const who = uid === null ? 'the relay' : `uid ${uid} gid ${gid}`;
+  let fix: string;
+  switch (code) {
+    case 'EACCES':
+    case 'EPERM':
+      fix =
+        `make ${dir} writable by ${who}. With deploy/compose.yml, set RELAY_USER to the relay's uid:gid; the ` +
+        'relay-data-init service hands the relay-data volume to that user at every start (deploy/RUNBOOK.md ' +
+        `section 3). On a host, chown -R ${uid ?? '<uid>'}:${gid ?? '<gid>'} ${dir} (deploy/SYSTEMD.md).`;
+      break;
+    case 'EROFS':
+      fix =
+        `${dir} is on a read-only file system: mount a writable volume at RELAY_DATA_DIR (compose.yml mounts ` +
+        'relay-data there; under systemd, list it in ReadWritePaths).';
+      break;
+    case 'ENOSPC':
+    case 'EDQUOT':
+      fix = `free space on the file system that holds ${dir}.`;
+      break;
+    case 'ENOTDIR':
+    case 'ENOENT':
+    case 'EEXIST':
+      fix = `set RELAY_DATA_DIR to a directory (${dir} is not one, or cannot be created).`;
+      break;
+    default:
+      fix = `check RELAY_DATA_DIR (${dir}) and its file system.`;
+  }
+  return new ClaimsStoreError(
+    `the demo-token claims store cannot ${action} (${path}): ${code} (${detail}). ` +
+      `The relay runs as ${who}; ${ownership(dir)}. Fix: ${fix}`,
+    'filesystem',
+    path,
+    code,
+  );
 }
 
 function processAlive(pid: number): boolean {

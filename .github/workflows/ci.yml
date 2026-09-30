@@ -109,6 +109,8 @@ jobs:
           test "$code" = 503 || test "$code" = 200
           docker logs relay-ci | tail -5
           docker rm -f relay-ci
+      - name: The data volume with the relay run as another uid (relay-data-init, nocopy, the claims lock's errors)
+        run: RELAY_IMAGE=nightmarket/relay:ci bash test/deploy/relay-data-volume.sh
 
   deploy-bundle:
     name: Deploy bundle (compose, web and key-volume images)

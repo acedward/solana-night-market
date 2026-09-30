@@ -59,7 +59,9 @@ does not use Docker.
   The single-server `MIDNIGHT_PROOF_SERVER_URL` of MN Bank is refused by the relay (exit 78), and
   every `SEPOLIA_*`, `BRIDGE_*`, `STALE_CLOSE_*` and `VAULT_GAS_*` line is gone.
 - `sudo install -d -m 700 -o nightmarket -g nightmarket /var/lib/nightmarket/data` (the demo-token
-  claims; back it up).
+  claims; back it up). It must belong to the relay unit's `User=`. Compose does this with its
+  `relay-data-init` service; a native host does it once here. If you change the unit's user later,
+  run `sudo chown -R <user>:<group> /var/lib/nightmarket/data`.
 
 ## 4. The key set
 
@@ -79,7 +81,15 @@ After=network-online.target nightmarket-proof-contracts.service nightmarket-proo
 ReadWritePaths=/var/lib/nightmarket
 ```
 
-Exit 78 also covers a demo-token claims file held by another relay (one relay per data dir).
+Exit 78 also covers the demo-token claims store:
+
+- **Held by another relay** (one relay per data dir). The message names the lock and its holder's
+  pid. A lock left by a crash is taken over on its own.
+- **A data dir the relay cannot use.** The message names the path, the error, the relay's uid and
+  gid, the directory's owner and mode, and the fix:
+  - `EACCES`: the directory belongs to another user. Fix it with the `chown -R` above.
+  - `EROFS`: `ProtectSystem=strict` without `/var/lib/nightmarket` in `ReadWritePaths`.
+  - `ENOSPC`: the disk is full.
 
 ## 6. The web
 

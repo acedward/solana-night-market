@@ -11,19 +11,14 @@
 //     accepted at most once, ever;
 //   - an EXPIRY (unix seconds); the relay also caps how far ahead it may be.
 //
-// THE SIGNATURE SCHEME IS A SEAM (plan lane B3). `RelayActionScheme` turns an envelope into the exact
-// bytes the wallet signs and checks a signature over them. TODO(B3): the Solana scheme, from Track
-// A's arm client in `@nightmarket/core/passport` (../passport/ed25519.ts):
-//   - `messageBytes` must be printable ASCII the wallet shows as text (Phantom `display: 'utf8'`),
-//     start with the market's label (`marketLabel(network)`), and pass
-//     `assertSafeEd25519Message` (never a Solana transaction, an off-chain message or a Sign-In With
-//     Solana request); Track A's `ed25519PossessionMessage` is the arm's own shape for an off-chain
-//     proof of key (it authorises nothing on chain);
-//   - `verify` checks the 64-byte signature strictly (tweetnacl `sign.detached.verify` over the
-//     owner's 32-byte key, as the arm's pre-check does) and refuses an owner key that does not decode
-//     (`assertDeviceKeyDecodes`).
-// The account's own calls are not signed here: each carries the arm's F3 message (PassportAuth).
-// Until a scheme is given, every envelope is refused as `not-supported`.
+// THE SIGNATURE SCHEME is `RelayActionScheme`: it turns an envelope into the exact bytes the wallet
+// signs and checks a signature over them. The Solana wallet's scheme (AA 00047 lane B3, questions
+// Q14) is ./solana-auth.ts (entry `@nightmarket/core/solana-auth`): Track A's proof-of-key-possession message, whose nonce field carries the
+// envelope's digest, verified strictly. Only the actions that have no account call of their own use
+// an envelope: opening an account and claiming demo tokens (and a withdrawal's recipient, only when a
+// deployment turns F-B6's switch on, Q13). Every account CALL is authorised by its own F3 message
+// (PassportAuth, the one signature the circuit also verifies), so every action is ONE wallet prompt.
+// Without a scheme every envelope is refused as `not-supported`.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';
@@ -32,7 +27,17 @@ import { bytesToHex } from './hex.js';
 import { DEVICE_KEY_PATTERN } from './signing.js';
 
 /** Every action the relay knows. The executors are wired per network; the names are the contract. */
-export const RELAY_ACTIONS = ['register', 'withdraw', 'append-inbox', 'open-swap', 'take'] as const;
+export const RELAY_ACTIONS = [
+  'register',
+  'withdraw',
+  'append-inbox',
+  'open-swap',
+  'take',
+  // AA 00047 lane B3: a withdrawal of unshielded tokens (the arm's `withdraw_unshielded_with_ed25519`)
+  // and the demo-token pack from the mint-test-tokens faucets (./demo-tokens.ts).
+  'withdraw-unshielded',
+  'demo-tokens',
+] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 
 /** The message as it travels in JSON: every value a string. */
@@ -185,7 +190,7 @@ export interface VerifyRelayActionOptions {
 const fail = (code: AuthFailureCode, reason: string): AuthResult => ({ ok: false, code, reason });
 
 export const NOT_SUPPORTED_REASON =
-  'signing is not available yet: Solana wallets arrive with the Ed25519 account arm (plan lanes B2 and B3)';
+  'this relay does not accept wallet signatures (it runs without the Ed25519 arm or its key volume)';
 
 const unhex = (h: string) => {
   const out = new Uint8Array(h.length / 2);

@@ -84,13 +84,15 @@ regexes = ['''^token_color"''']
 
 # The web bundle carries the onchain-runtime's wasm-bindgen glue (the browser-safe Passport
 # client, plan P0.4): its generated import names (`__wbg_<name>_<16 hex>`) and one exported
-# function name are code identifiers, not secrets. Scoped to that rule, the built bundle AND those
+# function name are code identifiers, not secrets. So is `verifyEd25519Strict`, the Solana
+# envelope scheme's verifier (packages/core/src/solana-auth.ts, AA 00047), which the source map's
+# names list carries next to a `…Key` identifier. Scoped to that rule, the built bundle AND those
 # exact shapes only.
 [[rules.allowlists]]
 condition = "AND"
 paths = ['''(^|/)web/dist/assets/[^/]+\.js(\.map)?$''']
 regexTarget = "secret"
-regexes = ['''^__wbg_[A-Za-z0-9_]+_[0-9a-f]{16}$''', '''^signingKeyFromBip340$''']
+regexes = ['''^__wbg_[A-Za-z0-9_]+_[0-9a-f]{16}$''', '''^signingKeyFromBip340$''', '''^verifyEd25519Strict$''']
 
 # deploy/.env.example pins the relay's key-set fingerprint: a SHA-256 over PUBLIC verifier keys,
 # which the generic rule flags because the variable's name holds "KEY". Scoped to that rule, that

@@ -37,11 +37,11 @@ import {
   type Ed25519SignatureArg,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519.js';
 import {
-  ED25519_LABEL_BYTES,
   ED25519_MAX_DECIMALS,
   ED25519_SYMBOL_BYTES,
   type EdTokenResolver,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
+import { marketLabel } from '../market-label.js';
 
 export {
   Ed25519Device,
@@ -79,21 +79,10 @@ export {
 /**
  * The first line of every message the wallet shows (<= 24 printable ASCII characters): the market
  * and its network. The circuit renders it from the call's display input and the signature covers
- * it, so the browser and the relay must use the same one: this one.
+ * it, so the browser and the relay must use the same one. Defined in the light `../market-label.ts`
+ * (B3: the relay envelope's Solana scheme in the package root starts with it too).
  */
-export const MARKET_LABELS: Readonly<Record<NetworkName, string>> = {
-  stagenet: 'Night Market - stagenet',
-  // "Night Market - undeployed" would be 25 characters.
-  undeployed: 'Night Market - local',
-};
-
-export function marketLabel(network: NetworkName): string {
-  const label = MARKET_LABELS[network];
-  if (label.length > ED25519_LABEL_BYTES || !/^[\x20-\x7e]*$/.test(label)) {
-    throw new RangeError(`the ${network} label must be at most ${ED25519_LABEL_BYTES} printable ASCII characters`);
-  }
-  return label;
-}
+export { MARKET_LABELS, marketLabel } from '../market-label.js';
 
 /**
  * How the arm shows a token (its symbol and decimals), from the market's registry. A symbol the

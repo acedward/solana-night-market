@@ -42,6 +42,13 @@ export function relayErrorText(e: {
       return 'Your account has more history than this version of Night Market can read (500 or more actions on Midnight), so its balances can no longer be refreshed: they show the last refresh, and new coins will not appear. Nothing is lost: your coins stay on Midnight and your Export keeps the key to them. Keep your Export and ask the market; a later version reads the account again.';
     case 'payload-too-large':
       return 'The request was too large for the market to accept.';
+    // The demo-token claim (AA 00047, packages/core/src/demo-tokens.ts).
+    case 'demo-disabled':
+      return 'This market is not handing out demo tokens right now. Nothing was sent.';
+    case 'demo-already-claimed':
+      return 'This wallet has already had its demo tokens: the market gives one pack per wallet.';
+    case 'demo-daily-cap':
+      return 'Today’s demo tokens are all given out. Try again tomorrow (UTC); nothing was sent.';
     case 'unauthorised':
       switch (e.detail) {
         case 'expired':
@@ -53,7 +60,9 @@ export function relayErrorText(e: {
         case 'unknown-nonce':
           return 'The market restarted since this was signed, so the signature is no longer valid. Try again and sign once more.';
         case 'not-supported':
-          return 'Signing with a Solana wallet is not available on this site yet. Nothing was sent.';
+          return 'This market is not accepting wallet signatures right now. Nothing was sent.';
+        case 'bad-signature':
+          return 'The market could not verify your wallet’s signature for this request. Nothing was sent; try again.';
         default:
           return sentence(e.message);
       }

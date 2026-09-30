@@ -121,6 +121,7 @@ export function harness(
 export const ACCOUNT = '11'.repeat(32);
 
 export function samplePayload(action: RelayActionName): Record<string, unknown> {
+  if (action === 'demo-tokens') return {};
   return action === 'register' ? { encPublicKey: 'ab'.repeat(32) } : { amount: '1000000', colour: 'bb'.repeat(32) };
 }
 

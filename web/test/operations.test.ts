@@ -12,6 +12,7 @@ import {
   contractCoinCommitment,
   contractCoinNullifier,
   formatShieldedAddress,
+  formatUnshieldedAddress,
   hexToBytes,
   payloadHash,
   type AccountStateView,
@@ -34,8 +35,10 @@ import {
   syncAccount,
   unsecuredCoins,
   withdrawToWallet,
+  withdrawUnshieldedToWallet,
   type OperationEnv,
 } from '../src/passport/operations.js';
+import { claimDemoTokens, claimState, packText } from '../src/demo/operations.js';
 import { readCoins, readRoster, readSecret } from '../src/passport/records.js';
 import type { RelayClient } from '../src/relay/client.js';
 import { MAX_IMPORT_READ_BYTES, recordKey } from '../src/store/schema.js';
@@ -293,16 +296,37 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
 
   // Security review F-B6: the recipient's encryption key is outside the contract's challenge, so a
   // payment to a wallet address carries a RelayAction envelope over the whole body, same device.
-  it('pays a wallet address with a second signature that binds its encryption key', async () => {
-    const { signing, relay, e, calls } = await fundedAccount();
+  it('pays a wallet address with ONE signature by default (questions Q13 option B)', async () => {
+    const { relay, e, calls } = await fundedAccount();
     await syncAccount(e, ACCOUNT);
-    relay.results.withdraw = { txId: 'wd2', change: null };
+    relay.results.withdraw = { txId: 'wd3', change: null };
     const recipient = { coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) };
     await withdrawToWallet(e, ACCOUNT, {
       color: COLOUR,
       amount: 40_000_000n,
       recipient: formatShieldedAddress(recipient, 'undeployed'),
     });
+    expect(calls).toEqual(['authorise:withdrawShielded']);
+    const sub = relay.submitted[0]!;
+    expect(sub.request.payload).toMatchObject({ recipient: '44'.repeat(32), recipientEncryptionKey: '55'.repeat(32) });
+    expect(sub.request.auth).toBeUndefined();
+  });
+
+  it("pays a wallet address with a second signature that binds its encryption key, when the relay's policy asks", async () => {
+    const { signing, relay, e, calls } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    relay.results.withdraw = { txId: 'wd2', change: null };
+    const recipient = { coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) };
+    await withdrawToWallet(
+      e,
+      ACCOUNT,
+      {
+        color: COLOUR,
+        amount: 40_000_000n,
+        recipient: formatShieldedAddress(recipient, 'undeployed'),
+      },
+      { recipientEnvelope: true },
+    );
     expect(calls).toEqual(['authorise:withdrawShielded', 'relayAction']);
     const sub = relay.submitted[0]!;
     const payload = sub.request.payload as Record<string, unknown>;
@@ -325,6 +349,105 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
       withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 70_000_000n, recipient: '44'.repeat(32) }),
     ).rejects.toThrow(/largest single payment is 60000000/);
     expect(calls).toEqual([]);
+  });
+
+  it('withdraws from the unshielded balance to an mn_addr wallet with ONE signature (AA 00047)', async () => {
+    const { signing, relay, e, calls } = await fundedAccount();
+    relay.results['withdraw-unshielded'] = { txId: 'wu1' };
+    const user = '66'.repeat(32);
+    const r = await withdrawUnshieldedToWallet(e, ACCOUNT, {
+      color: COLOUR,
+      amount: 2_500_000n,
+      recipient: formatUnshieldedAddress(user, 'undeployed'),
+      balance: 10_000_000n,
+    });
+    expect(r.txId).toBe('wu1');
+    expect(calls).toEqual(['authorise:withdrawUnshielded']);
+    const sub = relay.submitted[0]!;
+    expect(sub.action).toBe('withdraw-unshielded');
+    expect(sub.request.payload).toEqual({ recipient: user, color: COLOUR, amount: '2500000', authNonce: '7' });
+    expect(sub.request.auth).toBeUndefined();
+    expect(sub.request.passportAuth).toMatchObject({ owner: signing.deviceKey, useCounter: '1' });
+    expect(readRoster(e.store, e.scope, ACCOUNT)).toEqual({ useCounter: '2' });
+  });
+
+  it('refuses an unshielded withdrawal to a bad address, another network, or above the balance, before the wallet', async () => {
+    const { e, calls } = await fundedAccount();
+    const user = '66'.repeat(32);
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, { color: COLOUR, amount: 1n, recipient: 'mn_addr_nonsense' }),
+    ).rejects.toThrow(/not a Midnight address/);
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, {
+        color: COLOUR,
+        amount: 1n,
+        recipient: formatUnshieldedAddress(user, 'stagenet'),
+      }),
+    ).rejects.toThrow(/for the stagenet network, not undeployed/);
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, {
+        color: COLOUR,
+        amount: 11n,
+        recipient: formatUnshieldedAddress(user, 'undeployed'),
+        balance: 10n,
+      }),
+    ).rejects.toThrow(/does not hold that much/);
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, {
+        color: COLOUR,
+        amount: 1n,
+        recipient: formatShieldedAddress(
+          { coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) },
+          'undeployed',
+        ),
+      }),
+    ).rejects.toThrow(/not an unshielded wallet address/);
+    expect(calls).toEqual([]);
+  });
+
+  it('claims demo tokens with ONE envelope signature for the account, then walks the inbox (AA 00047)', async () => {
+    const { signing, relay, e, calls } = await fundedAccount();
+    expect(readCoins(e.store, e.scope, ACCOUNT)).toEqual([]);
+    relay.results['demo-tokens'] = { account: ACCOUNT, path: 'direct', minted: [] };
+    await claimDemoTokens(e, ACCOUNT);
+    expect(calls).toEqual(['relayAction']);
+    const sub = relay.submitted[0]!;
+    expect(sub.action).toBe('demo-tokens');
+    expect(sub.request).toMatchObject({ account: ACCOUNT, payload: {} });
+    const auth = sub.request.auth as SignedRelayAction;
+    expect(auth.message).toMatchObject({
+      action: 'demo-tokens',
+      network: 'undeployed',
+      account: `0x${ACCOUNT}`,
+      owner: signing.deviceKey,
+      payloadHash: payloadHash({}),
+    });
+    expect(testScheme.verify(auth.message, unhex(auth.signature))).toBe(true);
+    // The deposit's inbox entries were read after the job (nothing was synced before the claim).
+    expect(readCoins(e.store, e.scope, ACCOUNT).filter((c) => !c.spent).length).toBeGreaterThan(0);
+    // A failed claim says why, in the relay's words.
+    relay.failNext = 'this key has already claimed';
+    await expect(claimDemoTokens(e, ACCOUNT)).rejects.toThrow('This key has already claimed.');
+  });
+
+  it('says whether this wallet may claim, and what the pack is', () => {
+    const base = {
+      enabled: true,
+      pack: [
+        { symbol: 'twUSDC', colour: '11'.repeat(32), decimals: 6, amount: '1000000000' },
+        { symbol: 'twBTC', colour: '22'.repeat(32), decimals: 8, amount: '10000000' },
+        { symbol: 'twETH', colour: '33'.repeat(32), decimals: 18, amount: '1000000000000000000' },
+      ],
+      perKey: 1,
+      dailyCap: 50,
+      remainingToday: 12,
+    };
+    expect(packText(base.pack)).toBe('1,000.00 twUSDC · 0.10 twBTC · 1.00 twETH');
+    expect(claimState(base)).toEqual({ ok: true });
+    expect(claimState(null)).toMatchObject({ ok: false, code: 'unavailable' });
+    expect(claimState({ ...base, enabled: false })).toMatchObject({ ok: false, code: 'disabled' });
+    expect(claimState({ ...base, claimed: true })).toMatchObject({ ok: false, code: 'claimed' });
+    expect(claimState({ ...base, remainingToday: 0 })).toMatchObject({ ok: false, code: 'cap' });
   });
 
   it("re-files the change in the inbox, sealed to the account's key, with ONE signature (Q13)", async () => {

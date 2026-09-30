@@ -19,6 +19,8 @@ export const API_PATHS = {
   accountState: (account: string) => `/v1/accounts/${account}/state`,
   accountInbox: (account: string) => `/v1/accounts/${account}/inbox`,
   accountZswap: (account: string) => `/v1/accounts/${account}/zswap`,
+  /** The demo-token pack and limits (AA 00047 B3, ./demo-tokens.ts). */
+  demoTokens: '/v1/demo-tokens',
 } as const;
 
 // ── Errors ──────────────────────────────────────────────────────────────────

@@ -64,7 +64,15 @@ describe('canonical JSON and the payload hash', () => {
 
 describe('the RelayAction envelope', () => {
   it('knows only Night Market actions (no bridge)', () => {
-    expect([...RELAY_ACTIONS]).toEqual(['register', 'withdraw', 'append-inbox', 'open-swap', 'take']);
+    expect([...RELAY_ACTIONS]).toEqual([
+      'register',
+      'withdraw',
+      'append-inbox',
+      'open-swap',
+      'take',
+      'withdraw-unshielded',
+      'demo-tokens',
+    ]);
   });
 
   it('names the device key as the owner, lowercase, and no account for registration', () => {

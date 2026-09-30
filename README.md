@@ -81,6 +81,7 @@ The site reads `config.json` next to `index.html` (`web/public/config.json`):
 | `tokens` | `{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"? }] }`: tokens added to the network's built-in list (`"mode": "replace"` replaces it). |
 | `pairs` | The markets, `["BASE/QUOTE", …]`; default: the network's pairs. |
 | `assets` | This site's asset set (a list of symbols, or `"all"`); the page's `?assets=` link narrows within it. |
+| `walletTimeoutSeconds` | How long the page waits for the Solana wallet to answer a connection or a signature (5–600; default 120). |
 
 One build and one relay can serve several domains, each with its own `config.json`
 ([`web/README.md`](web/README.md)).

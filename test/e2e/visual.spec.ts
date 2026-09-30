@@ -13,7 +13,10 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
 
+import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
+import { installMockPhantom } from './mock-phantom.js';
+import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -96,13 +99,52 @@ for (const vp of VIEWPORTS) {
       expect(ex.external).toEqual([]);
     });
 
-    test('the Connect menu (no Solana wallet adapter yet)', async ({ page }) => {
+    test('the Connect menu (Phantom found)', async ({ page }) => {
       await serveExchange(page);
+      await installMockPhantom(page);
       await page.goto('/#markets');
       await page.getByTestId('connect').click();
-      await expect(page.getByTestId('wallet-unsupported')).toBeVisible();
+      await expect(page.getByTestId('wallet-option')).toHaveText(/Phantom/);
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-connect-menu`, false);
+    });
+
+    test('Trade and Account with a connected wallet: the books, the forms and the holdings panel', async ({ page }) => {
+      await serveExchange(page);
+      const phantom = await installMockPhantom(page);
+      const relay = new MockRelay();
+      await page.route(`${RELAY}/**`, (r) => relay.handle(r));
+      await page.route('**/config.json', (r) => r.fulfill({ json: { network: 'stagenet', relayUrl: RELAY } }));
+      await page.goto('/#account');
+      await page.getByTestId('connect').click();
+      await page.getByTestId('wallet-option').click();
+      await expect(page.getByTestId('wallet-address')).toBeVisible();
+      await page.getByTestId('open-account').click();
+      await expect(page.getByTestId('masthead-account')).toBeVisible();
+      await page.getByTestId('get-demo-tokens').click();
+      await expect(page.getByTestId('demo-message')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-account-connected`);
+      await page.getByTestId('tab-trade').click();
+      await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-trade-connected`);
+      // The signing panel, while Phantom's window is open.
+      const release = phantom.holdNext();
+      await page.getByTestId('tab-account').click();
+      await page.getByTestId('withdraw-kind-shielded').click();
+      await page.getByTestId('send-amount').fill('1');
+      await page
+        .getByTestId('send-recipient')
+        .fill(
+          formatShieldedAddress({ coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) }, 'stagenet'),
+        );
+      await page.getByTestId('send-submit').click();
+      await expect(page.getByTestId('sign-prompt')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-sign-prompt`, false);
+      release();
+      await expect(page.getByTestId('sign-prompt')).toHaveCount(0);
     });
 
     test('Markets with a book open', async ({ page }) => {

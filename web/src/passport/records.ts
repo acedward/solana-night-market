@@ -33,7 +33,8 @@ export interface RosterRecord {
   useCounter: string;
 }
 
-export type JobAction = 'register' | 'withdraw' | 'append-inbox' | 'open-swap' | 'take';
+export type JobAction =
+  'register' | 'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'open-swap' | 'take' | 'demo-tokens';
 
 export interface JobRecord {
   requestId: string;

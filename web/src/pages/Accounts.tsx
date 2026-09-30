@@ -26,7 +26,7 @@ import {
 } from '@nightmarket/core';
 
 import { useActivity } from '../activity/ActivityContext.js';
-import type { ActivityKind } from '../activity/activity.js';
+import { stageWords, type ActivityKind } from '../activity/activity.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
 import { DemoTokens } from '../demo/DemoTokens.js';
 
@@ -77,22 +77,6 @@ import { useWallet } from '../wallet/WalletContext.js';
 const short = (s: string, head = 8, tail = 6) =>
   s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
 
-const STAGE_TEXT: Record<string, string> = {
-  queued: 'Waiting in line',
-  running: 'Started',
-  deploying: 'Creating your account',
-  'wave-1-submitted': 'Account created (step 1 of 2)',
-  'wave-2-submitted': 'Account features added (step 2 of 2)',
-  deployed: 'Account created',
-  activating: 'Linking your wallet to the account',
-  'activation-submitted': 'Sent to Midnight',
-  activated: 'Account ready',
-  proving: 'Creating the zero-knowledge proof',
-  submitted: 'Sent to Midnight',
-  succeeded: 'Done',
-  failed: 'Failed',
-};
-
 const JOB_TITLE: Record<string, string> = {
   register: 'Opening your account',
   withdraw: 'Withdrawing',
@@ -108,7 +92,7 @@ function JobTracker({ job }: { job: JobView }) {
   const last = job.stages.length - 1;
   const stages: TrackerStage[] = job.stages.map((s, i) => ({
     key: `${s.stage}-${i}`,
-    title: STAGE_TEXT[s.stage] ?? s.stage,
+    title: stageWords(s.stage, job.action),
     state: i < last || job.state === 'succeeded' ? 'done' : job.state === 'failed' ? 'failed' : 'current',
     time: <span title={new Date(s.at * 1000).toISOString()}>{clock(s.at)}</span>,
     detail: s.detail?.tx ? (
@@ -147,7 +131,7 @@ function JobTracker({ job }: { job: JobView }) {
       }
     >
       <p className="tracker-summary">
-        <strong>{STAGE_TEXT[job.stage] ?? job.stage}</strong>
+        <strong>{stageWords(job.stage, job.action)}</strong>
         {job.state === 'queued' && job.position !== undefined && (
           <span data-testid="queue-position"> — position {job.position} in the queue</span>
         )}
@@ -610,7 +594,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       await secureChange(e, account.address, coin);
       markLiveOffersCancelled(e, account.address);
       await syncAccount(e, account.address);
-      setMessage({ kind: 'ok', text: 'The coin is recorded in your inbox.' });
+      setMessage({ kind: 'ok', text: 'The coin is recorded in your inbox on Midnight.' });
     });
 
   const lede =

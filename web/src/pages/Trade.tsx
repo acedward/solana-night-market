@@ -5,6 +5,11 @@
 // amounts are shown before it, and the signing modal follows the market's part to the end. The
 // account's offers (Your offers and trades) are reconciled from the chain and the exchange.
 //
+// On-chain or not (P8.2, the owner's Q18 finding; questions Q24): creating an offer puts NOTHING on
+// the chain. The relay proves the offer and the exchange lists it; the tokens stay in the account
+// until someone takes it, and the take is the one Midnight transaction that settles it. The page
+// says so wherever the account's own offers show (./trade/messages.ts).
+//
 // The seam limits are enforced and explained here (Q9, FR-019): one live offer at a time, each
 // payment from one coin (an offer the account cannot pay keeps a greyed Buy or Sell that says why
 // on hover, focus and tap: "Not enough twBTC. You hold 0.10 twBTC.", AA 00044), and a warning
@@ -33,7 +38,7 @@ import {
 } from '@nightmarket/core';
 
 import { useActivity } from '../activity/ActivityContext.js';
-import type { ActivityKind } from '../activity/activity.js';
+import { OFFER_OFF_CHAIN, stageWords, type ActivityKind } from '../activity/activity.js';
 import { PortfolioDock, PortfolioToggle } from '../account/PortfolioDock.js';
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import {
@@ -72,33 +77,27 @@ import { findAccount, readCoins, readSecret } from '../passport/records.js';
 import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
+import { OPEN_OFFERS_NOTE, madeOfferText, tookOfferText } from '../trade/messages.js';
 import { guardFor, makeOffer, reconcileOffers, takeOffer } from '../trade/operations.js';
 import { liveOffer, readTrades, type TradeRecord } from '../trade/records.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet } from '../wallet/WalletContext.js';
 
-const short = (s: string, head = 8, tail = 6) =>
-  s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
 const amt = (raw: bigint, t: TokenEntry) => formatUnits(raw, t.decimals, { minFractionDigits: 2, grouping: true });
 const clock = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 const placed = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 
-const STAGE_TEXT: Record<string, string> = {
-  queued: 'Waiting in line',
-  running: 'Started',
-  proving: 'Creating the zero-knowledge proof (about a minute)',
-  proven: 'Proof ready',
-  posted: 'Sent to the exchange',
-  listed: 'Listed on the exchange',
+/** The take's own stages, in more words than the modal's (the tracker has the room). */
+const TAKE_STAGE_TEXT: Record<string, string> = {
   'offer-checked': 'The offer is still there, and exactly the one you chose',
   merged: 'Your side and the offer combined into one transaction',
-  settled: 'Settled',
-  succeeded: 'Done',
-  failed: 'Failed',
 };
+const stageText = (stage: string, action: string) =>
+  (action === 'take' ? TAKE_STAGE_TEXT[stage] : undefined) ?? stageWords(stage, action);
 
 const STATE_TEXT: Record<TradeRecord['status'], string> = {
-  live: 'Live',
+  // A live offer is listed on the market, not on-chain (questions Q24).
+  live: 'Listed',
   filled: 'Filled',
   expired: 'Expired',
   cancelled: 'Cancelled',
@@ -126,10 +125,11 @@ function hashParams(): URLSearchParams {
 
 /** A trade job in progress, as the market reports it (the stage tracker of the design system). */
 function Tracker({ job }: { job: JobView }) {
+  const make = job.action === 'open-swap';
   const shown = job.stages.filter((s) => s.stage !== 'queued' || job.stages.length === 1);
   const stages: TrackerStage[] = shown.map((s, i) => ({
     key: `${s.stage}-${i}`,
-    title: STAGE_TEXT[s.stage] ?? s.stage,
+    title: stageText(s.stage, job.action),
     state: i < shown.length - 1 || job.state === 'succeeded' ? 'done' : job.state === 'failed' ? 'failed' : 'current',
     time: clock(s.at * 1000),
     detail:
@@ -153,10 +153,10 @@ function Tracker({ job }: { job: JobView }) {
   return (
     <Panel
       className="section-gap"
-      title="Your trade"
+      title={make ? 'Your offer' : 'Your trade'}
       meta={
         <span className="small">
-          {STAGE_TEXT[job.stage] ?? job.stage}
+          {stageText(job.stage, job.action)}
           {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : ''}
         </span>
       }
@@ -164,7 +164,8 @@ function Tracker({ job }: { job: JobView }) {
       data-state={job.state}
       data-stage={job.stage}
     >
-      <StageTracker stages={stages} label="Your trade" />
+      <StageTracker stages={stages} label={make ? 'Your offer' : 'Your trade'} />
+      {make && <p className="table-note">{OFFER_OFF_CHAIN}</p>}
     </Panel>
   );
 }
@@ -214,25 +215,27 @@ function PairStats({ market, quote }: { market: Market | null; quote: TokenEntry
   const value = (v: string | null | undefined, cls?: string) =>
     market === null ? <Skeleton width="4.5em" /> : v ? <span className={cls}>{v}</span> : <NoValue>—</NoValue>;
   return (
-    <dl className="pair-stats" data-testid="pair-stats">
-      <div>
-        <dt>Buy at</dt>
-        <dd>{value(market?.asks.best ? askText(market.asks.best.price) : null, 'price-ask')}</dd>
-      </div>
-      <div>
-        <dt>Sell at</dt>
-        <dd>{value(market?.bids.best ? bidText(market.bids.best.price) : null, 'price-bid')}</dd>
-      </div>
-      <div>
-        <dt>Spread</dt>
-        <dd>{value(market ? spreadText(market) : null)}</dd>
-      </div>
-      <div>
-        <dt>Last trade</dt>
-        <dd>{value(market ? lastTradeText(market.lastTrade) : null)}</dd>
-      </div>
-      <div className="sr-only">Prices in {quote.symbol}</div>
-    </dl>
+    <>
+      <span className="sr-only">Prices in {quote.symbol}</span>
+      <dl className="pair-stats" data-testid="pair-stats">
+        <div>
+          <dt>Buy at</dt>
+          <dd>{value(market?.asks.best ? askText(market.asks.best.price) : null, 'price-ask')}</dd>
+        </div>
+        <div>
+          <dt>Sell at</dt>
+          <dd>{value(market?.bids.best ? bidText(market.bids.best.price) : null, 'price-bid')}</dd>
+        </div>
+        <div>
+          <dt>Spread</dt>
+          <dd>{value(market ? spreadText(market) : null)}</dd>
+        </div>
+        <div>
+          <dt>Last trade</dt>
+          <dd>{value(market ? lastTradeText(market.lastTrade) : null)}</dd>
+        </div>
+      </dl>
+    </>
   );
 }
 
@@ -472,7 +475,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     const l = legs;
     void run('make', 'open-swap', async (e) => {
       const rec = await makeOffer(e, account.address, l, pair);
-      setMessage({ kind: 'ok', text: `Your offer is on the exchange: ${rec.summary} (offer ${short(rec.offerId)}).` });
+      setMessage({ kind: 'ok', text: madeOfferText(rec) });
       setQuantity('');
     });
   };
@@ -493,10 +496,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     void run('take', 'take', async (env2) => {
       setConfirmTake(null);
       const rec = await takeOffer(env2, account.address, e, pair);
-      setMessage({
-        kind: 'ok',
-        text: `Done: ${rec.summary}, settled in one transaction (tx ${short(rec.settledTx ?? '')}).`,
-      });
+      setMessage({ kind: 'ok', text: tookOfferText(rec) });
       setPicked(null);
     });
   const takeGuard = guardFor({ store: store!, scope }, account.address, 'take', now);
@@ -675,8 +675,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           className="panel-intro"
           data-testid="live-offer-banner"
         >
-          Your offer is live: {live.summary}, until {clock(live.expiresAt)}. Any other approval (a take or a withdrawal)
-          cancels it; we ask you first.
+          Your offer is listed on the market: {live.summary}, until {clock(live.expiresAt)}. It is not on-chain: your
+          tokens stay in your account until someone takes it. Any other approval (a take or a withdrawal) cancels it; we
+          ask you first.
         </Notice>
       )}
 
@@ -728,7 +729,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             {bookSide(bids, 'bids')}
           </div>
           <p className="table-note">
-            Offers are all or nothing: you pay and get exactly the amounts shown, from one coin.
+            Offers are listed on the market, not on-chain. Taking one is all or nothing: you pay and get exactly the
+            amounts shown, from one coin, settled on Midnight in one transaction.
           </p>
         </Panel>
 
@@ -868,11 +870,12 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               data-testid="make-sign"
               disabled={!!busy || !!paused || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'}
             >
-              {busy === 'make' ? 'Publishing…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
+              {busy === 'make' ? 'Preparing your offer…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
             </Button>
-            <p className="xsmall muted gap-top">
-              Your offer stays on the exchange until someone takes all of it, or for about an hour. Approving anything
-              else from this account before then cancels it.
+            <p className="xsmall muted gap-top" data-testid="make-off-chain">
+              One approval in Phantom lists your offer on the market; it puts nothing on-chain. Your tokens stay in your
+              account until someone takes the whole offer (then it settles on Midnight in one transaction), for about an
+              hour. Approving anything else from this account before then cancels it.
             </p>
           </Panel>
         </div>
@@ -896,6 +899,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         }
         data-testid="my-offers"
       >
+        <p className="panel-intro small muted" data-testid="my-offers-off-chain">
+          {OPEN_OFFERS_NOTE}
+        </p>
         <StatementTable
           caption="Your offers and trades"
           columns={[

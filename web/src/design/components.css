@@ -2087,10 +2087,12 @@
 .input::placeholder {
   color: var(--muted);
 }
+/* The focus ring of a field: the same 2 px cyan ring (with a gap) as every other control
+   (base.css :focus-visible; P8.2 accessibility), drawn as a shadow so it follows the radius. */
 .input:focus {
   outline: none;
   border-color: var(--cyan);
-  box-shadow: 0 0 0 3px rgb(34 211 238 / 22%);
+  box-shadow: var(--focus);
 }
 .input.mono {
   font-family: var(--mono);
@@ -2139,7 +2141,7 @@ select.input option {
   box-shadow: none;
 }
 .input-unit:focus-within {
-  box-shadow: 0 0 0 3px rgb(34 211 238 / 22%);
+  box-shadow: var(--focus);
 }
 .input-unit:focus-within .unit {
   border-color: var(--cyan);
@@ -2370,6 +2372,8 @@ select.input option {
   position: relative;
   flex: 1 1 0;
   min-width: 0;
+  /* Room between two labels, so a long one wraps instead of touching its neighbour (390 px). */
+  padding: 0 var(--space-1);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2571,6 +2575,10 @@ select.input option {
   font-size: var(--text-xl);
   font-weight: 700;
 }
+/* A dialog that starts on its title (focusTitle): the title is a starting point, not a control. */
+.mnb-dialog .dialog-title[tabindex='-1']:focus {
+  outline: none;
+}
 .mnb-dialog .dialog-body {
   color: var(--slate);
   font-size: 0.9375rem;
@@ -2705,6 +2713,16 @@ select.input option {
   margin-top: var(--space-3);
   color: var(--muted);
   font-size: var(--text-sm);
+}
+/* A made offer is off-chain until someone takes it (questions Q24): said plainly, in an info box,
+   on the signing modal and wherever the account's open offers show. */
+.off-chain-note {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: var(--info-soft);
+  border: 1px solid rgb(34 211 238 / 30%);
+  color: var(--ink);
 }
 
 /* ── empty state ───────────────────────────────────────────────────── */

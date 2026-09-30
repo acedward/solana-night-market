@@ -106,7 +106,12 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('legs-give')).toContainText('0.05 twBTC');
   await expect(page.getByTestId('legs-want')).toContainText('3,000.00 twUSDC');
   await page.getByTestId('make-sign').click();
-  await expect(page.getByTestId('trade-message')).toContainText('Your offer is on the exchange');
+  // Listed on the market, and plainly NOT on-chain (the owner's Q18 finding; questions Q24).
+  await expect(page.getByTestId('trade-message')).toContainText('Your offer is listed on the market');
+  await expect(page.getByTestId('trade-message')).toContainText('Nothing goes on-chain until someone takes your offer');
+  await expect(page.getByTestId('live-offer-banner')).toContainText('It is not on-chain');
+  await expect(page.locator('[data-testid=my-trade][data-role=make]')).toContainText('Listed');
+  await expect(page.getByTestId('my-offers-off-chain')).toContainText('listed on the market, not on-chain');
   expect(phantom.requests).toHaveLength(1);
   const make = lines(phantom.requests[0]!.text);
   expect(make[0]).toBe('Night Market - stagenet '); // the arm's 24-character label field
@@ -123,7 +128,7 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('take-confirm')).toBeVisible();
   await expect(page.getByTestId('take-cancels-offer')).toBeVisible(); // the live offer dies with it
   await page.getByTestId('take-sign').click();
-  await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction');
+  await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction on Midnight');
   expect(phantom.requests).toHaveLength(2);
   const take = lines(phantom.requests[1]!.text);
   expect(take[1]).toBe('Swap offer');
@@ -137,6 +142,24 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');
   await expect(holding(page, 'twBTC')).toContainText('0.14');
   await expect(holding(page, 'twETH')).toHaveCount(0);
+});
+
+test('a make the exchange has not listed yet says so, and that nothing is on-chain (questions Q24)', async ({
+  page,
+}) => {
+  const { relay } = await setup(page, { seeded: true });
+  relay.makeListing = 'unknown';
+  await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+  await connectPhantom(page);
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
+  await page.getByTestId('side-sell').click();
+  await page.getByTestId('make-quantity').fill('0.05');
+  await page.getByTestId('make-price').fill('60000');
+  await page.getByTestId('make-sign').click();
+  await expect(page.getByTestId('trade-message')).toContainText('The market has your offer, but it is not listed yet');
+  await expect(page.getByTestId('trade-message')).toContainText('Nothing goes on-chain until someone takes your offer');
+  // The tokens stayed: the offer's coin is not spent.
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
 });
 
 test('withdraw shielded (one approval, one more to record the change) and unshielded (one approval)', async ({

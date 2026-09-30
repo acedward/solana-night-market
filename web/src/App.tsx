@@ -62,21 +62,54 @@ const sectionFromHash = (): SectionId => {
   return (SECTIONS.find((s) => s.id === h)?.id ?? 'markets') as SectionId;
 };
 
-/** Close a menu on Escape or a click outside it. */
-function useDismiss(open: boolean, close: () => void, ref: RefObject<HTMLElement | null>) {
+/**
+ * A header menu's keyboard and dismissal (the ARIA menu button; P8.2 accessibility): the first item
+ * takes the focus when the menu opens; the arrow keys, Home and End move between its items; Escape
+ * closes it and gives the focus back to its button; a click outside it, or the focus leaving it
+ * (Tab), closes it.
+ */
+function useMenu(open: boolean, close: () => void, ref: RefObject<HTMLElement | null>) {
   useEffect(() => {
     if (!open) return;
+    const items = () => Array.from(ref.current?.querySelectorAll<HTMLElement>('[role=menuitem]') ?? []);
+    items()[0]?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape') {
+        close();
+        ref.current?.querySelector<HTMLElement>('[aria-haspopup]')?.focus();
+        return;
+      }
+      const list = items();
+      const i = list.indexOf(document.activeElement as HTMLElement);
+      if (i < 0) return;
+      const next =
+        e.key === 'ArrowDown'
+          ? list[(i + 1) % list.length]
+          : e.key === 'ArrowUp'
+            ? list[(i - 1 + list.length) % list.length]
+            : e.key === 'Home'
+              ? list[0]
+              : e.key === 'End'
+                ? list[list.length - 1]
+                : undefined;
+      if (next) {
+        e.preventDefault();
+        next.focus();
+      }
     };
     const onDown = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) close();
     };
+    const onFocus = (e: FocusEvent) => {
+      if (ref.current && e.target instanceof Node && !ref.current.contains(e.target)) close();
+    };
     document.addEventListener('keydown', onKey);
     document.addEventListener('pointerdown', onDown);
+    document.addEventListener('focusin', onFocus);
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('focusin', onFocus);
     };
   }, [open, close, ref]);
 }
@@ -100,7 +133,7 @@ function WalletArea({
     setMenu(false);
     setChoosing(false);
   }, [setChoosing]);
-  useDismiss(menu || choosing, closeAll, area);
+  useMenu(menu || choosing, closeAll, area);
   // The account this wallet has in this browser (read-only; `revision` follows writes).
   const account = useMemo(
     () =>

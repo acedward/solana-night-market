@@ -22,6 +22,9 @@ import { Notice } from './Notice.js';
 export interface DialogProps {
   open: boolean;
   title: ReactNode;
+  /** Start with the focus on the title, the dialog scrolled to its top (a long, read-first dialog:
+   *  the signing modal on a phone). Otherwise the browser focuses the first control. */
+  focusTitle?: boolean;
   /** Escape, or the page's Cancel. */
   onClose(): void;
   tone?: 'default' | 'danger';
@@ -31,17 +34,34 @@ export interface DialogProps {
   testId?: string;
 }
 
-export function Dialog({ open, title, onClose, tone = 'default', actions, children, className, testId }: DialogProps) {
+export function Dialog({
+  open,
+  title,
+  focusTitle = false,
+  onClose,
+  tone = 'default',
+  actions,
+  children,
+  className,
+  testId,
+}: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const titleId = useId();
   useLayoutEffect(() => {
     const d = ref.current;
     if (!d || !open) return;
-    if (!d.open) d.showModal();
+    if (!d.open) {
+      d.showModal();
+      if (focusTitle) {
+        heading.current?.focus({ preventScroll: true });
+        d.scrollTop = 0;
+      }
+    }
     return () => {
       if (d.open) d.close();
     };
-  }, [open]);
+  }, [open, focusTitle]);
   if (!open) return null;
   return (
     <dialog
@@ -54,7 +74,7 @@ export function Dialog({ open, title, onClose, tone = 'default', actions, childr
         onClose();
       }}
     >
-      <h2 id={titleId} className="dialog-title">
+      <h2 id={titleId} className="dialog-title" ref={heading} {...(focusTitle ? { tabIndex: -1 } : {})}>
         {title}
       </h2>
       <div className="dialog-body">{children}</div>

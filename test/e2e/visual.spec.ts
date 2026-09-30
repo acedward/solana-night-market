@@ -18,9 +18,10 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
-import { installMockPhantom } from './mock-phantom.js';
+import { connectPhantom, installMockPhantom } from './mock-phantom.js';
 import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const OUT = process.env.VISUAL_OUT_DIR ?? `${root}/test-results/visual`;
@@ -148,6 +149,31 @@ for (const vp of VIEWPORTS) {
       await shot(page, `${vp.name}-sign-prompt`, false);
       release();
       await expect(page.getByTestId('sign-prompt')).toHaveCount(0);
+    });
+
+    // AA 00047 P8.2 (questions Q24): a make's own progress (Preparing your offer, then Listed on the
+    // market) and the listed offer, which says it is not on-chain.
+    test('Trade: making an offer (preparing, listing, listed)', async ({ page }) => {
+      const { relay } = await setup(page, { seeded: true });
+      await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+      await connectPhantom(page);
+      await page.getByTestId('side-sell').click();
+      await page.getByTestId('make-quantity').fill('0.05');
+      await page.getByTestId('make-price').fill('61500');
+      const hold = relay.holdNextJob();
+      await page.getByTestId('make-sign').click();
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'proving');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-preparing`, false);
+      hold.at(['proving', 'proven', 'posted']);
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'posted', { timeout: 10_000 });
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listing`, false);
+      hold();
+      await expect(page.getByTestId('live-offer-banner')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('my-offers-off-chain')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listed`);
     });
 
     test('Markets with a book open', async ({ page }) => {

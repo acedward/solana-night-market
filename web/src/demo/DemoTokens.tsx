@@ -9,19 +9,11 @@ import { useCallback, useEffect, useState } from 'react';
 import type { DemoTokensInfo, JobView, NetworkProfile } from '@nightmarket/core';
 
 import { useActivity } from '../activity/ActivityContext.js';
+import { stageWords } from '../activity/activity.js';
 import { useAccountView } from '../account/useAccountView.js';
 import { Button, Icon, Panel, Skeleton, Toast } from '../design/index.js';
 import { useRelayStatus } from '../relay/RelayStatus.js';
 import { claimDemoTokens, claimState, packText } from './operations.js';
-
-const STAGE_TEXT: Record<string, string> = {
-  queued: 'Waiting in line',
-  running: 'Started',
-  minting: 'Minting from the test faucets',
-  depositing: 'Depositing into your account',
-  submitted: 'Sent to Midnight',
-  succeeded: 'Done',
-};
 
 export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
   const { account, hasSecret, relay, env, scope } = useAccountView(network, relayUrl);
@@ -89,8 +81,8 @@ export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; rel
             {packText(info.pack)}
           </p>
           <p className="xsmall muted" data-testid="demo-limits">
-            One free pack per wallet: the market mints it from the test faucets and pays the fees. {info.remainingToday}{' '}
-            of {info.dailyCap} left today.
+            One free pack per wallet: the market mints it from the test faucets into your account on Midnight and pays
+            the fees. {info.remainingToday} of {info.dailyCap} left today.
           </p>
         </>
       ) : (
@@ -117,7 +109,7 @@ export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; rel
       )}
       {busy && job && (
         <p className="small gap-top" data-testid="demo-stage" data-stage={job.stage}>
-          {STAGE_TEXT[job.stage] ?? job.stage}
+          {stageWords(job.stage, job.action)}
           {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : ''}
         </p>
       )}

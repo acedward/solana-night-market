@@ -312,7 +312,10 @@ function Book({ market, onClose }: { market: Market; onClose(): void }) {
         <BookSide market={market} side="asks" />
         <BookSide market={market} side="bids" />
       </div>
-      <p className="table-note">Offers are all or nothing: you pay and get the whole amount shown, in one step.</p>
+      <p className="table-note">
+        Offers are listed on the market, not on-chain. Taking one is all or nothing: you pay and get the whole amount
+        shown, settled on Midnight in one transaction.
+      </p>
     </Panel>
   );
 }

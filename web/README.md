@@ -254,8 +254,18 @@ Your data's CLEAR ALL). Nothing to show: `EmptyState icon="…" title="…"`.
 wraps it in `activity.run(kind, …)` and reports its relay jobs with `activity.job(job)` (its
 `OperationEnv.onJob`). The signing modal (`src/wallet/SigningPrompt.tsx`) then shows the exact text
 Phantom shows with its fingerprint while the wallet is open (`sign-prompt`), and after the signature
-the steps Approve → Market prepares it → Confirmed, a bar against the measured duration of that
-action and the relay's stage (`activity-progress`), with "Continue in background". On the page,
+the action's steps, a bar and the relay's stage (`activity-progress`), with "Continue in background".
+The steps depend on how the action ends (`ACTIVITY_FLOW` in `src/activity/activity.ts`):
+
+- an on-chain action (open an account, demo tokens, a take, a withdrawal, saving a change): Approve →
+  Market prepares it → Confirmed on Midnight, with a bar against the measured duration of that action;
+- making an offer: Approve → Preparing your offer → Listed on the market. A made offer is a proven,
+  signed intent the exchange lists; nothing is on-chain until someone takes it, and the tokens stay
+  in the account until then. The bar covers the preparation (the proof) only, and the step ends when
+  the exchange lists the offer. Every place that shows the account's own offers says so
+  (`src/trade/messages.ts`, `OFFER_OFF_CHAIN`).
+
+On the page,
 `StageTracker` shows a long job (done stages ticked in green, the current one ringed in violet), and
 `Hash` a transaction hash or id (shortened, with Copy, and a link when `href` is given). Pass a
 stage's test attributes through `data`:
@@ -273,9 +283,12 @@ stage's test attributes through `data`:
 asserts no horizontal page scroll, 44 px buttons on touch screens, the self-hosted font and no
 glass; add the new page there (its fixtures are in `test/e2e/visual-fixtures.ts`). The screenshots
 land in `test-results/visual/` (or `$VISUAL_OUT_DIR`). The design review screens (the landing,
-Trade, Create offer, the signing modal approving and proving, Portfolio, the drawer, demo tokens,
-an error toast) are `test/e2e/screens.spec.ts`, in `test-results/screens/` (or `$SCREENS_OUT_DIR`).
-The contrast of every text pair on the dark surfaces is `test/design-contrast.test.ts`.
+Trade, Create offer, the signing modal approving, the make-offer progress (preparing, then listing)
+and the listed offer, Portfolio, the drawer, demo tokens, an error toast) are
+`test/e2e/screens.spec.ts`, in `test-results/screens/` (or `$SCREENS_OUT_DIR`). The contrast of
+every text pair on the dark surfaces is `test/design-contrast.test.ts`; axe-core (WCAG 2.2 A/AA
+rules) on the key screens, the drawer's focus trap, Escape on every overlay and the focus rings are
+`test/e2e/a11y.spec.ts`.
 
 ## When something is not working (error states)
 

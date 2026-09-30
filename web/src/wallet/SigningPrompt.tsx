@@ -2,15 +2,28 @@
 //
 // 1. While the Solana wallet is asked to sign, it shows the exact text the wallet shows, with its
 //    fingerprint, so the customer can compare the two before approving (`sign-prompt`).
-// 2. Once the wallet has signed, it follows the market's part of the action (`activity-progress`):
-//    the relay proves the call (20–60 s), submits it, and it lands. A bar fills against how long
-//    that action usually takes, and the relay's own stage is named.
+// 2. Once the wallet has signed, it follows the market's part of the action (`activity-progress`),
+//    with the steps of that kind of action (../activity/activity.ts, questions Q24):
+//    - an on-chain action (open an account, demo tokens, a take, a withdrawal): the relay proves the
+//      call (about 20 s), submits it, and it lands; a bar fills against how long that action
+//      usually takes (Approve → Market prepares it → Confirmed on Midnight);
+//    - making an offer: the relay proves it and the exchange lists it; nothing reaches the chain
+//      (Approve → Preparing your offer → Listed on the market). The bar covers the preparation
+//      only; the listing has no duration bar, and the modal says the tokens stay in the account.
 // It holds nothing and cancels nothing: the wallet answers (or the page's timeout ends the wait),
 // the action ends, and the modal closes by itself; "Continue in background" only hides it.
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
-import { EXPECTED_SECONDS, STAGE_WORDS, activityStep, type ActivityStore } from '../activity/activity.js';
+import {
+  ACTIVITY_FLOW,
+  EXPECTED_SECONDS,
+  OFFER_OFF_CHAIN,
+  OFFER_PREPARE_SECONDS,
+  activityStep,
+  stageWords,
+  type ActivityStore,
+} from '../activity/activity.js';
 import { Button, Dialog, Icon, ProgressBar, Spinner, Stepper } from '../design/index.js';
 import type { SignPromptStore } from './sign-prompt.js';
 import { useWallet } from './WalletContext.js';
@@ -26,7 +39,6 @@ const LEDE = {
 const SETTLE_MS = 300;
 
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
-const usually = (s: number) => (s >= 55 ? 'about a minute' : `about ${Math.round(s / 5) * 5} seconds`);
 
 export function SigningPrompt({
   prompts,
@@ -51,7 +63,8 @@ export function SigningPrompt({
     return () => clearInterval(t);
   }, [running]);
 
-  const steps = [`Approve in ${walletName}`, 'Market prepares it', 'Confirmed on Midnight'];
+  const flow = act ? ACTIVITY_FLOW[act.kind] : null;
+  const steps = flow ? [`Approve in ${walletName}`, ...flow.steps] : [];
 
   if (prompt) {
     const digestLine = prompt.kind === 'account-call' ? 'Digest' : 'Nonce';
@@ -62,6 +75,7 @@ export function SigningPrompt({
     return (
       <Dialog
         open
+        focusTitle
         className="sign-modal"
         title={
           <>
@@ -81,6 +95,11 @@ export function SigningPrompt({
         <p className="small" data-testid="sign-prompt-kind" data-kind={prompt.kind}>
           {LEDE[prompt.kind]}
         </p>
+        {flow?.end === 'listed' && (
+          <p className="small off-chain-note" data-testid="sign-prompt-off-chain">
+            Approving lists your offer on the market. {OFFER_OFF_CHAIN}
+          </p>
+        )}
         <p className="sign-label">What {prompt.wallet} shows</p>
         <pre className="sign-text mono" data-testid="sign-prompt-text">
           {prompt.text}
@@ -109,11 +128,18 @@ export function SigningPrompt({
   if (!settled) return null;
 
   const job = act.job;
-  const step = activityStep(job);
+  const listing = flow!.end === 'listed';
+  const step = activityStep(act.kind, job);
   const since = act.jobSince ?? act.approvedAt ?? act.startedAt;
   const elapsed = Math.max(0, (now - since) / 1000);
-  const expected = EXPECTED_SECONDS[job?.action ?? act.kind] ?? 60;
-  const stage = job ? (STAGE_WORDS[job.stage] ?? job.stage) : 'Sending to the market';
+  // An on-chain action: the whole action's usual duration. A make: the preparation only, then no
+  // length at all while the exchange lists it (it is not a transaction; questions Q24).
+  const bar: number | undefined = listing
+    ? step === 1
+      ? Math.min(0.95, elapsed / OFFER_PREPARE_SECONDS)
+      : undefined
+    : Math.min(0.95, elapsed / (EXPECTED_SECONDS[job?.action ?? act.kind] ?? 60));
+  const stage = job ? stageWords(job.stage, job.action) : 'Sending to the market';
   const queued = job?.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : '';
   return (
     <Dialog
@@ -134,9 +160,9 @@ export function SigningPrompt({
       }
     >
       <Stepper steps={steps} current={step} label={act.title} />
-      <div className="progress-block">
+      <div className="progress-block" data-end={flow!.end}>
         <p className="progress-line">
-          <strong data-testid="activity-stage" data-stage={job?.stage ?? 'sending'}>
+          <strong data-testid="activity-stage" data-stage={job?.stage ?? 'sending'} aria-live="polite">
             {stage}
             {queued}
           </strong>
@@ -144,10 +170,13 @@ export function SigningPrompt({
             {clock(elapsed)}
           </span>
         </p>
-        <ProgressBar value={Math.min(0.95, elapsed / expected)} label={act.title} data-testid="activity-bar" />
-        <p className="progress-note">
-          Signed. The market is creating a zero-knowledge proof of your action and sending it to Midnight; this usually
-          takes {usually(expected)}. You can keep browsing: the page tells you when it is done.
+        <ProgressBar
+          {...(bar !== undefined ? { value: bar } : {})}
+          label={listing && step > 1 ? 'Listing your offer' : act.title}
+          data-testid="activity-bar"
+        />
+        <p className="progress-note" data-testid="activity-note">
+          {flow!.note}
         </p>
       </div>
     </Dialog>

@@ -31,9 +31,18 @@ export interface RelayConfig {
   trustProxy: boolean;
   /** Origins allowed to call the relay from a browser (exact match). Empty: no CORS headers. */
   corsOrigins: string[];
-  proofServerUrl: string;
-  /** Expected proof-server version (health reports a mismatch). */
-  proofServerVersion: string;
+  /**
+   * TWO proof servers until stagenet moves to dust/10 (AA 00047 spike 3 §6, spec FR-005):
+   *   - the CONTRACT prover proves the account's circuits: 9.0.0-rc.8 (ZKIR 3.1; rc.6 cannot read
+   *     compactc 0.35.0's circuits, "unrecognised discriminant");
+   *   - the DUST prover proves the sponsor wallet's DUST spends: 9.0.0-rc.6 (stagenet requires
+   *     dust/9; rc.8 proves dust/10).
+   * /health reports each one's reachability and version (a mismatch degrades it).
+   */
+  contractProofServerUrl: string;
+  contractProofServerVersion: string;
+  dustProofServerUrl: string;
+  dustProofServerVersion: string;
   /** The read-only key volume (compiled contracts with prover keys), or null. */
   managedPath: string | null;
   /** The pinned verifier-key fingerprint of the key volume; the relay refuses to start on another. */
@@ -203,12 +212,26 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
   const logLevel = (str(env.LOG_LEVEL) ?? 'info') as LogLevel;
   if (!LOG_LEVELS.includes(logLevel)) throw new ConfigError(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}`);
 
-  const proofServerUrl = str(env.MIDNIGHT_PROOF_SERVER_URL) ?? 'http://proof-server:6300';
-  try {
-    new URL(proofServerUrl);
-  } catch {
-    throw new ConfigError('MIDNIGHT_PROOF_SERVER_URL is not a URL');
+  // One proof server cannot serve both proofs on stagenet today, so the single-server names of MN
+  // Bank are refused rather than guessed at (a contract proof sent to rc.6 fails minutes later).
+  for (const legacy of ['MIDNIGHT_PROOF_SERVER_URL', 'PROOF_SERVER_EXPECTED_VERSION']) {
+    if (str(env[legacy]) !== undefined) {
+      throw new ConfigError(
+        `${legacy} is replaced by two settings: MIDNIGHT_CONTRACT_PROOF_SERVER_URL (proof server 9.0.0-rc.8, the account's circuits) and MIDNIGHT_DUST_PROOF_SERVER_URL (9.0.0-rc.6, the sponsor's DUST), with CONTRACT_/DUST_PROOF_SERVER_EXPECTED_VERSION`,
+      );
+    }
   }
+  const url = (name: string, dflt: string): string => {
+    const value = str(env[name]) ?? dflt;
+    try {
+      new URL(value);
+    } catch {
+      throw new ConfigError(`${name} is not a URL`);
+    }
+    return value;
+  };
+  const contractProofServerUrl = url('MIDNIGHT_CONTRACT_PROOF_SERVER_URL', 'http://proof-server-contracts:6300');
+  const dustProofServerUrl = url('MIDNIGHT_DUST_PROOF_SERVER_URL', 'http://proof-server-dust:6300');
 
   const fingerprint = str(env.RELAY_KEYS_FINGERPRINT)?.toLowerCase() ?? null;
   if (fingerprint && !/^[0-9a-f]{64}$/.test(fingerprint))
@@ -229,8 +252,10 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-    proofServerUrl,
-    proofServerVersion: str(env.PROOF_SERVER_EXPECTED_VERSION) ?? '9.0.0-rc.6',
+    contractProofServerUrl,
+    contractProofServerVersion: str(env.CONTRACT_PROOF_SERVER_EXPECTED_VERSION) ?? '9.0.0-rc.8',
+    dustProofServerUrl,
+    dustProofServerVersion: str(env.DUST_PROOF_SERVER_EXPECTED_VERSION) ?? '9.0.0-rc.6',
     managedPath: str(env.MIDNIGHT_MANAGED_PATH) ?? null,
     keysFingerprint: fingerprint,
     requireKeys: bool(env.RELAY_REQUIRE_KEYS, false, 'RELAY_REQUIRE_KEYS'),

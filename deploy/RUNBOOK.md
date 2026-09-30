@@ -3,10 +3,12 @@
 > **Being rewritten (AA 00047).** This runbook is MN Bank's, carried over. Night Market has **no
 > Sepolia and no bridge**: skip sections 5 and 8, the bridge parts of 7, 9 and 14, and every
 > `SEPOLIA_*` / `BRIDGE_*` / `STALE_CLOSE_*` / `VAULT_GAS_*` setting (the bundle no longer reads
-> them). Image, volume and path names are now `nightmarket…` where this text says `mnbank…`. Lane
-> B3 rewrites the runbook for the Ed25519 arm: compactc 0.35.0 keys, the rc.8 proof server for the
-> contract circuits beside rc.6 for DUST, and the demo-token endpoint. `deploy/.env.example` and
-> `deploy/compose.yml` are current.
+> them). Image, volume and path names are now `nightmarket…` where this text says `mnbank…`. The
+> bundle already builds the Ed25519 arm's keys with compactc 0.35.0 (the account alone is installed
+> in the key volume; the report is `.night-market-keys.json`) and runs TWO proof servers,
+> `proof-server-contracts` (9.0.0-rc.8, the account's circuits) and `proof-server-dust` (9.0.0-rc.6,
+> the sponsor's DUST), where this text says one `proof-server`. Lane B3 rewrites the runbook for
+> them and for the demo-token endpoint. `deploy/.env.example` and `deploy/compose.yml` are current.
 
 This runbook deploys and runs the market on Midnight **stagenet**, a test network: nothing here
 carries real value. Every command runs from the repository root unless it says otherwise.

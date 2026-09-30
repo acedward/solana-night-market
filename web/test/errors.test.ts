@@ -129,6 +129,12 @@ describe('what /health pauses, and says', () => {
     const prover = health({ proofServer: { ...health().proofServer, reachable: false } });
     expect(relayNotices(ok(prover)).map((n) => n.id)).toEqual(['prover-down']);
     expect(spendingPaused(ok(prover))).toMatch(/prover is not available/);
+    // The DUST prover (the fee payment) down pauses them the same way (AA 00047: two provers).
+    const dust = health({ dustProofServer: { reachable: false, version: null, jobCapacity: null } });
+    expect(relayNotices(ok(dust)).map((n) => n.id)).toEqual(['prover-down']);
+    expect(
+      relayNotices(ok(health({ dustProofServer: { reachable: true, version: '9.0.0-rc.6', jobCapacity: 1 } }))),
+    ).toEqual([]);
 
     const low = health({ sponsor: { ...health().sponsor, dustLow: true } });
     expect(relayNotices(ok(low))[0]).toMatchObject({ id: 'sponsor-low', place: 'shell', tone: 'danger' });

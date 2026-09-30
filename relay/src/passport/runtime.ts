@@ -27,7 +27,9 @@ export interface PassportRuntimeOptions {
   networkId: string;
   indexerUrl: string;
   indexerWsUrl: string;
-  proofServerUrl: string;
+  /** The CONTRACT prover (proof server 9.0.0-rc.8): the account's circuits are compactc 0.35.0's
+   *  ZKIR 3.1, which rc.6 cannot read. The sponsor wallet's DUST goes to rc.6 (../sponsor/facade.ts). */
+  contractProofServerUrl: string;
   /** Proof requests may take minutes (k=18); the HTTP provider's timeout, ms. */
   proofTimeoutMs?: number;
   /** A balanced transaction's time to live, ms (the node's fee window is short). */
@@ -40,16 +42,18 @@ const VENDOR = '../../../vendor/passport/contract';
 /** The client modules, loaded once. `compiled` is the very module `contract.js` re-exports
  *  (same path, so the same instance), imported directly for its `expectedVk` table. */
 async function importClient() {
-  const [account, signer, contract, compiled, witnesses, shape, compactJs] = await Promise.all([
+  const [account, signer, contract, compiled, witnesses, ed25519, shape, compactJs] = await Promise.all([
     import(`${VENDOR}/src/wallet/account.js`),
     import(`${VENDOR}/src/wallet/signer.js`),
     import(`${VENDOR}/src/wallet/contract.js`),
     import(`${VENDOR}/contracts/managed/account/contract/index.js`),
     import(`${VENDOR}/src/wallet/witnesses.js`),
+    // Track A's Ed25519 arm client (Ed25519Device, strict decoding, the tweetnacl pre-check).
+    import(`${VENDOR}/src/wallet/ed25519.js`),
     import('./account-shape.js'),
     import('@midnight-ntwrk/compact-js'),
   ]);
-  return { account, signer, contract, compiled, witnesses, shape, compactJs };
+  return { account, signer, contract, compiled, witnesses, ed25519, shape, compactJs };
 }
 export type PassportClient = Awaited<ReturnType<typeof importClient>>;
 
@@ -118,7 +122,7 @@ export class PassportRuntime {
       zkConfigProvider: new NodeZkConfigProvider(join(managedPath, 'account')),
       // midnight-js's HTTP proof provider, rebuilt to stream each prover key to the proof server
       // instead of holding copies of it (plan P5.1b, question Q25; ../prover/proving-provider.ts).
-      proofProvider: await relayProofProvider(options.proofServerUrl, managedPath, {
+      proofProvider: await relayProofProvider(options.contractProofServerUrl, managedPath, {
         timeout: options.proofTimeoutMs ?? 900_000,
         log: options.log,
       }),
@@ -189,6 +193,8 @@ export interface AccountLedger {
   readonly auth_nonce: bigint;
   readonly inbox_count: bigint;
   readonly enc_key: Uint8Array;
+  /** The network salt every Ed25519 challenge binds (the account's sealed `evm_domain_salt`). */
+  readonly evm_domain_salt: Uint8Array;
   devices: { member(e: Uint8Array): boolean; [Symbol.iterator](): Iterator<Uint8Array> };
   inbox: { member(k: bigint): boolean; lookup(k: bigint): Uint8Array };
 }

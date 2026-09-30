@@ -566,7 +566,10 @@ describe('read routes leak nothing secret', () => {
       startedAt: 0,
       sponsor: r.sponsor,
       dustLowSpecks: config.sponsor.dustLowSpecks,
-      prover: new ProofServerClient('http://prover.test', '9.0.0-rc.6', (async () => {
+      prover: new ProofServerClient('http://prover.test', '9.0.0-rc.8', (async () => {
+        throw new TypeError('down');
+      }) as unknown as typeof fetch),
+      dustProver: new ProofServerClient('http://dust-prover.test', '9.0.0-rc.6', (async () => {
         throw new TypeError('down');
       }) as unknown as typeof fetch),
       keys: () => ({

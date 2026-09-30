@@ -43,7 +43,9 @@ export function relayNotices(s: RelayState, nowS = Math.floor(Date.now() / 1000)
   const h = s.health;
   if (!h) return [];
   const out: RelayNotice[] = [];
-  if (!h.proofServer.reachable) {
+  // The contract prover (the account's circuits) and the DUST prover (the fee payment): every paid
+  // action needs both.
+  if (!h.proofServer.reachable || h.dustProofServer?.reachable === false) {
     out.push({
       id: 'prover-down',
       place: 'shell',

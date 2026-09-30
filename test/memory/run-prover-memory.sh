@@ -75,7 +75,7 @@ harness() {
   else
     run+=(--network "$NET" -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro"
       -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed
-      -e MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300)
+      -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server:6300)
   fi
   mkdir -p "$OUT_DIR"
   say "$mode: $PROOFS proof(s) in a container limited to $MEM_LIMIT without swap, budget $budget MB"

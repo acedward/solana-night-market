@@ -92,10 +92,11 @@ export function harness(
     sponsor: { configured: true, state: 'synced', synced: true, dustSpecks: '1', dustLow: false },
     proofServer: {
       reachable: true,
-      version: '9.0.0-rc.6',
+      version: '9.0.0-rc.8',
       jobCapacity: 10,
       keys: { present: false, fingerprint: null, pinned: false, matchesPin: null },
     },
+    dustProofServer: { reachable: true, version: '9.0.0-rc.6', jobCapacity: 10 },
     queue: { jobs: 0, lanes: {} },
     kernel: { reachable: true, synced: true },
     batcher: { reachable: true },

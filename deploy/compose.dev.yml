@@ -1,4 +1,5 @@
-# Local development and testing: the relay and its proof server.
+# Local development and testing: the relay and its two proof servers (rc.8 for the account's
+# circuits, rc.6 for the sponsor wallet's DUST; AA 00047 spike 3 §6).
 #
 #   docker compose -f deploy/compose.dev.yml --env-file deploy/.env up -d --build
 #
@@ -20,11 +21,13 @@ services:
       - path: .env
         required: false
     environment:
-      MIDNIGHT_PROOF_SERVER_URL: ${MIDNIGHT_PROOF_SERVER_URL:-http://proof-server:6300}
+      MIDNIGHT_CONTRACT_PROOF_SERVER_URL: ${MIDNIGHT_CONTRACT_PROOF_SERVER_URL:-http://proof-server-contracts:6300}
+      MIDNIGHT_DUST_PROOF_SERVER_URL: ${MIDNIGHT_DUST_PROOF_SERVER_URL:-http://proof-server-dust:6300}
     ports:
       - 127.0.0.1:${RELAY_HOST_PORT:-18080}:8080
     depends_on:
-      - proof-server
+      - proof-server-contracts
+      - proof-server-dust
     read_only: true
     tmpfs:
       - /tmp
@@ -33,13 +36,25 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  proof-server:
-    # midnightntwrk/proof-server 9.0.0-rc.6 (plan Pins): proves the wallet's DUST spends and every
-    # Passport circuit. A k=18 proof needs about 8 GB of memory.
+  proof-server-contracts:
+    # midnightntwrk/proof-server 9.0.0-rc.8: the account's circuits (compactc 0.35.0, ZKIR 3.1). A
+    # k=18 proof peaks near 9.4 GiB. CONTRACT_PROOF_SERVER_IMAGE names a locally loaded copy (a
+    # `docker load` keeps no digest; see compose.yml).
+    image: ${CONTRACT_PROOF_SERVER_IMAGE:-midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf}
+    environment:
+      PORT: '6300'
+    mem_limit: 12g
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  proof-server-dust:
+    # midnightntwrk/proof-server 9.0.0-rc.6: the sponsor wallet's DUST spends (stagenet: dust/9).
     image: midnightntwrk/proof-server@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
     environment:
       PORT: '6300'
-    mem_limit: 10g
+    mem_limit: 4g
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true

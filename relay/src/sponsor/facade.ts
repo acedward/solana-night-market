@@ -20,7 +20,9 @@ export interface WalletEndpoints {
   indexerUrl: string;
   indexerWsUrl: string;
   nodeWsUrl: string;
-  proofServerUrl: string;
+  /** The wallet's proving server: it proves only the DUST spends, so it is the DUST prover
+   *  (proof server 9.0.0-rc.6 while stagenet requires dust/9), never the contract prover (rc.8). */
+  dustProofServerUrl: string;
 }
 
 export interface OpenedWallet {
@@ -164,7 +166,7 @@ export const openFacadeWallet: WalletFactory = async (seedHex, endpoints, option
   const configuration = {
     networkId: endpoints.networkId,
     indexerClientConnection: { indexerHttpUrl: endpoints.indexerUrl, indexerWsUrl: endpoints.indexerWsUrl },
-    provingServerUrl: new URL(endpoints.proofServerUrl),
+    provingServerUrl: new URL(endpoints.dustProofServerUrl),
     relayURL: new URL(endpoints.nodeWsUrl),
     costParameters: { feeBlocksMargin: options.feeBlocksMargin },
     txHistoryStorage: NoopTxHistoryStorage,

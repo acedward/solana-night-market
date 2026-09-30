@@ -92,7 +92,7 @@ async function main(): Promise<void> {
           indexerUrl: config.network.midnight.indexerUrl,
           indexerWsUrl: config.network.midnight.indexerWsUrl,
           nodeWsUrl: config.network.midnight.nodeWsUrl,
-          proofServerUrl: config.proofServerUrl,
+          dustProofServerUrl: config.dustProofServerUrl,
         },
         feeBlocksMargin: config.sponsor.feeBlocksMargin,
         fundingLockFile: config.sponsor.fundingLockFile,
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
         networkId: config.network.midnightNetworkId,
         indexerUrl: config.network.midnight.indexerUrl,
         indexerWsUrl: config.network.midnight.indexerWsUrl,
-        proofServerUrl: config.proofServerUrl,
+        contractProofServerUrl: config.contractProofServerUrl,
         log: log.child({ component: 'passport' }),
       });
     } catch (e) {
@@ -165,7 +165,8 @@ async function main(): Promise<void> {
     startedAt: Math.floor(Date.now() / 1000),
     sponsor,
     dustLowSpecks: config.sponsor.dustLowSpecks,
-    prover: new ProofServerClient(config.proofServerUrl, config.proofServerVersion),
+    prover: new ProofServerClient(config.contractProofServerUrl, config.contractProofServerVersion),
+    dustProver: new ProofServerClient(config.dustProofServerUrl, config.dustProofServerVersion),
     // The volume is read-only and was checked in full above: re-scan it hourly, not per request (F-B1).
     keys: cachedKeyCheck(keys, { initial: keyCheck, intervalSeconds: KEY_RECHECK_SECONDS }),
     queue,

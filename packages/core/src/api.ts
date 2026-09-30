@@ -124,6 +124,7 @@ export const HealthResponseSchema = z.object({
     dustSpecks: z.string().nullable(),
     dustLow: z.boolean(),
   }),
+  /** The CONTRACT prover (proof server 9.0.0-rc.8): the account's circuits, with the key volume. */
   proofServer: z.object({
     reachable: z.boolean(),
     version: z.string().nullable(),
@@ -139,6 +140,16 @@ export const HealthResponseSchema = z.object({
       problems: z.number().int().optional(),
     }),
   }),
+  /** The DUST prover (proof server 9.0.0-rc.6 while stagenet requires dust/9): the sponsor wallet's
+   *  fee payments. Every paid action needs both provers (AA 00047 spike 3 §6). Optional only so a
+   *  page tolerates an older relay; this relay always reports it. */
+  dustProofServer: z
+    .object({
+      reachable: z.boolean(),
+      version: z.string().nullable(),
+      jobCapacity: z.number().nullable(),
+    })
+    .optional(),
   queue: z.object({
     jobs: z.number().int(),
     lanes: z.record(z.string(), z.object({ running: z.number().int(), waiting: z.number().int() })),

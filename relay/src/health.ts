@@ -58,7 +58,10 @@ export interface HealthDeps {
   startedAt: number;
   sponsor: SponsorSession;
   dustLowSpecks: bigint;
+  /** The CONTRACT prover (rc.8: the account's circuits). */
   prover: ProofServerClient;
+  /** The DUST prover (rc.6: the sponsor wallet's fee payments). */
+  dustProver: ProofServerClient;
   keys: () => KeyCheck;
   queue: JobQueue;
   probes: ExternalProbes;
@@ -78,12 +81,13 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
   let cached: { at: number; external: External } | null = null;
   let refreshing: Promise<{ at: number; external: External }> | null = null;
   const probeAll = async () => {
-    const [proof, kernel, batcher] = await Promise.all([
+    const [proof, dustProof, kernel, batcher] = await Promise.all([
       deps.prover.probe(),
+      deps.dustProver.probe(),
       deps.probes.kernel(),
       deps.probes.batcher(),
     ]);
-    return { proof, kernel, batcher, keys: deps.keys() };
+    return { proof, dustProof, kernel, batcher, keys: deps.keys() };
   };
   /** The one refresh in flight: started by the first caller that finds the cache expired. */
   const refresh = () => {
@@ -106,7 +110,7 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
     return (await pending).external;
   };
   return async () => {
-    const { proof, kernel, batcher, keys } = await current();
+    const { proof, dustProof, kernel, batcher, keys } = await current();
     const sponsor = deps.sponsor.status();
     const dustLow = sponsor.dustSpecks === null ? sponsor.configured : sponsor.dustSpecks < deps.dustLowSpecks;
     const stats = deps.queue.stats();
@@ -116,14 +120,17 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
       keys.missingProverKeys.filter((k) => !keys.missingVerifierKeys.includes(k)).length +
       keys.missingZkir.filter((k) => !keys.missingVerifierKeys.includes(k)).length +
       keys.mismatchedVerifierKeys.length;
-    const down = !proof.reachable || sponsor.state === 'error' || keys.matchesPin === false;
+    // Either prover down stops every paid action: the contract prover proves the call, the DUST
+    // prover the fee payment of the same transaction.
+    const down = !proof.reachable || !dustProof.reachable || sponsor.state === 'error' || keys.matchesPin === false;
     const degraded =
       !sponsor.synced ||
       dustLow ||
       !kernel.reachable ||
       !batcher.reachable ||
       !keysOk ||
-      proof.versionMatches === false;
+      proof.versionMatches === false ||
+      dustProof.versionMatches === false;
     return {
       status: down ? 'down' : degraded ? 'degraded' : 'ok',
       network: deps.network,
@@ -148,6 +155,11 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
           complete: keysOk,
           problems: keyProblems,
         },
+      },
+      dustProofServer: {
+        reachable: dustProof.reachable,
+        version: dustProof.version,
+        jobCapacity: dustProof.jobCapacity,
       },
       queue: { jobs: stats.jobs, lanes: stats.lanes },
       kernel,

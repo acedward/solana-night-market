@@ -38,7 +38,9 @@ const account = env('FUND_ACCOUNT').replace(/^0x/, '').toLowerCase();
 const colour = env('FUND_COLOUR').replace(/^0x/, '').toLowerCase();
 const amount = BigInt(env('FUND_AMOUNT'));
 const managedPath = env('MIDNIGHT_MANAGED_PATH', '/app/vendor/passport/contract/contracts/managed');
-const proofServerUrl = env('MIDNIGHT_PROOF_SERVER_URL', 'http://proof-server-rc6:6300');
+// Two proof servers (spike 3 §6): the account's circuits on rc.8, the funder wallet's DUST on rc.6.
+const contractProofServerUrl = env('MIDNIGHT_CONTRACT_PROOF_SERVER_URL', 'http://proof-server-rc8:6300');
+const dustProofServerUrl = env('MIDNIGHT_DUST_PROOF_SERVER_URL', 'http://proof-server-rc6:6300');
 const indexerUrl = env('MIDNIGHT_INDEXER_URL', 'http://indexer:8088/api/v4/graphql');
 const indexerWsUrl = env('MIDNIGHT_INDEXER_WS_URL', 'ws://indexer:8088/api/v4/graphql/ws');
 const nodeWsUrl = env('MIDNIGHT_NODE_WS_URL', 'ws://node:9944');
@@ -49,12 +51,12 @@ const runtime = await PassportRuntime.load({
   networkId: 'undeployed',
   indexerUrl,
   indexerWsUrl,
-  proofServerUrl,
+  contractProofServerUrl,
   log,
 });
 const opened = await openFacadeWallet(
   seedHex,
-  { networkId: 'undeployed', indexerUrl, indexerWsUrl, nodeWsUrl, proofServerUrl },
+  { networkId: 'undeployed', indexerUrl, indexerWsUrl, nodeWsUrl, dustProofServerUrl },
   { feeBlocksMargin: 5 },
 );
 const handle = opened.handle as Parameters<typeof syncedKeys>[0];

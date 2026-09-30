@@ -98,6 +98,37 @@ describe('configuration', () => {
     expect(() => loadConfig({ RELAY_NETWORK: 'stagenet', ZSWAP_KERNEL_URL: 'nope' }, tokens)).toThrow(ConfigError);
   });
 
+  it('names two proof servers: rc.8 for the contract circuits, rc.6 for the DUST (and refuses the single-server names)', () => {
+    const { config } = loadConfig({ RELAY_NETWORK: 'stagenet' }, tokens);
+    expect(config).toMatchObject({
+      contractProofServerUrl: 'http://proof-server-contracts:6300',
+      contractProofServerVersion: '9.0.0-rc.8',
+      dustProofServerUrl: 'http://proof-server-dust:6300',
+      dustProofServerVersion: '9.0.0-rc.6',
+    });
+    const set = loadConfig(
+      {
+        RELAY_NETWORK: 'stagenet',
+        MIDNIGHT_CONTRACT_PROOF_SERVER_URL: 'http://rc8:6300',
+        CONTRACT_PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.9',
+        MIDNIGHT_DUST_PROOF_SERVER_URL: 'http://rc6:6300',
+        DUST_PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.7',
+      },
+      tokens,
+    ).config;
+    expect([set.contractProofServerUrl, set.contractProofServerVersion]).toEqual(['http://rc8:6300', '9.0.0-rc.9']);
+    expect([set.dustProofServerUrl, set.dustProofServerVersion]).toEqual(['http://rc6:6300', '9.0.0-rc.7']);
+    expect(() => loadConfig({ RELAY_NETWORK: 'stagenet', MIDNIGHT_DUST_PROOF_SERVER_URL: 'nope' }, tokens)).toThrow(
+      /MIDNIGHT_DUST_PROOF_SERVER_URL is not a URL/,
+    );
+    expect(() =>
+      loadConfig({ RELAY_NETWORK: 'stagenet', MIDNIGHT_PROOF_SERVER_URL: 'http://proof-server:6300' }, tokens),
+    ).toThrow(/MIDNIGHT_CONTRACT_PROOF_SERVER_URL.*MIDNIGHT_DUST_PROOF_SERVER_URL/);
+    expect(() =>
+      loadConfig({ RELAY_NETWORK: 'stagenet', PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.6' }, tokens),
+    ).toThrow(ConfigError);
+  });
+
   it('reads secrets from files, and never echoes them in an error', () => {
     const mnemonic = generateMnemonic(wordlist, 256);
     const files: Record<string, string> = {
@@ -194,7 +225,7 @@ describe('the funding lock', () => {
         indexerUrl: 'http://i',
         indexerWsUrl: 'ws://i',
         nodeWsUrl: 'ws://n',
-        proofServerUrl: 'http://p',
+        dustProofServerUrl: 'http://p',
       },
       feeBlocksMargin: 5,
       fundingLockFile: path,
@@ -226,7 +257,7 @@ describe('the funding lock', () => {
           indexerUrl: 'http://i',
           indexerWsUrl: 'ws://i',
           nodeWsUrl: 'ws://n',
-          proofServerUrl: 'http://p',
+          dustProofServerUrl: 'http://p',
         },
         feeBlocksMargin: 5,
         fundingLockFile: path,

@@ -112,7 +112,7 @@ async function withWallet<T>(
         indexerUrl: config.network.midnight.indexerUrl,
         indexerWsUrl: config.network.midnight.indexerWsUrl,
         nodeWsUrl: config.network.midnight.nodeWsUrl,
-        proofServerUrl: config.proofServerUrl,
+        dustProofServerUrl: config.dustProofServerUrl,
       },
       { feeBlocksMargin: config.sponsor.feeBlocksMargin },
     );

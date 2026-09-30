@@ -103,21 +103,26 @@ describe('health (FR-013)', () => {
     kernel: async () => ({ reachable: true, synced: true }),
     batcher: async () => ({ reachable: true }),
   });
-  const prover = (up = true) =>
-    new ProofServerClient(
-      'http://prover:6300',
-      '9.0.0-rc.6',
-      fakeFetch(
-        up
-          ? {
-              'http://prover:6300/version': { body: '9.0.0-rc.6' },
-              'http://prover:6300/ready': {
-                body: { status: 'ok', jobsProcessing: 0, jobsPending: 0, jobCapacity: 10 },
-              },
-            }
-          : {},
-      ).f,
-    );
+  const server =
+    (host: string, version: string) =>
+    (up = true, reports = version) =>
+      new ProofServerClient(
+        `http://${host}:6300`,
+        version,
+        fakeFetch(
+          up
+            ? {
+                [`http://${host}:6300/version`]: { body: reports },
+                [`http://${host}:6300/ready`]: {
+                  body: { status: 'ok', jobsProcessing: 0, jobsPending: 0, jobCapacity: 10 },
+                },
+              }
+            : {},
+        ).f,
+      );
+  /** The contract prover (rc.8) and the DUST prover (rc.6). */
+  const prover = server('prover', '9.0.0-rc.8');
+  const dustProver = server('dust-prover', '9.0.0-rc.6');
   const collector = (over: Partial<Parameters<typeof healthCollector>[0]> = {}) =>
     healthCollector({
       network: 'stagenet',
@@ -126,6 +131,7 @@ describe('health (FR-013)', () => {
       sponsor: new FakeSponsor(),
       dustLowSpecks: 10n ** 16n,
       prover: prover(),
+      dustProver: dustProver(),
       keys: () => ({
         present: true,
         fingerprint: 'f'.repeat(64),
@@ -154,12 +160,14 @@ describe('health (FR-013)', () => {
       dustSpecks: (10n ** 20n).toString(),
       dustLow: false,
     });
-    expect(h.proofServer).toMatchObject({ reachable: true, version: '9.0.0-rc.6', jobCapacity: 10 });
+    expect(h.proofServer).toMatchObject({ reachable: true, version: '9.0.0-rc.8', jobCapacity: 10 });
+    expect(h.dustProofServer).toEqual({ reachable: true, version: '9.0.0-rc.6', jobCapacity: 10 });
     expect(h.queue.lanes).toHaveProperty('prover');
     expect(h.kernel).toEqual({ reachable: true, synced: true });
     // Nothing of Sepolia, the vault or the bridge (AA 00047).
     expect(Object.keys(h).sort()).toEqual([
       'batcher',
+      'dustProofServer',
       'kernel',
       'network',
       'proofServer',
@@ -183,13 +191,20 @@ describe('health (FR-013)', () => {
       (await collector({ probes: { ...okProbes(), kernel: async () => ({ reachable: false, synced: null }) } })())
         .status,
     ).toBe('degraded');
+    // A proof server of another version than the pinned one (e.g. the two swapped) degrades it.
+    expect((await collector({ dustProver: dustProver(true, '9.0.0-rc.8') })()).status).toBe('degraded');
+    expect((await collector({ prover: prover(true, '9.0.0-rc.6') })()).status).toBe('degraded');
     const none = await collector({ sponsor: new DisabledSponsorSession() })();
     expect(none.status).toBe('degraded');
     expect(none.sponsor).toMatchObject({ configured: false, state: 'disabled', dustSpecks: null });
   });
 
-  it('is down when the proof server is unreachable or the keys do not match the pin', async () => {
+  it('is down when either proof server is unreachable or the keys do not match the pin', async () => {
     expect((await collector({ prover: prover(false) })()).status).toBe('down');
+    const noDust = await collector({ dustProver: dustProver(false) })();
+    expect(noDust.status).toBe('down');
+    expect(noDust.dustProofServer).toEqual({ reachable: false, version: null, jobCapacity: null });
+    expect(noDust.proofServer.reachable).toBe(true);
     expect(
       (
         await collector({

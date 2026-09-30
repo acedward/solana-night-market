@@ -7,14 +7,13 @@
 //
 //   READ      `GET /v1/accounts/:account/unshielded` (unshieldedBalancesPath): the account's
 //             unshielded balance per token colour, from the chain (UnshieldedBalancesView).
-//   WITHDRAW  the RelayAction `withdraw-unshielded` on `POST /v1/actions/withdraw-unshielded`: the
-//             arm's `withdraw_unshielded_with_ed25519` call, authorised by its OWN signature
-//             (`passportAuth`, a `passport-call` like `withdraw`: the wallet signs the circuit's F3
-//             "Withdraw unshielded" message, which covers the colour, the amount, the recipient and
-//             the nonce, so ONE prompt). The recipient is an unshielded wallet address,
-//             `mn_addr_<network>1…` (32 bytes). The job's result is a WithdrawUnshieldedResult.
+//   WITHDRAW  the RelayAction `withdraw-unshielded` on `POST /v1/actions/withdraw-unshielded`
+//             (lane B3's ./withdraw-unshielded.ts: `WithdrawUnshieldedPayloadSchema`, the arm's
+//             `withdraw_unshielded_with_ed25519` call authorised by its OWN F3 signature, one prompt).
+//             The recipient is an unshielded wallet address, `mn_addr_<network>1…` (32 bytes), which
+//             `parseUnshieldedAddress` below decodes.
 //
-// The gated call's AuthRequest is `unshieldedWithdrawRequest(payload)`
+// The gated call's AuthRequest is lane B3's `withdrawUnshieldedRequest(payload)`
 // (./passport/gated-unshielded.ts), so the browser and the relay build the same one.
 
 import { bech32m } from '@scure/base';
@@ -22,7 +21,6 @@ import { z } from 'zod';
 
 import { bytesToHex } from './hex.js';
 
-const hex32 = z.string().regex(/^(0x)?[0-9a-fA-F]{64}$/);
 const decimal = z.string().regex(/^[0-9]{1,40}$/);
 
 /** `GET` the account's unshielded balances. */
@@ -36,24 +34,6 @@ export const UnshieldedBalancesViewSchema = z.object({
   blockHeight: z.number().int().nonnegative(),
 });
 export type UnshieldedBalancesView = z.infer<typeof UnshieldedBalancesViewSchema>;
-
-/** The body of `withdraw-unshielded`: pay `amount` of `color` from the account's unshielded balance
- *  to an unshielded wallet (its 32-byte user address). */
-export const WithdrawUnshieldedPayloadSchema = z
-  .object({
-    /** The recipient's unshielded user address (32 bytes, from `mn_addr_…`). */
-    recipient: hex32,
-    color: hex32,
-    amount: decimal,
-    /** The auth nonce the signed challenge binds. */
-    authNonce: decimal,
-  })
-  .strict();
-export type WithdrawUnshieldedPayload = z.infer<typeof WithdrawUnshieldedPayloadSchema>;
-
-export interface WithdrawUnshieldedResult {
-  txId: string;
-}
 
 // ── Unshielded wallet addresses ──────────────────────────────────────────────
 

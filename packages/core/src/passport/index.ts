@@ -45,7 +45,6 @@ export * from './ed25519.js';
 export * from './gated.js';
 export * from './gated-unshielded.js';
 export * from './offer-call.js';
-export * from './relay-envelope.js';
 export * from './vendor/offer-codec.js';
 
 /** The upstream commit the client code above comes from. */

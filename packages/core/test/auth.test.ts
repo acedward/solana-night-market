@@ -70,8 +70,8 @@ describe('the RelayAction envelope', () => {
       'append-inbox',
       'open-swap',
       'take',
-      'demo-tokens',
       'withdraw-unshielded',
+      'demo-tokens',
     ]);
   });
 

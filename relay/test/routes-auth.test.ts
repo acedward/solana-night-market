@@ -120,7 +120,7 @@ describe('before a wallet arm is wired (lane B3)', () => {
     expect(res.status).toBe(401);
     const err = ((await res.json()) as { error: { code: string; detail?: string; message: string } }).error;
     expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
-    expect(err.message).toMatch(/lanes B2 and B3/);
+    expect(err.message).toMatch(/does not accept wallet signatures/);
     expect(h.queue.stats().jobs).toBe(0);
   });
 });

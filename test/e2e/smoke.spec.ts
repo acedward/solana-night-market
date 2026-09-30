@@ -56,7 +56,8 @@ test('the shell, the Solana wallet placeholder, and Local data with another tabâ
   }, entries);
   await other.close();
   await expect(page.locator('[data-testid=record-row]')).toHaveCount(4);
-  expect(Object.keys(await marketKeys(page))).toHaveLength(5); // 4 records + the schema marker
+  // The 4 records; no schema marker yet, because this page has written nothing (no wallet).
+  expect(Object.keys(await marketKeys(page))).toHaveLength(4);
 
   // The secret is masked until revealed.
   const secretRow = page.locator('[data-testid=record-row][data-kind=secret]');

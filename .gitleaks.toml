@@ -66,6 +66,14 @@ paths = ['''(^|/)packages/core/src/tokens/mint-test-tokens/metadata\.stagenet\.j
 regexTarget = "match"
 regexes = ['''^tokenId"''']
 
+# The same registry as the web build bundles it (a JS object: `tokenId:` then the 64-hex token type
+# in backticks). Scoped to that rule, the built bundle AND that exact shape.
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''(^|/)web/dist/assets/[^/]+\.js(\.map)?$''']
+regexTarget = "match"
+regexes = ['''^tokenId:`[0-9a-f]{64}`''']
+
 # The staging kernel's GET /v1/known-tokens, captured verbatim (a test fixture): the values the
 # rule flags there are PUBLIC token colours. Scoped to that rule, that capture AND that field.
 [[rules.allowlists]]

@@ -4,8 +4,8 @@
 // reload keeps the list; `?assets=all`, Show all assets and CLEAR ALL bring everything back; a
 // token from the site's config (nmGOLD) and its pair are filtered with no code change. The
 // exchange is the visual tests' fixture (served through page.route: nothing leaves the page's
-// origin). The connected-wallet views (Account holdings, the Trade picker) come with lane B2's mock
-// Phantom. Screenshots go to $ASSET_FILTER_OUT_DIR (default test-results/asset-filter).
+// origin). The connected-wallet views (the holdings, the Trade picker) are checked with the mock
+// Phantom in ./wallet.spec.ts. Screenshots go to $ASSET_FILTER_OUT_DIR (default test-results/asset-filter).
 
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

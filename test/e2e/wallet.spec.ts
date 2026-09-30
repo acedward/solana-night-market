@@ -240,6 +240,36 @@ test('withdraw shielded (one approval, one more to record the change) and unshie
   expect(phantom.requests).toHaveLength(3);
 });
 
+test('?assets= narrows the connected views (00042), and a line one coin cannot pay says why (00044)', async ({
+  page,
+}) => {
+  const { phantom } = await setup(page, { seeded: true });
+  await page.goto('/?assets=twETH,twBTC#trade');
+  await connectPhantom(page);
+  // The holdings side panel and the Trade picker show only the listed assets and their pair.
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
+  await expect(holding(page, 'twETH')).toContainText('1.00');
+  await expect(holding(page, 'twUSDC')).toHaveCount(0);
+  await expect(page.getByTestId('trade-pair').locator('option')).toHaveText([/^twETH \/ twBTC/]);
+  await page.getByTestId('tab-account').click();
+  await expect(page.locator('[data-testid=passport-row][data-symbol="twUSDC"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid=passport-row][data-symbol="twBTC"]')).toBeVisible();
+
+  // Everything again, and on twBTC/twUSDC the 0.50 twBTC ask (30,000 twUSDC) is more than the account
+  // holds: its Buy stays in place, greyed, and says why on hover and to a screen reader.
+  await page.goto(`/?assets=all#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+  await connectPhantom(page);
+  await expect(holding(page, 'twUSDC')).toContainText('1,000.00');
+  const line = page.locator('[data-testid=trade-line]').first();
+  const buy = line.getByTestId('take-line-not-enough');
+  await expect(buy).toBeDisabled();
+  const words = 'Not enough twUSDC. You hold 1,000.00 twUSDC.';
+  await expect(buy).toHaveAccessibleDescription(words);
+  await line.getByTestId('not-enough').hover();
+  await expect(line.getByTestId('tooltip')).toHaveText(words);
+  expect(phantom.requests).toEqual([]);
+});
+
 test("export, CLEAR ALL and import the connected wallet's records", async ({ page }) => {
   const { phantom } = await setup(page, { seeded: true });
   await page.goto('/#account');

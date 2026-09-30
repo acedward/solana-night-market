@@ -2,9 +2,8 @@
 // served through page.route, and records seeded into this browser's local data as another tab
 // would write them. No relay, kernel or chain is used, and nothing leaves the page's origin.
 //
-// No wallet is injected: this build ships no Solana wallet adapter yet. Lane B2 (AA 00047) adds
-// Phantom and a mock Phantom for these tests, and with it the connected-wallet walkthroughs MN Bank
-// had (opening an account, the statement, making and taking offers, export and import).
+// No wallet is injected here: the connected-wallet walkthroughs (AA 00047 lane B2) use the mock
+// Phantom of ./mock-phantom.ts and the mock relay of ./mock-relay.ts (./wallet.spec.ts).
 
 import type { Page } from '@playwright/test';
 import { x25519 } from '@noble/curves/ed25519.js';

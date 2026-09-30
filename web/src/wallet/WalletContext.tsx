@@ -39,7 +39,7 @@ export interface WalletSession {
   subscribe?(listener: (event: WalletSessionEvent) => void): () => void;
 }
 
-/** What lane B2 implements for Phantom (and a mock for the browser tests). */
+/** What a wallet integration implements (./phantom-adapter.ts for Solana wallets). */
 export interface WalletAdapter {
   /** The wallets in this browser; `onChange` is called when one registers later. */
   discover(onChange: (options: WalletOption[]) => void): () => void;
@@ -56,7 +56,7 @@ export interface WalletState {
   walletName: string | null;
   /** How the site asks the wallet for signatures, while connected. */
   signing: ActionSigning | null;
-  /** False when this build has no wallet adapter (Solana wallets arrive with lane B2). */
+  /** False when the site has no wallet adapter (no token list for the network). */
   supported: boolean;
   error: string | null;
   connect(option: WalletOption): Promise<void>;

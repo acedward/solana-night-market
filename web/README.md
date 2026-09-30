@@ -57,14 +57,35 @@ tabs, or in Local data) and CLEAR ALL clear it; Export and Import carry it. It o
 the page shows: it is not a security setting, and the relay never sees it. The code is
 `src/assets/`.
 
-## The Solana wallet (lane B2)
+## The Solana wallet (AA 00047 lane B2)
 
-This build ships no wallet adapter yet: Connect says that Solana wallets are coming, and the
-Account and Trade sections ask the customer to wait. The seam is `src/wallet/`:
-`WalletContext.tsx` takes a `WalletAdapter` (the wallet's public key and `signMessage`), and every
-operation asks for signatures only through `ActionSigning` (`src/wallet/signing.ts`): the relay's
-action envelope, a Passport call's authorisation, and the device's use counter. Lane B2 plugs
-Phantom and Track A's Ed25519 arm client in there.
+Connect lists every Solana wallet in the browser: Wallet Standard wallets that can sign Solana
+messages (`solana:signMessage`), found through the standard's two window events without a
+library, and Phantom's injected `window.phantom.solana` when Phantom did not register through the
+standard (`src/wallet/solana-wallets.ts`). The wallet only ever signs messages, never a Solana
+transaction, so it needs no SOL.
+
+- **Every signature is checked the moment it comes back** (`src/wallet/solana-signature.ts`): with
+  tweetnacl over exactly the bytes the page asked for and the connected key. One that verifies only
+  over a Solana off-chain-message wrapping (`\xff"solana offchain"` ‖ …, v0, the short v0 header or
+  v1, or the wallet's own `signedMessage`) is a **Ledger (hardware) account**, which v1 refuses: the
+  page says "hardware (Ledger) accounts aren't supported yet" and ends the session. Any other
+  mismatch is a bad signature. Neither is ever sent to the market.
+- **What the wallet signs is readable text.** An account call signs Track A's F3 message (the
+  circuit renders the same bytes); opening an account and claiming demo tokens sign lane B3's
+  envelope, Track A's proof-of-key message. While the wallet's window is open, the page shows the
+  same text and a fingerprint (the first 8 hex digits of its `Digest` or `Nonce` line)
+  (`src/wallet/SigningPrompt.tsx`).
+- **Errors** (`src/wallet/wallet-errors.ts`): a declined request (4001), a locked wallet (4100 /
+  4900), no answer within `walletTimeoutSeconds` (config.json, default 120), a bad signature.
+- **The seam** stays `src/wallet/`: `WalletContext.tsx` takes a `WalletAdapter`
+  (`src/wallet/phantom-adapter.ts`), and every operation asks for signatures only through
+  `ActionSigning` (`src/wallet/signing.ts`).
+
+The browser tests use a mock Phantom (`test/e2e/mock-phantom.ts`: tweetnacl in the test process,
+Phantom's byte semantics, and modes for a Ledger account, a declined request, a locked wallet, no
+answer and another key) against a mock relay that checks every signature as the relay does
+(`test/e2e/mock-relay.ts`).
 
 ## The Night Market design system
 

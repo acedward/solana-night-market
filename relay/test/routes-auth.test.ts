@@ -90,6 +90,9 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
       expect((await post(h, action, tampered)).status).toBe(400);
       const swapped = { ...body, payload: { encPublicKey: 'cd'.repeat(32) } };
       await expect401(await post(h, action, swapped), 'payload-mismatch');
+    } else if (action === 'demo-tokens') {
+      // the claim's body is strictly empty: anything added is refused before the signature is checked
+      expect((await post(h, action, tampered)).status).toBe(400);
     } else {
       await expect401(await post(h, action, tampered), 'payload-mismatch');
     }
@@ -112,7 +115,7 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
   });
 });
 
-describe('before a wallet arm is wired (lane B3)', () => {
+describe('a relay without the Ed25519 arm (no key volume: no scheme, no Passport-call check)', () => {
   it.each(RELAY_ACTIONS)('refuses %s as not supported, whatever it carries, and queues nothing', async (action) => {
     const h = harness({ scheme: null });
     const body = await signedBody(h, action, newWallet());
@@ -120,7 +123,7 @@ describe('before a wallet arm is wired (lane B3)', () => {
     expect(res.status).toBe(401);
     const err = ((await res.json()) as { error: { code: string; detail?: string; message: string } }).error;
     expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
-    expect(err.message).toMatch(/lanes B2 and B3/);
+    expect(err.message).toMatch(/does not accept wallet signatures/);
     expect(h.queue.stats().jobs).toBe(0);
   });
 });

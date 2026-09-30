@@ -13,9 +13,11 @@
 //
 // B1.5 typed the seam with Track A's client (vendor/passport @ 451f761): a check's `auth` is Track A's
 // `Ed25519Authorisation` and a registration's device its `Ed25519Device`. `./ed25519-arm.ts` is the
-// arm: its device and circuit arguments are real, its two call checks are lane B3's (TODO(B3)). Until
-// B3 finishes them and defines the Solana envelope scheme, main.ts wires no arm: the account and
-// trade actions answer "not supported yet", and nothing is proven.
+// arm (lane B3): it rebuilds each call's F3 message from the call's arguments and the account's
+// state and verifies the wallet's signature over it, the same signature the circuit verifies, so
+// every account action is ONE wallet prompt. `wiredArm` hands main.ts the arm and the Solana
+// envelope scheme (packages/core/src/solana-auth.ts) for the two actions without an account call
+// (opening an account, demo tokens).
 //
 // Only TYPES come from the client here: its modules load the compiled account (the key volume's, in a
 // deployment), so the relay imports them at run time only (./runtime.ts, ./ed25519-arm.ts).
@@ -26,13 +28,18 @@ import {
   PassportAuthSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
+  WithdrawUnshieldedPayloadSchema,
+  solanaRelayActionScheme,
   type AppendInboxPayload,
+  type NetworkName,
   type OpenSwapPayload,
   type PassportAuth,
   type RelayActionName,
   type RelayActionScheme,
   type TakePayload,
+  type TokenRegistry,
   type WithdrawPayload,
+  type WithdrawUnshieldedPayload,
 } from '@nightmarket/core';
 
 import type { Ed25519Authorisation, Ed25519Device } from '../../../vendor/passport/contract/src/wallet/ed25519.js';
@@ -42,31 +49,40 @@ import type { AccountLedger, PassportRuntime } from './runtime.js';
 export const DEVICE_ARM = 'ed25519';
 
 /** The arm's circuits the relay proves: Track A's `_with_ed25519` circuits (relay/test/account-shape
- *  checks each against the compiled contract and against Track A's own account shape). Lane B3 adds
- *  the ones it proves beyond these (e.g. `withdraw_unshielded_with_ed25519`). */
+ *  checks each against the compiled contract and against Track A's own account shape). */
 export const ARM_CIRCUITS = {
   /** Registration: the first device's activation. */
   activate: 'activate_initial_device_with_ed25519',
   /** A shielded withdrawal to a wallet. */
   withdrawShielded: 'withdraw_shielded_with_ed25519',
+  /** An unshielded withdrawal to a user address (lane B3). */
+  withdrawUnshielded: 'withdraw_unshielded_with_ed25519',
   /** Re-filing a change coin's inbox entry (Q13). */
   appendInbox: 'append_inbox_with_ed25519',
   /** Making and taking offers. */
   openSwap: 'open_swap_shielded_with_ed25519',
 } as const;
 
-// ── The gated account calls (withdraw, append-inbox) ──────────────────────────
+// ── The gated account calls (withdraw, withdraw-unshielded, append-inbox) ─────
 
-export type GatedAction = Extract<RelayActionName, 'withdraw' | 'append-inbox'>;
+export type GatedAction = Extract<RelayActionName, 'withdraw' | 'withdraw-unshielded' | 'append-inbox'>;
 
 /** Every action a gated call's own Passport signature authorises. */
-export const GATED_ACTIONS: readonly GatedAction[] = ['withdraw', 'append-inbox'];
+export const GATED_ACTIONS: readonly GatedAction[] = ['withdraw', 'withdraw-unshielded', 'append-inbox'];
 
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a);
 
-export type GatedPayload<A extends GatedAction> = A extends 'withdraw' ? WithdrawPayload : AppendInboxPayload;
+export type GatedPayload<A extends GatedAction> = A extends 'withdraw'
+  ? WithdrawPayload
+  : A extends 'withdraw-unshielded'
+    ? WithdrawUnshieldedPayload
+    : AppendInboxPayload;
 
-const GATED_SCHEMAS = { withdraw: WithdrawPayloadSchema, 'append-inbox': AppendInboxPayloadSchema } as const;
+const GATED_SCHEMAS = {
+  withdraw: WithdrawPayloadSchema,
+  'withdraw-unshielded': WithdrawUnshieldedPayloadSchema,
+  'append-inbox': AppendInboxPayloadSchema,
+} as const;
 
 /** Parse a gated action's body; null when it is not the action's shape. */
 export function parseGatedPayload<A extends GatedAction>(action: A, payload: unknown): GatedPayload<A> | null {
@@ -115,6 +131,11 @@ export interface GatedCheckFail {
   reason: string;
 }
 
+/** Why a call's account is refused before any signature work: it is not a Night Market account
+ *  deployed with the relay's pinned key set, or its maintenance authority was not retired (spec
+ *  FR-005; ./account-keys.ts). */
+export type AccountKeysCheck = (account: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+
 /**
  * The shared first half of every arm's check: the account, the body, the authorisation's shape,
  * and the account's state (booted, at the auth nonce the call binds). The arm then rebuilds the
@@ -147,7 +168,7 @@ export async function preflightCall<P extends { authNonce: string }>(
 export interface DeviceArm {
   readonly name: typeof DEVICE_ARM;
   readonly circuits: typeof ARM_CIRCUITS;
-  /** Check a gated account call (`withdraw`, `append-inbox`) against the account's current state:
+  /** Check a gated account call (`withdraw`, `withdraw-unshielded`, `append-inbox`) against the account's current state:
    *  rebuild the message the device signed from the arguments, verify the signature, and check the
    *  device's rolling entry at the signed use counter is live. */
   checkGatedCall<A extends GatedAction>(
@@ -179,12 +200,16 @@ export interface DeviceArm {
 }
 
 /**
- * The arm (and the relay envelope's signature scheme) this build wires into the relay: NONE yet.
- * TODO(B3): once `ed25519Arm` (./ed25519-arm.ts) checks calls and the Solana envelope scheme exists
- * (packages/core/src/auth.ts `RelayActionScheme`), return
- * `{ arm: ed25519Arm({ network, tokens }), scheme }` here (from the relay's config). Until then
- * main.ts serves the default catalogue, whose account and trade actions answer "not supported".
+ * The arm and the relay envelope's signature scheme this build wires into the relay (lane B3):
+ * Track A's Ed25519 arm (./ed25519-arm.ts), rendering with the relay's network label and token
+ * registry, and the Solana envelope scheme (packages/core/src/solana-auth.ts, questions Q14).
+ * `accountKeys` is the FR-005 check every call's account passes first (./account-keys.ts).
  */
-export function wiredArm(): { arm: DeviceArm; scheme: RelayActionScheme } | null {
-  return null;
+export async function wiredArm(options: {
+  network: NetworkName;
+  tokens: TokenRegistry;
+  accountKeys?: AccountKeysCheck;
+}): Promise<{ arm: DeviceArm; scheme: RelayActionScheme }> {
+  const { ed25519Arm } = await import('./ed25519-arm.js');
+  return { arm: ed25519Arm(options), scheme: solanaRelayActionScheme };
 }

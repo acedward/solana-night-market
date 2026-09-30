@@ -2,21 +2,24 @@
 // of its body, and its executor.
 //
 // `defaultCatalogue()` has every action with an executor that fails with `not-implemented`: that is
-// what main.ts serves until a device arm is wired (lane B3, ../passport/arm.ts). `accountCatalogue`
-// and `withTrade` add the executors, which are arm-agnostic given a `DeviceArm`: register (authorised
-// by its RelayAction envelope, which is also the enrolment), and withdraw, append-inbox, open-swap
-// and take, each authorised by the call's OWN Passport signature (`passport-call`), so every action
-// is one wallet prompt.
+// what main.ts serves when no device arm can run (no key volume). `accountCatalogue`, `withTrade`
+// and `withDemoTokens` add the executors, which are arm-agnostic given a `DeviceArm`: register and
+// demo-tokens (authorised by a RelayAction envelope in the Solana scheme, which for registration is
+// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, open-swap and take, each
+// authorised by the call's OWN Passport signature (`passport-call`, the F3 message the circuit
+// verifies), so every action is one wallet prompt.
 
 import { z } from 'zod';
 
 import {
   AppendInboxPayloadSchema,
+  DemoTokensPayloadSchema,
   OpenSwapPayloadSchema,
   RELAY_ACTIONS,
   RegisterPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
+  WithdrawUnshieldedPayloadSchema,
   type JobLane,
   type RelayActionName,
 } from '@nightmarket/core';
@@ -46,7 +49,13 @@ export interface ActionDefinition {
   implementedBy: string;
 }
 
-import { appendInboxExecutor, registerExecutor, withdrawExecutor, type AccountActionDeps } from './account-actions.js';
+import {
+  appendInboxExecutor,
+  registerExecutor,
+  withdrawExecutor,
+  withdrawUnshieldedExecutor,
+  type AccountActionDeps,
+} from './account-actions.js';
 
 /** Until a lane defines its action's body, any JSON object (the size limit still applies). */
 const anyObject = z.record(z.string(), z.unknown());
@@ -82,6 +91,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('append-inbox', 'prover', 'B3'),
     def('open-swap', 'prover', 'B3'),
     def('take', 'prover', 'B3'),
+    def('withdraw-unshielded', 'prover', 'B3'),
+    def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -90,8 +101,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
 
 /**
  * The catalogue with the account executors: register (authorised by its RelayAction envelope,
- * which is also the enrolment), and withdraw and append-inbox, each authorised by the gated call's
- * OWN Passport signature (`passport-call`), so every action is one wallet prompt.
+ * which is also the enrolment), and withdraw, withdraw-unshielded and append-inbox, each authorised
+ * by the gated call's OWN Passport signature (`passport-call`), so every action is one wallet prompt.
  */
 export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, ActionDefinition> {
   const map = defaultCatalogue();
@@ -101,9 +112,16 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
   set('withdraw', {
     auth: 'passport-call',
     payload: WithdrawPayloadSchema,
-    // The recipient's encryption key is not in the contract's WithdrawShielded challenge (F-B6).
-    envelope: (p) => p.recipientEncryptionKey !== undefined,
+    // The recipient's encryption key is not in the contract's WithdrawShielded challenge (F-B6). A
+    // second signature binds it only when the deployment asks for it (questions Q13: off by default,
+    // one prompt per action).
+    ...(deps.withdrawRecipientEnvelope ? { envelope: (p) => p.recipientEncryptionKey !== undefined } : {}),
     executor: withdrawExecutor(deps),
+  });
+  set('withdraw-unshielded', {
+    auth: 'passport-call',
+    payload: WithdrawUnshieldedPayloadSchema,
+    executor: withdrawUnshieldedExecutor(deps),
   });
   set('append-inbox', {
     auth: 'passport-call',
@@ -127,5 +145,23 @@ export function withTrade(
     map.set(action, { ...map.get(action)!, ...patch });
   set('open-swap', { auth: 'passport-call', payload: OpenSwapPayloadSchema, executor: openSwapExecutor(deps) });
   set('take', { auth: 'passport-call', payload: TakePayloadSchema, executor: takeExecutor(deps) });
+  return map;
+}
+
+/**
+ * The catalogue with the demo-token claim (spec FR-007, ../demo/action.ts): a RelayAction envelope in
+ * the Solana scheme, admitted only for a live device of an active market account, once per key and
+ * within the daily cap.
+ */
+export function withDemoTokens(
+  map: Map<RelayActionName, ActionDefinition>,
+  demo: { admit: AdmissionCheck; executor: JobExecutor },
+): Map<RelayActionName, ActionDefinition> {
+  map.set('demo-tokens', {
+    ...map.get('demo-tokens')!,
+    payload: DemoTokensPayloadSchema,
+    admit: demo.admit,
+    executor: demo.executor,
+  });
   return map;
 }

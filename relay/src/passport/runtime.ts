@@ -176,6 +176,13 @@ export class PassportRuntime {
     };
   }
 
+  /** A contract's on-chain state (operations, verifier keys, maintenance authority), or null when
+   *  there is no contract at the address (FR-005: ./account-keys.ts, the demo faucets' check). */
+  async contractState(address: string): Promise<unknown> {
+    const pdp = this.shared.publicDataProvider as { queryContractState(a: string): Promise<unknown> };
+    return (await pdp.queryContractState(address)) ?? null;
+  }
+
   /** The account's public ledger state, or null when there is no contract at the address. */
   async ledgerState(account: string): Promise<AccountLedger | null> {
     const pdp = this.shared.publicDataProvider as { queryContractState(a: string): Promise<{ data: unknown } | null> };

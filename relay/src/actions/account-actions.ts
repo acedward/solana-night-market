@@ -1,4 +1,5 @@
-// The account executors (plan L-ACC): register, withdraw and append-inbox.
+// The account executors (plan L-ACC): register, withdraw, withdraw-unshielded (AA 00047 B3) and
+// append-inbox.
 //
 // Every one runs on the prover lane (one proof at a time), pays its DUST from the sponsor wallet,
 // keeps the call's private state (the coin a spend consumes) in a per-job in-memory store that is
@@ -13,6 +14,7 @@ import {
   type RelayActionScheme,
   type SignedRelayAction,
   type WithdrawResult,
+  type WithdrawUnshieldedResult,
 } from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
@@ -35,6 +37,9 @@ export interface AccountActionDeps {
   sponsor: SponsorSession;
   /** The Midnight network name a RelayAction envelope must name (security review F-B6). */
   network: string;
+  /** F-B6's second signature for a withdrawal's recipient encryption key (questions Q13; the
+   *  deployment's RELAY_WITHDRAW_RECIPIENT_ENVELOPE, off by default: one prompt per action). */
+  withdrawRecipientEnvelope?: boolean;
   replay: DigestReplayGuard;
   /** Issues and checks the single-use entitlements `append-inbox` needs (security review F-B3). */
   entitlements: AppendEntitlements;
@@ -224,9 +229,10 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'withdraw', raw, ctx);
     const p = check.payload;
-    if (p.recipientEncryptionKey) {
-      // Security review F-B6: the encryption key the coin is sealed to must be the one the device
-      // signed in the route's RelayAction envelope (the contract's challenge does not cover it).
+    if (p.recipientEncryptionKey && deps.withdrawRecipientEnvelope) {
+      // Security review F-B6 (when the deployment turns it on, Q13): the encryption key the coin is
+      // sealed to must be the one the device signed in the route's RelayAction envelope (the
+      // contract's challenge does not cover it).
       const { account: _a, passportAuth: _p, signer: _s, auth, ...body } = raw as Record<string, unknown>;
       const envelope = checkRelayActionBinding(auth, {
         expectedAction: 'withdraw',
@@ -287,6 +293,43 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
                 ? { changeEntitlement: deps.entitlements.issue(check.account, `withdraw:${String(out.txId)}`) }
                 : {}),
             };
+            return result as unknown as Record<string, unknown>;
+          } finally {
+            privateState.wipe();
+          }
+        }),
+      ),
+    );
+  };
+}
+
+/** The arm's `withdraw_unshielded` (AA 00047 B3): pay `amount` of an unshielded colour the account
+ *  holds to a user address. No coin (unshielded balances are public), no change, no inbox entry. */
+export function withdrawUnshieldedExecutor(deps: AccountActionDeps): JobExecutor {
+  return async (raw, ctx) => {
+    const { rt, check } = await recheck(deps, 'withdraw-unshielded', raw, ctx);
+    const p = check.payload;
+    return runGated(deps, check.digestHex, () =>
+      ctx.prove(() =>
+        deps.sponsor.withWallet(async (w) => {
+          const privateState = new MemoryPrivateStateProvider();
+          try {
+            const providers = await rt.providers(w as SponsorWalletHandle, privateState);
+            const custody = await rt.client.account.CustodyAccount.connect(
+              providers,
+              rt.compiledAccount(),
+              check.account,
+              rt.client.witnesses.emptyCoinStore(),
+            );
+            ctx.stage('proving', { circuit: deps.arm.circuits.withdrawUnshielded });
+            const out = await custody.withdrawUnshieldedWithAuth(
+              unhex(p.color),
+              BigInt(p.amount),
+              unhex(p.recipient),
+              check.auth,
+            );
+            ctx.stage('submitted', { tx: String(out.txId) });
+            const result: WithdrawUnshieldedResult = { txId: String(out.txId) };
             return result as unknown as Record<string, unknown>;
           } finally {
             privateState.wipe();

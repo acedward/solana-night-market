@@ -121,7 +121,10 @@ export function harness(
 export const ACCOUNT = '11'.repeat(32);
 
 export function samplePayload(action: RelayActionName): Record<string, unknown> {
-  return action === 'register' ? { encPublicKey: 'ab'.repeat(32) } : { amount: '1000000', colour: 'bb'.repeat(32) };
+  if (action === 'register') return { encPublicKey: 'ab'.repeat(32) };
+  // The demo-token claim's body is empty (the account is the request's `account`).
+  if (action === 'demo-tokens') return {};
+  return { amount: '1000000', colour: 'bb'.repeat(32) };
 }
 
 /** A test device (an Ed25519 key, as a Solana wallet holds). */

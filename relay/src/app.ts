@@ -9,6 +9,7 @@
 //   GET  /v1/accounts/:account/state    public ledger reads (L-ACC)
 //   GET  /v1/accounts/:account/inbox    public inbox ciphertexts (L-ACC)
 //   GET  /v1/accounts/:account/zswap    the account's Zswap leaves (exact positions) and spends (L-ACC)
+//   GET  /v1/demo-tokens[?owner=<key>]  the demo-token pack, its limits, and whether a key claimed (B3)
 //
 // Request bodies are never logged. Errors are JSON: {"error": {"code", "message", "detail"?}}.
 
@@ -20,6 +21,7 @@ import {
   ActionRequestSchema,
   RELAY_ACTIONS,
   type ActionRequest,
+  type DemoTokensInfo,
   type HealthResponse,
   type NonceResponse,
   type PublicConfig,
@@ -56,6 +58,8 @@ export interface AppDeps {
   /** Verifies a gated call's own Passport signature through the device arm (lane B3); absent until
    *  an arm is wired, and then every `passport-call` route answers `not-supported`. */
   passportCall?: (def: ActionDefinition, request: ActionRequest) => Promise<VerifyOutcome>;
+  /** The demo-token pack and limits (GET /v1/demo-tokens, B3); absent: the endpoint is off. */
+  demoTokens?: (owner?: string) => DemoTokensInfo;
   /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop). */
   clientAddress?: (c: Context) => string;
   now?: () => number;
@@ -166,6 +170,24 @@ export function createApp(deps: AppDeps): Hono {
     return job
       ? c.json({ job })
       : apiError(c, 404, 'not-found', 'no such job (it may have expired, or the relay restarted)');
+  });
+
+  app.get(API_PATHS.demoTokens, (c) => {
+    const refused = limited(readLimiter, clientAddress(c), c);
+    if (refused) return refused;
+    const owner = c.req.query('owner')?.replace(/^0x/, '').toLowerCase();
+    if (owner !== undefined && !/^[0-9a-f]{64}$/.test(owner))
+      return apiError(c, 400, 'bad-request', 'owner must be a device key (64 hex)');
+    c.header('Cache-Control', 'no-store');
+    const body: DemoTokensInfo = deps.demoTokens?.(owner) ?? {
+      enabled: false,
+      pack: [],
+      perKey: 1,
+      dailyCap: 0,
+      remainingToday: 0,
+      ...(owner ? { claimed: false } : {}),
+    };
+    return c.json(body);
   });
 
   app.get(API_PATHS.queue, (c) => {

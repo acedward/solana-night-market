@@ -1,8 +1,9 @@
 // Plan P1 testing, carried over: the Playwright smoke. The Night Market shell renders with its
-// four sections and no trace of an EVM wallet; until lane B2 ships the Phantom adapter, the Connect
-// menu, Account and Trade say that Solana wallets are coming; Local data shows another tab's
-// records, masks the encryption secret until revealed, and CLEAR ALL (behind the typed phrase)
-// leaves nothing. Export and Import need a connected wallet: lane B2 tests them with a mock Phantom.
+// four sections and no trace of an EVM wallet; in a browser without a Solana wallet, the Connect
+// menu says to install Phantom and Account and Trade ask for a wallet; Local data shows another
+// tab's records, masks the encryption secret until revealed, and CLEAR ALL (behind the typed phrase)
+// leaves nothing. Export and Import need a connected wallet: ./wallet.spec.ts tests them with the
+// mock Phantom (AA 00047 lane B2).
 
 import { expect, test, type Page } from '@playwright/test';
 
@@ -21,7 +22,7 @@ const marketKeys = (page: Page) =>
     return out;
   });
 
-test('the shell, the Solana wallet placeholder, and Local data with another tab’s records', async ({
+test('the shell, the Connect menu without a Solana wallet, and Local data with another tab’s records', async ({
   page,
   context,
 }) => {
@@ -36,14 +37,15 @@ test('the shell, the Solana wallet placeholder, and Local data with another tab�
   await expect(page.getByTestId('network-name')).toContainText('stagenet');
   await expect(page.locator('body')).not.toContainText(/sepolia|ethereum|metamask|\bevm\b|MN Bank/i);
 
-  // Connect: no wallet adapter in this build yet, and the menu says so.
+  // Connect: no Solana wallet in this browser, and the menu says what to do.
   await page.getByTestId('connect').click();
   await expect(page.getByTestId('wallet-menu')).toBeVisible();
-  await expect(page.getByTestId('wallet-unsupported')).toContainText('Solana wallets (Phantom) are coming');
+  await expect(page.getByTestId('wallet-none')).toContainText('No Solana wallet found in this browser');
   await page.getByTestId('tab-account').click();
-  await expect(page.getByTestId('account-connect')).toContainText('controlled by a Solana wallet (Phantom)');
+  await expect(page.getByTestId('account-connect')).toContainText('It only signs messages: it needs no SOL');
   await page.getByTestId('tab-trade').click();
-  await expect(page.getByTestId('trade-connect')).toContainText('Trading with a Solana wallet is coming');
+  await expect(page.getByTestId('trade-connect')).toContainText('Connect your Solana wallet to trade');
+  await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'no-wallet');
 
   // Another tab writes a wallet's records; this tab follows (storage events).
   await page.getByTestId('tab-local').click();

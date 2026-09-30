@@ -125,7 +125,9 @@ function Identity({ network }: { network: NetworkProfile }) {
                 Solana wallets (Phantom) are coming to this site. You can already browse the order books.
               </p>
             ) : w.options.length === 0 ? (
-              <p className="small">No Solana wallet found in this browser. Install Phantom, then reload.</p>
+              <p className="small" data-testid="wallet-none">
+                No Solana wallet found in this browser. Install Phantom, then reload.
+              </p>
             ) : (
               <>
                 <p className="wallet-menu-title">Choose a wallet</p>

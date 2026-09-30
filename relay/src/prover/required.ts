@@ -3,52 +3,32 @@
 // relay when any of them lacks its prover key, verifier key or ZKIR, so a missing key is found at
 // deploy time instead of in a customer's job an hour later.
 //
-// Where each one is proven:
-//   account/activate_initial_device_with_evm   registration (actions/account-actions.ts)
-//   account/withdraw_shielded_with_evm         a shielded withdrawal (actions/account-actions.ts)
-//   account/append_inbox_with_evm              re-filing a change coin's entry, Q13 (actions/account-actions.ts)
-//   account/bridge_* (5)                       the bridge starts and settles (bridge/live-backend.ts)
-//   account/open_swap_shielded_with_evm        making and taking offers (trade/account-offer.ts)
-//   Erc20Vault/startDeposit, startWithdraw     called by the account's bridge starts
-//   Erc20Vault/completeDeposit, completeWithdraw, refundWithdraw
-//                                              called by the account's bridge settles
-//   Erc20Vault/abandonDeposit                  closing a never-executed deposit, Q21 A (bridge/live-backend.ts)
-//   SignetSigner/signBidirectional             called by the vault's two starts
+// Night Market proves only the account's device-arm calls (../passport/arm.ts `ARM_CIRCUITS`, Track
+// A's Ed25519 arm) and its offer circuit:
+//   account/activate_initial_device_with_ed25519   registration (actions/account-actions.ts)
+//   account/withdraw_shielded_with_ed25519         a shielded withdrawal (actions/account-actions.ts)
+//   account/append_inbox_with_ed25519              re-filing a change coin's entry, Q13 (actions/account-actions.ts)
+//   account/open_swap_shielded_with_ed25519        making and taking offers (trade/account-offer.ts)
+// MN Bank also proved the bridge circuits and the vault's and the Signet singleton's; Night Market
+// has no bridge. (The account contract still declares the vault as a callee, so the key job still
+// compiles it: deploy/key-volume/build.sh.)
 //
-// relay/test/key-completeness.test.ts checks that every circuit name the relay's sources call is listed
-// here, and that every account circuit here is in the MN Bank account shape.
+// relay/test/key-completeness.test.ts checks that every circuit name the relay's sources prove is
+// listed here, and (once the submodule carries the arm, plan P6.1) that each is a real
+// proof-bearing circuit of the compiled account.
 
-// Plain names, no import of ../passport/account-shape.ts: that module loads the Passport client,
-// which needs the compiled contracts, and this list is read at start-up before (and without) any
-// key volume. The test checks these names against account-shape's lists.
-export const ACCOUNT_PROVEN_CIRCUITS = [
-  'activate_initial_device_with_evm',
-  'withdraw_shielded_with_evm',
-  'append_inbox_with_evm',
-  'bridge_deposit_start_with_evm',
-  'bridge_withdraw_start_with_evm',
-  'bridge_deposit_complete',
-  'bridge_withdraw_complete',
-  'bridge_withdraw_refund',
-  'open_swap_shielded_with_evm',
-] as const;
+import { ARM_CIRCUITS } from '../passport/arm.js';
 
-export const VAULT_PROVEN_CIRCUITS = [
-  'startDeposit',
-  'completeDeposit',
-  'abandonDeposit',
-  'startWithdraw',
-  'completeWithdraw',
-  'refundWithdraw',
-] as const;
-
-export const SIGNET_PROVEN_CIRCUITS = ['signBidirectional'] as const;
+export const ACCOUNT_PROVEN_CIRCUITS: readonly string[] = [
+  ARM_CIRCUITS.activate,
+  ARM_CIRCUITS.withdrawShielded,
+  ARM_CIRCUITS.appendInbox,
+  ARM_CIRCUITS.openSwap,
+];
 
 /** The contract directories of the key volume the relay reads. */
-export const KEY_VOLUME_CONTRACTS = { account: 'account', vault: 'Erc20Vault', signet: 'SignetSigner' } as const;
+export const KEY_VOLUME_CONTRACTS = { account: 'account' } as const;
 
-export const RELAY_PROVEN_CIRCUITS: readonly string[] = [
-  ...ACCOUNT_PROVEN_CIRCUITS.map((c) => `${KEY_VOLUME_CONTRACTS.account}/${c}`),
-  ...VAULT_PROVEN_CIRCUITS.map((c) => `${KEY_VOLUME_CONTRACTS.vault}/${c}`),
-  ...SIGNET_PROVEN_CIRCUITS.map((c) => `${KEY_VOLUME_CONTRACTS.signet}/${c}`),
-];
+export const RELAY_PROVEN_CIRCUITS: readonly string[] = ACCOUNT_PROVEN_CIRCUITS.map(
+  (c) => `${KEY_VOLUME_CONTRACTS.account}/${c}`,
+);

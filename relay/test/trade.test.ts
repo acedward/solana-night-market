@@ -1,35 +1,34 @@
 // Plan L-TRD: the relay's two trade actions against a mocked kernel and batcher, with the proof
 // and the ledger replaced by G-TAKE's fake transactions (the live check, L-TRD.0, runs the real ones).
 //
-//   - the `passport-call` authorisation of an OpenSwapShielded signature (valid, tampered, replayed);
+//   - the `passport-call` authorisation of a swap call's signature (valid, tampered, replayed), through
+//     the TEST device arm (./fake-arm.ts; the Ed25519 arm is lane B3's);
 //   - open-swap: prove → publish (waiting out ROOT_UNKNOWN) → listed; a refusal is reported;
 //   - take: the maker's offer is checked BEFORE any proof (whole, complementary, legs in segment 0,
 //     still live), then merge → cost(params, true) → batcher; every refusal is specific.
 
-import { type BaseWallet, Wallet } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
-import { encodeOffer, type OpenSwapPayload, type TakePayload } from '@mnbank/core';
-import { evmDeviceEntry, openSwapGatedCall } from '@mnbank/core/passport';
+import { encodeOffer, type OpenSwapPayload, type TakePayload } from '@nightmarket/core';
 
 import { accountOffer, walletOffer, type FakeTx } from '../../test/gates/take/fake-tx.js';
 import { passportCallAuthoriser } from '../src/auth/passport-call.js';
 import { DigestReplayGuard } from '../src/auth/verifiers.js';
-import type { AccountLedger, PassportRuntime } from '../src/passport/runtime.js';
+import type { PassportRuntime } from '../src/passport/runtime.js';
 import { PublicError, type JobContext } from '../src/queue/jobs.js';
 import type { SponsorSession } from '../src/sponsor/session.js';
 import type { ProvenAccountOffer } from '../src/trade/account-offer.js';
 import { openSwapExecutor, takeExecutor, type TradeDeps } from '../src/trade/executors.js';
 import { TakeRefusal, checkMakerOffer, mergeForSettlement } from '../src/trade/settle.js';
 import { describeTx } from '../src/trade/tx-structure.js';
+import { callSigner, fakeAccountRuntime, testArm } from './fake-arm.js';
 import { silentLog } from './harness.js';
 
 const ACCOUNT = '5e'.repeat(32);
-const SALT = '9a'.repeat(32);
-const STOCK = 'a1'.repeat(32);
-const USDC = 'b2'.repeat(32);
+// Any two tokens: no token is special.
+const BASE = 'a1'.repeat(32);
+const QUOTE = 'b2'.repeat(32);
 const OFFER_ID = 'cd'.repeat(32);
-const unhex = (h: string) => Uint8Array.from(Buffer.from(h, 'hex'));
 
 /** A FakeTx that also answers the ledger's cost questions. */
 function costly(tx: FakeTx, opts: { timeToDismiss?: boolean } = {}): FakeTx {
@@ -46,28 +45,14 @@ function costly(tx: FakeTx, opts: { timeToDismiss?: boolean } = {}): FakeTx {
   });
 }
 
-function fakeRuntime(owner: string, authNonce = 2n) {
-  const live = new Set([evmDeviceEntry(ACCOUNT, owner, 0n, 0n)]);
-  const ledger: AccountLedger = {
-    booted: true,
-    device_count: 1n,
-    device_epoch: 0n,
-    auth_nonce: authNonce,
-    inbox_count: 0n,
-    enc_key: new Uint8Array(32),
-    evm_domain_salt: unhex(SALT),
-    vault_address: { bytes: new Uint8Array(32) },
-    devices: {
-      member: (e: Uint8Array) => live.has(Buffer.from(e).toString('hex')),
-      [Symbol.iterator]: () => [...live].map(unhex)[Symbol.iterator](),
-    },
-    inbox: { member: () => false, lookup: () => new Uint8Array(192) },
-  };
-  return {
-    ledgerState: async () => ledger,
+type Signer = ReturnType<typeof callSigner>;
+
+/** The account `signer` controls, at auth nonce 2, with the providers the executors borrow. */
+function fakeRuntime(signer: Signer, authNonce = 2n): PassportRuntime {
+  return Object.assign(fakeAccountRuntime(ACCOUNT, [signer.deviceKey], authNonce), {
     providers: async () => ({}),
     compiledAccount: () => ({}),
-  } as unknown as PassportRuntime;
+  }) as unknown as PassportRuntime;
 }
 
 const sponsor = {
@@ -90,34 +75,30 @@ function ctx(): JobContext & { stages: string[] } {
 }
 
 const make: OpenSwapPayload = {
-  giveColor: STOCK,
+  giveColor: BASE,
   giveAmount: '2000000',
-  wantColor: USDC,
+  wantColor: QUOTE,
   wantAmount: '2100000',
   wantNonce: '11'.repeat(32),
   wantEntry: '22'.repeat(192),
   changeEntry: '00'.repeat(192),
   validUntil: '0',
-  coin: { nonce: '33'.repeat(32), color: STOCK, value: '3000000', mtIndex: '9' },
+  coin: { nonce: '33'.repeat(32), color: BASE, value: '3000000', mtIndex: '9' },
   authNonce: '2',
 };
-/** B takes an ask "2 wStkA for 2.10 wUSDC": gives 2.10 wUSDC, wants 2 wStkA. */
+/** B takes an ask "2 base for 2.10 quote": gives 2.10 quote, wants 2 base. */
 const take: TakePayload = {
   ...make,
-  giveColor: USDC,
+  giveColor: QUOTE,
   giveAmount: '2100000',
-  wantColor: STOCK,
+  wantColor: BASE,
   wantAmount: '2000000',
-  coin: { nonce: '44'.repeat(32), color: USDC, value: '4000000', mtIndex: '12' },
+  coin: { nonce: '44'.repeat(32), color: QUOTE, value: '4000000', mtIndex: '12' },
   offerId: OFFER_ID,
 };
 
-async function signed(w: BaseWallet, payload: OpenSwapPayload, authNonce = 2n) {
-  const call = openSwapGatedCall({ account: ACCOUNT, authNonce, evmDomainSalt: SALT }, w.address, payload);
-  const td = call.typedData as unknown as { domain: object; types: Record<string, never>; message: object };
-  const { EIP712Domain: _d, ...types } = td.types;
-  const signature = await w.signTypedData(td.domain as never, types, td.message as never);
-  return { owner: w.address.toLowerCase(), signature, useCounter: '0' };
+function signed(w: Signer, action: 'open-swap' | 'take', payload: OpenSwapPayload) {
+  return w.passportAuth(action, ACCOUNT, payload as unknown as Record<string, unknown>);
 }
 
 function proven(tx: FakeTx, id = 'ef'.repeat(32)): ProvenAccountOffer {
@@ -148,6 +129,7 @@ function fetchMock(route: Route) {
 function deps(rt: PassportRuntime, extra: Partial<TradeDeps>): TradeDeps {
   return {
     runtime: () => rt,
+    arm: testArm,
     sponsor,
     kernelUrl: 'http://kernel.test',
     batcherUrl: 'http://batcher.test',
@@ -160,12 +142,12 @@ function deps(rt: PassportRuntime, extra: Partial<TradeDeps>): TradeDeps {
 }
 
 describe('the passport-call authorisation of a trade', () => {
-  it('accepts the device’s OpenSwapShielded signature once, and refuses tampered terms and replays', async () => {
-    const w = Wallet.createRandom();
-    const rt = fakeRuntime(w.address);
+  it("accepts the device's swap signature once, and refuses tampered terms and replays", async () => {
+    const w = callSigner();
+    const rt = fakeRuntime(w);
     const replay = new DigestReplayGuard(3600);
-    const authorise = passportCallAuthoriser(() => rt, replay);
-    const auth = await signed(w, make);
+    const authorise = passportCallAuthoriser(() => rt, testArm, replay);
+    const auth = signed(w, 'open-swap', make);
     const req = { account: ACCOUNT, payload: make, passportAuth: auth };
     expect(await authorise({ action: 'open-swap' } as never, req as never)).toMatchObject({ ok: true });
     expect(await authorise({ action: 'open-swap' } as never, req as never)).toMatchObject({
@@ -175,9 +157,9 @@ describe('the passport-call authorisation of a trade', () => {
     const tampered = { ...req, payload: { ...make, wantAmount: '2000000' } };
     expect(await authorise({ action: 'open-swap' } as never, tampered as never)).toMatchObject({
       ok: false,
-      code: 'wrong-signer',
+      code: 'bad-signature',
     });
-    const stale = passportCallAuthoriser(() => fakeRuntime(w.address, 3n), new DigestReplayGuard(3600));
+    const stale = passportCallAuthoriser(() => fakeRuntime(w, 3n), testArm, new DigestReplayGuard(3600));
     expect(await stale({ action: 'open-swap' } as never, req as never)).toMatchObject({ ok: false, code: 'expired' });
     // A take must name the offer.
     expect(await authorise({ action: 'take' } as never, req as never)).toMatchObject({
@@ -189,7 +171,7 @@ describe('the passport-call authorisation of a trade', () => {
 
 describe('open-swap (make)', () => {
   it('proves, publishes (waiting out ROOT_UNKNOWN) and reports the offer once it is listed', async () => {
-    const w = Wallet.createRandom();
+    const w = callSigner();
     let posts = 0;
     const { f, calls } = fetchMock((url, init) => {
       if (init.method === 'POST' && url.endsWith('/v1/offers')) {
@@ -201,11 +183,11 @@ describe('open-swap (make)', () => {
       if (url.endsWith('/status')) return json(200, { offerId: 'ef'.repeat(32), status: 'live' });
       return json(404, {});
     });
-    const prove = vi.fn(async () => proven(accountOffer(4711, 0, STOCK, 2_000_000n, USDC, 2_100_000n)));
+    const prove = vi.fn(async () => proven(accountOffer(4711, 0, BASE, 2_000_000n, QUOTE, 2_100_000n)));
     const c = ctx();
-    const auth = await signed(w, make);
-    const r = await openSwapExecutor(deps(fakeRuntime(w.address), { fetchImpl: f, prove }))(
-      { ...make, account: ACCOUNT, passportAuth: auth, signer: w.address.toLowerCase() },
+    const auth = signed(w, 'open-swap', make);
+    const r = await openSwapExecutor(deps(fakeRuntime(w), { fetchImpl: f, prove }))(
+      { ...make, account: ACCOUNT, passportAuth: auth, signer: w.deviceKey },
       c,
     );
     expect(prove).toHaveBeenCalledTimes(1);
@@ -216,12 +198,12 @@ describe('open-swap (make)', () => {
   });
 
   it('reports the exchange’s refusal with its code', async () => {
-    const w = Wallet.createRandom();
+    const w = callSigner();
     const { f } = fetchMock(() => json(400, { error: 'PROOF_INVALID', reason: 'wellFormed failed' }));
-    const prove = async () => proven(accountOffer(4711, 0, STOCK, 2_000_000n, USDC, 2_100_000n));
-    const auth = await signed(w, make);
+    const prove = async () => proven(accountOffer(4711, 0, BASE, 2_000_000n, QUOTE, 2_100_000n));
+    const auth = signed(w, 'open-swap', make);
     await expect(
-      openSwapExecutor(deps(fakeRuntime(w.address), { fetchImpl: f, prove }))(
+      openSwapExecutor(deps(fakeRuntime(w), { fetchImpl: f, prove }))(
         { ...make, account: ACCOUNT, passportAuth: auth },
         ctx(),
       ),
@@ -249,10 +231,10 @@ describe('take', () => {
     batcher?: (body: unknown) => Response;
     payload?: TakePayload;
   }) {
-    const w = Wallet.createRandom();
+    const w = callSigner();
     const payload = o.payload ?? take;
-    const makerTx = o.maker ?? costly(walletOffer(STOCK, 2_000_000n, USDC, 2_100_000n));
-    const takerTx = o.taker ?? costly(accountOffer(62921, 0, USDC, 2_100_000n, STOCK, 2_000_000n));
+    const makerTx = o.maker ?? costly(walletOffer(BASE, 2_000_000n, QUOTE, 2_100_000n));
+    const takerTx = o.taker ?? costly(accountOffer(62921, 0, QUOTE, 2_100_000n, BASE, 2_000_000n));
     const batcherBodies: unknown[] = [];
     const { f } = fetchMock((url, init) => {
       if (url.startsWith('http://batcher.test')) {
@@ -264,9 +246,9 @@ describe('take', () => {
     });
     const prove = vi.fn(async () => proven(takerTx));
     const c = ctx();
-    const auth = await signed(w, payload);
+    const auth = signed(w, 'take', payload);
     const exec = takeExecutor(
-      deps(fakeRuntime(w.address), {
+      deps(fakeRuntime(w), {
         fetchImpl: f,
         prove,
         deserialize: async () => makerTx,
@@ -302,19 +284,19 @@ describe('take', () => {
     expect(partial.prove).not.toHaveBeenCalled();
 
     // A default-proven account maker: its legs are in its own fallible segment (G-TAKE (c1)).
-    const fallible = await run({ maker: costly(accountOffer(11204, 11204, STOCK, 2_000_000n, USDC, 2_100_000n)) });
+    const fallible = await run({ maker: costly(accountOffer(11204, 11204, BASE, 2_000_000n, QUOTE, 2_100_000n)) });
     await expect(fallible.result).rejects.toMatchObject({ code: 'take-maker-segment' });
     expect(fallible.prove).not.toHaveBeenCalled();
   });
 
   it('refuses a merge the node would refuse: time-to-dismiss, or the same intent segment', async () => {
     const slow = await run({
-      maker: costly(walletOffer(STOCK, 2_000_000n, USDC, 2_100_000n), { timeToDismiss: false }),
+      maker: costly(walletOffer(BASE, 2_000_000n, QUOTE, 2_100_000n), { timeToDismiss: false }),
     });
     await expect(slow.result).rejects.toMatchObject({ code: 'take-time-to-dismiss' });
     const collide = await run({
-      maker: costly(accountOffer(500, 0, STOCK, 2_000_000n, USDC, 2_100_000n)),
-      taker: costly(accountOffer(500, 0, USDC, 2_100_000n, STOCK, 2_000_000n)),
+      maker: costly(accountOffer(500, 0, BASE, 2_000_000n, QUOTE, 2_100_000n)),
+      taker: costly(accountOffer(500, 0, QUOTE, 2_100_000n, BASE, 2_000_000n)),
     });
     await expect(collide.result).rejects.toMatchObject({ code: 'take-intent-collision' });
   });
@@ -328,27 +310,27 @@ describe('take', () => {
 
 describe('the settlement checks', () => {
   it('checkMakerOffer names what the offer gives and wants when it is not the one signed', () => {
-    const maker = walletOffer(STOCK, 2_000_000n, USDC, 2_100_000n);
+    const maker = walletOffer(BASE, 2_000_000n, QUOTE, 2_100_000n);
     expect(
       checkMakerOffer(maker, {
-        give: { colour: USDC, amount: 2_100_000n },
-        want: { colour: STOCK, amount: 2_000_000n },
+        give: { colour: QUOTE, amount: 2_100_000n },
+        want: { colour: BASE, amount: 2_000_000n },
       }),
     ).toEqual({ makerSegment: 0 });
     try {
-      checkMakerOffer(maker, { give: { colour: USDC, amount: 2n }, want: { colour: STOCK, amount: 2_000_000n } });
+      checkMakerOffer(maker, { give: { colour: QUOTE, amount: 2n }, want: { colour: BASE, amount: 2_000_000n } });
       expect.unreachable();
     } catch (e) {
       expect(e).toBeInstanceOf(TakeRefusal);
-      expect((e as TakeRefusal).detail).toMatchObject({ offerGives: { colour: STOCK, amount: '2000000' } });
+      expect((e as TakeRefusal).detail).toMatchObject({ offerGives: { colour: BASE, amount: '2000000' } });
     }
   });
 
   it('mergeForSettlement refuses an unbalanced merge and reads the cost of a balanced one', () => {
-    const maker = costly(walletOffer(STOCK, 2_000_000n, USDC, 2_100_000n));
-    const short = costly(accountOffer(7, 0, USDC, 2_000_000n, STOCK, 2_000_000n));
+    const maker = costly(walletOffer(BASE, 2_000_000n, QUOTE, 2_100_000n));
+    const short = costly(accountOffer(7, 0, QUOTE, 2_000_000n, BASE, 2_000_000n));
     expect(() => mergeForSettlement(maker, short, {})).toThrow(/not token-balanced/);
-    const ok = mergeForSettlement(maker, costly(accountOffer(7, 0, USDC, 2_100_000n, STOCK, 2_000_000n)), {});
+    const ok = mergeForSettlement(maker, costly(accountOffer(7, 0, QUOTE, 2_100_000n, BASE, 2_000_000n)), {});
     expect(ok.cost.enforced).toEqual({ readTime: '1', computeTime: '2', blockUsage: '3' });
     expect(ok.structure.legs).toEqual({});
   });

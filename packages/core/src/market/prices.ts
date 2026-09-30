@@ -78,7 +78,8 @@ export function classifyOffer(
   const give = gives[0]!;
   const want = wants[0]!;
   if (give.type !== 'SHIELDED' || want.type !== 'SHIELDED') return { kind: 'ignored', reason: 'unshielded' };
-  if (!registry.byColour(give.token) || !registry.byColour(want.token)) return { kind: 'ignored', reason: 'unknown-token' };
+  if (!registry.byColour(give.token) || !registry.byColour(want.token))
+    return { kind: 'ignored', reason: 'unknown-token' };
   const found = pairFor(pairs, give.token, want.token);
   if (!found) return { kind: 'ignored', reason: 'not-a-pair' };
   if (give.amount <= 0n || want.amount <= 0n) return { kind: 'ignored', reason: 'zero-amount' };

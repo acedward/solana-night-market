@@ -1,5 +1,10 @@
 # G-TAKE — can a Passport account take an offer?
 
+> **Night Market (AA 00047):** carried over from MN Bank (plan 00039). The live driver (`gate.ts`,
+> `run-gate.sh`) drove an EVM-arm account and was removed with the EVM arm; it is in `main`'s
+> history. The offline half below is arm-agnostic and still runs in CI (the `gate-take` project).
+> The mechanism is the same for the Ed25519 arm's swap circuit.
+
 Plan 00039, gate G-TAKE (P2), on a **local** ledger-9 stack. No account had ever taken an offer: a
 Passport call's value legs sit where its transcript runs, balancing is checked per token per
 segment, and the batcher's `midnight-balancer` only adds DUST. This gate finds out, with evidence,
@@ -15,8 +20,6 @@ which way an account can take.
 | `partition.ts` | Steers midnight-js's transcript partitioner so an account call runs fully GUARANTEED and its legs land in segment 0 (see below) | building the take (and makes) |
 | `batcher-client.ts` | `POST /send-input` to `midnight-balancer`, the zswap SPA's body byte for byte | submitting |
 | `relay-take.ts` | The relay-assisted take (Q15 option A) as pure orchestration: withdraw the whole coin to the bank's taker wallet, take as a wallet, deposit the stock and the change back; refund when the offer is gone or the take does not settle | the fallback |
-| `gate.ts` | The live driver (runs only on a local stack, never in CI) | reference |
-| `run-gate.sh` | Host orchestration: the P0.5 stack under the one-stack lock, the rc.6 prover, one driver step per run | reference |
 | `*.test.ts`, `fake-tx.ts` | The offline half, in the `gate-take` vitest project | |
 
 ## The mechanism in one paragraph

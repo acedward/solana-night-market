@@ -212,7 +212,7 @@ function checkBinding(
   const early = beforeSignature(message);
   if (early) return early;
   if (!options.scheme) return fail('not-supported', NOT_SUPPORTED_REASON);
-  let valid = false;
+  let valid: boolean;
   try {
     valid = options.scheme.verify(message, unhex(signature));
   } catch {

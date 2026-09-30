@@ -1,32 +1,25 @@
 // The relay's entry point (Bun): load the configuration, register every secret with the log
 // redactor, check the key volume (and refuse to start when it lacks any circuit the relay proves,
-// plan P4-A), open the sponsor wallet (under the funding lock when one is configured), start the
-// stale bridge-request closer (Q21 A), and serve.
+// plan P4-A), open the sponsor wallet (under the funding lock when one is configured), wire the
+// device arm when this build has one (lane B3: ./passport/arm.ts `wiredArm`), and serve.
 
 import { readFileSync } from 'node:fs';
 
-import { bridgeConfigured } from '@mnbank/core';
-
-import { accountCatalogue, withBridge, withTrade } from './actions/catalogue.js';
+import { accountCatalogue, defaultCatalogue, withTrade } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
 import { createApp } from './app.js';
 import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
 import { DigestReplayGuard } from './auth/verifiers.js';
-import type { BridgeBackend } from './bridge/backend.js';
-import { loadLiveBridgeBackend } from './bridge/live-backend.js';
-import { BridgeService } from './bridge/service.js';
-import { StaleRequestCloser, bankAccountChecker } from './bridge/stale.js';
-import { deviceChecker, gatedStartVerifier } from './bridge/wiring.js';
 import { IndexerClient } from './chain/indexer.js';
 import { IndexerChainReader, notImplementedChainReader, type ChainReader } from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
 import { healthCollector, httpProbes } from './health.js';
 import { Redactor, createLogger } from './log.js';
 import { ProofServerClient } from './prover/client.js';
-import { deployedVerifierKeys } from './prover/deployed.js';
 import { cachedKeyCheck, checkKeyVolume, keyVolumeProblems } from './prover/keys.js';
 import { RELAY_PROVEN_CIRCUITS } from './prover/required.js';
+import { wiredArm } from './passport/arm.js';
 import { PassportRuntime, PassportRuntimeError } from './passport/runtime.js';
 import { JobQueue } from './queue/jobs.js';
 import { FacadeSponsorSession, openFacadeWallet } from './sponsor/facade.js';
@@ -49,21 +42,20 @@ async function main(): Promise<void> {
   const { config, secrets } = loaded;
   redactor.addSecret(secrets.sponsorSeedHex);
   redactor.addSecret(secrets.sponsorSeedSource);
-  redactor.addSecret(secrets.sepoliaRpcUrl);
   const log = createLogger({ level: config.logLevel, redactor }, { service: 'relay', network: config.network.name });
 
   // The key volume (plan P4-A): every circuit the relay proves must have its prover key, verifier
-  // key and ZKIR, the vault's and the singleton's keys must be the deployed ones, and a pinned
-  // fingerprint must match. When a volume is configured and any of that fails, the relay does not
-  // start: a missing key would otherwise surface only in a customer's job.
-  const deployed = deployedVerifierKeys(config.network.name, config.network.bridge.vaultAddress);
+  // key and ZKIR, and a pinned fingerprint must match. When a volume is configured and any of that
+  // fails, the relay does not start: a missing key would otherwise surface only in a customer's job.
+  // (No deployed callee is checked: MN Bank checked the bridge vault's keys; Night Market has none.)
+  const deployed: Record<string, string> = {};
   const keys = () => checkKeyVolume(config.managedPath, config.keysFingerprint, RELAY_PROVEN_CIRCUITS, deployed);
   const keyCheck = keys();
   if (config.managedPath && !keyCheck.present && !config.requireKeys) {
     // The image names a default key path; with nothing mounted there the relay runs keyless (CI,
     // UI development). A deployment sets RELAY_REQUIRE_KEYS=true so a missing volume is fatal.
     log.warn(
-      'no key volume at MIDNIGHT_MANAGED_PATH: account, bridge and trade actions are unavailable (RELAY_REQUIRE_KEYS=true refuses to start instead)',
+      'no key volume at MIDNIGHT_MANAGED_PATH: account and trade actions are unavailable (RELAY_REQUIRE_KEYS=true refuses to start instead)',
     );
   } else if (config.managedPath) {
     const problems = keyVolumeProblems(keyCheck, {
@@ -87,7 +79,7 @@ async function main(): Promise<void> {
     log.error('RELAY_REQUIRE_KEYS is set but MIDNIGHT_MANAGED_PATH names no key volume; refusing to start');
     process.exit(78);
   } else {
-    log.warn('no key volume (MIDNIGHT_MANAGED_PATH): account, bridge and trade actions are unavailable');
+    log.warn('no key volume (MIDNIGHT_MANAGED_PATH): account and trade actions are unavailable');
   }
 
   let sponsor: SponsorSession = new DisabledSponsorSession();
@@ -104,7 +96,7 @@ async function main(): Promise<void> {
         },
         feeBlocksMargin: config.sponsor.feeBlocksMargin,
         fundingLockFile: config.sponsor.fundingLockFile,
-        purpose: `mn-bank relay ${RELAY_VERSION} (${config.network.name})`,
+        purpose: `night-market relay ${RELAY_VERSION} (${config.network.name})`,
       },
       openFacadeWallet,
       log.child({ component: 'sponsor' }),
@@ -146,25 +138,11 @@ async function main(): Promise<void> {
     : notImplementedChainReader;
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
 
-  // The bridge (plan L-BRG): needs the runtime, a complete vault profile and a Sepolia RPC.
-  let bridgeBackend: BridgeBackend | null = null;
-  if (runtime && bridgeConfigured(config.network) && secrets.sepoliaRpcUrl) {
-    try {
-      bridgeBackend = await loadLiveBridgeBackend({
-        runtime,
-        sponsor,
-        network: config.network,
-        evmRpcUrl: secrets.sepoliaRpcUrl,
-        indexer,
-        log: log.child({ component: 'bridge' }),
-      });
-      log.info('bridge ready', { vault: config.network.bridge.vaultAddress });
-    } catch (e) {
-      log.error('the bridge could not be loaded; bridge actions are unavailable', { error: e });
-    }
-  } else {
-    log.info('bridge not configured (it needs the key volume, the vault profile and SEPOLIA_RPC_URL_FILE)');
-  }
+  // The device arm (lane B3): Track A's Ed25519 arm and the Solana wallet's envelope scheme. This
+  // build wires none yet, so every action answers "not supported" (the default catalogue).
+  const wired = wiredArm();
+  if (!wired)
+    log.warn('no device arm is wired in this build (plan lane B3): account and trade actions are unavailable');
 
   // Security review F-B3: `append-inbox` is sponsored only against a single-use entitlement the
   // relay issued for a change coin (./actions/entitlements.ts); the MAC key comes from the seed.
@@ -180,46 +158,7 @@ async function main(): Promise<void> {
     maxJobs: config.limits.maxJobs,
     log: log.child({ component: 'queue' }),
   });
-  const bridge = new BridgeService({
-    backend: () => bridgeBackend,
-    laneLoad: (lane, account) => queue.laneLoad(lane, account),
-    gas: config.bridgeGas,
-    tokens: config.tokens,
-    vaultAddress: config.network.bridge.vaultAddress,
-    verifyStart: gatedStartVerifier(() => runtime),
-    releaseDigest: (digest) => replay.release(digest),
-    isDevice: deviceChecker(() => runtime),
-    issueEntitlement: (account, source) => entitlements.issue(account, source),
-    log: log.child({ component: 'bridge' }),
-    closedTtlMs: config.limits.jobTtlSeconds * 1000,
-  });
-  // Q21 A: close bridge requests their owners left open (./bridge/stale.ts).
-  const closer = new StaleRequestCloser({
-    config: {
-      enabled: config.staleClose.enabled && config.staleClose.maxPerDay > 0,
-      intervalMs: config.staleClose.intervalSeconds * 1000,
-      staleAfterMs: config.staleClose.afterSeconds * 1000,
-      maxPerDay: config.staleClose.maxPerDay,
-      minSponsorDustSpecks: config.staleClose.minSponsorDustSpecks,
-      retryAfterMs: config.staleClose.retrySeconds * 1000,
-    },
-    service: bridge,
-    backend: () => bridgeBackend,
-    submit: (sub) => queue.submit(sub),
-    settled: (id) => queue.settled(id),
-    sponsor: () => sponsor.status(),
-    isBankAccount: bankAccountChecker(
-      async (account) => (runtime ? runtime.ledgerState(account) : null),
-      config.network.bridge.vaultAddress,
-    ),
-    log: log.child({ component: 'stale-requests' }),
-  });
   let batcherRefusal: { httpStatus: number; at: number } | null = null;
-  const bridgeHealth = () => ({
-    available: bridge.available(),
-    mpc: bridge.mpcStatus(),
-    staleRequests: closer.status(),
-  });
   const health = healthCollector({
     network: config.network.name,
     version: RELAY_VERSION,
@@ -233,14 +172,9 @@ async function main(): Promise<void> {
     probes: httpProbes({
       kernelUrl: config.network.zswap.kernelUrl,
       batcherUrl: config.network.zswap.batcherUrl,
-      vaultEvmAddress: config.network.bridge.vaultEvmAddress,
-      sepoliaRpcUrl: secrets.sepoliaRpcUrl,
       log,
     }),
-    vaultEvmAddress: config.network.bridge.vaultEvmAddress,
-    vaultGasLowWei: config.vaultGasLowWei,
     cacheSeconds: config.healthCacheSeconds,
-    bridge: bridgeHealth,
     batcherRefusal: () => batcherRefusal,
   });
   const app = createApp({
@@ -249,38 +183,37 @@ async function main(): Promise<void> {
     log,
     nonces,
     queue,
-    catalogue: withTrade(
-      withBridge(
-        accountCatalogue({
-          runtime: () => runtime,
-          sponsor,
-          vaultAddress: config.network.bridge.vaultAddress,
-          network: config.network.name,
-          chainId: config.network.evm.chainId,
-          replay,
-          entitlements,
-          log: log.child({ component: 'accounts' }),
-        }),
-        bridge,
-      ),
-      {
-        runtime: () => runtime,
-        sponsor,
-        kernelUrl: config.network.zswap.kernelUrl,
-        batcherUrl: config.network.zswap.batcherUrl,
-        batcherTarget: config.network.zswap.batcherTarget,
-        replay,
-        log: log.child({ component: 'trade' }),
-        onBatcherRefusal: (httpStatus) => {
-          batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
-        },
-      },
-    ),
+    catalogue: wired
+      ? withTrade(
+          accountCatalogue({
+            runtime: () => runtime,
+            arm: wired.arm,
+            scheme: wired.scheme,
+            sponsor,
+            network: config.network.name,
+            replay,
+            entitlements,
+            log: log.child({ component: 'accounts' }),
+          }),
+          {
+            runtime: () => runtime,
+            arm: wired.arm,
+            sponsor,
+            kernelUrl: config.network.zswap.kernelUrl,
+            batcherUrl: config.network.zswap.batcherUrl,
+            batcherTarget: config.network.zswap.batcherTarget,
+            replay,
+            log: log.child({ component: 'trade' }),
+            onBatcherRefusal: (httpStatus) => {
+              batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
+            },
+          },
+        )
+      : defaultCatalogue(),
     sponsor,
     health,
     chain,
-    bridge,
-    passportCall: passportCallAuthoriser(() => runtime, replay),
+    ...(wired ? { scheme: wired.scheme, passportCall: passportCallAuthoriser(() => runtime, wired.arm, replay) } : {}),
   });
 
   const sweeper = setInterval(() => {
@@ -289,7 +222,6 @@ async function main(): Promise<void> {
   }, 60_000);
 
   const server = Bun.serve({ hostname: config.host, port: config.port, fetch: app.fetch });
-  if (bridgeBackend) closer.start();
   log.info('relay listening', {
     host: config.host,
     port: server.port,
@@ -303,7 +235,6 @@ async function main(): Promise<void> {
     stopping = true;
     log.info('shutting down', { signal });
     clearInterval(sweeper);
-    closer.stop();
     await server.stop();
     await sponsor.stop().catch((e: unknown) => log.warn('sponsor stop failed', { error: e }));
     process.exit(0);

@@ -1,6 +1,7 @@
 // The two trade actions (plan L-TRD): `open-swap` (make an offer) and `take` (take one whole live
-// offer). Each is ONE `open_swap_shielded_with_evm` call signed by the customer, proven here with
-// a fully guaranteed transcript (./account-offer.ts), on the prover lane (one proof at a time).
+// offer). Each is ONE call of the device arm's swap circuit (../passport/arm.ts) signed by the
+// customer, proven here with a fully guaranteed transcript (./account-offer.ts), on the prover lane
+// (one proof at a time). Everything below is arm-agnostic: the arm checks the call's signature.
 //
 //   open-swap: prove → bind → `swapoffer1…` → `POST /v1/offers` → wait until the exchange lists it.
 //              Nothing is balanced or submitted: a taker settles it later, and the batcher pays.
@@ -13,10 +14,11 @@
 // build a call); neither action spends the sponsor's DUST. The coin the give is paid from is the
 // call's private state for this job only, and is wiped when the job ends (Q5).
 
-import type { OpenSwapResult, TakeResult } from '@mnbank/core';
+import type { OpenSwapResult, TakeResult } from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
 import type { Logger } from '../log.js';
+import type { DeviceArm, TradeAction, TradeCheckOk } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
@@ -25,10 +27,11 @@ import type { SponsorSession } from '../sponsor/session.js';
 import { AccountOfferError, proveGuaranteedOffer, type AccountOfferCall } from './account-offer.js';
 import { fetchOfferBytes, publishOffer, waitOfferStatus } from './publish.js';
 import { TakeRefusal, checkMakerOffer, mergeForSettlement, submitSettlement } from './settle.js';
-import { checkTradeCall, type TradeAction, type TradeCheckOk } from './verify.js';
 
 export interface TradeDeps {
   runtime: () => PassportRuntime | null;
+  /** The device arm: checks each call's own signature (../passport/arm.ts). */
+  arm: DeviceArm;
   sponsor: SponsorSession;
   kernelUrl: string;
   batcherUrl: string;
@@ -77,7 +80,8 @@ const seconds = (ms: number) => Math.round(ms / 100) / 10;
 
 function needRuntime(deps: TradeDeps): PassportRuntime {
   const rt = deps.runtime();
-  if (!rt) throw new PublicError('not-available', 'the bank cannot run account operations right now (no prover keys)');
+  if (!rt)
+    throw new PublicError('not-available', 'the market cannot run account operations right now (no prover keys)');
   return rt;
 }
 
@@ -85,7 +89,7 @@ async function recheck<A extends TradeAction>(deps: TradeDeps, action: A, raw: u
   const rt = needRuntime(deps);
   const body = raw as { account?: string; passportAuth?: unknown };
   const { account: _a, passportAuth: _p, signer: _s, auth: _auth, ...payload } = raw as Record<string, unknown>;
-  const check = await checkTradeCall(rt, action, body.account, payload, body.passportAuth);
+  const check = await deps.arm.checkTradeCall(rt, action, body.account, payload, body.passportAuth);
   if (!check.ok) {
     ctx.log.info('trade call no longer valid at run time', { code: check.code });
     throw new PublicError(check.code === 'expired' ? 'stale-authorisation' : 'unauthorised', check.reason);
@@ -103,10 +107,10 @@ async function withReplayRelease<T>(deps: TradeDeps, digestHex: string, fn: () =
 }
 
 /** The call's arguments, as upstream offer.ts takes them, from a checked payload. */
-async function callOf(check: TradeCheckOk): Promise<AccountOfferCall> {
-  const { openSwapArgs } = await import('@mnbank/core/passport');
+async function callOf(deps: TradeDeps, check: TradeCheckOk): Promise<AccountOfferCall> {
+  const { openSwapArgs } = await import('@nightmarket/core/passport');
   const { call, coin } = openSwapArgs(check.payload);
-  return { call, coin, authArgs: [check.auth.pk, check.auth.use_counter, check.auth.sig] };
+  return { call, coin, authArgs: deps.arm.authArgs(check.auth) };
 }
 
 async function defaultLedgerParameters(rt: PassportRuntime, account: string): Promise<unknown> {
@@ -136,7 +140,7 @@ function proveError(e: unknown): never {
 export function openSwapExecutor(deps: TradeDeps): JobExecutor {
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'open-swap', raw, ctx);
-    const offer = await callOf(check);
+    const offer = await callOf(deps, check);
     const prove = deps.prove ?? proveGuaranteedOffer;
     const proven = await withReplayRelease(deps, check.digestHex, () =>
       ctx.prove(() =>
@@ -144,8 +148,14 @@ export function openSwapExecutor(deps: TradeDeps): JobExecutor {
           const privateState = new MemoryPrivateStateProvider();
           try {
             const providers = await rt.providers(w as SponsorWalletHandle, privateState);
-            ctx.stage('proving', { circuit: 'open_swap_shielded_with_evm' });
-            return await prove({ rt, providers, account: check.account, offer }).catch(proveError);
+            ctx.stage('proving', { circuit: deps.arm.circuits.openSwap });
+            return await prove({
+              rt,
+              providers,
+              account: check.account,
+              offer,
+              circuitId: deps.arm.circuits.openSwap,
+            }).catch(proveError);
           } finally {
             privateState.wipe();
           }
@@ -216,7 +226,7 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
     }
     ctx.stage('offer-checked', { offerId: p.offerId });
 
-    const offer = await callOf(check);
+    const offer = await callOf(deps, check);
     const prove = deps.prove ?? proveGuaranteedOffer;
     return withReplayRelease(deps, check.digestHex, () =>
       ctx.prove(() =>
@@ -224,8 +234,14 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
           const privateState = new MemoryPrivateStateProvider();
           try {
             const providers = await rt.providers(w as SponsorWalletHandle, privateState);
-            ctx.stage('proving', { circuit: 'open_swap_shielded_with_evm' });
-            const taker = await prove({ rt, providers, account: check.account, offer }).catch(proveError);
+            ctx.stage('proving', { circuit: deps.arm.circuits.openSwap });
+            const taker = await prove({
+              rt,
+              providers,
+              account: check.account,
+              offer,
+              circuitId: deps.arm.circuits.openSwap,
+            }).catch(proveError);
             const params = await (deps.ledgerParameters ?? defaultLedgerParameters)(rt, check.account);
             let settlement: ReturnType<typeof mergeForSettlement>;
             try {
@@ -240,7 +256,7 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
             ).unshieldedKeystore
               ?.getBech32Address?.()
               ?.asString();
-            if (!address) throw new PublicError('not-available', 'the bank wallet has no submitter address');
+            if (!address) throw new PublicError('not-available', 'the relay wallet has no submitter address');
             const b = await submitSettlement({
               batcherUrl: deps.batcherUrl,
               merged: settlement.merged as unknown as { serialize(): Uint8Array },

@@ -1,6 +1,6 @@
-// Plan P1 testing: queue rules. One proof at a time; bridge deposits one at a time per account;
-// bridge withdrawals one at a time across the relay; jobs resumable by request id; state in
-// memory with a TTL; the payload dropped when a job ends.
+// Plan P1 testing: queue rules. One proof at a time; account-lane jobs one at a time per account;
+// relay-lane jobs one at a time across the relay; jobs resumable by request id; state in memory
+// with a TTL; the payload dropped when a job ends.
 
 import { describe, expect, it } from 'vitest';
 
@@ -93,21 +93,21 @@ describe('the prover lane', () => {
     expect(q.get(c.requestId)).toMatchObject({ state: 'succeeded', result: { name: 'c' } });
   });
 
-  it('bridge jobs take the prover lane only around their proofs', async () => {
+  it('account-lane jobs take the prover lane only around their proofs', async () => {
     const q = queue();
     const p = probe();
-    // A long bridge deposit that proves once, and a register that proves the whole time.
+    // A long account-lane job that proves once, and a register that proves the whole time.
     const reg = q.submit({ action: 'register', lane: 'prover', payload: {}, executor: p.executor('reg') })!;
     const dep = q.submit({
-      action: 'bridge-deposit',
-      lane: 'deposit',
+      action: 'append-inbox',
+      lane: 'account',
       account: '11'.repeat(32),
       payload: {},
       executor: p.executor('dep', { prove: true }),
     })!;
     await tick();
     expect(p.started('reg')).toBe(true);
-    expect(p.started('dep')).toBe(false); // holds its deposit lane, waits for the prover
+    expect(p.started('dep')).toBe(false); // holds its account lane, waits for the prover
     expect(q.get(dep.requestId)?.stage).toBe('waiting-for-prover');
     await p.release('reg');
     await q.settled(reg.requestId);
@@ -119,39 +119,39 @@ describe('the prover lane', () => {
   });
 });
 
-describe('the deposit lane', () => {
-  it('runs deposits for one account one at a time, and different accounts side by side', async () => {
+describe('the account lane', () => {
+  it('runs jobs for one account one at a time, and different accounts side by side', async () => {
     const q = queue();
     const p = probe();
     const A = 'aa'.repeat(32);
     const B = 'bb'.repeat(32);
     const a1 = q.submit({
-      action: 'bridge-deposit',
-      lane: 'deposit',
+      action: 'append-inbox',
+      lane: 'account',
       account: A,
       payload: {},
       executor: p.executor('a1'),
     })!;
     const a2 = q.submit({
-      action: 'bridge-deposit',
-      lane: 'deposit',
+      action: 'append-inbox',
+      lane: 'account',
       account: `0x${A.toUpperCase()}`,
       payload: {},
       executor: p.executor('a2'),
     })!;
     const b1 = q.submit({
-      action: 'bridge-deposit',
-      lane: 'deposit',
+      action: 'append-inbox',
+      lane: 'account',
       account: B,
       payload: {},
       executor: p.executor('b1'),
     })!;
     await tick();
     expect(p.started('a1')).toBe(true);
-    expect(p.started('b1')).toBe(true); // another account's deposit runs at the same time
+    expect(p.started('b1')).toBe(true); // another account's job runs at the same time
     expect(p.started('a2')).toBe(false);
     expect(q.get(a2.requestId)).toMatchObject({ state: 'queued', position: 1 });
-    expect(q.stats().lanes.deposit).toEqual({ running: 2, waiting: 1 });
+    expect(q.stats().lanes.account).toEqual({ running: 2, waiting: 1 });
     await p.release('a1');
     await tick();
     expect(p.started('a2')).toBe(true);
@@ -159,30 +159,30 @@ describe('the deposit lane', () => {
     await p.release('b1');
     await Promise.all([q.settled(a1.requestId), q.settled(a2.requestId), q.settled(b1.requestId)]);
     expect(p.order.indexOf('end a1')).toBeLessThan(p.order.indexOf('start a2'));
-    expect(q.stats().lanes.deposit).toEqual({ running: 0, waiting: 0 });
+    expect(q.stats().lanes.account).toEqual({ running: 0, waiting: 0 });
   });
 
   it('needs an account', () => {
     expect(() =>
-      queue().submit({ action: 'bridge-deposit', lane: 'deposit', payload: {}, executor: async () => ({}) }),
+      queue().submit({ action: 'append-inbox', lane: 'account', payload: {}, executor: async () => ({}) }),
     ).toThrow();
   });
 });
 
-describe('the withdrawal lane', () => {
-  it('runs withdrawals one at a time across every account', async () => {
+describe('the relay lane', () => {
+  it('runs relay-lane jobs one at a time across every account', async () => {
     const q = queue();
     const p = probe();
     q.submit({
-      action: 'bridge-withdraw',
-      lane: 'withdrawal',
+      action: 'withdraw',
+      lane: 'relay',
       account: 'aa'.repeat(32),
       payload: {},
       executor: p.executor('w1'),
     })!;
     const w2 = q.submit({
-      action: 'bridge-withdraw',
-      lane: 'withdrawal',
+      action: 'withdraw',
+      lane: 'relay',
       account: 'bb'.repeat(32),
       payload: {},
       executor: p.executor('w2'),
@@ -268,8 +268,8 @@ describe('job state', () => {
     const failed: string[] = [];
     for (let i = 0; i < 50; i++) {
       const job = q.submit({
-        action: 'bridge-resume',
-        lane: 'deposit',
+        action: 'take',
+        lane: 'account',
         account: 'ab'.repeat(32),
         payload: {},
         executor: async () => {

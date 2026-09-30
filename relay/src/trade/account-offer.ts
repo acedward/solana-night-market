@@ -14,7 +14,7 @@
 // midnight-2-offers' `aa-offer.ts` does; the imbalances must not change), and require that segment
 // to be 0. The result is encoded as `swapoffer1…` and never balanced, signed or submitted here.
 
-import { encodeOffer, offerIdOf } from '@mnbank/core';
+import { encodeOffer, offerIdOf } from '@nightmarket/core';
 
 import type { PassportProviders, PassportRuntime } from '../passport/runtime.js';
 import { steeringParameters, withPartitionParameters } from './partition.js';
@@ -46,7 +46,7 @@ export interface AccountOfferCall {
   };
   /** The coin the give is paid from, with its exact Merkle position. */
   coin: { nonce: Uint8Array; color: Uint8Array; value: bigint; mt_index: bigint };
-  /** The trailing authorisation arguments: `pk`, `use_counter`, `sig`. */
+  /** The trailing authorisation arguments, as the device arm expands them (../passport/arm.ts). */
   authArgs: readonly unknown[];
 }
 
@@ -93,6 +93,8 @@ export async function proveGuaranteedOffer(o: {
   providers: PassportProviders;
   account: string;
   offer: AccountOfferCall;
+  /** The device arm's swap circuit (`ARM_CIRCUITS.openSwap`). */
+  circuitId: string;
 }): Promise<ProvenAccountOffer> {
   const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
     LedgerParameters: { deserialize(b: Uint8Array): never };
@@ -128,7 +130,7 @@ export async function proveGuaranteedOffer(o: {
       compiledContract: o.rt.compiledAccount(),
       accountAddress: o.account,
       privateStateId: custody.privateStateId,
-      circuitId: 'open_swap_shielded_with_evm',
+      circuitId: o.circuitId,
       call: o.offer.call,
       authArgs: o.offer.authArgs,
     });

@@ -137,8 +137,6 @@ describe('account state and inbox views', () => {
     auth_nonce: 2n,
     inbox_count: 3n,
     enc_key: Uint8Array.from(Buffer.from('cc'.repeat(32), 'hex')),
-    evm_domain_salt: Uint8Array.from(Buffer.from('dd'.repeat(32), 'hex')),
-    vault_address: { bytes: Uint8Array.from(Buffer.from('ee'.repeat(32), 'hex')) },
     devices: [Uint8Array.from(Buffer.from('f1'.repeat(32), 'hex'))],
     inbox: {
       member: (k) => k !== 1n,
@@ -156,8 +154,6 @@ describe('account state and inbox views', () => {
       authNonce: '2',
       inboxCount: '3',
       encKey: 'cc'.repeat(32),
-      vault: 'ee'.repeat(32),
-      evmDomainSalt: 'dd'.repeat(32),
     });
   });
 

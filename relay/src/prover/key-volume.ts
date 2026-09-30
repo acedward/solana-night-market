@@ -2,18 +2,16 @@
 // (deploy/key-volume/build.sh, relay/src/tools/key-volume.ts) runs before the relay may use a
 // freshly compiled key set, and again on every start.
 //
-// The method is G-BRIDGE's (test/gates/bridge/gate.ts `keys-verify`):
+// The checks (MN Bank's G-BRIDGE method, without its bridge half):
 //   1. every bundle's verifier keys equal its compiled `expectedVk` table (SHA-256 of each
-//      `.verifier` file). compact-runtime compares a callee module's table with the verifier keys
-//      deployed at the callee's address on every cross-contract call, so this is the table the
-//      account's bridge circuits are checked against;
-//   2. the vault's and the Signet singleton's verifier keys equal the ones DEPLOYED on the network
-//      (the indexer's contract state), circuit by circuit;
-//   3. every prover key the relay proves with is present;
-//   4. the whole verifier-key set has the pinned fingerprint (the relay's `scanKeyTree`), which
+//      `.verifier` file);
+//   2. every prover key the relay proves with is present;
+//   3. the whole verifier-key set has the pinned fingerprint (the relay's `scanKeyTree`), which
 //      ties the account's keys to the ones every live account so far was deployed with.
+// `compareDeployed` and `deployedVerifierDigests` compare a compile with a DEPLOYED contract's
+// verifier keys; lane B3 uses them for the accounts' own keys (spec FR-005).
 //
-// This module holds the pure comparisons and the file walks; the CLI does the network read.
+// This module holds the pure comparisons and the file walks.
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -21,7 +19,9 @@ import { join } from 'node:path';
 
 import { RELAY_PROVEN_CIRCUITS } from './required.js';
 
-/** The bundles a relay key volume holds, in compile order (callees first). */
+/** The bundles a relay key volume holds, in compile order (callees first). The Passport account
+ *  contract declares the ERC20 vault (and through it the Signet singleton) as a callee, so they are
+ *  compiled with it, although Night Market proves none of their circuits. */
 export const KEY_VOLUME_BUNDLES = ['SignetSigner', 'SignetCircuits', 'Erc20Vault', 'account'] as const;
 
 /** The bundles that carry keys (SignetCircuits is JavaScript only). */

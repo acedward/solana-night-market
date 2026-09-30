@@ -6,7 +6,7 @@ import { ZswapOutput } from '@midnightntwrk/ledger-v9';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { contractCoinCommitment } from '@mnbank/core';
+import { contractCoinCommitment } from '@nightmarket/core';
 
 const hex = (n: number) => randomBytes(n).toString('hex');
 

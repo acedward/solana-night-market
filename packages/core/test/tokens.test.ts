@@ -51,8 +51,12 @@ describe('the stagenet registry', () => {
     expect(usdc.midnightColour).toBe('e934b965a454ed6857080e9956ea83fb5542e0a860e96ce91daf35f5d7b02c9f');
     expect(usdc.contract).toBe('11e406f1a83fa87d3fafe62674c1822ad5fb13a1b31765a601f90b2563ab0ec6');
     expect(usdc.domainSeparator).toBe('mint-test-tokens:twUSDC');
-    expect(r.bySymbol('twBTC')?.midnightColour).toBe('ad2ba014014e6ec705357be9db5d3ad6f535d4bef6576f84a461f23b313a2e8e');
-    expect(r.bySymbol('twETH')?.midnightColour).toBe('2862f0f347068b6c4909079ab8e991067b71fe2263ef00c20f017eefb6e9477a');
+    expect(r.bySymbol('twBTC')?.midnightColour).toBe(
+      'ad2ba014014e6ec705357be9db5d3ad6f535d4bef6576f84a461f23b313a2e8e',
+    );
+    expect(r.bySymbol('twETH')?.midnightColour).toBe(
+      '2862f0f347068b6c4909079ab8e991067b71fe2263ef00c20f017eefb6e9477a',
+    );
     expect(r.bySymbol('twUSDM')?.contract).toBe('6f6dacef3dbddad25137afedadc8beb58bc4a8ee65d8c7150c21ca0bcb9bfede');
     expect(r.bySymbol('utwUSDC')?.contract).toBe('473e8354fe9cd1d65d30664805ff1672fa9dee3066ae8cb92505e5f1a7a1691e');
     expect(r.bySymbol('utwBTC')?.contract).toBe('2e962ef4bc7f2f44056a4089fed639fc5b67aca64dc5ed66e6e508b33836b59e');
@@ -197,7 +201,10 @@ describe('pairs', () => {
     const eth = r.bySymbol('twETH')!.midnightColour;
     const usdm = r.bySymbol('twUSDM')!.midnightColour;
     expect(pairFor(pairs, eth, btc)).toMatchObject({ pair: { id: 'twETH/twBTC' }, givesBase: true });
-    expect(pairFor(pairs, `0x${btc.toUpperCase()}`, eth)).toMatchObject({ pair: { id: 'twETH/twBTC' }, givesBase: false });
+    expect(pairFor(pairs, `0x${btc.toUpperCase()}`, eth)).toMatchObject({
+      pair: { id: 'twETH/twBTC' },
+      givesBase: false,
+    });
     expect(pairFor(pairs, usdm, btc)).toBeNull();
   });
 });

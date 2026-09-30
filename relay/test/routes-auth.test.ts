@@ -3,7 +3,7 @@
 // covered here fails the first test.
 
 import { describe, expect, it } from 'vitest';
-import { RELAY_ACTIONS } from '@mnbank/core';
+import { RELAY_ACTIONS } from '@nightmarket/core';
 
 import { STATE_CHANGING_ROUTES } from '../src/app.js';
 import { ACCOUNT, FakeSponsor, harness, newWallet, post, samplePayload, signedBody, testConfig } from './harness.js';
@@ -39,8 +39,8 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
   it('refuses a call signed by someone other than the owner', async () => {
     const h = harness();
     const owner = newWallet();
-    const body = await signedBody(h, action, newWallet(), { owner: owner.address });
-    await expect401(await post(h, action, body), 'wrong-signer');
+    const body = await signedBody(h, action, newWallet(), { owner: owner.deviceKey });
+    await expect401(await post(h, action, body), 'bad-signature');
     expect(h.queue.stats().jobs).toBe(0);
   });
 
@@ -109,6 +109,19 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
     // P1: every executor is a stub that the lanes replace
     expect(view.state).toBe('failed');
     expect(view.error?.code).toBe('not-implemented');
+  });
+});
+
+describe('before a wallet arm is wired (lane B3)', () => {
+  it.each(RELAY_ACTIONS)('refuses %s as not supported, whatever it carries, and queues nothing', async (action) => {
+    const h = harness({ scheme: null });
+    const body = await signedBody(h, action, newWallet());
+    const res = await post(h, action, body);
+    expect(res.status).toBe(401);
+    const err = ((await res.json()) as { error: { code: string; detail?: string; message: string } }).error;
+    expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
+    expect(err.message).toMatch(/lanes B2 and B3/);
+    expect(h.queue.stats().jobs).toBe(0);
   });
 });
 
@@ -189,8 +202,9 @@ describe('reads', () => {
   it('serves health, config, queue and 404s', async () => {
     const h = harness();
     expect((await h.app.request('/health')).status).toBe(200);
-    const cfg = (await (await h.app.request('/v1/config')).json()) as { network: string; chainId: number };
-    expect(cfg).toMatchObject({ network: 'undeployed', chainId: 11155111 });
+    const cfg = (await (await h.app.request('/v1/config')).json()) as Record<string, unknown>;
+    expect(cfg).toMatchObject({ network: 'undeployed', relayVersion: 'test' });
+    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion']);
     expect((await h.app.request('/v1/queue')).status).toBe(200);
     expect((await h.app.request('/v1/jobs/zz')).status).toBe(400);
     expect((await h.app.request(`/v1/jobs/${'0'.repeat(32)}`)).status).toBe(404);

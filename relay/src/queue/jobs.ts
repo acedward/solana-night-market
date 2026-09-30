@@ -2,16 +2,14 @@
 // browser keeps the request id and resumes by polling GET /v1/jobs/:requestId.
 //
 // Three lanes:
-//   - prover:     one job at a time across the relay. Every sponsor-paid call (register,
-//                 withdraw, append-inbox, open-swap, take) holds it for its whole run: the proof
-//                 server proves one circuit at a time (a k=18 proof needs about 8 GB), and the one
-//                 sponsor wallet balances one transaction at a time.
-//   - deposit:    one bridge deposit at a time PER ACCOUNT (they share the account's deposit
-//                 address and its nonce on Sepolia).
-//   - withdrawal: one bridge withdrawal at a time across the WHOLE relay (they share the vault's
-//                 single EVM account and its nonce).
-// A bridge job holds its lane for its whole run (about 20 minutes, mostly waiting for the MPC
-// and Sepolia finality) and takes the prover lane only around its proofs, through ctx.prove().
+//   - prover:  one job at a time across the relay. Every sponsor-paid call (register, withdraw,
+//              append-inbox, open-swap, take) holds it for its whole run: the proof server proves
+//              one circuit at a time (a k=18 proof needs about 8 GB), and the one sponsor wallet
+//              balances one transaction at a time.
+//   - account: one job at a time PER ACCOUNT, for long jobs that must not overlap on one account;
+//   - relay:   one job at a time across the WHOLE relay, for long jobs that share one resource.
+// A job on the account or relay lane holds it for its whole run and takes the prover lane only
+// around its proofs, through ctx.prove(). No action uses them today (MN Bank's bridge did).
 //
 // When a job finishes, its payload (which can hold the coin it spends) is dropped at once; only
 // the public outcome is kept, until the TTL.
@@ -23,7 +21,7 @@
 
 import { randomBytes } from 'node:crypto';
 
-import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@mnbank/core';
+import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@nightmarket/core';
 
 import type { Logger } from '../log.js';
 import { FifoLock } from './fifo-lock.js';
@@ -52,10 +50,10 @@ export interface JobContext {
 export type JobExecutor = (payload: unknown, ctx: JobContext) => Promise<Record<string, unknown>>;
 
 export interface JobSubmission {
-  /** A route's action, or an internal job the relay runs on its own (plan P4-A: `bridge-close`). */
+  /** A route's action. */
   action: JobActionName;
   lane: JobLane;
-  /** The deposit lane's account (64 hex); ignored by the other lanes. */
+  /** The account lane's account (64 hex); ignored by the other lanes. */
   account?: string;
   payload: unknown;
   executor: JobExecutor;
@@ -93,8 +91,8 @@ export interface JobQueueOptions {
 export class JobQueue {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly prover = new FifoLock();
-  private readonly withdrawal = new FifoLock();
-  private readonly deposits = new Map<string, FifoLock>();
+  private readonly relayLane = new FifoLock();
+  private readonly accounts = new Map<string, FifoLock>();
   private readonly now: () => number;
 
   constructor(private readonly options: JobQueueOptions) {
@@ -107,7 +105,7 @@ export class JobQueue {
     if (this.jobs.size >= this.options.maxJobs) this.sweep();
     if (this.jobs.size >= this.options.maxJobs) this.evictFinished(this.jobs.size - this.options.maxJobs + 1);
     if (this.jobs.size >= this.options.maxJobs) return null;
-    if (sub.lane === 'deposit' && !sub.account) throw new Error('a deposit job needs its account');
+    if (sub.lane === 'account' && !sub.account) throw new Error('an account-lane job needs its account');
     const requestId = randomBytes(16).toString('hex');
     const now = this.now();
     let settle!: () => void;
@@ -115,7 +113,7 @@ export class JobQueue {
       requestId,
       action: sub.action,
       lane: sub.lane,
-      laneKey: sub.lane === 'deposit' ? `deposit:${sub.account!.replace(/^0x/, '').toLowerCase()}` : sub.lane,
+      laneKey: sub.lane === 'account' ? `account:${sub.account!.replace(/^0x/, '').toLowerCase()}` : sub.lane,
       state: 'queued',
       stages: [{ stage: 'queued', at: now }],
       createdAt: now,
@@ -147,30 +145,30 @@ export class JobQueue {
   }
 
   stats(): QueueStats {
-    let depRunning = 0;
-    let depWaiting = 0;
-    for (const lock of this.deposits.values()) {
-      depRunning += lock.running;
-      depWaiting += lock.waiting;
+    let accRunning = 0;
+    let accWaiting = 0;
+    for (const lock of this.accounts.values()) {
+      accRunning += lock.running;
+      accWaiting += lock.waiting;
     }
     return {
       jobs: this.jobs.size,
       lanes: {
         prover: { running: this.prover.running, waiting: this.prover.waiting },
-        deposit: { running: depRunning, waiting: depWaiting },
-        withdrawal: { running: this.withdrawal.running, waiting: this.withdrawal.waiting },
+        account: { running: accRunning, waiting: accWaiting },
+        relay: { running: this.relayLane.running, waiting: this.relayLane.waiting },
       },
     };
   }
 
-  /** The jobs holding and waiting for one lane (the deposit lane is per account). */
+  /** The jobs holding and waiting for one lane (the account lane is per account). */
   laneLoad(lane: JobLane, account?: string): { running: number; waiting: number } {
     const lock =
       lane === 'prover'
         ? this.prover
-        : lane === 'withdrawal'
-          ? this.withdrawal
-          : this.deposits.get(`deposit:${(account ?? '').replace(/^0x/, '').toLowerCase()}`);
+        : lane === 'relay'
+          ? this.relayLane
+          : this.accounts.get(`account:${(account ?? '').replace(/^0x/, '').toLowerCase()}`);
     return lock ? { running: lock.running, waiting: lock.waiting } : { running: 0, waiting: 0 };
   }
 
@@ -199,11 +197,11 @@ export class JobQueue {
 
   private laneLock(rec: JobRecord): FifoLock {
     if (rec.lane === 'prover') return this.prover;
-    if (rec.lane === 'withdrawal') return this.withdrawal;
-    let lock = this.deposits.get(rec.laneKey);
+    if (rec.lane === 'relay') return this.relayLane;
+    let lock = this.accounts.get(rec.laneKey);
     if (!lock) {
       lock = new FifoLock();
-      this.deposits.set(rec.laneKey, lock);
+      this.accounts.set(rec.laneKey, lock);
     }
     return lock;
   }
@@ -259,7 +257,7 @@ export class JobQueue {
       rec.executor = null;
       rec.expiresAt = this.now() + this.options.ttlSeconds;
       releaseLane();
-      if (rec.lane === 'deposit' && lane.idle) this.deposits.delete(rec.laneKey);
+      if (rec.lane === 'account' && lane.idle) this.accounts.delete(rec.laneKey);
     }
   }
 

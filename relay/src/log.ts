@@ -3,9 +3,9 @@
 // Two layers of redaction run on every record:
 //   1. by KEY: any field whose name looks sensitive (seed, secret, mnemonic, private key,
 //      password, signature, authorization, RPC URL, API key) is replaced, whatever its value;
-//   2. by VALUE: every secret the relay loaded (the sponsor seed or mnemonic, the Sepolia RPC
-//      URL) is registered here at startup and cut out of every string it appears in, inside
-//      messages, nested fields and error texts alike.
+//   2. by VALUE: every secret the relay loaded (the sponsor seed or mnemonic) is registered here
+//      at startup and cut out of every string it appears in, inside messages, nested fields and
+//      error texts alike.
 // Request bodies are never logged.
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;

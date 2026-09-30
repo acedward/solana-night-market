@@ -127,13 +127,12 @@ export class PassportRuntime {
     return new PassportRuntime(client, { ...options, managedPath }, shared);
   }
 
-  /** The indexer-backed public data provider every job shares (the bridge's relayer reads the
-   *  vault's request records through it). */
+  /** The indexer-backed public data provider every job shares. */
   get publicDataProvider(): unknown {
     return this.shared.publicDataProvider;
   }
 
-  /** The proof provider every job shares (relay/src/tools/prover-memory.ts measures it). */
+  /** The proof provider every job shares. */
   get proofProvider(): unknown {
     return this.shared.proofProvider;
   }
@@ -143,8 +142,8 @@ export class PassportRuntime {
     return this.shared.zkConfigProvider;
   }
 
-  /** The compiled account (the MN Bank shape), with the coin-store witnesses and the key
-   *  volume's assets. */
+  /** The compiled account (the Night Market shape: ./account-shape.ts), with the coin-store
+   *  witnesses and the key volume's assets. */
   compiledAccount(): unknown {
     const { compactJs, contract, shape, witnesses } = this.client;
     const { CompiledContract } = compactJs;
@@ -190,8 +189,6 @@ export interface AccountLedger {
   readonly auth_nonce: bigint;
   readonly inbox_count: bigint;
   readonly enc_key: Uint8Array;
-  readonly evm_domain_salt: Uint8Array;
-  readonly vault_address: { bytes: Uint8Array };
   devices: { member(e: Uint8Array): boolean; [Symbol.iterator](): Iterator<Uint8Array> };
   inbox: { member(k: bigint): boolean; lookup(k: bigint): Uint8Array };
 }

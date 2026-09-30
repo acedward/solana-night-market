@@ -51,7 +51,12 @@ describe('the device use counter (MIP-0013 S11)', () => {
     expect(findUseCounter(live, mine)).toBe(5n);
     expect(findUseCounter(live, mine, 5n)).toBe(5n);
     expect(findUseCounter(live, mine, 9n)).toBe(5n); // a stale-high hint still resolves
-    expect(findUseCounter(live.map((e) => e.toUpperCase()), mine)).toBe(5n);
+    expect(
+      findUseCounter(
+        live.map((e) => e.toUpperCase()),
+        mine,
+      ),
+    ).toBe(5n);
     expect(findUseCounter(live, entryAt('78'.repeat(28)))).toBeNull(); // another device
     expect(findUseCounter(live, mine, 0n, 5n)).toBeNull(); // beyond the scan limit
   });

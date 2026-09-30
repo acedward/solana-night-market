@@ -10,7 +10,7 @@
 //   zswapInput  { nullifier, contract }              a spend
 // Only events whose `contract` is the account are kept.
 
-import type { OwnedInput, OwnedOutput, ZswapActivity } from '@mnbank/core';
+import type { OwnedInput, OwnedOutput, ZswapActivity } from '@nightmarket/core';
 
 export class IndexerError extends Error {
   override name = 'IndexerError';

@@ -30,7 +30,8 @@ describe('network profiles', () => {
   });
 
   it('has nothing of Sepolia, EVM wallets or a bridge (AA 00047)', () => {
-    for (const p of Object.values(PROFILES)) expect(Object.keys(p).sort()).toEqual(['midnight', 'midnightNetworkId', 'name', 'zswap']);
+    for (const p of Object.values(PROFILES))
+      expect(Object.keys(p).sort()).toEqual(['midnight', 'midnightNetworkId', 'name', 'zswap']);
     expect(JSON.stringify(PROFILES)).not.toMatch(/sepolia|evm|vault|bridge|mpc/i);
   });
 

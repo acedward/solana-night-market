@@ -1,22 +1,20 @@
 // The relay's configuration, from the environment. deploy/.env.example documents every variable.
 //
 // Secrets never come from plain env values in production: pass the PATH of a file
-// (SPONSOR_SEED_FILE, SEPOLIA_RPC_URL_FILE), which a deployment mounts read-only. Secrets are
+// (SPONSOR_SEED_FILE), which a deployment mounts read-only. Secrets are
 // returned separately from the config, are registered with the log redactor at startup, and
 // never appear in /health, /v1/config or any log line.
 
 import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
 import {
-  DEFAULT_EVM_GAS,
-  type EvmGasPolicy,
   type NetworkOverrides,
   type NetworkProfile,
   type TokenRegistry,
   isNetworkName,
   registryFor,
   resolveNetwork,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import { LOG_LEVELS, type LogLevel } from './log.js';
 
@@ -42,16 +40,6 @@ export interface RelayConfig {
   keysFingerprint: string | null;
   /** Refuse to start without a key volume (a deployment sets it; CI and UI development do not). */
   requireKeys: boolean;
-  /** The stale bridge-request closer (plan P4-A, Q21 A; relay/src/bridge/stale.ts). */
-  staleClose: {
-    enabled: boolean;
-    intervalSeconds: number;
-    afterSeconds: number;
-    maxPerDay: number;
-    /** The sponsor's DUST below which the closer pays for nothing (specks). */
-    minSponsorDustSpecks: bigint;
-    retrySeconds: number;
-  };
   sponsor: {
     enabled: boolean;
     /** The wallet SDK's fee margin in blocks: it declares fee × 1.046^margin. 5 fails the
@@ -79,14 +67,9 @@ export interface RelayConfig {
     maxBodyBytes: number;
     /** How long a change's append entitlement stays valid (security review F-B3). */
     appendEntitlementTtlSeconds: number;
-    /** The most inbox appends the bank pays for per account in any rolling 24 h (F-B3 backstop). */
+    /** The most inbox appends the market pays for per account in any rolling 24 h (F-B3 backstop). */
     appendsPerAccountPerDay: number;
   };
-  /** Health reports low gas when the vault's EVM account holds less than this (wei). */
-  vaultGasLowWei: bigint;
-  /** The Sepolia gas fields every bridge start signs (the MPC signs them verbatim). A withdrawal's
-   *  gas is paid from the vault's shared EVM account, so the relay accepts no other values. */
-  bridgeGas: EvmGasPolicy;
   healthCacheSeconds: number;
   logLevel: LogLevel;
 }
@@ -96,8 +79,6 @@ export interface RelaySecrets {
   sponsorSeedHex: string | null;
   /** The raw secret text as read, so the redactor can also cut out a mnemonic. */
   sponsorSeedSource: string | null;
-  /** A Sepolia RPC URL; it usually carries an API key. */
-  sepoliaRpcUrl: string | null;
 }
 
 type Env = Record<string, string | undefined>;
@@ -186,14 +167,6 @@ function overridesFromEnv(env: Env): NetworkOverrides {
       batcherTarget: str(env.ZSWAP_BATCHER_TARGET),
       siteUrl: str(env.ZSWAP_SITE_URL),
     }),
-    bridge: pick({
-      vaultAddress: str(env.BRIDGE_VAULT_ADDRESS)?.replace(/^0x/, '').toLowerCase(),
-      vaultEvmAddress: str(env.BRIDGE_VAULT_EVM_ADDRESS),
-      signetSingleton: str(env.BRIDGE_SIGNET_SINGLETON)?.replace(/^0x/, '').toLowerCase(),
-      mpcRootPublicKey: str(env.BRIDGE_MPC_ROOT_PUBLIC_KEY),
-      mpcOutputCacheUrl: str(env.BRIDGE_MPC_OUTPUT_CACHE_URL),
-      explorerUrl: str(env.BRIDGE_EXPLORER_URL),
-    }),
   };
   const midnightNetworkId = str(env.MIDNIGHT_NETWORK_ID);
   if (midnightNetworkId) overrides.midnightNetworkId = midnightNetworkId;
@@ -261,14 +234,6 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     managedPath: str(env.MIDNIGHT_MANAGED_PATH) ?? null,
     keysFingerprint: fingerprint,
     requireKeys: bool(env.RELAY_REQUIRE_KEYS, false, 'RELAY_REQUIRE_KEYS'),
-    staleClose: {
-      enabled: bool(env.STALE_CLOSE_ENABLED, true, 'STALE_CLOSE_ENABLED'),
-      intervalSeconds: int(env.STALE_CLOSE_INTERVAL_SECONDS, 300, 'STALE_CLOSE_INTERVAL_SECONDS', 30, 86_400),
-      afterSeconds: int(env.STALE_CLOSE_AFTER_SECONDS, 900, 'STALE_CLOSE_AFTER_SECONDS', 60, 7 * 86_400),
-      maxPerDay: int(env.STALE_CLOSE_MAX_PER_DAY, 24, 'STALE_CLOSE_MAX_PER_DAY', 0, 10_000),
-      minSponsorDustSpecks: big(env.STALE_CLOSE_MIN_DUST_SPECKS, 2n * dustLowSpecks, 'STALE_CLOSE_MIN_DUST_SPECKS'),
-      retrySeconds: int(env.STALE_CLOSE_RETRY_SECONDS, 1800, 'STALE_CLOSE_RETRY_SECONDS', 60, 7 * 86_400),
-    },
     sponsor: {
       enabled: sponsorEnabled,
       feeBlocksMargin: int(env.SPONSOR_FEE_BLOCKS_MARGIN, 20, 'SPONSOR_FEE_BLOCKS_MARGIN', 1, 1000),
@@ -307,31 +272,12 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         1,
       ),
     },
-    vaultGasLowWei: big(env.VAULT_GAS_LOW_WEI, 2_000_000_000_000_000n, 'VAULT_GAS_LOW_WEI'),
-    bridgeGas: {
-      gasLimit: big(env.BRIDGE_EVM_GAS_LIMIT, DEFAULT_EVM_GAS.gasLimit, 'BRIDGE_EVM_GAS_LIMIT'),
-      maxFeePerGas: big(env.BRIDGE_EVM_MAX_FEE_PER_GAS, DEFAULT_EVM_GAS.maxFeePerGas, 'BRIDGE_EVM_MAX_FEE_PER_GAS'),
-      maxPriorityFeePerGas: big(
-        env.BRIDGE_EVM_MAX_PRIORITY_FEE_PER_GAS,
-        DEFAULT_EVM_GAS.maxPriorityFeePerGas,
-        'BRIDGE_EVM_MAX_PRIORITY_FEE_PER_GAS',
-      ),
-      keyVersion: DEFAULT_EVM_GAS.keyVersion,
-    },
     healthCacheSeconds: int(env.HEALTH_CACHE_SECONDS, 15, 'HEALTH_CACHE_SECONDS', 0, 600),
     logLevel,
   };
 
   const sponsorSeedSource = secret(env, readFile, 'SPONSOR_SEED');
   const sponsorSeedHex = sponsorSeedSource === null ? null : parseSponsorSeed(sponsorSeedSource);
-  const sepoliaRpcUrl = secret(env, readFile, 'SEPOLIA_RPC_URL')?.trim() ?? null;
-  if (sepoliaRpcUrl !== null) {
-    try {
-      new URL(sepoliaRpcUrl);
-    } catch {
-      throw new ConfigError('the Sepolia RPC URL is not a URL');
-    }
-  }
 
   if (sponsorEnabled && sponsorSeedHex === null) throw new ConfigError('SPONSOR_ENABLED needs SPONSOR_SEED_FILE');
   // Live networks: a seed shared with other tools must be taken under the shared lock, and a
@@ -342,5 +288,5 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     );
   }
 
-  return { config, secrets: { sponsorSeedHex, sponsorSeedSource, sepoliaRpcUrl } };
+  return { config, secrets: { sponsorSeedHex, sponsorSeedSource } };
 }

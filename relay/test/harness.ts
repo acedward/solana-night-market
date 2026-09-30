@@ -1,14 +1,16 @@
 // A relay app wired with in-memory fakes, for route tests. No network, no wallet, no ports.
+// Relay envelopes are signed with the TEST scheme (packages/core/test/fixtures/test-signing.ts):
+// the Solana scheme is lane B3's.
 
-import { type BaseWallet, Wallet } from 'ethers';
 import {
   API_PATHS,
-  RELAY_ACTION_TYPES,
   buildRelayActionMessage,
-  relayDomain,
   type HealthResponse,
   type RelayActionName,
-} from '@mnbank/core';
+  type RelayActionScheme,
+} from '@nightmarket/core';
+
+import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
 
 import { defaultCatalogue, type ActionDefinition } from '../src/actions/catalogue.js';
 import { AppendEntitlements } from '../src/actions/entitlements.js';
@@ -22,8 +24,8 @@ import type { SponsorSession, SponsorStatus } from '../src/sponsor/session.js';
 
 export const LOCAL_TOKENS = {
   tokens: [
-    { symbol: 'tUSDC', midnightName: 'shielded-a', role: 'usdc', decimals: 6, midnightColour: 'aa'.repeat(32) },
-    { symbol: 'tSTK', midnightName: 'shielded-b', role: 'stock', decimals: 6, midnightColour: 'bb'.repeat(32) },
+    { symbol: 'tA', decimals: 6, midnightColour: 'aa'.repeat(32) },
+    { symbol: 'tB', decimals: 8, midnightColour: 'bb'.repeat(32) },
   ],
 };
 
@@ -73,7 +75,8 @@ export function harness(
     catalogue?: Map<RelayActionName, ActionDefinition>;
     passportCall?: AppDeps['passportCall'];
     chain?: ChainReader;
-    bridge?: AppDeps['bridge'];
+    /** The envelope scheme: the test scheme unless given (null: none, as main.ts until lane B3). */
+    scheme?: RelayActionScheme | null;
   } = {},
 ) {
   const config = opts.config ?? testConfig();
@@ -96,7 +99,6 @@ export function harness(
     queue: { jobs: 0, lanes: {} },
     kernel: { reachable: true, synced: true },
     batcher: { reachable: true },
-    vaultGas: { address: '', balanceWei: null, low: null },
   });
   const app = createApp({
     config,
@@ -109,7 +111,7 @@ export function harness(
     health,
     chain: opts.chain ?? notImplementedChainReader,
     ...(opts.passportCall ? { passportCall: opts.passportCall } : {}),
-    ...(opts.bridge ? { bridge: opts.bridge } : {}),
+    ...(opts.scheme === null ? {} : { scheme: opts.scheme ?? testScheme }),
     clientAddress: () => '198.51.100.7',
   });
   return { app, config, log, nonces, queue, catalogue };
@@ -121,11 +123,14 @@ export function samplePayload(action: RelayActionName): Record<string, unknown> 
   return action === 'register' ? { encPublicKey: 'ab'.repeat(32) } : { amount: '1000000', colour: 'bb'.repeat(32) };
 }
 
+/** A test device (an Ed25519 key, as a Solana wallet holds). */
+export type TestDevice = ReturnType<typeof testDevice>;
+
 /** Build a correctly signed request body for `action` (or a deliberately broken one). */
 export async function signedBody(
   h: ReturnType<typeof harness>,
   action: RelayActionName,
-  signer: BaseWallet,
+  signer: TestDevice,
   over: {
     owner?: string;
     expiry?: number;
@@ -141,13 +146,13 @@ export async function signedBody(
   const message = buildRelayActionMessage({
     action: over.signedAction ?? action,
     network: over.network ?? h.config.network.name,
-    owner: over.owner ?? signer.address,
+    owner: over.owner ?? signer.deviceKey,
     account: def.requiresAccount ? ACCOUNT : undefined,
     payload,
     nonce,
     expiry: over.expiry ?? Math.floor(Date.now() / 1000) + 120,
   });
-  const signature = await signer.signTypedData(relayDomain(), RELAY_ACTION_TYPES, message);
+  const signature = signer.signEnvelope(message);
   return { ...(def.requiresAccount ? { account: ACCOUNT } : {}), payload, auth: { message, signature } };
 }
 
@@ -158,4 +163,4 @@ export const post = (h: ReturnType<typeof harness>, action: string, body: unknow
     body: JSON.stringify(body),
   });
 
-export const newWallet = (): BaseWallet => Wallet.createRandom();
+export const newWallet = (): TestDevice => testDevice();

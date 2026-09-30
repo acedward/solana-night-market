@@ -49,7 +49,8 @@ export function allPairs(registry: TokenRegistry): MarketPair[] {
   const shielded = registry.shielded();
   const out: MarketPair[] = [];
   for (let i = 0; i < shielded.length; i++)
-    for (let j = i + 1; j < shielded.length; j++) out.push(makePair(registry, shielded[i]!.symbol, shielded[j]!.symbol));
+    for (let j = i + 1; j < shielded.length; j++)
+      out.push(makePair(registry, shielded[i]!.symbol, shielded[j]!.symbol));
   return out;
 }
 

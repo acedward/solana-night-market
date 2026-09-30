@@ -20,9 +20,11 @@ export const testScheme: RelayActionScheme = {
   },
 };
 
-/** A fresh test device: a random Ed25519 key that signs like a Solana wallet's `signMessage`. */
-export function testDevice(): DeviceSigner & { signEnvelope(m: RelayActionMessage): string } {
-  const secret = ed25519.utils.randomSecretKey();
+/** A test device: an Ed25519 key (random unless given) that signs like a Solana wallet's
+ *  `signMessage`. */
+export function testDevice(
+  secret: Uint8Array = ed25519.utils.randomSecretKey(),
+): DeviceSigner & { signEnvelope(m: RelayActionMessage): string } {
   const deviceKey = bytesToHex(ed25519.getPublicKey(secret));
   return {
     deviceKey,

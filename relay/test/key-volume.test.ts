@@ -50,11 +50,11 @@ function tree(bundles: Record<string, { circuits: string[]; provers: string[] }>
 }
 
 describe('the kept prover list', () => {
-  it('defaults to the relay set plus abandonDeposit and deposit_shielded', () => {
+  it('defaults to the relay set plus deposit_shielded, and nothing of the bridge vault', () => {
     const kept = parseKeptProvers(undefined);
     expect(kept).toEqual([...DEFAULT_KEPT_PROVERS]);
-    expect(kept).toContain('Erc20Vault/abandonDeposit');
     expect(kept).toContain('account/deposit_shielded');
+    expect(kept.filter((k) => !k.startsWith('account/'))).toEqual([]);
     expect(parseKeptProvers('  ')).toEqual([...DEFAULT_KEPT_PROVERS]);
   });
 
@@ -65,7 +65,7 @@ describe('the kept prover list', () => {
   });
 
   it('keeps every circuit the relay proves (relay/src/prover/required.ts)', () => {
-    expect(RELAY_PROVEN_CIRCUITS.length).toBe(16);
+    expect(RELAY_PROVEN_CIRCUITS.length).toBe(4);
     for (const r of RELAY_PROVEN_CIRCUITS) expect(DEFAULT_KEPT_PROVERS).toContain(r);
     expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 1);
   });

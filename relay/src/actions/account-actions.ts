@@ -8,17 +8,17 @@
 import {
   RegisterPayloadSchema,
   checkRelayActionBinding,
-  recoverRelayActionPoint,
   type AppendInboxResult,
   type RegisterResult,
+  type RelayActionScheme,
   type SignedRelayAction,
   type WithdrawResult,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
 import type { AppendEntitlements } from './entitlements.js';
 import type { Logger } from '../log.js';
-import { checkGatedCall, type GatedAction } from '../passport/gated-verify.js';
+import type { DeviceArm, GatedAction } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
@@ -28,12 +28,13 @@ import type { SponsorSession } from '../sponsor/session.js';
 export interface AccountActionDeps {
   /** The Passport runtime, or null when the relay has no key volume. */
   runtime: () => PassportRuntime | null;
+  /** The device arm (../passport/arm.ts): how calls are checked and devices enrolled. */
+  arm: DeviceArm;
+  /** The relay envelope's signature scheme (F-B6 re-checks it); absent until lane B3 wires it. */
+  scheme?: RelayActionScheme;
   sponsor: SponsorSession;
-  /** The vault every account seals (64 hex); '' when the network profile names none. */
-  vaultAddress: string;
   /** The Midnight network name a RelayAction envelope must name (security review F-B6). */
   network: string;
-  chainId: number;
   replay: DigestReplayGuard;
   /** Issues and checks the single-use entitlements `append-inbox` needs (security review F-B3). */
   entitlements: AppendEntitlements;
@@ -46,7 +47,8 @@ const secondsSince = (t: number) => Math.round((Date.now() - t) / 100) / 10;
 
 function needRuntime(deps: AccountActionDeps): PassportRuntime {
   const rt = deps.runtime();
-  if (!rt) throw new PublicError('not-available', 'the bank cannot run account operations right now (no prover keys)');
+  if (!rt)
+    throw new PublicError('not-available', 'the market cannot run account operations right now (no prover keys)');
   return rt;
 }
 
@@ -58,9 +60,10 @@ const txIdOf = (r: unknown): string => {
 // ── register ──────────────────────────────────────────────────────────────────
 
 /**
- * Deploy wave 1 and wave 2 (the account shape: `evm` arm, bridge, offer; authority retired),
- * seal the network's vault, and activate the device recovered from the registration's one
- * signature. Returns the account's address and every transaction.
+ * Deploy wave 1 and wave 2 (the account shape: the device arm and the offer circuit; authority
+ * retired) and activate the device the registration enrols (the arm builds it from the verified
+ * registration: its device key, the Solana wallet's). Returns the account's address and every
+ * transaction.
  */
 export function registerExecutor(deps: AccountActionDeps): JobExecutor {
   return async (raw, ctx) => {
@@ -68,20 +71,13 @@ export function registerExecutor(deps: AccountActionDeps): JobExecutor {
     const parsed = RegisterPayloadSchema.safeParse({ encPublicKey: body.encPublicKey });
     if (!parsed.success || !body.auth || !body.signer)
       throw new PublicError('bad-request', 'the registration is malformed');
-    if (!/^[0-9a-f]{64}$/.test(deps.vaultAddress)) {
-      throw new PublicError('not-available', 'the bank has no bridge vault configured for this network');
-    }
     const rt = needRuntime(deps);
     const encPublicKey = unhex(parsed.data.encPublicKey);
-    // The registration's RelayAction signature IS the enrolment: its point is the device's key.
-    const uncompressed = unhex(recoverRelayActionPoint(body.auth.message, body.auth.signature, deps.chainId));
-    const point = {
-      x: BigInt(`0x${hex(uncompressed.slice(1, 33))}`),
-      y: BigInt(`0x${hex(uncompressed.slice(33, 65))}`),
-    };
-    const { EvmDevice } = rt.client.signer;
     const signer = body.signer.toLowerCase();
-    const device = EvmDevice.fromPublicPoint(signer, point);
+    const { device, entryAt } = await deps.arm.registrationDevice(rt, {
+      deviceKey: signer,
+      body: raw as Record<string, unknown>,
+    });
 
     return ctx.prove(() =>
       deps.sponsor.withWallet(async (w) => {
@@ -103,10 +99,9 @@ export function registerExecutor(deps: AccountActionDeps): JobExecutor {
           const dormant = await rt.client.account.CustodyAccount.deployDormant(
             providers,
             rt.compiledAccount(),
-            device,
+            device as never,
             { publicKey: encPublicKey, secretKey: undefined },
             {
-              vaultAddress: deps.vaultAddress,
               waveOneCircuits: waves.waveOne,
               waveTwoCircuits: waves.waveTwo,
               armsInWaveTwo: [],
@@ -116,7 +111,7 @@ export function registerExecutor(deps: AccountActionDeps): JobExecutor {
           const tDeployed = Date.now();
           ctx.stage('deployed', { account: dormant.address });
           ctx.stage('activating', { account: dormant.address });
-          const activation = await dormant.activate(device, dormant.salt);
+          const activation = await dormant.activate(device as never, dormant.salt);
           const tActivated = Date.now();
           const account = String(dormant.address).replace(/^0x/, '').toLowerCase();
 
@@ -127,8 +122,7 @@ export function registerExecutor(deps: AccountActionDeps): JobExecutor {
             l.booted === true &&
             l.device_count === 1n &&
             hex(l.enc_key) === hex(encPublicKey) &&
-            hex(l.vault_address.bytes) === deps.vaultAddress &&
-            l.devices.member(device.entryAt(unhex(account), l.device_epoch, 0n));
+            l.devices.member(entryAt(unhex(account), l.device_epoch, 0n));
           if (!ok)
             throw new PublicError('register-mismatch', 'the account was created but does not read back as expected');
           ctx.stage('activated', { account, tx: txIdOf(activation) });
@@ -163,7 +157,7 @@ async function recheck<A extends GatedAction>(deps: AccountActionDeps, action: A
   const rt = needRuntime(deps);
   const body = raw as { account?: string; passportAuth?: unknown };
   const { account: _a, passportAuth: _p, signer: _s, auth: _auth, ...payload } = raw as Record<string, unknown>;
-  const check = await checkGatedCall(rt, action, body.account, payload, body.passportAuth);
+  const check = await deps.arm.checkGatedCall(rt, action, body.account, payload, body.passportAuth);
   if (!check.ok) {
     ctx.log.info('gated call no longer valid at run time', { code: check.code });
     throw new PublicError(check.code === 'expired' ? 'stale-authorisation' : 'unauthorised', check.reason);
@@ -197,6 +191,7 @@ function changeOf(r: unknown): unknown {
 async function withdrawToThirdParty(
   custody: { callTx: Record<string, (...a: unknown[]) => Promise<unknown>> },
   providers: unknown,
+  circuit: string,
   recipientHex: string,
   encryptionKeyHex: string,
   args: unknown[],
@@ -211,10 +206,10 @@ async function withdrawToThirdParty(
   const finalized = await run(
     providers,
     async (txCtx) => {
-      inner = await custody.callTx.withdraw_shielded_with_evm!(txCtx, ...args);
+      inner = await custody.callTx[circuit]!(txCtx, ...args);
     },
     {
-      scopeName: 'withdraw_shielded_with_evm',
+      scopeName: circuit,
       additionalCoinEncPublicKeyMappings: new Map([
         [recipientHex.replace(/^0x/, '').toLowerCase(), encryptionKeyHex.replace(/^0x/, '').toLowerCase()],
       ]),
@@ -223,7 +218,7 @@ async function withdrawToThirdParty(
   return { txId: String(finalized?.public?.txId ?? ''), change: changeOf(inner) ?? changeOf(finalized) };
 }
 
-/** `withdraw_shielded_with_evm`: one coin (the browser's choice) pays `amount` to a shielded
+/** The arm's `withdraw_shielded`: one coin (the browser's choice) pays `amount` to a shielded
  *  wallet; the change comes back as the circuit's result (it has no inbox entry: Q13). */
 export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
   return async (raw, ctx) => {
@@ -236,9 +231,9 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
       const envelope = checkRelayActionBinding(auth, {
         expectedAction: 'withdraw',
         network: deps.network,
-        chainId: deps.chainId,
         expectedAccount: check.account,
         payload: body,
+        ...(deps.scheme ? { scheme: deps.scheme } : {}),
       });
       if (!envelope.ok || envelope.signer.toLowerCase() !== check.signer.toLowerCase()) {
         deps.replay.release(check.digestHex);
@@ -264,14 +259,16 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
               check.account,
               witnesses.withCoin(witnesses.emptyCoinStore(), coin),
             );
-            ctx.stage('proving', { circuit: 'withdraw_shielded_with_evm' });
+            ctx.stage('proving', { circuit: deps.arm.circuits.withdrawShielded });
             const out = p.recipientEncryptionKey
-              ? await withdrawToThirdParty(custody, providers, p.recipient, p.recipientEncryptionKey, [
-                  { bytes: unhex(p.recipient) },
-                  unhex(p.color),
-                  BigInt(p.amount),
-                  ...rt.client.signer.authArgs(check.auth),
-                ])
+              ? await withdrawToThirdParty(
+                  custody,
+                  providers,
+                  deps.arm.circuits.withdrawShielded,
+                  p.recipient,
+                  p.recipientEncryptionKey,
+                  [{ bytes: unhex(p.recipient) }, unhex(p.color), BigInt(p.amount), ...deps.arm.authArgs(check.auth)],
+                )
               : await custody.withdrawShieldedWithAuth(
                   unhex(p.recipient),
                   unhex(p.color),
@@ -285,7 +282,7 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
               change: change
                 ? { nonce: hex(change.nonce), color: hex(change.color), value: change.value.toString(10) }
                 : null,
-              // The change has no inbox entry: the bank will pay for filing ONE (F-B3).
+              // The change has no inbox entry: the market will pay for filing ONE (F-B3).
               ...(change
                 ? { changeEntitlement: deps.entitlements.issue(check.account, `withdraw:${String(out.txId)}`) }
                 : {}),
@@ -300,8 +297,8 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
   };
 }
 
-/** `append_inbox_with_evm`: file one 192-byte entry (Q13: a withdrawal's change, sealed by the
- *  browser to the account's own public key), only against the single-use entitlement the bank
+/** The arm's `append_inbox`: file one 192-byte entry (Q13: a withdrawal's change, sealed by the
+ *  browser to the account's own public key), only against the single-use entitlement the market
  *  issued for that change (security review F-B3): checked at admission and again here; spent when
  *  the append lands, released when it fails. */
 export function appendInboxExecutor(deps: AccountActionDeps): JobExecutor {
@@ -335,7 +332,7 @@ async function appendInbox(deps: AccountActionDeps, raw: unknown, ctx: JobContex
             check.account,
             rt.client.witnesses.emptyCoinStore(),
           );
-          ctx.stage('proving', { circuit: 'append_inbox_with_evm' });
+          ctx.stage('proving', { circuit: deps.arm.circuits.appendInbox });
           const out = await custody.appendInboxWithAuth(unhex(p.entry), check.auth);
           ctx.stage('submitted', { tx: String(out.txId) });
           const result: AppendInboxResult = { txId: String(out.txId) };

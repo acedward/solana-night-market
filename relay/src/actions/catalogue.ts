@@ -1,19 +1,17 @@
 // Every state-changing action the relay offers, with its lane, how it is authorised, the shape
 // of its body, and its executor.
 //
-// In P1 every executor is a stub that fails with `not-implemented`: the Passport operations are
-// behind this one interface, and the lanes fill them in (L-ACC: register, withdraw,
-// append-inbox; L-TRD: open-swap, take; L-BRG: bridge-deposit, bridge-withdraw). A lane that
-// implements a gated call's digest builder may switch its `auth` to 'passport-call' so the
-// customer signs only the contract's own typed data (one prompt per action).
+// `defaultCatalogue()` has every action with an executor that fails with `not-implemented`: that is
+// what main.ts serves until a device arm is wired (lane B3, ../passport/arm.ts). `accountCatalogue`
+// and `withTrade` add the executors, which are arm-agnostic given a `DeviceArm`: register (authorised
+// by its RelayAction envelope, which is also the enrolment), and withdraw, append-inbox, open-swap
+// and take, each authorised by the call's OWN Passport signature (`passport-call`), so every action
+// is one wallet prompt.
 
 import { z } from 'zod';
 
 import {
   AppendInboxPayloadSchema,
-  BridgeDepositPayloadSchema,
-  BridgeResumePayloadSchema,
-  BridgeWithdrawPayloadSchema,
   OpenSwapPayloadSchema,
   RELAY_ACTIONS,
   RegisterPayloadSchema,
@@ -21,11 +19,10 @@ import {
   WithdrawPayloadSchema,
   type JobLane,
   type RelayActionName,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import type { AuthKind } from '../auth/verifiers.js';
 import type { AdmissionCheck } from './admission.js';
-import type { BridgeService } from '../bridge/service.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
 
@@ -80,16 +77,11 @@ const def = (
 
 export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
   const list: ActionDefinition[] = [
-    def('register', 'prover', 'L-ACC', { requiresAccount: false, payload: RegisterPayloadSchema }),
-    def('withdraw', 'prover', 'L-ACC'),
-    def('append-inbox', 'prover', 'L-ACC'),
-    def('open-swap', 'prover', 'L-TRD'),
-    def('take', 'prover', 'L-TRD'),
-    def('bridge-deposit', 'deposit', 'L-BRG'),
-    def('bridge-withdraw', 'withdrawal', 'L-BRG'),
-    // A resume runs on its account's lane: its Sepolia nonce is already fixed, so it never waits
-    // for the global withdrawal lane.
-    def('bridge-resume', 'deposit', 'L-BRG'),
+    def('register', 'prover', 'B3', { requiresAccount: false, payload: RegisterPayloadSchema }),
+    def('withdraw', 'prover', 'B3'),
+    def('append-inbox', 'prover', 'B3'),
+    def('open-swap', 'prover', 'B3'),
+    def('take', 'prover', 'B3'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -97,9 +89,9 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
 }
 
 /**
- * The catalogue with plan lane L-ACC's executors: register (authorised by its RelayAction
- * signature, which is also the enrolment), and withdraw and append-inbox, each authorised by the
- * gated call's OWN Passport signature (`passport-call`), so every action is one wallet prompt.
+ * The catalogue with the account executors: register (authorised by its RelayAction envelope,
+ * which is also the enrolment), and withdraw and append-inbox, each authorised by the gated call's
+ * OWN Passport signature (`passport-call`), so every action is one wallet prompt.
  */
 export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, ActionDefinition> {
   const map = defaultCatalogue();
@@ -124,39 +116,8 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
 }
 
 /**
- * The catalogue with plan lane L-BRG's executors added: the two bridge starts, each authorised by
- * the start's OWN Passport signature (one prompt: it binds the Sepolia transaction the MPC will
- * sign), and a resume by vault request id, authorised by a RelayAction signature (only after the
- * relay restarted; the settles it runs are permissionless and pinned to the account).
- */
-export function withBridge(
-  map: Map<RelayActionName, ActionDefinition>,
-  bridge: BridgeService,
-): Map<RelayActionName, ActionDefinition> {
-  const set = (action: RelayActionName, patch: Partial<ActionDefinition>) =>
-    map.set(action, { ...map.get(action)!, ...patch });
-  set('bridge-deposit', {
-    auth: 'passport-call',
-    payload: BridgeDepositPayloadSchema,
-    executor: bridge.depositExecutor,
-  });
-  set('bridge-withdraw', {
-    auth: 'passport-call',
-    payload: BridgeWithdrawPayloadSchema,
-    executor: bridge.withdrawExecutor,
-  });
-  // Only a device of the account may queue a resume (security review F-B2); the executor checks again.
-  set('bridge-resume', {
-    payload: BridgeResumePayloadSchema,
-    admit: bridge.admitResume,
-    executor: bridge.resumeExecutor,
-  });
-  return map;
-}
-
-/**
- * The catalogue with plan lane L-TRD's executors added: making an offer (`open-swap`) and taking
- * one (`take`), each authorised by the call's OWN OpenSwapShielded signature (one prompt).
+ * The catalogue with the trade executors added: making an offer (`open-swap`) and taking one
+ * (`take`), each authorised by the swap call's OWN signature (one prompt).
  */
 export function withTrade(
   map: Map<RelayActionName, ActionDefinition>,

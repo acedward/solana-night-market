@@ -4,7 +4,7 @@
 // headers, and the relay keeps the parsing of ledger state and ledger events off the browser
 // (plan P0.4: the browser bundle carries no ledger-v9).
 
-import type { AccountStateView, InboxPage, ZswapActivity } from '@mnbank/core';
+import type { AccountStateView, InboxPage, ZswapActivity } from '@nightmarket/core';
 
 import { type IndexerClient, ledgerEventDecoder, zswapActivityOf, type EventDecoder } from './indexer.js';
 
@@ -41,8 +41,6 @@ export interface LedgerView {
   readonly auth_nonce: bigint;
   readonly inbox_count: bigint;
   readonly enc_key: Uint8Array;
-  readonly evm_domain_salt: Uint8Array;
-  readonly vault_address: { bytes: Uint8Array };
   devices: { [Symbol.iterator](): Iterator<Uint8Array> };
   inbox: { member(k: bigint): boolean; lookup(k: bigint): Uint8Array };
 }
@@ -59,8 +57,6 @@ export function accountStateView(account: string, l: LedgerView): AccountStateVi
     authNonce: l.auth_nonce.toString(10),
     inboxCount: l.inbox_count.toString(10),
     encKey: hex(l.enc_key),
-    vault: hex(l.vault_address.bytes),
-    evmDomainSalt: hex(l.evm_domain_salt),
   };
 }
 

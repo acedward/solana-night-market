@@ -97,7 +97,8 @@ describe('offer-codec.ts vs upstream src/wallet/offer.ts', () => {
     }
     const recipients = up.slice(
       up.indexOf('/** Recipient shapes the circuit accepts.'),
-      up.indexOf('export const RECIPIENT_CONTRACT_REFUSED = 2n;') + 'export const RECIPIENT_CONTRACT_REFUSED = 2n;'.length,
+      up.indexOf('export const RECIPIENT_CONTRACT_REFUSED = 2n;') +
+        'export const RECIPIENT_CONTRACT_REFUSED = 2n;'.length,
     );
     expect(ours.includes(recipients)).toBe(true);
   });

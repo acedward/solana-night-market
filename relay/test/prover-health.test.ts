@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { HealthResponseSchema } from '@mnbank/core';
+import { HealthResponseSchema } from '@nightmarket/core';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { healthCollector, httpProbes, type ExternalProbes } from '../src/health.js';
@@ -99,10 +99,9 @@ describe('the key volume', () => {
 });
 
 describe('health (FR-013)', () => {
-  const okProbes = (gas: bigint | null = 10n ** 18n): ExternalProbes => ({
+  const okProbes = (): ExternalProbes => ({
     kernel: async () => ({ reachable: true, synced: true }),
     batcher: async () => ({ reachable: true }),
-    vaultGasWei: async () => gas,
   });
   const prover = (up = true) =>
     new ProofServerClient(
@@ -139,14 +138,12 @@ describe('health (FR-013)', () => {
       }),
       queue: new JobQueue({ ttlSeconds: 60, maxJobs: 10, log: silentLog() }),
       probes: okProbes(),
-      vaultEvmAddress: '0x648216975e722494bFF92E88FFc68C8F8d438FaA',
-      vaultGasLowWei: 2n * 10n ** 15n,
       cacheSeconds: 15,
       now: () => 100,
       ...over,
     });
 
-  it('reports every FR-013 field and is ok when everything is', async () => {
+  it('reports every health field and is ok when everything is', async () => {
     const h = await collector()();
     expect(HealthResponseSchema.parse(h)).toBeTruthy();
     expect(h.status).toBe('ok');
@@ -160,14 +157,21 @@ describe('health (FR-013)', () => {
     expect(h.proofServer).toMatchObject({ reachable: true, version: '9.0.0-rc.6', jobCapacity: 10 });
     expect(h.queue.lanes).toHaveProperty('prover');
     expect(h.kernel).toEqual({ reachable: true, synced: true });
-    expect(h.vaultGas).toEqual({
-      address: '0x648216975e722494bFF92E88FFc68C8F8d438FaA',
-      balanceWei: (10n ** 18n).toString(),
-      low: false,
-    });
+    // Nothing of Sepolia, the vault or the bridge (AA 00047).
+    expect(Object.keys(h).sort()).toEqual([
+      'batcher',
+      'kernel',
+      'network',
+      'proofServer',
+      'queue',
+      'sponsor',
+      'status',
+      'uptimeSeconds',
+      'version',
+    ]);
   });
 
-  it('degrades on low DUST, low vault gas, an unreachable kernel, or no sponsor', async () => {
+  it('degrades on low DUST, an unreachable kernel, or no sponsor', async () => {
     expect(
       (
         await collector({
@@ -175,7 +179,6 @@ describe('health (FR-013)', () => {
         })()
       ).status,
     ).toBe('degraded');
-    expect((await collector({ probes: okProbes(1n) })()).vaultGas.low).toBe(true);
     expect(
       (await collector({ probes: { ...okProbes(), kernel: async () => ({ reachable: false, synced: null }) } })())
         .status,
@@ -247,36 +250,36 @@ describe('health (FR-013)', () => {
   it('serves the cached report while one refresh runs, and waits only when the cache is old', async () => {
     let now = 100;
     let probeSets = 0;
-    let gasWei = 10n ** 18n;
+    let synced: boolean | null = true;
     const gate: { release?: () => void } = {};
     const c = collector({
       now: () => now,
       probes: {
         ...okProbes(),
-        vaultGasWei: async () => {
+        kernel: async () => {
           probeSets++;
           if (probeSets > 1) await new Promise<void>((r) => (gate.release = r));
-          return gasWei;
+          return { reachable: true, synced };
         },
       },
     });
-    expect((await c()).vaultGas.balanceWei).toBe((10n ** 18n).toString());
+    expect((await c()).kernel.synced).toBe(true);
     now += 20; // expired (15 s), but recent (under 60 s): served at once while ONE refresh runs
-    gasWei = 5n;
+    synced = false;
     const during = await Promise.all(Array.from({ length: 20 }, () => c()));
     expect(probeSets).toBe(2);
-    expect(during.every((h) => h.vaultGas.balanceWei === (10n ** 18n).toString())).toBe(true);
+    expect(during.every((h) => h.kernel.synced === true)).toBe(true);
     gate.release!();
     await new Promise((r) => setTimeout(r, 0));
-    expect((await c()).vaultGas.balanceWei).toBe('5');
+    expect((await c()).kernel.synced).toBe(false);
     expect(probeSets).toBe(2);
     now += 600; // far past the stale bound: callers wait for the one shared refresh
-    gasWei = 7n;
+    synced = null;
     const waiting = Promise.all([c(), c(), c()]);
     await new Promise((r) => setTimeout(r, 0));
     expect(probeSets).toBe(3);
     gate.release!();
-    expect((await waiting).map((h) => h.vaultGas.balanceWei)).toEqual(['7', '7', '7']);
+    expect((await waiting).map((h) => h.kernel.synced)).toEqual([null, null, null]);
   });
 
   it('re-scans the key volume only on its own long interval, not per refresh', () => {
@@ -301,40 +304,20 @@ describe('health (FR-013)', () => {
     expect(scans).toBe(1);
   });
 
-  it('probes the kernel, batcher and Sepolia over HTTP without leaking the RPC URL', async () => {
-    const rpc = 'https://sepolia.example.test/v3/0123456789abcdef';
+  it('probes the kernel and the batcher over HTTP', async () => {
     const { f, calls } = fakeFetch({
       'http://kernel:9999/v1/health': { body: { status: 'ok', synced: true } },
       'http://batcher:3334/health': { body: { status: 'ok' } },
-      [`POST https://sepolia.example.test/v3/0123456789abcdef`]: {
-        body: { jsonrpc: '2.0', id: 1, result: '0xde0b6b3a7640000' },
-      },
     });
     const log = silentLog();
-    const p = httpProbes({
-      kernelUrl: 'http://kernel:9999',
-      batcherUrl: 'http://batcher:3334',
-      vaultEvmAddress: '0x648216975e722494bFF92E88FFc68C8F8d438FaA',
-      sepoliaRpcUrl: rpc,
-      fetchImpl: f,
-      log,
-    });
+    const p = httpProbes({ kernelUrl: 'http://kernel:9999', batcherUrl: 'http://batcher:3334', fetchImpl: f, log });
     expect(await p.kernel()).toEqual({ reachable: true, synced: true });
     expect(await p.batcher()).toEqual({ reachable: true });
-    expect(await p.vaultGasWei()).toBe(10n ** 18n);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(2);
     const h = await collector({ probes: p })();
-    expect(JSON.stringify(h)).not.toContain('sepolia.example.test');
-    const down = httpProbes({
-      kernelUrl: 'http://nokernel:1',
-      batcherUrl: 'http://nobatcher:1',
-      vaultEvmAddress: '0x0',
-      sepoliaRpcUrl: 'https://nope.example.test/key123456',
-      fetchImpl: f,
-      log,
-    });
+    expect(h.status).toBe('ok');
+    const down = httpProbes({ kernelUrl: 'http://nokernel:1', batcherUrl: 'http://nobatcher:1', fetchImpl: f, log });
     expect(await down.kernel()).toEqual({ reachable: false, synced: null });
-    expect(await down.vaultGasWei()).toBeNull();
-    expect(log.lines.join('\n')).not.toContain('key123456');
+    expect(await down.batcher()).toEqual({ reachable: false });
   });
 });

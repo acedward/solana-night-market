@@ -58,8 +58,8 @@ export function shortSolanaAddress(address: string, head = 4, tail = 4): string 
 }
 
 /**
- * Something that signs with a device key: the connected Solana wallet in the browser (lane B2:
- * Phantom's `signMessage(message, 'utf8')`, TODO(B2)), a test key in tests. `signMessage` returns
+ * Something that signs with a device key: the connected Solana wallet in the browser (Phantom's
+ * `signMessage(message, 'utf8')` behind web/src/wallet/phantom-adapter.ts), a test key in tests. `signMessage` returns
  * the raw 64-byte Ed25519 signature over exactly `message` (RFC 8032, as Phantom's `signMessage`
  * does): it is Track A's `Ed25519SignFn`. The arm verifies every signature with tweetnacl before
  * anything is proven, so a Ledger-wrapped signature or another key fails at once.

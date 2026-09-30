@@ -20,8 +20,8 @@
 //   - the LABEL on top of every message (`marketLabel`), per network;
 //   - the TOKEN DISPLAY (symbol and decimals per colour) from the market's registry
 //     (`ed25519TokenResolver`). The browser and the relay must resolve with the same registry for
-//     the network (TODO(B2/B3): a token known to one side only renders differently on the other, so
-//     the relay's check refuses the signature, with a reason);
+//     the network (a token known to one side only renders differently on the other, so the
+//     relay's check refuses the signature, with a reason; questions Q12);
 //   - the device from a connected wallet (`ed25519DeviceOf`), and the relay's device for checking a
 //     browser's signature (`ed25519DeviceForCheck`: every check above re-runs on the relay).
 

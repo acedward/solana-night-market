@@ -49,6 +49,9 @@ COPY vendor/passport/contract/contracts/account.compact vendor/passport/contract
 COPY vendor/passport/contract/contracts/modules vendor/passport/contract/contracts/modules
 COPY vendor/passport/contract/contracts/erc20-vault/src/erc20-vault.compact vendor/passport/contract/contracts/erc20-vault/src/
 COPY vendor/passport/contract/contracts/erc20-vault/src/vendor vendor/passport/contract/contracts/erc20-vault/src/vendor
+# The arm's message builder (browser-safe: no compiled contract): the package root's Solana envelope
+# scheme (packages/core/src/solana-auth.ts) imports it, and the key job imports the package root.
+COPY vendor/passport/contract/src/wallet/ed25519-message.ts vendor/passport/contract/src/wallet/hex.ts vendor/passport/contract/src/wallet/
 # The step that points the compiled account module at compact-runtime 0.20.0 (only it).
 COPY scripts/pin-contract-runtime.mjs scripts/
 COPY deploy/key-volume/build.sh /usr/local/bin/nightmarket-key-volume

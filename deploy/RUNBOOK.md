@@ -238,6 +238,13 @@ Below `SPONSOR_DUST_LOW_SPECKS` (default 10 DUST) the relay refuses new actions 
 message and `/health` shows `sponsor.dustLow: true`. Registration needs about 60 DUST: keep the
 balance well above that.
 
+The balance the relay reports and checks does not dip while a transaction is in flight (section 8,
+`sponsor.dustSpecks`), so `dustLow` only turns on when the DUST is really low, and it turns on at
+once.
+
+`sponsor-wallet.ts status` prints the wallet's own balance. That tool runs with the relay stopped,
+so nothing is in flight and the two agree.
+
 ## 5. The key volume
 
 The relay proves with a key set that must match what the accounts are deployed with. The `keys`
@@ -425,13 +432,30 @@ unhealthy only when `/health` answers 503.
 |---|---|---|
 | `status` | `ok`; `degraded` (something needs attention; the market works for what it can); `down` (a proof server unreachable, the sponsor wallet in error, or a key set other than the pinned one). | Alert on `down` at once; on `degraded` for more than 10 minutes. |
 | `sponsor.state`, `synced` | The wallet's state; spending needs `synced`. | `syncing` for a few minutes after a start is normal. `error`: restart the relay, check the node and indexer. |
-| `sponsor.dustSpecks`, `dustLow` | DUST in specks (10^15 per DUST); below the low level new actions are refused. | Section 4. |
+| `sponsor.dustSpecks`, `dustLow` | DUST in specks (10^15 per DUST): the settled balance, see below. Below the low level, `dustLow` is `true` and new actions are refused. | Section 4. |
+| `sponsor.dustInFlightSpecks` | The part of `dustSpecks` held by the sponsor's transactions in flight: `"0"` when idle. | Nothing: it returns to `"0"` when the transactions land. If it stays above 0 for more than an hour, a transaction never landed; the lock ends after the ledger's 3-hour grace period. |
 | `proofServer.reachable`, `version` | The CONTRACT prover: must be `9.0.0-rc.8` (`CONTRACT_PROOF_SERVER_EXPECTED_VERSION`). | Unreachable: `docker compose logs proof-server-contracts` (an out-of-memory kill shows as a restart). |
 | `dustProofServer.reachable`, `version` | The DUST prover: must be `9.0.0-rc.6`. | As above for `proof-server-dust`. |
 | `proofServer.keys.fingerprint`, `matchesPin`, `complete`, `problems` | The key set's identity and completeness. | Always pinned and complete on a running relay (it refuses to start otherwise). |
 | `queue.lanes.prover` | Proofs running (at most 1) and waiting. | A `waiting` above 5 for long: customers wait minutes (section 9). |
 | `kernel.reachable`, `synced` | The ZSwap kernel. | `false`: offers cannot be made or taken; tell the kernel operator. |
 | `batcher.reachable`, `lastRefusal` | The batcher, and its last refusal of a take (429 = its daily cap). | Section 13.2. |
+
+**How `sponsor.dustSpecks` is counted** (issue 00049):
+- When the wallet pays a fee, the ledger locks the **whole** DUST output it spends until the
+  transaction lands. The wallet's own balance does not count a locked output, so a 9,700-DUST output
+  paying a 12-DUST fee would read as 9,700 DUST gone for about a minute.
+- The relay counts each locked output at its value minus that transaction's fee, which is the change
+  it will get back. The reported balance therefore stays level through a transaction, and drops by
+  exactly the fee.
+- In the first seconds of a transaction, before the fee is known, a locked output counts in full.
+- A lock ends when the change arrives, when the spend is dropped, or after the ledger's grace period
+  (3 hours).
+- The log line `sponsor DUST outputs locked by transactions in flight` records each lock and each
+  release, with the amounts.
+
+To measure what a run spent, compare two readings with `dustInFlightSpecks` at `"0"`, or add up the
+indexer's `paidFees` (section 4.3).
 
 `GET /v1/demo-tokens` shows the pack, `remainingToday`, and (with `?owner=<key>`) whether a key
 has claimed.

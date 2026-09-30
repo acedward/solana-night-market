@@ -112,6 +112,8 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
   return async () => {
     const { proof, dustProof, kernel, batcher, keys } = await current();
     const sponsor = deps.sponsor.status();
+    // The settled balance (issue 00049): a transaction in flight does not make it dip, so a low
+    // reading is a real one and is flagged at once (no hysteresis).
     const dustLow = sponsor.dustSpecks === null ? sponsor.configured : sponsor.dustSpecks < deps.dustLowSpecks;
     const stats = deps.queue.stats();
     const keysOk = keyVolumeComplete(keys);
@@ -141,6 +143,9 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
         state: sponsor.state,
         synced: sponsor.synced,
         dustSpecks: sponsor.dustSpecks === null ? null : sponsor.dustSpecks.toString(10),
+        ...(sponsor.dustInFlightSpecks === undefined
+          ? {}
+          : { dustInFlightSpecks: sponsor.dustInFlightSpecks.toString(10) }),
         dustLow,
       },
       proofServer: {

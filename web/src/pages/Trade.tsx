@@ -348,7 +348,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     try {
       const changed = await reconcileOffers(e, accountAddress, kernel);
       if (changed.length === 0) await syncAccount(e, accountAddress);
-      const filled = changed.find((c) => c.status === 'filled');
+      // A make someone else settled (a take's own result is the take's toast).
+      const filled = changed.find((c) => c.status === 'filled' && c.role === 'make');
       if (filled) setMessage({ kind: 'ok', text: `Your offer (${filled.summary}) was filled.` });
     } catch {
       /* the next refresh tries again; the page keeps the last known state */

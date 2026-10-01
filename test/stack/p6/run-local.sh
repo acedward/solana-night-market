@@ -176,6 +176,16 @@ fi
 if [[ "${SKIP_TAMPER:-0}" != 1 ]]; then
   dc --profile relay logs --no-color relay >"$OUT/relay.log" 2>&1 || true
   dc --profile relay stop relay >/dev/null
+  # A fresh contract prover: rc.8's memory grows across proofs, and after a full run (about 25
+  # proofs) a k=18 proof was OOM-killed at the 14 GB cap (P9.I local run 3).
+  dc logs --no-color proof-server-rc8 2>&1 | tail -400 >"$OUT/proof-server-rc8.before-restart.log"
+  dc restart proof-server-rc8 >/dev/null
+  for i in $(seq 1 30); do
+    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" "$BUN_IMAGE" bun -e \
+      "const r = await fetch('http://proof-server-rc8:6300/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" \
+      >/dev/null 2>&1 && break
+    sleep 2
+  done
   if bun_run -v "$RUN_DIR:/run/nm:ro" -v "$STATE_DIR:/state:ro" -v "$OUT:/out" -e NETWORK=undeployed \
     -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out -e WHO="${TAMPER_WHO:-B}" \
     -e SPONSOR_SEED_FILE=/run/nm/sponsor.seed -e SPONSOR_FEE_BLOCKS_MARGIN=20 \

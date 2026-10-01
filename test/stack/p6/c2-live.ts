@@ -3,7 +3,9 @@
 // (twUSDC). The wallet's signature is VALID for that text (the challenge comes from the contract's
 // own pure circuit, the message from the arm's renderer), so only the circuit's C2 assert
 // (`coin.color == color`, passport b2f1847) stands between it and a withdrawal that shows token B
-// and sends token A. The call must fail with that assert; nothing is proven, submitted or paid.
+// and sends token A. The witness store is a malicious one (keyed by the named token, holding the
+// other token's coin): the honest store finds no coin of the named token and refuses first. The call
+// must fail with the circuit's assert; nothing is proven, submitted or paid.
 //
 // The honest client refuses to sign such a call, and the relay refuses the signature
 // (market-flows.ts `p9-negatives`); this script goes around both, the way a malicious relay or page
@@ -175,12 +177,19 @@ async function main() {
       providers,
       rt.compiledAccount(),
       account,
-      rt.client.witnesses.withCoin(rt.client.witnesses.emptyCoinStore(), {
-        nonce: coin.nonce,
-        color: coin.color,
-        value: coin.value,
-        mtIndex: coin.mt_index,
-      }),
+      // A MALICIOUS witness store: asked for the coin of the named token (twBTC), it hands the
+      // circuit the twUSDC coin (the honest store, keyed by colour, would find none and refuse).
+      {
+        ...rt.client.witnesses.emptyCoinStore(),
+        coins: {
+          [named.midnightColour]: {
+            nonceHex: coinRec.nonce,
+            colorHex: coinRec.color,
+            value: coinRec.value,
+            mtIndex: coinRec.mtIndex,
+          },
+        },
+      },
     )) as { handle: { callTx: Record<string, (...a: unknown[]) => Promise<unknown>> } };
     const t0 = Date.now();
     try {
@@ -197,7 +206,13 @@ async function main() {
       result.txId = (r as { public?: { txId?: string } })?.public?.txId ?? null;
       process.exitCode = 1;
     } catch (e) {
-      const msg = String((e as Error)?.stack ?? e);
+      // The circuit's own assert message sits in the error's cause chain (midnight-js wraps it).
+      const chain: string[] = [];
+      for (let c: unknown = e, i = 0; c && i < 8; c = (c as { cause?: unknown }).cause, i++) {
+        chain.push(String((c as Error)?.message ?? c));
+      }
+      result.causeChain = chain;
+      const msg = `${chain.join(' <- ')}\n${String((e as Error)?.stack ?? e)}`;
       result.outcome = /held coin colour does not match the withdrawn colour/.test(msg)
         ? 'REFUSED by the circuit: held coin colour does not match the withdrawn colour'
         : 'REFUSED (other)';

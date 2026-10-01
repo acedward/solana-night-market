@@ -113,7 +113,8 @@ describe('the claims store', () => {
     writeFileSync(`${file}.lock`, '999999999\n'); // no such process: a crash left it
     const c = new DemoTokenClaims({ file, dailyCap: 1 });
     c.lock();
-    expect(readFileSync(`${file}.lock`, 'utf8').trim()).toBe(String(process.pid));
+    // The lock names its holder (AA 00047 P10, F-A2-7: pid, host and a token).
+    expect(JSON.parse(readFileSync(`${file}.lock`, 'utf8'))).toMatchObject({ pid: process.pid });
     c.unlock();
   });
 });

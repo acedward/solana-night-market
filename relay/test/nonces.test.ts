@@ -1,7 +1,13 @@
-// AA 00047 P9, audit C9 (F-A7.3): the relay's nonce store never evicts an unexpired nonce. A client
-// spread over many addresses used to push other customers' nonces out once AUTH_MAX_NONCES were
-// outstanding, so their registration or demo-token claim failed as `unknown-nonce`. Now each client
-// address holds at most AUTH_MAX_NONCES_PER_CLIENT, and a full store refuses new nonces instead.
+// AA 00047 P10, audit round 2 R2-8 (F-A2-6; round 1 C9 / F-A7.3): the relay's authorisation nonces.
+//
+// Round 1: a client spread over many addresses pushed other customers' outstanding nonces out.
+// Round 2: nothing was evicted any more, but the 50,000-nonce store filled from 1,667 addresses of
+// ONE IPv6 /64, and then every client was refused (503) for the nonce TTL. Now:
+//   - nonces are STATELESS (an HMAC over their expiry and randomness): issuing one stores nothing, so
+//     no flood from any number of addresses can fill anything or lock anyone out;
+//   - issuance is bounded by the per-client rate limit, and an IPv6 client is keyed by its /64;
+//   - only USED nonces are remembered (until they expire), so a replay is still refused; past
+//     AUTH_MAX_USED_NONCES the oldest is forgotten, never a refusal.
 
 import { describe, expect, it } from 'vitest';
 
@@ -15,51 +21,71 @@ import { notImplementedChainReader } from '../src/chain/reader.js';
 import { JobQueue } from '../src/queue/jobs.js';
 import { FakeSponsor, newWallet, post, signedBody, silentLog, testConfig } from './harness.js';
 
-describe('NonceStore (unit)', () => {
-  it('caps outstanding nonces per client, refusing (not evicting) past the cap', () => {
-    let now = 1000;
-    const s = new NonceStore(60, 100, () => now, 2);
-    const a1 = s.issue('a');
-    const a2 = s.issue('a');
-    expect(a1.ok && a2.ok).toBe(true);
-    expect(s.issue('a')).toMatchObject({ ok: false, refused: 'client-cap', retryAfterSeconds: 60 });
-    expect(s.issue('b').ok).toBe(true);
-    // Both of a's nonces are still good.
-    if (a1.ok) expect(s.consume(a1.nonce)).toBe('ok');
-    // Using one frees a slot for that client.
-    expect(s.issue('a').ok).toBe(true);
-    expect(s.outstanding('a')).toBe(2);
-    // Expiry frees the rest.
-    now += 61;
-    expect(s.issue('a').ok).toBe(true);
-    expect(s.outstanding('a')).toBe(1);
+/** The store as main.ts builds it from `config` (the old store's settings, when they exist). */
+function storeFor(config: ReturnType<typeof testConfig>): NonceStore {
+  const l = config.limits as unknown as Record<string, number | undefined>;
+  return new (NonceStore as unknown as new (...a: unknown[]) => NonceStore)(
+    config.limits.nonceTtlSeconds,
+    l.maxUsedNonces ?? l.maxNonces,
+    undefined,
+    l.maxNoncesPerClient,
+  );
+}
+
+describe('NonceStore (unit, stateless)', () => {
+  const ok = (r: ReturnType<NonceStore['issue']>) => {
+    if (!r.ok) throw new Error(`refused: ${r.refused}`);
+    return r;
+  };
+
+  it('issuing stores nothing and never refuses, however many clients ask', () => {
+    const s = new NonceStore(60, 100, () => 1000);
+    for (let i = 0; i < 5000; i++) ok(s.issue(`2001:db8:${i.toString(16)}::1`));
+    expect(s.size).toEqual({ issued: 0, used: 0 });
   });
 
-  it('a full store refuses every client, and never evicts an unexpired nonce', () => {
+  it('a nonce is accepted once; a replay is "used"; a forged, altered or expired one is "unknown"', () => {
     let now = 1000;
-    const s = new NonceStore(60, 3, () => now, 2);
-    const victim = s.issue('victim');
-    s.issue('attacker-1');
-    s.issue('attacker-2');
-    expect(s.issue('attacker-3')).toMatchObject({ ok: false, refused: 'full' });
-    expect(s.size.issued).toBe(3);
-    if (victim.ok) expect(s.consume(victim.nonce)).toBe('ok');
-    now += 61;
-    expect(s.issue('attacker-3').ok).toBe(true);
+    const s = new NonceStore(60, 100, () => now);
+    const { nonce, expiresAt } = ok(s.issue());
+    expect(nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(expiresAt).toBe(1060);
+    // Altered: any byte (the expiry, the randomness, the MAC).
+    for (const i of [2, 15, 40, 65]) {
+      const flipped = nonce.slice(0, i) + (nonce[i] === '0' ? '1' : '0') + nonce.slice(i + 1);
+      expect(s.consume(flipped)).toBe('unknown');
+    }
+    expect(s.consume(`0x${'42'.repeat(32)}`)).toBe('unknown');
+    expect(s.consume(nonce)).toBe('ok');
+    expect(s.consume(nonce)).toBe('used');
+    const late = ok(s.issue()).nonce;
+    now = 1061;
+    expect(s.consume(late)).toBe('unknown');
+  });
+
+  it('a nonce issued by another process (a restart: a new key) is unknown', () => {
+    const a = new NonceStore(60, 100, () => 1000);
+    const b = new NonceStore(60, 100, () => 1000);
+    expect(b.consume(ok(a.issue()).nonce)).toBe('unknown');
+  });
+
+  it('a full used set forgets its oldest entry to make room: never a refusal', () => {
+    const s = new NonceStore(60, 3, () => 1000);
+    const used = Array.from({ length: 5 }, () => ok(s.issue()).nonce);
+    for (const n of used) expect(s.consume(n)).toBe('ok');
+    expect(s.size.used).toBe(3);
+    expect(s.evicted).toBe(2);
+    // The newest are still refused as replays.
+    expect(s.consume(used[4]!)).toBe('used');
   });
 });
 
-describe('GET /v1/auth/nonce under a flood from many addresses (audit C9)', () => {
+describe('GET /v1/auth/nonce under a flood (audit round 2 R2-8)', () => {
   function relay(env: Record<string, string>) {
-    const config = testConfig({ RATE_LIMIT_NONCES_PER_MIN: '1000', ...env });
-    let client = 'victim';
+    const config = testConfig(env);
+    let client = '198.51.100.7';
     const log = silentLog();
-    const nonces = new NonceStore(
-      config.limits.nonceTtlSeconds,
-      config.limits.maxNonces,
-      undefined,
-      config.limits.maxNoncesPerClient,
-    );
+    const nonces = storeFor(config);
     const queue = new JobQueue({ ttlSeconds: 600, maxJobs: 100, log });
     const catalogue = defaultCatalogue();
     const app = createApp({
@@ -77,54 +103,50 @@ describe('GET /v1/auth/nonce under a flood from many addresses (audit C9)', () =
       scheme: testScheme,
       clientAddress: () => client,
     });
-    return {
-      app,
-      config,
-      log,
-      nonces,
-      queue,
-      catalogue,
-      as: (c: string) => (client = c),
-    };
+    return { app, config, log, nonces, queue, catalogue, as: (c: string) => (client = c) };
   }
 
-  it('the victim’s nonce survives; the flood is refused, and the victim’s signed call is accepted', async () => {
-    const r = relay({ AUTH_MAX_NONCES: '100', AUTH_MAX_NONCES_PER_CLIENT: '30' });
-    r.as('victim');
+  it('a flood from many networks fills nothing: an honest client is served and its signed call accepted', async () => {
+    // (The old store held at most AUTH_MAX_NONCES outstanding and refused everyone past it.)
+    const r = relay({ RATE_LIMIT_NONCES_PER_MIN: '1000', AUTH_MAX_NONCES: '300' });
     const h = { ...r, app: r.app } as unknown as Parameters<typeof signedBody>[0];
     const victim = newWallet();
-    const body = await signedBody(h, 'register', victim); // takes the victim's nonce now
-    // Address after address asks for 30 nonces, until the store is full and refuses.
+    const body = await signedBody(h, 'register', victim); // the victim's nonce, taken now
     const statuses = new Map<number, number>();
-    for (let ip = 0; ip < 1000 && (statuses.get(503) ?? 0) < 50; ip++) {
-      r.as(`10.0.${ip >> 8}.${ip & 255}`);
+    for (let net = 0; net < 20; net++) {
+      r.as(`2001:db8:${net.toString(16)}::1`); // twenty different /64s
       for (let i = 0; i < 30; i++) {
         const res = await r.app.request(API_PATHS.nonce);
         statuses.set(res.status, (statuses.get(res.status) ?? 0) + 1);
       }
     }
-    expect(statuses.get(503)).toBeGreaterThan(0);
-    expect(r.nonces.size.issued).toBe(100);
-    r.as('victim');
-    const res = await post(h, 'register', body);
-    // The nonce was still known: the call passed authorisation (the stub executor is queued).
-    expect(res.status).toBe(202);
+    expect([...statuses.entries()]).toEqual([[200, 600]]);
+    r.as('198.51.100.7');
+    expect((await r.app.request(API_PATHS.nonce)).status).toBe(200);
+    // The victim's nonce is still good: the call passes authorisation (the stub executor is queued).
+    expect((await post(h, 'register', body)).status).toBe(202);
   });
 
-  it('one address past its own cap gets 429 with Retry-After; another address is served', async () => {
-    const r = relay({ AUTH_MAX_NONCES_PER_CLIENT: '3' });
-    r.as('203.0.113.5');
+  it('every address of one IPv6 /64 shares one nonce rate limit; another network is served', async () => {
+    const r = relay({});
     const codes: number[] = [];
-    for (let i = 0; i < 4; i++) codes.push((await r.app.request(API_PATHS.nonce)).status);
-    expect(codes).toEqual([200, 200, 200, 429]);
-    const refused = await r.app.request(API_PATHS.nonce);
-    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0);
-    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('rate-limited');
-    r.as('203.0.113.6');
+    for (let i = 0; i < 40; i++) {
+      r.as(`2001:db8:0:1::${(i + 1).toString(16)}`); // 40 addresses, one /64
+      codes.push((await r.app.request(API_PATHS.nonce)).status);
+    }
+    expect(codes.filter((c) => c === 200)).toHaveLength(r.config.limits.noncesPerMinute);
+    expect(codes.slice(r.config.limits.noncesPerMinute).every((c) => c === 429)).toBe(true);
+    r.as('2001:db8:0:2::1'); // the next /64
+    expect((await r.app.request(API_PATHS.nonce)).status).toBe(200);
+    r.as('198.51.100.7');
     expect((await r.app.request(API_PATHS.nonce)).status).toBe(200);
   });
 
-  it('AUTH_MAX_NONCES_PER_CLIENT defaults to 30', () => {
-    expect(testConfig().limits.maxNoncesPerClient).toBe(30);
+  it('AUTH_MAX_USED_NONCES defaults to 200,000 and is configurable', () => {
+    const l = testConfig().limits as unknown as Record<string, unknown>;
+    expect(l.maxUsedNonces).toBe(200_000);
+    expect(
+      (testConfig({ AUTH_MAX_USED_NONCES: '5000' }).limits as unknown as Record<string, unknown>).maxUsedNonces,
+    ).toBe(5000);
   });
 });

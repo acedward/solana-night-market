@@ -16,6 +16,13 @@
 // lands, and confirms the claim when every token landed. When anything fails, the claim stays
 // (partial, resumable, its daily charge kept: audit C8 / F-B7), so the key can claim again and get
 // only the tokens still missing.
+//
+// Never twice (AA 00047 P10, audit round 2 R2-7 / F-B2-4): each token is recorded as PENDING, with the
+// inbox entry its transaction files, BEFORE the transaction is submitted (the faucet calls back just
+// before it submits). A resumed claim first RECONCILES every pending token against the account's
+// on-chain inbox: the entry is there → delivered; it is not and the transaction can no longer land →
+// minted again; it is not but could still land → the job stops (`demo-tokens-settling`, not counted)
+// and nothing is minted; nothing to look for → quarantined (held back for good; an operator decides).
 
 import type { DemoTokenMint, DemoTokenPath, DemoTokensInfo, DemoTokensResult } from '@nightmarket/core';
 
@@ -26,9 +33,15 @@ import type { AccountLedger, PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import type { SponsorSession } from '../sponsor/session.js';
-import type { ClaimHandle, DemoTokenClaims } from './claims.js';
+import type { ClaimHandle, DemoTokenClaims, PendingToken } from './claims.js';
 import type { MintOutcome } from './faucet.js';
 import type { ResolvedPackItem } from './pack.js';
+
+/** What a mint tells the claim JUST BEFORE it submits a transaction (AA 00047 P10, R2-7): the
+ *  stage, the inbox entry the transaction files into the account (when it files one), and the Unix
+ *  second after which it can no longer land (its TTL; absent: the relay's settle window). Throwing
+ *  here (the claims store cannot write) stops the mint before anything is submitted. */
+export type BeforeSubmit = (p: { stage: PendingToken['stage']; entry?: Uint8Array; notAfter?: number }) => void;
 
 /** One token's mint into the account (./faucet.ts `DemoFaucets.direct` / `viaSponsor`). */
 export type DemoMint = (o: {
@@ -39,6 +52,7 @@ export type DemoMint = (o: {
   item: ResolvedPackItem;
   path: DemoTokenPath;
   stage: (name: string, detail?: Record<string, string>) => void;
+  beforeSubmit: BeforeSubmit;
 }) => Promise<MintOutcome>;
 
 export interface DemoTokenDeps {
@@ -52,6 +66,37 @@ export interface DemoTokenDeps {
   accountKeys?: AccountKeysCheck;
   mint: DemoMint;
   log: Logger;
+  /** How long a submission without a known TTL may still land (seconds; default 4 h). */
+  pendingSettleSeconds?: number;
+  /** Unix seconds now (tests). */
+  now?: () => number;
+}
+
+/** Seconds past a transaction's TTL before its absence on chain is final (block time, indexer lag). */
+const SETTLE_MARGIN_SECONDS = 300;
+
+const hexOf = (b: Uint8Array) => Buffer.from(b).toString('hex');
+
+/**
+ * A pending token's fate, read from the account's on-chain inbox (AA 00047 P10, R2-7): `landed` when
+ * its entry is there, `not-landed` when it is not and its transaction can no longer land,
+ * `settling` when it could still land, `unknowable` when there is no entry to look for.
+ */
+export async function reconcilePending(
+  rt: PassportRuntime,
+  account: string,
+  pending: PendingToken,
+  now: number,
+): Promise<'landed' | 'not-landed' | 'settling' | 'unknowable'> {
+  if (!pending.entry) return 'unknowable';
+  const ledger = await rt.ledgerState(account);
+  if (!ledger) throw new PublicError('chain-unavailable', 'the account could not be read to check an earlier delivery');
+  const from = /^[0-9]{1,20}$/.test(pending.inboxFrom ?? '') ? BigInt(pending.inboxFrom!) : 0n;
+  const start = from <= ledger.inbox_count ? from : 0n;
+  for (let k = start; k < ledger.inbox_count; k++) {
+    if (ledger.inbox.member(k) && hexOf(ledger.inbox.lookup(k)) === pending.entry) return 'landed';
+  }
+  return now > pending.notAfter + SETTLE_MARGIN_SECONDS ? 'not-landed' : 'settling';
 }
 
 const norm = (h: string | undefined) => (h ?? '').replace(/^0x/, '').toLowerCase();
@@ -148,13 +193,41 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
     if (!claim) throw new PublicError('not-admitted', 'this demo-token claim was not admitted');
     /** Whether a mint was started: only then does a failure count against the key's attempts. */
     let attempted = false;
+    const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
     try {
       const rt = deps.runtime();
       if (!rt) throw new PublicError('not-available', 'the market cannot mint demo tokens right now (no prover keys)');
       const ledger = await rt.ledgerState(account);
       if (!ledger?.booted) throw new PublicError('wrong-account', 'no active account at this address');
       const encKey = Uint8Array.from(ledger.enc_key);
+
+      // An earlier attempt's tokens whose submission is uncertain are reconciled BEFORE anything is
+      // minted (AA 00047 P10, R2-7): never mint a token twice.
+      const settling: string[] = [];
+      for (const [colour, pending] of Object.entries(claim.pending)) {
+        const symbol = deps.pack.find((i) => norm(i.colour) === colour)?.symbol ?? colour.slice(0, 8);
+        const verdict = await reconcilePending(rt, account, pending, now());
+        ctx.stage('reconciled', { symbol, verdict });
+        if (verdict === 'landed') claim.settle(colour, { reconciled: true });
+        else if (verdict === 'not-landed') claim.settle(colour, null);
+        else if (verdict === 'settling') settling.push(symbol);
+        else {
+          claim.quarantine(colour, 'its delivery was cut off before it could be found on chain');
+          deps.log.warn('a demo token was held back (quarantined): its earlier delivery cannot be checked', {
+            symbol,
+            stage: pending.stage,
+          });
+        }
+      }
+      if (settling.length > 0) {
+        throw new PublicError(
+          'demo-tokens-settling',
+          `an earlier delivery of ${settling.join(', ')} may still land; nothing more was minted. Try again in an hour`,
+        );
+      }
+
       const already = claim.delivered;
+      const held = claim.quarantined;
       const minted = await ctx.prove(() =>
         deps.sponsor.withWallet(async (w) => {
           const out: DemoTokenMint[] = [];
@@ -163,9 +236,11 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
             const landed = already[colour];
             if (landed) {
               // A resumed claim: this token landed in an earlier attempt; never mint it twice.
-              out.push({ symbol: item.symbol, colour: item.colour, amount: item.amount, txs: { ...landed } });
+              const { reconciled: _r, ...txs } = landed;
+              out.push({ symbol: item.symbol, colour: item.colour, amount: item.amount, txs });
               continue;
             }
+            if (held[colour]) continue; // quarantined: never minted again by the relay
             ctx.stage('minting', { symbol: item.symbol });
             attempted = true;
             const txs = await deps.mint({
@@ -176,6 +251,15 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
               item,
               path: deps.path,
               stage: (name, detail) => ctx.stage(name, detail),
+              // Written durably BEFORE the transaction is submitted (R2-7); a write that fails throws
+              // here, and nothing is submitted.
+              beforeSubmit: ({ stage, entry, notAfter }) =>
+                claim.submitting(colour, {
+                  since: now(),
+                  notAfter: notAfter ?? now() + (deps.pendingSettleSeconds ?? 4 * 3600),
+                  stage,
+                  ...(entry ? { entry: hexOf(entry), inboxFrom: String(ledger.inbox_count) } : {}),
+                }),
             });
             // Written before the next token (audit C8 / F-B7): a failure later keeps this one's charge.
             claim.progress(colour, txs);
@@ -188,13 +272,20 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
         Object.values(m.txs).filter((t): t is string => typeof t === 'string' && t !== ''),
       );
       claim.confirm(txIds);
+      const heldBack = deps.pack.filter((i) => held[norm(i.colour)]).map(({ symbol, colour }) => ({ symbol, colour }));
       deps.log.info('demo tokens delivered', {
         tokens: minted.length,
         transactions: txIds.length,
         path: deps.path,
         resumed: claim.resumed,
+        held: heldBack.length,
       });
-      const result: DemoTokensResult = { account, path: deps.path, minted };
+      const result: DemoTokensResult = {
+        account,
+        path: deps.path,
+        minted,
+        ...(heldBack.length > 0 ? { held: heldBack } : {}),
+      };
       return result as unknown as Record<string, unknown>;
     } catch (e) {
       claim.fail(attempted);

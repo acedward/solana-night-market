@@ -49,7 +49,9 @@ function makePayload(validUntil: string): OpenSwapPayload {
 /** The relay as main.ts wires trading (test arm, fakes at the edges). */
 function relay() {
   const w = callSigner();
-  const config = loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t' }, () =>
+  // A make and a take of the one test account in a row (the one-job-per-account rule, AA 00047 P10
+  // R2-1, has its own tests: relay/test/fairness.test.ts).
+  const config = loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', JOBS_PER_ACCOUNT: '10' }, () =>
     JSON.stringify(LOCAL_TOKENS),
   ).config;
   const log = silentLog();

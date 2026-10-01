@@ -24,6 +24,23 @@
 //     before any job ran (a full queue) is RELEASED: nothing was spent;
 //   - a reservation found on disk at start (the relay stopped mid-job) is kept as `partial`: its
 //     tokens may have landed, so its charge is kept and the rest can be resumed.
+// A token is never minted twice (AA 00047 P10, audit round 2 R2-7 / F-B2-4; F-A2-7's lost progress
+// write): BEFORE a token's transaction is submitted, the claim records it as PENDING (durably, with
+// the 192-byte inbox entry the transaction files into the account and the time after which it can no
+// longer land); only then is it submitted. A pending token, whether the job failed, the response was
+// lost or the relay stopped (the crash-recovery path keeps it), is RECONCILED against the chain before
+// anything is minted again (../demo/action.ts): its entry in the account's inbox means it landed
+// (delivered); no entry after its last possible landing time means it did not (minted again); no
+// entry before that time means "still settling" (the claim waits, nothing is minted). A pending token
+// that cannot be reconciled (no entry to look for) is QUARANTINED: never minted again by the relay;
+// an operator decides (deploy/RUNBOOK.md section 7).
+//
+// The lock (F-A2-7): the lock file names its holder's pid, host and a random token, and the live
+// relay touches it every `heartbeatSeconds`. A lock is stale (taken over) when it is older than
+// `staleSeconds`, or when it was written on THIS host by a pid that is gone, or by this very pid
+// with another token (a restarted container). A fresh lock of another host (another container on the
+// same data volume, even with the same pid 1) is held. A relay whose lock was taken over stops
+// writing (claims answer `store-unavailable`), so two relays never write one file.
 // Every change is written to disk FIRST and only then applied in memory: a write that fails leaves
 // memory as it was (a reservation that could not be written is refused, not kept as a phantom). The
 // store reads and recovers its file only AFTER it holds the lock (`lock()`), so a second relay
@@ -32,6 +49,7 @@
 // What it holds is public: the owner key (its Solana address is public), the account, the times and
 // the transaction ids.
 
+import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -42,8 +60,10 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeSync,
 } from 'node:fs';
+import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const DAY_SECONDS = 86_400;
@@ -54,6 +74,30 @@ export interface DeliveredToken {
   mintAndDeposit?: string;
   mint?: string;
   deposit?: string;
+  /** Found on chain by reconciling a pending token (its transaction id was never reported). */
+  reconciled?: true;
+}
+
+/** A token whose transaction is (or was) being submitted: written BEFORE the submission (P10, R2-7). */
+export interface PendingToken {
+  /** Unix seconds when it was written. */
+  since: number;
+  /** Unix seconds after which the transaction can no longer land (its TTL, plus a margin). */
+  notAfter: number;
+  /** `direct`: the one mint-and-deposit transaction; `via-sponsor`: the mint to the sponsor, then the
+   *  deposit into the account. */
+  stage: 'mint-and-deposit' | 'mint' | 'deposit';
+  /** The 192-byte inbox entry (hex) the transaction files into the account: how it is found on chain. */
+  entry?: string;
+  /** The account's inbox count when it was written (decimal): where to start looking. */
+  inboxFrom?: string;
+}
+
+/** A pending token the relay could not reconcile and will not mint again. */
+export interface QuarantinedToken extends PendingToken {
+  /** Unix seconds when it was quarantined. */
+  at: number;
+  reason: string;
 }
 
 export interface ClaimRecord {
@@ -74,15 +118,32 @@ export interface ClaimRecord {
   delivered?: Record<string, DeliveredToken>;
   /** Attempts that failed while minting (a relay stopped mid-job does not count). */
   failures?: number;
+  /** Pack tokens being submitted, by colour: reconciled before anything is minted again (P10, R2-7). */
+  pending?: Record<string, PendingToken>;
+  /** Pack tokens the relay will not mint again, by colour (an operator decides). */
+  quarantined?: Record<string, QuarantinedToken>;
 }
 
 /** A reservation the executor drives: record each token as it lands, then confirm or fail. */
 export interface ClaimHandle {
   /** The tokens that already landed (a resumed claim), by colour. */
   readonly delivered: Readonly<Record<string, DeliveredToken>>;
+  /** The tokens whose submission is uncertain, by colour (reconcile them before minting). */
+  readonly pending: Readonly<Record<string, PendingToken>>;
+  /** The tokens the relay will not mint again, by colour. */
+  readonly quarantined: Readonly<Record<string, QuarantinedToken>>;
   /** Whether this reservation resumes an earlier partial claim. */
   readonly resumed: boolean;
-  /** Record one token that landed. Throws when the store cannot write (the job must stop). */
+  /** Record that a token's transaction is about to be submitted (BEFORE the submission). Throws
+   *  when the store cannot write: then nothing may be submitted. */
+  submitting(colour: string, pending: PendingToken): void;
+  /** A pending token was reconciled: it landed (`landed`: its record) or it did not (null: it may be
+   *  minted again). Throws when the store cannot write. */
+  settle(colour: string, landed: DeliveredToken | null): void;
+  /** A pending token cannot be reconciled: never mint it again. Throws when the store cannot write. */
+  quarantine(colour: string, reason: string): void;
+  /** Record one token that landed (it leaves `pending`). Throws when the store cannot write (the job
+   *  must stop; the token stays pending, and is reconciled before anything is minted again). */
   progress(colour: string, txs: DeliveredToken): void;
   /** Every token landed. Throws when the store cannot write. */
   confirm(txs: string[]): void;
@@ -128,6 +189,24 @@ export interface ClaimsOptions {
   onRecovered?: (count: number) => void;
   /** Told when a failure could not be written (memory and disk then differ until the next write). */
   onWriteFailed?: (what: string, error: unknown) => void;
+  /** How often the live relay touches its lock (seconds; 0: never, for tests). Default 30. */
+  heartbeatSeconds?: number;
+  /** A lock untouched for this long is stale, whoever wrote it (seconds). Default 120. */
+  staleSeconds?: number;
+  /** This relay's host name, as the lock names it (default: the OS host name; a container's id). */
+  hostname?: string;
+  /** Told when another relay took the lock over: this store stops writing. */
+  onLockLost?: () => void;
+}
+
+/** What a lock file says about its holder. */
+interface LockHolder {
+  raw: string;
+  pid: number | null;
+  host?: string;
+  token?: string;
+  /** Milliseconds since the file was last touched. */
+  ageMs: number;
 }
 
 export class DemoTokenClaims {
@@ -136,6 +215,11 @@ export class DemoTokenClaims {
   /** Owners with a reservation admitted and not yet finished (memory only). */
   private readonly active = new Set<string>();
   private lockFile: string | null = null;
+  /** This store's lock token (random per instance). */
+  private readonly token = randomBytes(16).toString('hex');
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Another relay took the lock over: nothing is written any more. */
+  private lost = false;
 
   constructor(private readonly o: ClaimsOptions) {
     this.now = o.now ?? (() => Math.floor(Date.now() / 1000));
@@ -176,7 +260,7 @@ export class DemoTokenClaims {
       const fd = createExclusive(path);
       if (fd !== null) {
         try {
-          writeSync(fd, `${process.pid}\n`);
+          writeSync(fd, `${JSON.stringify({ pid: process.pid, host: this.host, token: this.token })}\n`);
         } catch (e) {
           closeSync(fd);
           rmSync(path, { force: true });
@@ -184,17 +268,14 @@ export class DemoTokenClaims {
         }
         closeSync(fd);
         this.lockFile = path;
+        this.lost = false;
+        this.startHeartbeat();
         return;
       }
       // The lock file exists (EEXIST): who holds it?
       const holder = readHolder(path);
       if (holder === null) continue; // released meanwhile
-      // A lock left by a process that no longer exists is stale (a crash), and so is one holding our
-      // own pid (a restarted container: the relay has the same pid again): take it over. The lock
-      // guards against a second relay on this host; relays in separate containers sharing one data
-      // volume cannot see each other's pids, so the RUNBOOK says one relay per data dir.
-      const pid = Number(holder);
-      if (Number.isInteger(pid) && pid > 0 && (pid === process.pid || !processAlive(pid))) {
+      if (this.isStale(holder)) {
         try {
           rmSync(path, { force: true });
         } catch (e) {
@@ -202,19 +283,85 @@ export class DemoTokenClaims {
         }
         continue;
       }
-      throw held(path, holder);
+      throw held(path, describeHolder(holder));
     }
-    throw held(path, readHolder(path) ?? '');
+    const last = readHolder(path);
+    throw held(path, last ? describeHolder(last) : '');
+  }
+
+  private get host(): string {
+    return this.o.hostname ?? hostname();
+  }
+
+  /**
+   * Whether a lock can be taken over (see the header). A lock untouched for `staleSeconds` is stale.
+   * A lock that names its host: on THIS host it is stale when its pid is gone, or is this very pid
+   * with another token (a restarted container); on another host it is held while it is fresh (a
+   * second container on the same data volume). A lock of an older relay (a bare pid): stale when the
+   * pid is gone or is ours.
+   */
+  private isStale(h: LockHolder): boolean {
+    if (h.ageMs > (this.o.staleSeconds ?? 120) * 1000) return true;
+    if (h.pid === null || h.pid <= 0) return false;
+    if (h.host === undefined) return h.pid === process.pid || !processAlive(h.pid);
+    if (h.host !== this.host) return false;
+    return (h.pid === process.pid && h.token !== this.token) || !processAlive(h.pid);
+  }
+
+  private startHeartbeat(): void {
+    const seconds = this.o.heartbeatSeconds ?? 30;
+    if (seconds <= 0 || this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), seconds * 1000);
+    this.heartbeatTimer.unref?.();
+  }
+
+  /**
+   * Touch the lock, after checking it is still ours. When another relay took it over, stop: nothing
+   * is written any more (claims answer `store-unavailable`). Returns whether the lock is held.
+   */
+  heartbeat(): boolean {
+    if (!this.lockFile || this.lost) return false;
+    if (!this.lockStillOurs()) return false;
+    try {
+      const now = new Date();
+      utimesSync(this.lockFile, now, now);
+    } catch {
+      /* a failed touch only makes the lock look older */
+    }
+    return true;
+  }
+
+  /** Whether the lock file still carries this store's token; when not, the store stops writing. */
+  private lockStillOurs(): boolean {
+    if (!this.lockFile || this.lost) return false;
+    let h: LockHolder | null;
+    try {
+      h = readHolder(this.lockFile);
+    } catch {
+      return true; // cannot read it: keep going (the next write reports the file system)
+    }
+    if (h?.token === this.token) return true;
+    this.lost = true;
+    this.stopHeartbeat();
+    this.o.onLockLost?.();
+    return false;
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   unlock(): void {
-    if (this.lockFile) rmSync(this.lockFile, { force: true });
+    this.stopHeartbeat();
+    // Only our own lock is removed: one taken over by another relay is theirs.
+    if (this.lockFile && !this.lost && this.lockStillOurs()) rmSync(this.lockFile, { force: true });
     this.lockFile = null;
   }
 
-  /** Whether the store can be used: in memory, or file-backed and opened by `lock()`. */
+  /** Whether the store can be used: in memory, or file-backed, opened by `lock()` and still ours. */
   get open(): boolean {
-    return !this.o.file || this.lockFile !== null;
+    return !this.o.file || (this.lockFile !== null && !this.lost);
   }
 
   private load(file: string): void {
@@ -257,6 +404,10 @@ export class DemoTokenClaims {
   private writeFile(claims: ClaimRecord[]): void {
     const file = this.o.file;
     if (!file) return;
+    // Never write a file another relay holds (it took the lock over: F-A2-7).
+    if (this.lockFile && !this.lockStillOurs()) {
+      throw new ClaimsStoreError('the demo-token claims lock was taken over by another relay', 'held', file, 'EEXIST');
+    }
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     const body = `${JSON.stringify({ format: FORMAT, claims }, null, 1)}\n`;
     const tmp = join(dirname(file), `.${process.pid}.${Date.now()}.claims.tmp`);
@@ -337,6 +488,13 @@ export class DemoTokenClaims {
    * written.
    */
   reserve(ownerRaw: string, accountRaw: string): ReserveOutcome {
+    if (this.lost) {
+      return {
+        ok: false,
+        code: 'store-unavailable',
+        reason: 'the market cannot record demo-token claims right now; try again later',
+      };
+    }
     if (!this.open) throw new Error('the demo-token claims store is not open: call lock() first');
     const owner = ownerRaw.replace(/^0x/, '').toLowerCase();
     const account = accountRaw.replace(/^0x/, '').toLowerCase();
@@ -396,16 +554,55 @@ export class DemoTokenClaims {
       finished = true;
       this.active.delete(owner);
     };
+    const without = <T>(m: Record<string, T> | undefined, k: string): Record<string, T> | undefined => {
+      if (!m) return undefined;
+      const { [k]: _gone, ...rest } = m;
+      return Object.keys(rest).length > 0 ? rest : undefined;
+    };
+    const withPending = (r: ClaimRecord, pending: Record<string, PendingToken> | undefined): ClaimRecord => {
+      const { pending: _p, ...rest } = r;
+      return pending ? { ...rest, pending } : rest;
+    };
     return {
       ok: true,
       resumed: prior !== null,
       get delivered() {
         return { ...(current()?.delivered ?? {}) };
       },
+      get pending() {
+        return { ...(current()?.pending ?? {}) };
+      },
+      get quarantined() {
+        return { ...(current()?.quarantined ?? {}) };
+      },
+      submitting: (colour: string, pending: PendingToken) => {
+        if (finished) throw new Error('this demo-token claim has ended');
+        const r = current();
+        this.put(owner, { ...r, pending: { ...(r.pending ?? {}), [colour.toLowerCase()]: { ...pending } } });
+      },
+      settle: (colour: string, landed: DeliveredToken | null) => {
+        if (finished) throw new Error('this demo-token claim has ended');
+        const c = colour.toLowerCase();
+        const r = withPending(current(), without(current().pending, c));
+        this.put(owner, landed ? { ...r, delivered: { ...(r.delivered ?? {}), [c]: { ...landed } } } : r);
+      },
+      quarantine: (colour: string, reason: string) => {
+        if (finished) throw new Error('this demo-token claim has ended');
+        const c = colour.toLowerCase();
+        const was = current().pending?.[c];
+        const r = withPending(current(), without(current().pending, c));
+        const q: QuarantinedToken = {
+          ...(was ?? { since: this.now(), notAfter: this.now(), stage: 'mint' }),
+          at: this.now(),
+          reason,
+        };
+        this.put(owner, { ...r, quarantined: { ...(r.quarantined ?? {}), [c]: q } });
+      },
       progress: (colour: string, txs: DeliveredToken) => {
         if (finished) return;
-        const r = current();
-        this.put(owner, { ...r, delivered: { ...(r.delivered ?? {}), [colour.toLowerCase()]: { ...txs } } });
+        const c = colour.toLowerCase();
+        const r = withPending(current(), without(current().pending, c));
+        this.put(owner, { ...r, delivered: { ...(r.delivered ?? {}), [c]: { ...txs } } });
       },
       confirm: (txs: string[]) => {
         if (finished) return;
@@ -449,14 +646,40 @@ function createExclusive(path: string): number | null {
   }
 }
 
-/** The pid written in an existing lock file ('' when empty), or null when it has gone meanwhile. */
-function readHolder(path: string): string | null {
+/** What an existing lock file says (its holder, and how long since it was touched), or null when it
+ *  has gone meanwhile. A lock of an older relay holds a bare pid; this one's holds JSON. */
+function readHolder(path: string): LockHolder | null {
+  let raw: string;
+  let ageMs: number;
   try {
-    return readFileSync(path, 'utf8').trim();
+    raw = readFileSync(path, 'utf8').trim();
+    ageMs = Math.max(0, Date.now() - statSync(path).mtimeMs);
   } catch (e) {
     if (errnoCode(e) === 'ENOENT') return null;
     throw filesystemProblem('read its lock file', path, e);
   }
+  if (raw.startsWith('{')) {
+    try {
+      const j = JSON.parse(raw) as { pid?: unknown; host?: unknown; token?: unknown };
+      return {
+        raw,
+        pid: Number.isInteger(j.pid) ? (j.pid as number) : null,
+        ...(typeof j.host === 'string' ? { host: j.host } : {}),
+        ...(typeof j.token === 'string' ? { token: j.token } : {}),
+        ageMs,
+      };
+    } catch {
+      return { raw, pid: null, ageMs };
+    }
+  }
+  const pid = Number(raw);
+  return { raw, pid: raw !== '' && Number.isInteger(pid) ? pid : null, ageMs };
+}
+
+/** A lock's holder for the error message: "1 on host abc" for this relay's locks, else the text. */
+function describeHolder(h: LockHolder): string {
+  if (h.host !== undefined && h.pid !== null) return `${h.pid} on host ${h.host}`;
+  return h.raw;
 }
 
 function held(path: string, holder: string): ClaimsStoreError {

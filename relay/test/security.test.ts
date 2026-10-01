@@ -296,13 +296,12 @@ describe('nonces', () => {
     expect(new NonceStore(60, 3, () => now).consume(issued(store).nonce)).toBe('unknown');
   });
 
-  it('keeps at most the configured number outstanding, refusing more instead of evicting (audit C9)', () => {
+  it('issuing stores nothing and never refuses, so no issued nonce is ever pushed out (audit C9; P10 R2-8)', () => {
     const store = new NonceStore(60, 2);
     const first = issued(store).nonce;
-    issued(store);
-    expect(store.issue()).toMatchObject({ ok: false, refused: 'full' });
-    expect(store.size.issued).toBe(2);
-    // The outstanding nonce was not pushed out: it still works.
+    for (let i = 0; i < 1000; i++) issued(store, `client-${i}`);
+    expect(store.size).toEqual({ issued: 0, used: 0 });
+    // The first nonce still works.
     expect(store.consume(first)).toBe('ok');
   });
 });

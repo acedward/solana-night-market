@@ -20,6 +20,7 @@ import {
   type AppendInboxPayload,
   type CancelOffersPayload,
   type OpenSwapPayload,
+  type RestoreEncKeyPayload,
   type WithdrawPayload,
   type WithdrawUnshieldedPayload,
 } from '@nightmarket/core';
@@ -30,6 +31,7 @@ import {
   ed25519DeviceOf,
   openSwapArgs,
   passportAuthOf,
+  restoreEncKeyRequest,
   withdrawRequest,
   withdrawUnshieldedRequest,
 } from '@nightmarket/core/passport';
@@ -530,6 +532,93 @@ describe('AA 00047 P9.I: cancel-offers (questions Q30) is rotate_enc_key with th
     expect(def.auth).toBe('passport-call');
     expect(def.implementedBy).toBe('P9.I');
     // Without a runtime the executor says so (not "not-implemented").
+    const ctx = { log: { info: () => {} } } as never;
+    await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
+  });
+});
+
+describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key to the BROWSER’s key', () => {
+  const restore = (a: FakeAccount, newKey: string): RestoreEncKeyPayload => ({
+    newKey,
+    authNonce: String(a.authNonce),
+  });
+
+  it('accepts a restore the wallet signed as "Rotate encryption key / New key …" for the browser’s key', async () => {
+    const owner = wallet();
+    const a = accountOf(owner); // a page changed the on-chain key: it is not the browser's
+    const rt = runtimeOf(a);
+    const browserKey = hex(randomBytes(32));
+    const p = restore(a, browserKey);
+    const r = await arm.checkGatedCall(
+      rt,
+      'restore-enc-key',
+      a.account,
+      p,
+      await browserGated(owner, a, restoreEncKeyRequest(p)),
+    );
+    if (!r.ok) throw new Error(`refused: ${r.code} ${r.reason}`);
+    const lines = new TextDecoder().decode(r.auth.message).split('\n');
+    // TODO(P10.I): with P10.C's Q36 site prefix the first line changes; these lines do not.
+    expect(lines[1]!.trimEnd()).toBe('Rotate encryption key'); // F3 v2 pads to a fixed length
+    expect(lines[2]).toMatch(new RegExp(`^New key ${browserKey.slice(0, 16)}`));
+    expect(r.signer).toBe(owner.deviceKey);
+  });
+
+  it('refuses the on-chain key itself (a cancel in disguise) and an all-zero key, before any signature work', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    for (const key of [a.encKey, '00'.repeat(32)]) {
+      const p = restore(a, key);
+      // Even a valid signature over it is refused.
+      const passportAuth = await browserGated(owner, a, restoreEncKeyRequest(p));
+      expect(await arm.checkGatedCall(rt, 'restore-enc-key', a.account, p, passportAuth)).toMatchObject({
+        ok: false,
+        code: 'malformed',
+      });
+    }
+  });
+
+  it('a cancel’s signature cannot pass as a restore, nor a restore’s as a cancel (other bytes)', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const browserKey = hex(randomBytes(32));
+    // The wallet signed a restore; the relay is asked to treat it as a cancel to the same key.
+    const restoreAuth = await browserGated(owner, a, restoreEncKeyRequest(restore(a, browserKey)));
+    expect(
+      await arm.checkGatedCall(
+        rt,
+        'cancel-offers',
+        a.account,
+        { newKey: browserKey, authNonce: String(a.authNonce) },
+        restoreAuth,
+      ),
+    ).toMatchObject({ ok: false, code: 'malformed' });
+    // A real cancel signature presented as a restore to another key.
+    const cancelAuth = await browserGated(
+      owner,
+      a,
+      cancelOffersRequest({ newKey: a.encKey, authNonce: String(a.authNonce) }),
+    );
+    expect(
+      await arm.checkGatedCall(rt, 'restore-enc-key', a.account, restore(a, browserKey), cancelAuth),
+    ).toMatchObject({ ok: false, code: 'bad-signature' });
+  });
+
+  it('the catalogue wires the executor as a passport call (no longer the not-implemented placeholder)', async () => {
+    const catalogue = accountCatalogue({
+      runtime: () => null,
+      arm,
+      sponsor: {} as never,
+      network: 'stagenet',
+      replay: new DigestReplayGuard(600),
+      entitlements: {} as never,
+      log: {} as never,
+    });
+    const def = catalogue.get('restore-enc-key')!;
+    expect(def.auth).toBe('passport-call');
+    expect(def.lane).toBe('prover');
     const ctx = { log: { info: () => {} } } as never;
     await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
   });

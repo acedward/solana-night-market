@@ -35,6 +35,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Compile the Passport contracts' JavaScript (account compactc 0.35.0, callees 0.34.0, SHA-256 checked, no keys)
         run: bun run contracts
+      - name: The compiler fetch re-verifies a cached install and an override (AA 00047 P10, R2-9)
+        run: bash scripts/test-fetch-compactc.sh 0.35.0 && bash scripts/test-fetch-compactc.sh 0.34.0
       - run: bun run format:check
       - run: bun run lint
       - run: bun run typecheck

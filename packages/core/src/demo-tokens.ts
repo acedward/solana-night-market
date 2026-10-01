@@ -69,4 +69,8 @@ export interface DemoTokensResult {
   account: string;
   path: DemoTokenPath;
   minted: DemoTokenMint[];
+  /** Pack tokens the market held back (AA 00047 P10, R2-7): an earlier delivery of each was cut off
+   *  and could not be checked on chain, so the market will not mint it again; an operator decides.
+   *  Absent when none. */
+  held?: { symbol: string; colour: string }[];
 }

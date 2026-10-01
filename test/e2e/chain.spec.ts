@@ -102,7 +102,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
     await page.getByTestId('wu-submit').click();
     await expect(page.getByTestId('accounts-message')).toContainText('Withdrawn');
     expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([['withdraw-unshielded', 'ok']]);
-    expect(lines(phantom.requests[0]!.text).at(-2)).toMatch(/ nonce +3$/); // the chain's nonce, not the relay's 8
+    expect(lines(phantom.requests[0]!.text).at(-2)).toMatch(/ nonce 3 *$/); // the chain's nonce, not the relay's 8 (F3 v2: left-aligned)
     await expect(page.locator('[data-testid=passport-row][data-kind="unshielded"]')).toContainText('20.00');
   });
 
@@ -139,10 +139,9 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     const until = Number(relay.signedExpiries[0]);
     expect(until).toBeGreaterThanOrEqual(t0 + 3600);
     expect(until).toBeLessThanOrEqual(nowS() + 3600);
-    // The wallet's text carries it (P9.C renders it as a date; the 451f761 client prints the seconds).
-    expect(phantom.requests[0]!.text).toContain(`Expires`);
-    expect(phantom.requests[0]!.text).not.toMatch(/Expires +never/);
+    // The wallet's text carries it as a UTC date and time (F3 v2, audit C6).
     const readable = new Date(until * 1000).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+    expect(lines(phantom.requests[0]!.text)).toContain(`Expires ${readable}`);
     await expect(page.getByTestId('my-trade-expiry')).toHaveText(`until ${readable.slice(11, 16)} UTC`);
     await expect(page.getByTestId('my-trade-expiry')).toHaveAttribute('title', `Expires ${readable}`);
     await expect(page.getByTestId('live-offer-banner')).toContainText(`until ${readable} (the expiry you approved)`);
@@ -181,9 +180,11 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     // The account's own key, re-affirmed: the call changes nothing but the nonce.
     expect(relay.submitted[1]!.body.payload).toMatchObject({ newKey: relay.encKey, authNonce: '3' });
     expect(phantom.requests).toHaveLength(2);
-    // TODO(P9.I): P9.C's F3 v2 renders this call as "Cancel all open offers"; the 451f761 client
-    // still says "Rotate encryption key".
-    expect(lines(phantom.requests[1]!.text)[1]).toMatch(/Rotate encryption key|Cancel all open offers/);
+    // F3 v2 (questions Q30, Q32): the account's own key re-affirmed reads as a cancel, not a key change.
+    expect(lines(phantom.requests[1]!.text).slice(1, 3)).toEqual([
+      'Cancel all open offers',
+      'Your key does not change',
+    ]);
     expect(relay.authNonce).toBe(4n);
     expect(indexer.queries.slice(before)).toContain(`state:${ACCOUNT}`); // the chain confirmed it
     await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');

@@ -11,7 +11,7 @@
 //     request), yielding the circuit's trailing authorisation arguments;
 //   - the device a registration enrols.
 //
-// B1.5 typed the seam with Track A's client (vendor/passport @ 451f761): a check's `auth` is Track A's
+// B1.5 typed the seam with Track A's client (vendor/passport, now @ b2f1847): a check's `auth` is Track A's
 // `Ed25519Authorisation` and a registration's device its `Ed25519Device`. `./ed25519-arm.ts` is the
 // arm (lane B3): it rebuilds each call's F3 message from the call's arguments and the account's
 // state and verifies the wallet's signature over it, the same signature the circuit verifies, so
@@ -60,6 +60,9 @@ export const ARM_CIRCUITS = {
   withdrawUnshielded: 'withdraw_unshielded_with_ed25519',
   /** Re-filing a change coin's inbox entry (Q13). */
   appendInbox: 'append_inbox_with_ed25519',
+  /** "Cancel all open offers" (AA 00047 P9, questions Q30): the arm's rotate_enc_key with the
+   *  account's CURRENT key, which only moves the auth nonce (the relay action `cancel-offers`). */
+  rotateEncKey: 'rotate_enc_key_with_ed25519',
   /** Making and taking offers. */
   openSwap: 'open_swap_shielded_with_ed25519',
 } as const;
@@ -181,7 +184,7 @@ export async function preflightCall<P extends { authNonce: string }>(
 export interface DeviceArm {
   readonly name: typeof DEVICE_ARM;
   readonly circuits: typeof ARM_CIRCUITS;
-  /** Check a gated account call (`withdraw`, `withdraw-unshielded`, `append-inbox`) against the account's current state:
+  /** Check a gated account call (`withdraw`, `withdraw-unshielded`, `append-inbox`, `cancel-offers`) against the account's current state:
    *  rebuild the message the device signed from the arguments, verify the signature, and check the
    *  device's rolling entry at the signed use counter is live. */
   checkGatedCall<A extends GatedAction>(

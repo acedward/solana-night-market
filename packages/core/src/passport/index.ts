@@ -1,6 +1,6 @@
 // The Passport client surface the BROWSER uses, imported module by module from the pinned
-// submodule (vendor/passport = acedward/passport @ 451f761, branch 00047-solana-ed25519-arm: Track
-// A's Ed25519 arm; questions Q12 option A).
+// submodule (vendor/passport = acedward/passport @ b2f1847, branch 00047-solana-ed25519-arm: Track
+// A's Ed25519 arm with the P9.C fix pass, message format F3 v2; questions Q12 option A).
 //
 // Never import the package root or its `./browser` entry here: the root pulls in modules that
 // cannot load in a browser, and `./browser` drags in ledger-v9 (+10 MB of WASM). The set below
@@ -51,4 +51,4 @@ export * from './vendor/offer-codec.js';
 export * from './withdraw-change.js';
 
 /** The upstream commit the client code above comes from. */
-export const PASSPORT_CLIENT_COMMIT = '451f7610e90000e0c5550877418122a04b85d0e6';
+export const PASSPORT_CLIENT_COMMIT = 'b2f1847271435d37c441966271aa8e20c9b09ecf';

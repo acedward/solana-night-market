@@ -53,7 +53,7 @@ does not use Docker.
   SPONSOR_TOOL_RELAY_HEALTH_URL=http://127.0.0.1:8080/health
   RELAY_DATA_DIR=/var/lib/nightmarket/data
   MIDNIGHT_PP=/var/lib/nightmarket/zk-params
-  PASSPORT_COMMIT=451f7610e90000e0c5550877418122a04b85d0e6
+  PASSPORT_COMMIT=b2f1847271435d37c441966271aa8e20c9b09ecf
   ```
 
   The single-server `MIDNIGHT_PROOF_SERVER_URL` of MN Bank is refused by the relay (exit 78), and
@@ -67,7 +67,7 @@ does not use Docker.
 
 The same oneshot unit, with `TimeoutStartSec=2h` and `MemoryMax=12G`. It now also compiles the
 demo-token faucet (seconds) and checks its `mint` key against the deployed faucets. A good run ends
-with `verdict VERIFIED (fingerprint a627edb1…da92)`, and the set is 2.2 GB. To import a set built
+with `verdict VERIFIED (fingerprint efc52fbc…ef7f)`, and the set is 2.5 GB. To import a set built
 elsewhere, put `KEYS_IMPORT_DIR=<dir holding account/>` in `native.env` for the first run (the job
 copies only the kept prover keys).
 

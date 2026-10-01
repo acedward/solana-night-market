@@ -9,7 +9,7 @@ import { bytesToHex, registryFor, type DeviceSigner, type OpenSwapPayload } from
 import { cancelOffersRequest, withdrawRequest, withdrawUnshieldedRequest } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
-import { signFacts, type SignFacts } from '../src/wallet/sign-facts.js';
+import { SignFactsMismatchError, missingFromSignedText, signFacts, type SignFacts } from '../src/wallet/sign-facts.js';
 import { SignPromptStore } from '../src/wallet/sign-prompt.js';
 import { ed25519ActionSigning } from '../src/wallet/signing.js';
 
@@ -36,8 +36,10 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
   it('lists a make’s legs in base units with the full token ids, and its signed expiry', () => {
     const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap() }, tokens)!;
     expect(f.title).toBe('Make an offer');
+    expect(f.signedTitle).toBe('Swap offer');
     expect(f.facts).toEqual([
-      // The site label as the F3 v2 wallet line shows it (P9.C `renderSiteLabel`): every decimal.
+      // The site label as the F3 v2 wallet line shows it (the client's `renderSiteLabel`): every
+      // decimal. `signed`: the wallet text's lines the fact stands for.
       {
         kind: 'amount',
         label: 'Give',
@@ -45,6 +47,7 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
         tokenId: twBTC,
         siteLabel: '0.01000000 twBTC',
         listed: true,
+        signed: ['Give base units 1000000', `Give token ${twBTC}`, 'This site labels it: 0.01000000 twBTC'],
       },
       {
         kind: 'amount',
@@ -53,9 +56,15 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
         tokenId: twUSDC,
         siteLabel: '10.000000 twUSDC',
         listed: true,
+        signed: ['Get base units 10000000', `Get token ${twUSDC}`, 'This site labels it: 10.000000 twUSDC'],
       },
-      { kind: 'text', label: 'Expires', value: '2026-10-01 15:25:12 UTC' },
-      { kind: 'text', label: 'Paid from one coin of', value: '10000000 base units', mono: true },
+      {
+        kind: 'text',
+        label: 'Expires',
+        value: '2026-10-01 15:25:12 UTC',
+        signed: ['Expires 2026-10-01 15:25:12 UTC'],
+      },
+      { kind: 'text', label: 'Paid from one coin of', value: '10000000 base units', mono: true, signed: [] },
     ]);
   });
 
@@ -69,12 +78,18 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
       tokenId: UNKNOWN,
       siteLabel: '10000000 ?',
       listed: false,
+      signed: ['Get base units 10000000', `Get token ${UNKNOWN}`, 'This site labels it: 10000000 ?'],
     });
   });
 
   it('shows an unsigned deadline as never (the page no longer sends one)', () => {
     const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap({ validUntil: '0' }) }, tokens)!;
-    expect(f.facts[2]).toEqual({ kind: 'text', label: 'Expires', value: 'never (no expiry)' });
+    expect(f.facts[2]).toEqual({
+      kind: 'text',
+      label: 'Expires',
+      value: 'never (no expiry)',
+      signed: ['Expires never'],
+    });
   });
 
   it('lists a withdrawal’s amount and recipient, and a cancel’s unchanged key', () => {
@@ -91,6 +106,7 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
       },
       tokens,
     )!;
+    expect(w.signedTitle).toBe('Withdraw shielded');
     expect(w.facts.slice(0, 2)).toEqual([
       {
         kind: 'amount',
@@ -99,8 +115,15 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
         tokenId: twUSDC,
         siteLabel: '1.500000 twUSDC',
         listed: true,
+        signed: ['Base units 1500000', `Token ${twUSDC}`, 'This site labels it: 1.500000 twUSDC'],
       },
-      { kind: 'text', label: 'To (coin key)', value: '22'.repeat(32), mono: true },
+      {
+        kind: 'text',
+        label: 'To (coin key)',
+        value: '22'.repeat(32),
+        mono: true,
+        signed: [`To key ${'22'.repeat(8)}`],
+      },
     ]);
     const u = signFacts(
       {
@@ -110,17 +133,125 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
       tokens,
     )!;
     expect(u.facts[0]).toMatchObject({ baseUnits: '7', tokenId: twUSDC });
+    expect(u.signedTitle).toBe('Withdraw unshielded');
     const c = signFacts(
       { kind: 'gated', request: cancelOffersRequest({ newKey: 'ab'.repeat(32), authNonce: '5' }) },
       tokens,
     )!;
     expect(c.title).toBe('Cancel all open offers');
+    expect(c.signedTitle).toBe('Cancel all open offers');
     expect(c.facts[1]).toEqual({
       kind: 'text',
       label: 'Encryption key (unchanged)',
       value: 'ab'.repeat(32),
       mono: true,
+      signed: [],
     });
+  });
+});
+
+describe('the wallet is asked only for text that carries every fact the panel shows (AA 00047 P9.I)', () => {
+  const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(9));
+  const ctx = { account: 'c0'.repeat(32), authNonce: 5n, networkSalt: '71'.repeat(32), encKey: '6c'.repeat(32) };
+  const walletOf = () => {
+    const asked: Uint8Array[] = [];
+    const signer: DeviceSigner = {
+      deviceKey: bytesToHex(kp.publicKey),
+      address: 'x',
+      signMessage: async (m) => (asked.push(m), nacl.sign.detached(m, kp.secretKey)),
+    };
+    return { signer, asked };
+  };
+
+  it('every fact is a line of the real wallet text, for every kind of call', () => {
+    const { signer } = walletOf();
+    const signing = ed25519ActionSigning(signer, { network: 'stagenet', tokens });
+    const calls = [
+      { kind: 'swap', action: 'open-swap', payload: swap() },
+      { kind: 'swap', action: 'take', payload: swap({ wantColor: UNKNOWN, validUntil: '0' }) },
+      {
+        kind: 'gated',
+        request: withdrawRequest({
+          recipient: '22'.repeat(32),
+          color: twUSDC,
+          amount: '1500000',
+          coin: { nonce: '33'.repeat(32), color: twUSDC, value: '5000000', mtIndex: '9' },
+          authNonce: '5',
+        }),
+      },
+      {
+        kind: 'gated',
+        request: withdrawUnshieldedRequest({ recipient: '23'.repeat(32), color: twUSDC, amount: '7', authNonce: '5' }),
+      },
+      { kind: 'gated', request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }) },
+    ] as const;
+    for (const call of calls) {
+      const facts = signFacts(call as never, tokens)!;
+      expect(missingFromSignedText(facts, signing.preview(ctx, call as never).text)).toEqual([]);
+    }
+  });
+
+  it('names the lines a text is missing (a site label, a token id, the deadline)', () => {
+    const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap() }, tokens)!;
+    const { signer } = walletOf();
+    const text = ed25519ActionSigning(signer, { network: 'stagenet', tokens }).preview(ctx, {
+      kind: 'swap',
+      action: 'open-swap',
+      payload: swap(),
+    }).text;
+    const tampered = text
+      .replace('This site labels it: 10.000000 twUSDC', 'This site labels it: 1000.0000 twUSDC')
+      .replace('Expires 2026-10-01 15:25:12 UTC', 'Expires never                  ');
+    expect(missingFromSignedText(f, tampered)).toEqual([
+      'This site labels it: 10.000000 twUSDC',
+      'Expires 2026-10-01 15:25:12 UTC',
+    ]);
+    // A line must match whole: "Base units 1" is not "Base units 10".
+    const g = signFacts(
+      {
+        kind: 'gated',
+        request: withdrawUnshieldedRequest({ recipient: '23'.repeat(32), color: twUSDC, amount: '1', authNonce: '5' }),
+      },
+      tokens,
+    )!;
+    expect(missingFromSignedText(g, 'x\nWithdraw unshielded\nBase units 10\n')).toContain('Base units 1');
+  });
+
+  it('a cancel for a key that is not the account’s is never sent to the wallet ("Rotate encryption key")', async () => {
+    const { signer, asked } = walletOf();
+    const announced: Array<SignFacts | null> = [];
+    const signing = ed25519ActionSigning(signer, { network: 'stagenet', tokens }, undefined, (f) => announced.push(f));
+    const call = { kind: 'gated', request: cancelOffersRequest({ newKey: '7d'.repeat(32), authNonce: '5' }) } as const;
+    await expect(signing.authorise(ctx, call, 0n)).rejects.toBeInstanceOf(SignFactsMismatchError);
+    expect(asked).toHaveLength(0);
+    expect(announced.filter(Boolean)).toHaveLength(0); // the panel never showed the facts either
+    // The same call for the account's own key goes through, with one prompt.
+    await signing.authorise(
+      ctx,
+      { kind: 'gated', request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }) },
+      0n,
+    );
+    expect(asked).toHaveLength(1);
+    expect(String.fromCharCode(...asked[0]!).split('\n')[1]).toBe('Cancel all open offers');
+  });
+
+  it('a registry that labels a token one way for the panel and another for the message is caught', async () => {
+    const { signer, asked } = walletOf();
+    // A hostile or broken registry: the panel's lookup and the message's lookup disagree.
+    let n = 0;
+    const flipping = {
+      ...tokens,
+      byColour: (c: string) => {
+        const t = tokens.byColour(c);
+        return t && c === twUSDC && n++ > 0 ? { ...t, decimals: 2 } : t;
+      },
+    } as typeof tokens;
+    const signing = ed25519ActionSigning(signer, { network: 'stagenet', tokens: flipping });
+    const call = { kind: 'swap', action: 'open-swap', payload: swap() } as const;
+    const err = await signing.authorise(ctx, call, 0n).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SignFactsMismatchError);
+    expect((err as SignFactsMismatchError).missing).toEqual(['This site labels it: 10.000000 twUSDC']);
+    expect(asked).toHaveLength(0);
   });
 });
 
@@ -142,7 +273,7 @@ describe('the facts reach the signing panel only for an account call', () => {
     const signing = ed25519ActionSigning(signer, { network: 'stagenet', tokens }, undefined, (f) =>
       prompts.setFacts(f),
     );
-    const ctx = { account: 'c0'.repeat(32), authNonce: 5n, networkSalt: '71'.repeat(32) };
+    const ctx = { account: 'c0'.repeat(32), authNonce: 5n, networkSalt: '71'.repeat(32), encKey: '6c'.repeat(32) };
     await signing.authorise(ctx, { kind: 'swap', action: 'open-swap', payload: swap() }, 0n);
     expect(seen).toHaveLength(1);
     expect(seen[0]?.title).toBe('Make an offer');

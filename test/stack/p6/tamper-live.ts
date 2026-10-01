@@ -119,6 +119,7 @@ async function main() {
       account: party.account!,
       authNonce: l.auth_nonce,
       networkSalt: bytesToHex(l.evm_domain_salt),
+      encKey: bytesToHex(l.enc_key),
     });
     const entry = await sealEntryPortable(hexToBytes(party.encPublic, 32), {
       nonce: new Uint8Array(randomBytes(32)),

@@ -93,14 +93,31 @@ describe('decodeAccountState (the indexer’s serialised ContractState, decoded 
       state: string;
     };
     const s = decodeAccountState(f.account, f.state);
-    // Deployed by the market with the key set this build pins, authority retired, one device.
-    expect(compareVerifierKeys(s.operations, PINNED_ACCOUNT_KEYS.circuits)).toMatchObject({ equal: true });
+    // Deployed by the market on 2026-09-30 with the PREVIOUS key set (a627edb1…, vendor/passport
+    // 451f761): authority retired, one device. AA 00047 P9.I re-pinned the build to the P9.C set
+    // (efc52fbc…, b2f1847: F3 v2, C2, no device management), so this build REFUSES it: the gated
+    // circuits and the offer have other verifier keys, and the device pair is an extra operation.
+    // Old accounts cannot be used with this build (the BREAKING note).
+    expect(compareVerifierKeys(s.operations, PINNED_ACCOUNT_KEYS.circuits)).toEqual({
+      equal: false,
+      missing: [],
+      different: [
+        'append_inbox_with_ed25519',
+        'open_swap_shielded_with_ed25519',
+        'rotate_enc_key_with_ed25519',
+        'withdraw_shielded_to_contract_with_ed25519',
+        'withdraw_shielded_with_ed25519',
+        'withdraw_unshielded_with_ed25519',
+      ],
+      extra: ['add_device_with_ed25519', 'remove_device_with_ed25519'],
+    });
     expect(s.authority).toEqual({ committee: 0, threshold: 1 });
     expect(s.view).toMatchObject({ booted: true, deviceCount: 1, networkSalt: STAGENET_SALT });
     expect(s.view.devices).toHaveLength(1);
-    // Checked as if this browser held its key: everything but the device (whose key is not ours) passes.
+    // Checked as if this browser held its key: refused for its verifier keys (the old set) and its
+    // device (whose key is not ours); everything else passes.
     const c = checkMarketAccount(s, expectation({ deviceKey: DEVICE, encPublicKey: s.view.encKey }));
-    expect(codes(c)).toEqual(['devices']);
+    expect(codes(c)).toEqual(['verifier-keys', 'devices']);
   });
 });
 
@@ -150,10 +167,10 @@ describe('checkMarketAccount (audit C3: the account the relay made, checked by t
     const c1 = checkMarketAccount(await decode({ ...honest, operations: swapped }), expectation());
     expect(codes(c1)).toEqual(['verifier-keys']);
     expect(c1.problems[0]!.detail).toBe('different: withdraw_shielded_with_ed25519');
-    const { add_device_with_ed25519: _drop, ...missing } = FIXTURE_VERIFIER_KEYS;
+    const { rotate_enc_key_with_ed25519: _drop, ...missing } = FIXTURE_VERIFIER_KEYS;
     expect(
       checkMarketAccount(await decode({ ...honest, operations: missing }), expectation()).problems[0]!.detail,
-    ).toBe('missing: add_device_with_ed25519');
+    ).toBe('missing: rotate_enc_key_with_ed25519');
     const extra = { ...FIXTURE_VERIFIER_KEYS, bridge_withdraw_refund: FIXTURE_VERIFIER_KEYS.deposit_shielded! };
     expect(checkMarketAccount(await decode({ ...honest, operations: extra }), expectation()).problems[0]!.detail).toBe(
       'extra: bridge_withdraw_refund',

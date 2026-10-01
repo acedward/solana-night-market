@@ -22,7 +22,7 @@ const display = { network: 'stagenet', tokens } as const;
 const twUSDC = tokens.bySymbol('twUSDC')!.midnightColour;
 const twETH = tokens.bySymbol('twETH')!.midnightColour;
 const ACCOUNT = 'c0'.repeat(32);
-const ctx = { account: ACCOUNT, authNonce: 5n, networkSalt: '71'.repeat(32) };
+const ctx = { account: ACCOUNT, authNonce: 5n, networkSalt: '71'.repeat(32), encKey: '6c'.repeat(32) };
 
 /** A Solana-style wallet: tweetnacl over a fixed seed; records every message it is asked to sign. */
 function naclWallet(seedByte = 1) {
@@ -83,10 +83,19 @@ describe('ed25519ActionSigning (the browser side of the arm)', () => {
     const call: CallToAuthorise = { kind: 'swap', action: 'open-swap', payload: swapPayload };
     const { text } = signing.preview(ctx, call);
     const lines = text.split('\n');
-    expect(lines[1]).toBe('Swap offer');
-    expect(lines[2]).toContain(' 2.000000 twUSDC ');
-    expect(lines[3]).toContain(' 0.001000000000000000 twETH ');
-    expect(lines[5]).toBe(`Expires ${'1900000000'.padStart(20)}`);
+    // F3 v2 (questions Q25 B′, Q32): base units and full token ids, the site's reading as its label,
+    // and the signed expiry as a UTC date and time (audit C6).
+    expect(lines.slice(1, 10)).toEqual([
+      'Swap offer',
+      `Give base units ${'2000000'.padEnd(24)}`,
+      `Give token ${twUSDC}`,
+      `This site labels it: ${'2.000000 twUSDC'.padEnd(34)}`,
+      `Get base units ${'1000000000000000'.padEnd(24)}`,
+      `Get token ${twETH}`,
+      `This site labels it: ${'0.001000000000000000 twETH'.padEnd(34)}`,
+      `Taker ${'anyone'.padEnd(16)}`,
+      'Expires 2030-03-17 17:46:40 UTC',
+    ]);
     const auth = await signing.authorise(ctx, { ...call, action: 'take' }, 0n);
     expect(new TextDecoder().decode(asked[0])).toBe(text);
     expect(auth.useCounter).toBe('0');

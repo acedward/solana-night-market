@@ -25,17 +25,20 @@ export interface GatedContext {
    *  `networkSalt`). The Ed25519 arm binds it into every challenge, so a signature for one network
    *  (or one deployment) can never be used on another. */
   networkSalt: string;
+  /** The account's CURRENT encryption key, 64 hex: its ledger `enc_key` (AccountStateView
+   *  `encKey`; the page reads it from the chain, the relay from its ledger read). The F3 v2 client
+   *  (vendor/passport @ b2f1847) renders the arm's `rotate_enc_key` from it: re-affirming this key is
+   *  the market's on-chain cancel, "Cancel all open offers" (questions Q30, Q32), and any other key
+   *  would read "Rotate encryption key". */
+  encKey: string;
 }
 
-/** The Passport client's call context for `ctx`.
- *  TODO(P9.I): lane P9.C's F3 v2 client adds `CallContext.encKey` (the account's current `enc_key`,
- *  which the ed25519 `rotateEncKey` needs to render "Cancel all open offers", questions Q30); at the
- *  re-pin, add `encKey` to GatedContext (the page has it from the chain, the relay from its ledger
- *  read) and pass it here. */
+/** The Passport client's call context for `ctx` (the F3 v2 client's `CallContext`, `encKey` included). */
 export const callContext = (ctx: GatedContext): CallContext => ({
   contractAddress: hexToBytes(normaliseHex32(ctx.account), 32),
   authNonce: ctx.authNonce,
   evmDomainSalt: hexToBytes(normaliseHex32(ctx.networkSalt), 32),
+  encKey: hexToBytes(normaliseHex32(ctx.encKey), 32),
 });
 
 /** The AuthRequest of a `withdraw` action body. */

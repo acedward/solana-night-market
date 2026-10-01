@@ -37,8 +37,7 @@ import {
   type Ed25519SignatureArg,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519.js';
 import {
-  ED25519_MAX_DECIMALS,
-  ED25519_SYMBOL_BYTES,
+  isRenderableTokenDisplay,
   type EdTokenResolver,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
 import { marketLabel } from '../market-label.js';
@@ -60,14 +59,24 @@ export {
 export {
   ED25519_LABEL_BYTES,
   ED25519_MAX_AMOUNT,
+  ED25519_MAX_DEADLINE,
   ED25519_MAX_DECIMALS,
   ED25519_MESSAGE_BYTES,
+  ED25519_MESSAGE_FORMAT,
+  ED25519_SITE_BYTES,
   ED25519_SYMBOL_BYTES,
+  ED25519_UNITS_BYTES,
   UNKNOWN_TOKEN,
   assertSafeEd25519Message,
   ed25519PossessionMessage,
+  isRenderableTokenDisplay,
   parsesAsSolanaTransaction,
+  renderDeadline,
+  renderDecimal,
   renderEd25519Message,
+  renderSiteLabel,
+  renderUnits,
+  tokenDisplayFor,
   type Ed25519Message,
   type Ed25519MessageFrame,
   type Ed25519MessageInput,
@@ -85,24 +94,19 @@ export {
 export { MARKET_LABELS, marketLabel } from '../market-label.js';
 
 /**
- * How the arm shows a token (its symbol and decimals), from the market's registry. A symbol the
- * circuit cannot render (more than 8 characters, or not printable ASCII) shows as an UNKNOWN token:
- * base units under "?", beside the exact colour fingerprint the circuit computes. Nothing is
- * truncated, so the wallet never shows a symbol the registry does not have.
+ * How the arm labels a token (its symbol and decimals), from the market's registry: the F3 v2 wallet
+ * line "This site labels it: <amount> <symbol>" (questions Q25 B′, Q32). The base units and the full
+ * token id are shown whatever this says. A display the circuit cannot render (the client's own
+ * `isRenderableTokenDisplay`: a symbol of 1..8 printable characters WITHOUT a space, decimals 0..18)
+ * is labelled as an UNKNOWN token, "<base units> ?". Nothing is truncated, so the wallet never
+ * shows a symbol the registry does not have.
  */
 export function ed25519TokenResolver(registry: TokenRegistry): EdTokenResolver {
   return (colourHex: string) => {
     const t = registry.byColour(colourHex);
     if (!t) return undefined;
-    // The F3 v2 client's rule (P9.C `isRenderableTokenDisplay`: 1..8 printable characters, NO space;
-    // decimals 0..18). TODO(P9.I): call the client's own function once vendor/passport is re-pinned.
-    const renderable =
-      t.symbol.length <= ED25519_SYMBOL_BYTES &&
-      /^[\x21-\x7e]+$/.test(t.symbol) &&
-      Number.isInteger(t.decimals) &&
-      t.decimals >= 0 &&
-      t.decimals <= ED25519_MAX_DECIMALS;
-    return renderable ? { symbol: t.symbol, decimals: t.decimals } : undefined;
+    const display = { symbol: t.symbol, decimals: t.decimals };
+    return isRenderableTokenDisplay(display) ? display : undefined;
   };
 }
 

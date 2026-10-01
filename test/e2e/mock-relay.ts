@@ -220,7 +220,12 @@ export class MockRelay {
   }
 
   private ctx() {
-    return callContext({ account: ACCOUNT, authNonce: this.authNonce, networkSalt: this.salt });
+    return callContext({
+      account: ACCOUNT,
+      authNonce: this.authNonce,
+      networkSalt: this.salt,
+      encKey: this.encKey ?? '00'.repeat(32),
+    });
   }
 
   /** The relay's check of one request (B3's rules). Resolves to 'ok' or the refusal detail. */

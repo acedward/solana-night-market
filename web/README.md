@@ -71,8 +71,11 @@ transaction, so it needs no SOL.
   v1, or the wallet's own `signedMessage`) is a **Ledger (hardware) account**, which v1 refuses: the
   page says "hardware (Ledger) accounts aren't supported yet" and ends the session. Any other
   mismatch is a bad signature. Neither is ever sent to the market.
-- **What the wallet signs is readable text.** An account call signs Track A's F3 message (the
-  circuit renders the same bytes); opening an account and claiming demo tokens sign lane B3's
+- **What the wallet signs is readable text.** An account call signs Track A's F3 v2 message (the
+  circuit renders the same bytes: each amount's base units and full token id, the site's name and
+  decimals marked as the site's label, an offer's expiry as a UTC date); the signing panel lists the
+  same facts (`src/wallet/sign-facts.ts`), and the wallet is asked only when every one of them is a
+  line of the exact bytes it would sign (`SignFactsMismatchError` otherwise, nothing signed); opening an account and claiming demo tokens sign lane B3's
   envelope, Track A's proof-of-key message. While the wallet's window is open, the page shows the
   same text and a fingerprint (the first 8 hex digits of its `Digest` or `Nonce` line)
   (`src/wallet/SigningPrompt.tsx`).

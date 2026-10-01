@@ -67,7 +67,9 @@ describe('the kept prover list', () => {
   });
 
   it('keeps every circuit the relay proves (relay/src/prover/required.ts)', () => {
-    expect(RELAY_PROVEN_CIRCUITS.length).toBe(5);
+    // AA 00047 P9.I: + rotate_enc_key_with_ed25519, the market's "Cancel all open offers" (Q30).
+    expect(RELAY_PROVEN_CIRCUITS.length).toBe(6);
+    expect(RELAY_PROVEN_CIRCUITS).toContain('account/rotate_enc_key_with_ed25519');
     for (const r of RELAY_PROVEN_CIRCUITS) expect(DEFAULT_KEPT_PROVERS).toContain(r);
     expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 2);
   });

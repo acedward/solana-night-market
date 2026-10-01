@@ -116,8 +116,16 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   const make = lines(phantom.requests[0]!.text);
   expect(make[0]).toBe('Night Market - stagenet '); // the arm's 24-character label field
   expect(make[1]).toBe('Swap offer');
-  expect(make[2]).toMatch(/^Give +0\.05000000 twBTC +\[ad2ba014\]$/);
-  expect(make[3]).toMatch(/^Get +3000\.000000 twUSDC +\[e934b965\]$/);
+  // F3 v2 (questions Q25 B′, Q32): the enforced base units and full token ids, the site's reading as
+  // its label (trailing spaces pad each field to a fixed width).
+  expect(make.slice(2, 8).map((l) => l.trimEnd())).toEqual([
+    'Give base units 5000000',
+    `Give token ${COLOUR.twBTC}`,
+    'This site labels it: 0.05000000 twBTC',
+    'Get base units 3000000000',
+    `Get token ${COLOUR.twUSDC}`,
+    'This site labels it: 3000.000000 twUSDC',
+  ]);
   expect(make.at(-1)).toMatch(/^Digest [0-9a-f]{64}$/);
   expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([['open-swap', 'ok']]);
   await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'live');
@@ -132,8 +140,14 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   expect(phantom.requests).toHaveLength(2);
   const take = lines(phantom.requests[1]!.text);
   expect(take[1]).toBe('Swap offer');
-  expect(take[2]).toMatch(/^Give +1\.000000000000000000 twETH +\[2862f0f3\]$/);
-  expect(take[3]).toMatch(/^Get +0\.04000000 twBTC +\[ad2ba014\]$/);
+  expect(take.slice(2, 8).map((l) => l.trimEnd())).toEqual([
+    'Give base units 1000000000000000000',
+    `Give token ${COLOUR.twETH}`,
+    'This site labels it: 1.000000000000000000 twETH',
+    'Get base units 4000000',
+    `Get token ${COLOUR.twBTC}`,
+    'This site labels it: 0.04000000 twBTC',
+  ]);
   expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
     ['open-swap', 'ok'],
     ['take', 'ok'],
@@ -191,7 +205,11 @@ test('withdraw shielded (one approval, one more to record the change) and unshie
   await page.getByTestId('send-submit').click();
   await expect(page.getByTestId('accounts-message')).toContainText('the change is recorded in your inbox');
   expect(phantom.requests.map((r) => lines(r.text)[1])).toEqual(['Withdraw shielded', 'File inbox note']);
-  expect(lines(phantom.requests[0]!.text)[2]).toMatch(/^Amount +100\.000000 twUSDC +\[e934b965\]$/);
+  expect(
+    lines(phantom.requests[0]!.text)
+      .slice(2, 5)
+      .map((l) => l.trimEnd()),
+  ).toEqual(['Base units 100000000', `Token ${COLOUR.twUSDC}`, 'This site labels it: 100.000000 twUSDC']);
   expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
     ['withdraw', 'ok'],
     ['append-inbox', 'ok'],

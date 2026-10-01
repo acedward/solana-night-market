@@ -18,6 +18,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   registryFor,
   type AppendInboxPayload,
+  type CancelOffersPayload,
   type OpenSwapPayload,
   type WithdrawPayload,
   type WithdrawUnshieldedPayload,
@@ -25,6 +26,7 @@ import {
 import {
   appendInboxRequest,
   callContext,
+  cancelOffersRequest,
   ed25519DeviceOf,
   openSwapArgs,
   passportAuthOf,
@@ -125,6 +127,8 @@ type Wallet = ReturnType<typeof wallet>;
 interface FakeAccount {
   account: string;
   salt: string;
+  /** The account's encryption key on chain (its ledger `enc_key`). */
+  encKey: string;
   authNonce: bigint;
   devices: Set<string>;
 }
@@ -142,7 +146,7 @@ function runtimeOf(...accounts: FakeAccount[]): PassportRuntime {
         device_epoch: 0n,
         auth_nonce: a.authNonce,
         inbox_count: 0n,
-        enc_key: new Uint8Array(32),
+        enc_key: unhex(a.encKey),
         evm_domain_salt: unhex(a.salt),
         devices: {
           member: (e: Uint8Array) => a.devices.has(hex(e)),
@@ -161,6 +165,7 @@ function accountOf(owner: Wallet, authNonce = 5n): FakeAccount {
   return {
     account,
     salt: hex(randomBytes(32)),
+    encKey: hex(randomBytes(32)),
     authNonce,
     devices: new Set([hex(device.entryAt(unhex(account), 0n, 0n))]),
   };
@@ -173,13 +178,20 @@ async function browserGated(
   owner: Wallet,
   a: FakeAccount,
   request: Parameters<ReturnType<typeof ed25519DeviceOf>['sign']>[1],
-  opts: { network?: 'stagenet' | 'undeployed'; salt?: string; account?: string; authNonce?: bigint } = {},
+  opts: {
+    network?: 'stagenet' | 'undeployed';
+    salt?: string;
+    account?: string;
+    authNonce?: bigint;
+    encKey?: string;
+  } = {},
 ) {
   const device = ed25519DeviceOf(owner, { network: opts.network ?? 'stagenet', tokens });
   const ctx = callContext({
     account: opts.account ?? a.account,
     authNonce: opts.authNonce ?? a.authNonce,
     networkSalt: opts.salt ?? a.salt,
+    encKey: opts.encKey ?? a.encKey,
   });
   return passportAuthOf(await device.sign(ctx, request, 0n));
 }
@@ -207,7 +219,16 @@ describe('B3: the relay authenticates an account call by its own F3 signature (o
     expect(r.signer).toBe(owner.deviceKey);
     expect(r.account).toBe(a.account);
     expect(r.auth.arm).toBe('ed25519');
-    expect(new TextDecoder().decode(r.auth.message)).toMatch(/^Night Market - stagenet *\nWithdraw shielded\n/);
+    const text = new TextDecoder().decode(r.auth.message);
+    expect(text).toMatch(/^Night Market - stagenet *\nWithdraw shielded\n/);
+    // F3 v2 (AA 00047 P9.C/P9.I; questions Q25 B′, Q32): the relay renders what the circuit renders:
+    // the enforced base units and full token id, the site's reading marked as its label.
+    expect(text.split('\n').slice(2, 6)).toEqual([
+      `Base units ${'10000000'.padEnd(24)}`,
+      `Token ${twUSDC}`,
+      `This site labels it: ${'10.000000 twUSDC'.padEnd(34)}`,
+      `To key ${'11'.repeat(8)}`,
+    ]);
     expect(r.digestHex).toBe(createHash('sha256').update(r.auth.message).digest('hex'));
     expect(arm.authArgs(r.auth)).toHaveLength(4);
   });
@@ -365,11 +386,22 @@ describe('B3: the relay authenticates an account call by its own F3 signature (o
     };
     const device = ed25519DeviceOf(owner, display);
     const { call, coin } = openSwapArgs(make);
-    const ctx = callContext({ account: a.account, authNonce: a.authNonce, networkSalt: a.salt });
+    const ctx = callContext({ account: a.account, authNonce: a.authNonce, networkSalt: a.salt, encKey: a.encKey });
     const passportAuth = passportAuthOf(await device.signOffer(ctx, call, coin, 0n));
     const ok = await arm.checkTradeCall(rt, 'open-swap', a.account, make, passportAuth);
     expect(ok.ok).toBe(true);
-    if (ok.ok) expect(new TextDecoder().decode(ok.auth.message)).toContain('Swap offer');
+    if (ok.ok) {
+      const lines = new TextDecoder().decode(ok.auth.message).split('\n');
+      expect(lines[1]).toBe('Swap offer');
+      expect(lines.slice(2, 8).map((l) => l.trimEnd())).toEqual([
+        'Give base units 10000000',
+        `Give token ${twUSDC}`,
+        'This site labels it: 10.000000 twUSDC',
+        'Get base units 20000',
+        `Get token ${twBTC}`,
+        'This site labels it: 0.00020000 twBTC',
+      ]);
+    }
     // A take is the same call (plus the offer id, which the take executor checks against the book).
     expect(
       (await arm.checkTradeCall(rt, 'take', a.account, { ...make, offerId: 'cd'.repeat(32) }, passportAuth)).ok,
@@ -397,10 +429,109 @@ describe('B3: the relay authenticates an account call by its own F3 signature (o
     });
   });
 
+  it('refuses a signature over another site label for the same call (questions Q25 B′: the relay renders its own)', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const p = withdrawPayload(a);
+    // A page that labels twUSDC with other decimals: the base units and the token id are the same,
+    // the site line differs, so the signed bytes are not the ones the relay (and the circuit) render.
+    const lying = {
+      ...tokens,
+      byColour: (c: string) => {
+        const t = tokens.byColour(c);
+        return t && c === twUSDC ? { ...t, decimals: 2 } : t;
+      },
+    } as typeof tokens;
+    const device = ed25519DeviceOf(owner, { network: 'stagenet', tokens: lying });
+    const ctx = callContext({ account: a.account, authNonce: a.authNonce, networkSalt: a.salt, encKey: a.encKey });
+    const signed = await device.sign(ctx, withdrawRequest(p), 0n);
+    expect(new TextDecoder().decode(signed.message)).toContain('This site labels it: 100000.00 twUSDC');
+    expect(await arm.checkGatedCall(rt, 'withdraw', a.account, p, passportAuthOf(signed))).toMatchObject({
+      ok: false,
+      code: 'bad-signature',
+    });
+  });
+
   it("wires Track A's arm and the Solana envelope scheme (wiredArm)", async () => {
     const wired = await wiredArm({ network: 'stagenet', tokens });
     expect(wired.arm.name).toBe('ed25519');
     expect(wired.scheme.id).toBe('solana-ed25519-possession-v1');
+  });
+});
+
+describe('AA 00047 P9.I: cancel-offers (questions Q30) is rotate_enc_key with the account’s CURRENT key', () => {
+  const cancel = (a: FakeAccount, newKey = a.encKey): CancelOffersPayload => ({
+    newKey,
+    authNonce: String(a.authNonce),
+  });
+
+  it('accepts a cancel the wallet signed as "Cancel all open offers"', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const p = cancel(a);
+    const r = await arm.checkGatedCall(
+      rt,
+      'cancel-offers',
+      a.account,
+      p,
+      await browserGated(owner, a, cancelOffersRequest(p)),
+    );
+    if (!r.ok) throw new Error(`refused: ${r.code} ${r.reason}`);
+    const lines = new TextDecoder().decode(r.auth.message).split('\n');
+    expect(lines.slice(1, 3)).toEqual(['Cancel all open offers', 'Your key does not change']);
+    expect(ARM_CIRCUITS.rotateEncKey).toBe('rotate_enc_key_with_ed25519');
+  });
+
+  it('refuses a key that is not the on-chain one, before any signature work (the market never changes a key)', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const other = cancel(a, hex(randomBytes(32)));
+    // Even a valid signature over that key change ("Rotate encryption key") is refused.
+    const passportAuth = await browserGated(owner, a, cancelOffersRequest(other));
+    expect(await arm.checkGatedCall(rt, 'cancel-offers', a.account, other, passportAuth)).toMatchObject({
+      ok: false,
+      code: 'malformed',
+    });
+  });
+
+  it('refuses a cancel signed against another "current" key (other bytes), and an old nonce', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const p = cancel(a);
+    // The page believed the key was another one: its text read "Rotate encryption key".
+    const misread = await browserGated(owner, a, cancelOffersRequest(p), { encKey: hex(randomBytes(32)) });
+    expect(await arm.checkGatedCall(rt, 'cancel-offers', a.account, p, misread)).toMatchObject({
+      ok: false,
+      code: 'bad-signature',
+    });
+    const ok = await browserGated(owner, a, cancelOffersRequest(p));
+    a.authNonce += 1n; // another call landed first
+    expect(await arm.checkGatedCall(rt, 'cancel-offers', a.account, p, ok)).toMatchObject({
+      ok: false,
+      code: 'expired',
+    });
+  });
+
+  it('the catalogue wires the executor (no longer the not-implemented placeholder)', async () => {
+    const catalogue = accountCatalogue({
+      runtime: () => null,
+      arm,
+      sponsor: {} as never,
+      network: 'stagenet',
+      replay: new DigestReplayGuard(600),
+      entitlements: {} as never,
+      log: {} as never,
+    });
+    const def = catalogue.get('cancel-offers')!;
+    expect(def.auth).toBe('passport-call');
+    expect(def.implementedBy).toBe('P9.I');
+    // Without a runtime the executor says so (not "not-implemented").
+    const ctx = { log: { info: () => {} } } as never;
+    await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
   });
 });
 

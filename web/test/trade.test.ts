@@ -203,7 +203,7 @@ describe('make an offer (L-TRD.1)', () => {
     const pa = sub!.request.passportAuth as { owner: string; signature: string; useCounter: string };
     expect(pa).toMatchObject({ owner: signing.deviceKey, useCounter: '2' });
     const message = fakeCallMessage(
-      { account: ACCOUNT, authNonce: 4n, networkSalt: '5a'.repeat(32) },
+      { account: ACCOUNT, authNonce: 4n, networkSalt: '5a'.repeat(32), encKey: relay.state!.encKey },
       { kind: 'swap', action: 'open-swap', payload: p as never },
     );
     expect(ed25519.verify(unhex(pa.signature), message, unhex(signing.deviceKey))).toBe(true);

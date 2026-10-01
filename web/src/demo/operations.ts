@@ -22,6 +22,7 @@ import {
   putJob,
   syncAccount,
   updateJob,
+  verifiedAccount,
   type OperationEnv,
 } from '../passport/operations.js';
 import { jobErrorText } from '../relay/messages.js';
@@ -56,6 +57,9 @@ export async function claimDemoTokens(
 ): Promise<DemoTokensResult> {
   let requestId = findJobs(env, account, 'demo-tokens')[0]?.requestId;
   if (!requestId) {
+    // A deposit only into an account the chain shows is the market's own and this wallet's alone
+    // (AA 00047 P9.S, audit C3): checked before the wallet is asked for anything.
+    await verifiedAccount(env, account);
     const payload = {};
     const { nonce, maxTtlSeconds } = await env.relay.nonce();
     const message = buildRelayActionMessage({

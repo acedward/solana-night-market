@@ -124,6 +124,9 @@ export interface StoredCoin extends CoinInfo {
   spentTx?: string;
   /** For a coin without an inbox entry: the market's single-use entitlement to file one (F-B3). */
   appendEntitlement?: string;
+  /** A withdrawal's change: the coin it was paid from (its commitment) and the amount paid, from
+   *  which the browser recomputes the change before it seals an entry for it (AA 00047 P9.S, Q28 A). */
+  changeOf?: { spent: string; amount: string };
 }
 
 export interface ReconcileInput {

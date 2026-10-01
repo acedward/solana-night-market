@@ -1,12 +1,14 @@
 // The connected-wallet walkthroughs' setup (AA 00047 lane B2), shared by ./wallet.spec.ts and the
 // design review screens (./screens.spec.ts, P8.1): the markets fixture, a mock Phantom, a mock relay
-// that checks every signature, and optionally an account already open and holding the demo pack.
+// that checks every signature, the mock public indexer the page reads the account from (P9.S,
+// ./mock-indexer.ts), and optionally an account already open and holding the demo pack.
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import type { Page } from '@playwright/test';
 
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { encodeRecord, recordKey } from '../../web/src/store/schema.js';
+import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
 import { installMockPhantom, type MockPhantom } from './mock-phantom.js';
 import { ACCOUNT, DEMO_PACK, MockRelay, RELAY } from './mock-relay.js';
 import { seedRecords, serveExchange } from './visual-fixtures.js';
@@ -21,14 +23,21 @@ export async function setup(
     ...(opts.standard === false ? { standard: false } : {}),
   });
   const relay = new MockRelay();
+  const indexer = new MockIndexer(relay);
   await page.route(`${RELAY}/**`, (r) => relay.handle(r));
+  await page.route(INDEXER, (r) => indexer.handle(r));
   await page.route('**/config.json', (r) =>
     r.fulfill({
-      json: { network: 'stagenet', relayUrl: RELAY, walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20 },
+      json: {
+        network: 'stagenet',
+        relayUrl: RELAY,
+        overrides: INDEXER_OVERRIDE,
+        walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20,
+      },
     }),
   );
   if (opts.seeded) await seedAccount(page, phantom, relay);
-  return { ex, phantom, relay };
+  return { ex, phantom, relay, indexer };
 }
 
 /** An account that exists on chain and in this browser (its records as the page writes them),

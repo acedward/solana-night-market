@@ -72,6 +72,7 @@ describe('the RelayAction envelope', () => {
       'take',
       'withdraw-unshielded',
       'demo-tokens',
+      'cancel-offers', // AA 00047 P9.S (questions Q30)
     ]);
   });
 

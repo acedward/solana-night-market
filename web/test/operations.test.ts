@@ -4,7 +4,7 @@
 // change kept here until re-filed (Q13).
 
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   NO_ACCOUNT,
@@ -23,13 +23,21 @@ import {
   type SignedRelayAction,
   type ZswapActivity,
 } from '@nightmarket/core';
-import { openEntryPortable, sealEntryPortable, withdrawRequest } from '@nightmarket/core/passport';
+import {
+  openEntryPortable,
+  predictWithdrawChange,
+  sealEntryPortable,
+  sendShieldedChangeNonce,
+  withdrawRequest,
+} from '@nightmarket/core/passport';
 import { x25519 } from '@noble/curves/ed25519.js';
 
 import { testScheme } from '../../packages/core/test/fixtures/test-signing.js';
 
 import { exportFileText, importFile } from '../src/pages/LocalData.js';
 import {
+  AccountCheckError,
+  NEW_ACCOUNT_POLL_MS,
   openAccount,
   secureChange,
   syncAccount,
@@ -43,6 +51,7 @@ import { readCoins, readRoster, readSecret } from '../src/passport/records.js';
 import type { RelayClient } from '../src/relay/client.js';
 import { MAX_IMPORT_READ_BYTES, recordKey } from '../src/store/schema.js';
 import { LocalStore } from '../src/store/store.js';
+import { FakeChain } from './fake-chain.js';
 import { fakeCallMessage, fakeDeviceEntry, fakeSigning } from './fake-signing.js';
 import { expectImportRoundTrip } from './roundtrip.js';
 
@@ -53,6 +62,7 @@ class FakeRelay {
   submitted: Array<{ action: RelayActionName; request: ActionRequest }> = [];
   results: Record<string, Record<string, unknown>> = {};
   failNext: string | null = null;
+  failCode = 'x';
   state: AccountStateView | null = null;
   entries: Array<string | null> = [];
   zswapActivity: ZswapActivity = { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 };
@@ -84,20 +94,40 @@ class FakeRelay {
     };
   }
   async waitForJob(requestId: string, onUpdate: (j: JobView) => void): Promise<JobView> {
-    const action = this.submitted[Number(requestId) - 1]!.action;
+    const sub = this.submitted[Number(requestId) - 1]!;
+    const action = sub.action;
     const job =
       this.failNext !== null
-        ? this.view(requestId, action, 'failed', { error: { code: 'x', message: this.failNext } })
+        ? this.view(requestId, action, 'failed', { error: { code: this.failCode, message: this.failNext } })
         : this.view(requestId, action, 'succeeded', { result: this.results[action] ?? {} });
+    // A registration that succeeded is on chain: the fresh account, as the indexer then shows it.
+    if (action === 'register' && job.state === 'succeeded' && !this.state) {
+      const owner = (sub.request.auth as SignedRelayAction).message.owner;
+      this.state = {
+        account: ACCOUNT,
+        booted: true,
+        deviceCount: 1,
+        deviceEpoch: '0',
+        devices: [fakeDeviceEntry(ACCOUNT, owner, 0n, 0n)],
+        authNonce: '0',
+        inboxCount: '0',
+        encKey: (sub.request.payload as { encPublicKey: string }).encPublicKey,
+        networkSalt: '5a'.repeat(32),
+      };
+    }
     this.failNext = null;
+    this.failCode = 'x';
     onUpdate(job);
     return job;
   }
-  async accountState() {
-    return this.state;
+  // The relay's own reads of the account are NOT used by the page any more (AA 00047 P9.S, Q26): the
+  // fake chain serves the account from the same fields. They fail here, so a test that passes proves
+  // the page read the chain.
+  async accountState(): Promise<AccountStateView | null> {
+    throw new Error('the page must not read the account state from the relay');
   }
   async inbox(): Promise<InboxPage> {
-    return { account: ACCOUNT, from: 0, entries: this.entries, total: this.entries.length };
+    throw new Error('the page must not read the inbox from the relay');
   }
   async zswap() {
     return this.zswapActivity;
@@ -110,9 +140,10 @@ beforeEach(() => {
   storage = window.localStorage;
 });
 
-function env(signing: OperationEnv['signing'], relay: FakeRelay): OperationEnv {
+function env(signing: OperationEnv['signing'], relay: FakeRelay, chain = new FakeChain(relay)): OperationEnv {
   return {
     relay: relay as unknown as RelayClient,
+    chain,
     store: new LocalStore(storage),
     scope: { network: 'undeployed', owner: signing.deviceKey },
     signing,
@@ -170,6 +201,80 @@ describe('openAccount (L-ACC.1)', () => {
     relay.results.register = { account: ACCOUNT, device: signing.deviceKey, txs: {}, seconds: {} };
     await openAccount(e);
     expect(relay.submitted[1]!.request.payload).toEqual({ encPublicKey: pending.encPublicKey });
+  });
+
+  // AA 00047 P9.S (audit C3, questions Q26): the relay's "succeeded" is not taken on trust.
+  it('checks the new account on the CHAIN as a fresh account of this wallet and this browser key', async () => {
+    const relay = new FakeRelay();
+    const { signing } = fakeSigning();
+    const chain = new FakeChain(relay);
+    const e = env(signing, relay, chain);
+    relay.results.register = { account: ACCOUNT, device: 'ee'.repeat(32), txs: {}, seconds: {} };
+    const rec = await openAccount(e);
+    const secret = readSecret(e.store, e.scope, ACCOUNT)!;
+    expect(chain.expectations).toEqual([
+      { deviceKey: signing.deviceKey, encPublicKey: secret.encPublicKey, fresh: true },
+    ]);
+    expect(chain.reads).toContain(`state:${ACCOUNT}`);
+    // The record names THIS wallet as the device, whatever the relay reported.
+    expect(rec.device).toBe(signing.deviceKey);
+  });
+
+  it('refuses a new account that fails the check, keeping its records so nothing is lost', async () => {
+    const relay = new FakeRelay();
+    const { signing, calls } = fakeSigning();
+    const chain = new FakeChain(relay);
+    chain.check = {
+      ok: false,
+      useCounter: null,
+      problems: [
+        { code: 'devices', message: 'It has 2 devices; a Night Market account has exactly one, your wallet.' },
+      ],
+    };
+    const e = env(signing, relay, chain);
+    relay.results.register = { account: ACCOUNT, device: signing.deviceKey, txs: {}, seconds: {} };
+    const err = await openAccount(e).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(AccountCheckError);
+    expect((err as Error).message).toMatch(/does not pass this site's checks on Midnight: It has 2 devices/);
+    expect((err as Error).message).toMatch(/Do not send tokens to it/);
+    expect(readSecret(e.store, e.scope, ACCOUNT)).not.toBeNull();
+    // And nothing can be signed for it afterwards: every gated call checks again, before the wallet.
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, {
+        color: COLOUR,
+        amount: 1n,
+        recipient: formatUnshieldedAddress('66'.repeat(32), 'undeployed'),
+      }),
+    ).rejects.toBeInstanceOf(AccountCheckError);
+    await expect(claimDemoTokens(e, ACCOUNT)).rejects.toBeInstanceOf(AccountCheckError);
+    expect(calls).toEqual(['relayAction']); // only the registration's signature, ever
+    expect(relay.submitted.map((x) => x.action)).toEqual(['register']);
+  });
+
+  it('waits for the indexer to show the new account before checking it', async () => {
+    const relay = new FakeRelay();
+    const { signing } = fakeSigning();
+    const chain = new FakeChain(relay);
+    const e = env(signing, relay, chain);
+    relay.results.register = { account: ACCOUNT, device: signing.deviceKey, txs: {}, seconds: {} };
+    // The indexer lags: the first read finds no contract, the next one finds it activated.
+    const real = chain.checkAccount.bind(chain);
+    let first = true;
+    chain.checkAccount = async (a, x) => {
+      if (first) {
+        first = false;
+        return { state: null, check: { ok: false, useCounter: null, problems: [] } };
+      }
+      return real(a, x);
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const p = openAccount(e);
+      await vi.advanceTimersByTimeAsync(NEW_ACCOUNT_POLL_MS + 10);
+      await expect(p).resolves.toMatchObject({ address: ACCOUNT });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -235,11 +340,9 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const { signing, relay, e, calls } = await fundedAccount();
     await syncAccount(e, ACCOUNT);
     const changeEntitlement = `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`;
-    relay.results.withdraw = {
-      txId: 'wd1',
-      change: { nonce: '09'.repeat(32), color: COLOUR, value: '10000000' },
-      changeEntitlement,
-    };
+    // The change of 30 paid from the 40 coin, as the contract's `sendShielded` makes it (Q28 A).
+    const expectedChange = { nonce: sendShieldedChangeNonce('02'.repeat(32)), color: COLOUR, value: '10000000' };
+    relay.results.withdraw = { txId: 'wd1', change: expectedChange, changeEntitlement };
     const out = await withdrawToWallet(e, ACCOUNT, {
       color: COLOUR,
       amount: 30_000_000n,
@@ -263,7 +366,13 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     );
     expect(ed25519.verify(unhex(pa.signature), message, unhex(signing.deviceKey))).toBe(true);
 
-    expect(out.change).toMatchObject({ value: '10000000', inInbox: false, origin: 'change', mtIndex: null });
+    expect(out.change).toMatchObject({ ...expectedChange, inInbox: false, origin: 'change', mtIndex: null });
+    expect(out.changeMismatch).toBe(false);
+    // Where it came from, so the browser can recompute it before sealing an entry for it.
+    expect(out.change?.changeOf).toEqual({
+      spent: contractCoinCommitment({ nonce: '02'.repeat(32), color: COLOUR, value: '40000000' }, ACCOUNT),
+      amount: '30000000',
+    });
     // The market's entitlement to file the change (security review F-B3) is kept with it.
     expect(out.change?.appendEntitlement).toBe(changeEntitlement);
     const coins = readCoins(e.store, e.scope, ACCOUNT);
@@ -340,6 +449,76 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     });
     expect(auth.message.owner).toBe(signing.deviceKey);
     expect(testScheme.verify(auth.message, unhex(auth.signature))).toBe(true);
+  });
+
+  // AA 00047 P9.S, audit C7, questions Q28 A: the change comes from the signed coin and amount, never
+  // from the relay's word.
+  it('keeps the change it COMPUTES when the relay reports another one, and says so', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    relay.results.withdraw = {
+      txId: 'wd4',
+      change: { nonce: '09'.repeat(32), color: COLOUR, value: '10000000' }, // a fabricated nonce
+      changeEntitlement: `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`,
+    };
+    const out = await withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) });
+    expect(out.changeMismatch).toBe(true);
+    const expected = predictWithdrawChange({ nonce: '02'.repeat(32), color: COLOUR, value: '40000000' }, 30_000_000n)!;
+    expect(out.change).toMatchObject(expected);
+    expect(readCoins(e.store, e.scope, ACCOUNT).some((c) => c.nonce === '09'.repeat(32))).toBe(false);
+    // A relay that reports change where there is none is a mismatch too (the whole coin was paid).
+    relay.results.withdraw = { txId: 'wd5', change: { nonce: '0a'.repeat(32), color: COLOUR, value: '1' } };
+    const whole = await withdrawToWallet(e, ACCOUNT, {
+      color: COLOUR,
+      amount: 60_000_000n,
+      recipient: '44'.repeat(32),
+    });
+    expect(whole).toMatchObject({ change: null, changeMismatch: true });
+  });
+
+  it('reads the nonce, the device counter and the inbox from the CHAIN, never the relay (Q26)', async () => {
+    const { relay, e } = await fundedAccount();
+    const chain = e.chain as FakeChain;
+    // The relay's own account reads throw (FakeRelay above): the walk and the call still work.
+    await syncAccount(e, ACCOUNT);
+    expect(chain.reads).toEqual([`state:${ACCOUNT}`, `txs:${ACCOUNT}`]);
+    relay.results['withdraw-unshielded'] = { txId: 'wu9' };
+    await withdrawUnshieldedToWallet(e, ACCOUNT, {
+      color: COLOUR,
+      amount: 1n,
+      recipient: formatUnshieldedAddress('66'.repeat(32), 'undeployed'),
+    });
+    // The signed call binds the CHAIN's nonce (7) and the counter found among the CHAIN's devices (1).
+    const sub = relay.submitted[0]!;
+    expect(sub.request.payload).toMatchObject({ authNonce: '7' });
+    expect(sub.request.passportAuth).toMatchObject({ useCounter: '1' });
+    // Every check names this wallet and this browser's key.
+    const secret = readSecret(e.store, e.scope, ACCOUNT)!;
+    expect(chain.expectations.every((x) => x.encPublicKey === secret.encPublicKey && !x.fresh)).toBe(true);
+  });
+
+  it('drops coin facts the relay reports but the indexer does not carry (Q31)', async () => {
+    const { e } = await fundedAccount();
+    const chain = e.chain as FakeChain;
+    // The indexer shows only the first output's transaction: the second coin's position is unsupported.
+    chain.txs = [
+      {
+        hash: 'd1',
+        blockHeight: 1,
+        events: [
+          {
+            id: 1,
+            raw: `00${ACCOUNT}${contractCoinCommitment({ nonce: '01'.repeat(32), color: COLOUR, value: '60000000' }, ACCOUNT)}`,
+          },
+        ],
+      },
+    ];
+    const r = await syncAccount(e, ACCOUNT);
+    expect(r.unsupported).toBe(1);
+    expect(readCoins(e.store, e.scope, ACCOUNT).map((c) => [c.value, c.mtIndex])).toEqual([
+      ['60000000', '100'],
+      ['40000000', null], // not positioned: not spendable until an honest report positions it
+    ]);
   });
 
   it('refuses an amount no single coin covers before asking the wallet', async () => {
@@ -452,11 +631,14 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
 
   it("re-files the change in the inbox, sealed to the account's key, with ONE signature (Q13)", async () => {
     const { relay, e, calls, sk } = await fundedAccount();
+    await syncAccount(e, ACCOUNT); // the 40 coin the change was paid from is known here
     relay.results['append-inbox'] = { txId: 'ai1' };
-    const change = { nonce: '09'.repeat(32), color: COLOUR, value: '10000000' };
+    const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    const change = predictWithdrawChange(paidFrom, 30_000_000n)!;
     const { localCoin } = await import('@nightmarket/core');
     const appendEntitlement = `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`;
-    const r = await secureChange(e, ACCOUNT, { ...localCoin(change, ACCOUNT), appendEntitlement });
+    const changeOf = { spent: contractCoinCommitment(paidFrom, ACCOUNT), amount: '30000000' };
+    const r = await secureChange(e, ACCOUNT, { ...localCoin(change, ACCOUNT), appendEntitlement, changeOf });
     expect(r.txId).toBe('ai1');
     expect(calls).toEqual(['authorise:appendInbox']);
     const payload = relay.submitted[0]!.request.payload as { entry: string; entitlement?: string };
@@ -466,6 +648,31 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
       opened && { nonce: bytesToHex(opened.nonce), color: bytesToHex(opened.color), value: opened.value.toString() },
     ).toEqual(change);
     expect(recordKey(e.scope, 'job', { account: ACCOUNT, id: '1'.padStart(32, '0') })).toBeTruthy();
+  });
+
+  // AA 00047 P9.S, questions Q28 A: an entry is sealed only for the coin the withdrawal creates.
+  it('refuses to seal a coin that is not the recomputed change, before asking the wallet', async () => {
+    const { relay, e, calls } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    const { localCoin } = await import('@nightmarket/core');
+    const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    const appendEntitlement = `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`;
+    const changeOf = { spent: contractCoinCommitment(paidFrom, ACCOUNT), amount: '30000000' };
+    const right = predictWithdrawChange(paidFrom, 30_000_000n)!;
+    for (const wrong of [
+      { ...right, nonce: '09'.repeat(32) }, // another nonce (a relay's fabrication)
+      { ...right, value: '10000001' }, // another value
+    ]) {
+      await expect(
+        secureChange(e, ACCOUNT, { ...localCoin(wrong, ACCOUNT), appendEntitlement, changeOf }),
+      ).rejects.toThrow(/not the change its withdrawal creates/);
+    }
+    // A coin with no record of what it is the change of cannot be checked, so it is refused too.
+    await expect(secureChange(e, ACCOUNT, { ...localCoin(right, ACCOUNT), appendEntitlement })).rejects.toThrow(
+      /not the change its withdrawal creates/,
+    );
+    expect(calls).toEqual([]);
+    expect(relay.submitted).toEqual([]);
   });
 
   it('says a coin the market gave no entitlement for cannot be secured, before asking the wallet (F-B3)', async () => {
@@ -480,7 +687,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
   // Security review F-B8: the coin list only grows (spent coins are kept), and Import refused a
   // list of more than 5,000, so a long-used account's own export could not be restored.
   it('restores an export with more than 5,000 coins, and its unsecured coins survive Import and the next walk (F-B8)', async () => {
-    const { relay, e } = await fundedAccount();
+    const { e } = await fundedAccount();
     await syncAccount(e, ACCOUNT); // the two inbox coins, positioned
     const { localCoin } = await import('@nightmarket/core');
     const hex = (n: number, width = 64) => n.toString(16).padStart(width, '0');
@@ -515,7 +722,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const text = exportFileText(e.store.exportWallet(e.scope));
     expect(new TextEncoder().encode(text).length).toBeLessThan(MAX_IMPORT_READ_BYTES);
     e.store.clearAll();
-    const r = await importFile(e.store, relay as unknown as RelayClient, JSON.parse(text), e.scope);
+    const r = await importFile(e.store, e.chain, JSON.parse(text), e.scope);
     expect(r.imported).toBeGreaterThanOrEqual(3); // secret, roster, coins
     expect(readCoins(e.store, e.scope, ACCOUNT)).toEqual(before);
     expect(unsecuredCoins(readCoins(e.store, e.scope, ACCOUNT))).toEqual(unsecured);

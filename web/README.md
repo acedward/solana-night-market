@@ -82,10 +82,30 @@ transaction, so it needs no SOL.
   (`src/wallet/phantom-adapter.ts`), and every operation asks for signatures only through
   `ActionSigning` (`src/wallet/signing.ts`).
 
+- **What the contract enforces is listed beside the text** (AA 00047 P9.S, questions Q25 B′;
+  `src/wallet/sign-facts.ts`): every amount in base units with the token's full id, the site's name
+  and decimals marked as the site's label, the recipient and the signed expiry.
+
 The browser tests use a mock Phantom (`test/e2e/mock-phantom.ts`: tweetnacl in the test process,
 Phantom's byte semantics, and modes for a Ledger account, a declined request, a locked wallet, no
 answer and another key) against a mock relay that checks every signature as the relay does
-(`test/e2e/mock-relay.ts`).
+(`test/e2e/mock-relay.ts`), and a mock public indexer (`test/e2e/mock-indexer.ts`).
+
+## The account, read from the chain (AA 00047 P9.S)
+
+The page reads the connected wallet's account from Midnight's public indexer itself
+(`src/chain/indexer.ts`; `config.json` `overrides.midnight.indexerUrl` points it elsewhere), never
+from the relay: the account's contract state, decoded in the page with the compiled account's
+`ledger()`. Before any deposit, trade, withdrawal or sealed note it checks the account is the
+market's own (the verifier keys pinned in this build, the maintenance authority retired), that its
+ONE device is the connected wallet, and that it is sealed to this browser's key on this network; the
+Portfolio says what it found (`src/chain/AccountCheckNotice.tsx`). The nonce, the device counter, the
+inbox and the public balances come from the same read. A Content-Security-Policy must allow the
+indexer in `connect-src` (`deploy/RUNBOOK.md` section 16).
+
+Offers sign a real expiry (one hour; a take five minutes) and can be cancelled ("Cancel offer": one
+approval that moves the account's nonce, questions Q30); a withdrawal's change is computed in the page
+(questions Q28 A).
 
 ## The Night Market design system
 

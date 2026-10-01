@@ -11,7 +11,7 @@
 // The coin a spend consumes is part of the signed challenge (AUTH-10), `mt_index` included, so
 // the browser resolves the coin's exact position BEFORE it builds the call (../coins.ts).
 
-import type { AppendInboxPayload, WithdrawPayload } from '../accounts.js';
+import type { AppendInboxPayload, CancelOffersPayload, WithdrawPayload } from '../accounts.js';
 import { hexToBytes, normaliseHex32 } from '../hex.js';
 import type { AuthRequest, CallContext } from '../../../../vendor/passport/contract/src/wallet/signer.js';
 
@@ -27,7 +27,11 @@ export interface GatedContext {
   networkSalt: string;
 }
 
-/** The Passport client's call context for `ctx`. */
+/** The Passport client's call context for `ctx`.
+ *  TODO(P9.I): lane P9.C's F3 v2 client adds `CallContext.encKey` (the account's current `enc_key`,
+ *  which the ed25519 `rotateEncKey` needs to render "Cancel all open offers", questions Q30); at the
+ *  re-pin, add `encKey` to GatedContext (the page has it from the chain, the relay from its ledger
+ *  read) and pass it here. */
 export const callContext = (ctx: GatedContext): CallContext => ({
   contractAddress: hexToBytes(normaliseHex32(ctx.account), 32),
   authNonce: ctx.authNonce,
@@ -53,6 +57,12 @@ export function withdrawRequest(p: WithdrawPayload): AuthRequest {
 /** The AuthRequest of an `append-inbox` action body. */
 export function appendInboxRequest(p: AppendInboxPayload): AuthRequest {
   return { op: 'appendInbox', entry: hexToBytes(p.entry, 192) };
+}
+
+/** The AuthRequest of a `cancel-offers` action body: re-affirm the account's encryption key (the
+ *  arm's `rotate_enc_key`, questions Q30), which only bumps the auth nonce. */
+export function cancelOffersRequest(p: CancelOffersPayload): AuthRequest {
+  return { op: 'rotateEncKey', newKey: hexToBytes(normaliseHex32(p.newKey), 32) };
 }
 
 /**

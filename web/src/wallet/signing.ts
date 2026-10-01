@@ -39,6 +39,8 @@ import {
   type GatedContext,
 } from '@nightmarket/core/passport';
 
+import { signFacts, type SignFacts } from './sign-facts.js';
+
 /** One call to authorise: a gated account call (a withdrawal, an inbox append) or a swap (a make or
  *  a take, one `open_swap_shielded_with_ed25519` call). */
 export type CallToAuthorise =
@@ -68,11 +70,14 @@ export class EnvelopeSignatureError extends Error {
 }
 
 /** `ActionSigning` over Track A's Ed25519 arm, for any wallet that signs messages. `envelope` is the
- *  relay envelope's scheme (lane B3's Solana scheme; a test may pass another). */
+ *  relay envelope's scheme (lane B3's Solana scheme; a test may pass another). `announce` hears the
+ *  facts the contract enforces for each account call just before the wallet is asked (the signing
+ *  panel lists them, ./sign-facts.ts; AA 00047 P9.S, questions Q25 B′), then null. */
 export function ed25519ActionSigning(
   signer: DeviceSigner,
   display: Ed25519Display,
   envelope: RelayActionScheme = solanaRelayActionScheme,
+  announce?: (facts: SignFacts | null) => void,
 ): ActionSigning {
   const device = ed25519DeviceOf(signer, display);
   return {
@@ -92,9 +97,14 @@ export function ed25519ActionSigning(
     },
     async authorise(ctx, call, useCounter) {
       const cc = callContext(ctx);
-      if (call.kind === 'gated') return passportAuthOf(await device.sign(cc, call.request, useCounter));
-      const { call: args, coin } = openSwapArgs(call.payload);
-      return passportAuthOf(await device.signOffer(cc, args, coin, useCounter));
+      announce?.(signFacts(call, display.tokens));
+      try {
+        if (call.kind === 'gated') return passportAuthOf(await device.sign(cc, call.request, useCounter));
+        const { call: args, coin } = openSwapArgs(call.payload);
+        return passportAuthOf(await device.signOffer(cc, args, coin, useCounter));
+      } finally {
+        announce?.(null);
+      }
     },
     useCounter(state, hint) {
       const account = hexToBytes(state.account, 32);

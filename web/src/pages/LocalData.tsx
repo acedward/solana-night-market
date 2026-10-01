@@ -22,7 +22,8 @@ import {
   Toast,
   TypedConfirmDialog,
 } from '../design/index.js';
-import { RelayClient } from '../relay/client.js';
+import { useChain } from '../chain/ChainContext.js';
+import type { AccountChain } from '../chain/indexer.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
 import { MAX_IMPORT_READ_BYTES, SCHEMA_VERSION, STORE_PREFIX, type ExportFile } from '../store/schema.js';
@@ -54,11 +55,12 @@ function download(name: string, text: string): void {
 /**
  * Import as one change (security review F-B5): check the whole file first; an encryption secret it
  * would replace with a different one is accepted only when the new public key is the account's
- * on-chain key (so a file cannot swap in a key that opens nothing); then write it all or nothing.
+ * on-chain key (so a file cannot swap in a key that opens nothing), read from the public indexer
+ * itself, not the relay (AA 00047 P9.S, questions Q26); then write it all or nothing.
  */
 export async function importFile(
   store: LocalStore,
-  relay: Pick<RelayClient, 'accountState'>,
+  chain: Pick<AccountChain, 'accountState'>,
   file: unknown,
   scope: { network: string; owner: string },
 ): Promise<{ imported: number; replaced: number }> {
@@ -66,14 +68,15 @@ export async function importFile(
   const approved = new Set<string>();
   for (const c of plan.secretChanges) {
     if (!c.account) continue;
-    const state = await relay.accountState(c.account).catch(() => null);
+    const state = await chain.accountState(c.account).catch(() => null);
     if (state && state.encKey === c.encPublicKey) approved.add(c.account);
   }
   return store.commitImport(plan, { approvedSecretReplacements: approved });
 }
 
-export function LocalData({ network, relayUrl }: { network: string; relayUrl: string }) {
+export function LocalData({ network }: { network: string }) {
   const { status, store, revision } = useStore();
+  const chain = useChain();
   const wallet = useWallet();
   const assets = useAssetFilter();
   const [revealed, setRevealed] = useState<ReadonlySet<string>>(new Set());
@@ -126,7 +129,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     }
     try {
       const json: unknown = JSON.parse(await f.text());
-      const r = await importFile(store, new RelayClient(relayUrl), json, scope);
+      const r = await importFile(store, chain, json, scope);
       setMessage({
         kind: 'ok',
         text: `Imported ${r.imported} records${r.replaced ? ` (${r.replaced} replaced)` : ''}.`,

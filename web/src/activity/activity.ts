@@ -20,7 +20,14 @@ import type { JobView } from '@nightmarket/core';
 
 /** What the customer started (the operation, not the relay's job: a withdrawal may run two jobs). */
 export type ActivityKind =
-  'register' | 'demo-tokens' | 'open-swap' | 'take' | 'withdraw' | 'withdraw-unshielded' | 'append-inbox';
+  | 'register'
+  | 'demo-tokens'
+  | 'open-swap'
+  | 'take'
+  | 'withdraw'
+  | 'withdraw-unshielded'
+  | 'append-inbox'
+  | 'cancel-offers';
 
 export const ACTIVITY_TITLE: Record<ActivityKind, string> = {
   register: 'Opening your account',
@@ -30,6 +37,7 @@ export const ACTIVITY_TITLE: Record<ActivityKind, string> = {
   withdraw: 'Withdrawing',
   'withdraw-unshielded': 'Withdrawing',
   'append-inbox': 'Saving your change',
+  'cancel-offers': 'Cancelling your offer',
 };
 
 /** The sentence every make-offer screen carries: a made offer is off-chain until someone takes it. */
@@ -86,6 +94,13 @@ export const ACTIVITY_FLOW: Record<ActivityKind, ActivityFlow> = {
     steps: ON_CHAIN_STEPS,
     note: `Signed. The market records the coin in your account's inbox on Midnight; this usually takes about 40 seconds. ${KEEP_BROWSING}`,
   },
+  // AA 00047 P9.S (audit C6, questions Q30): one transaction that moves the account's nonce, so the
+  // offer (and anything else signed before) can never be taken.
+  'cancel-offers': {
+    end: 'on-chain',
+    steps: ON_CHAIN_STEPS,
+    note: `Signed. The market sends one transaction to Midnight that makes every open offer of your account unusable; this usually takes about 40 seconds. ${KEEP_BROWSING}`,
+  },
 };
 
 /** How long each relay job usually takes end to end on stagenet, in seconds (plan P6.4, measured):
@@ -97,6 +112,7 @@ export const EXPECTED_SECONDS: Record<string, number> = {
   withdraw: 42,
   'withdraw-unshielded': 42,
   'append-inbox': 39,
+  'cancel-offers': 39,
 };
 
 /** A make's preparation (the relay's checks and the offer's proof, 21.9 s on stagenet, plan P6.4):

@@ -41,11 +41,14 @@ export {
   type ShieldedCoin,
 } from '../../../../vendor/passport/contract/src/wallet/contract.js';
 
+export * from './account-chain.js';
 export * from './ed25519.js';
 export * from './gated.js';
 export * from './gated-unshielded.js';
 export * from './offer-call.js';
+export * from './pinned-account-keys.js';
 export * from './vendor/offer-codec.js';
+export * from './withdraw-change.js';
 
 /** The upstream commit the client code above comes from. */
 export const PASSPORT_CLIENT_COMMIT = '451f7610e90000e0c5550877418122a04b85d0e6';

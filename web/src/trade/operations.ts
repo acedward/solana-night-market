@@ -8,6 +8,12 @@
 // so every coin the trade creates is recoverable from the chain (FR-005). The relay proves the call
 // fully guaranteed (so any account can take it, and it can take any segment-0 offer), publishes a
 // make, and settles a take through the exchange's batcher in one transaction.
+//
+// Every make and take SIGNS a real expiry (AA 00047 P9.S, audit C6): a make lasts
+// OFFER_LIFETIME_SECONDS, a take TAKE_LIFETIME_SECONDS (@nightmarket/core). The circuit refuses the
+// call after it, whoever holds the approval, and the offer's status here follows that signed expiry
+// (never the relay's transaction TTL). "Cancel offer" ends it sooner (../passport/operations.ts
+// `cancelOpenApprovals`, questions Q30).
 
 import {
   type BookEntry,
@@ -27,12 +33,15 @@ import {
   fundWithOneCoin,
   guardSignedAction,
   hexToBytes,
+  signedValidUntil,
   takeLegs,
 } from '@nightmarket/core';
 import { freshWantNonce, offerInboxEntriesPortable, predictChangeCoin } from '@nightmarket/core/passport';
 
 import {
+  JobFailedError,
   OperationError,
+  cancelOpenApprovals,
   dropJob,
   gatedContext,
   putJob,
@@ -51,6 +60,7 @@ async function buildCall(
   action: 'open-swap' | 'take',
   legs: OrderLegs,
   giveToken: TokenEntry,
+  validUntil: string,
   offerId?: string,
 ): Promise<{ payload: OpenSwapPayload; passportAuth: PassportAuth; coin: StoredCoin }> {
   const funded = fundWithOneCoin(readCoins(env.store, env.scope, account), legs.give, giveToken);
@@ -76,7 +86,7 @@ async function buildCall(
     wantNonce: bytesToHex(want.nonce),
     wantEntry: bytesToHex(entries.wantEntry),
     changeEntry: bytesToHex(entries.changeEntry),
-    validUntil: '0',
+    validUntil,
     coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex },
     authNonce: state.authNonce,
   };
@@ -99,7 +109,10 @@ async function runJob(
   const done = await env.relay.waitForJob(job.requestId, (j) => updateJob(env, account, j));
   dropJob(env, account, job.requestId);
   if (done.state !== 'succeeded' || !done.result)
-    throw new OperationError(jobErrorText(done.error, 'The market could not complete this.'));
+    throw new JobFailedError(
+      done.error?.code ?? 'failed',
+      jobErrorText(done.error, 'The market could not complete this.'),
+    );
   return done;
 }
 
@@ -120,7 +133,8 @@ export async function makeOffer(
   const guard = guardSignedAction('open-swap', live, now);
   if (guard.kind === 'refuse') throw new OperationError(guard.message);
   const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
-  const { payload, passportAuth, coin } = await buildCall(env, account, 'open-swap', legs, giveToken);
+  const validUntil = signedValidUntil('make', now);
+  const { payload, passportAuth, coin } = await buildCall(env, account, 'open-swap', legs, giveToken, validUntil);
   const summary = tradeSummary(legs.side, legs.baseRaw, pair.base, legs.effectivePrice, pair.quote);
   const done = await runJob(env, account, 'open-swap', payload as never, passportAuth, { summary });
   const r = done.result as unknown as OpenSwapResult;
@@ -138,7 +152,9 @@ export async function makeOffer(
     authNonce: payload.authNonce,
     wantNonce: payload.wantNonce,
     createdAt: now,
-    expiresAt: r.expiresAt,
+    // The SIGNED expiry, not the relay's transaction TTL (audit C6).
+    expiresAt: Number(validUntil) * 1000,
+    validUntil,
     status: r.kernel.status === 'consumed' ? 'filled' : 'live',
     kernelStatus: r.kernel.status,
     checkedAt: Date.now(),
@@ -160,7 +176,16 @@ export async function takeOffer(
 ): Promise<TradeRecord> {
   const legs = takeLegs(entry, pair.base, pair.quote);
   const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
-  const { payload, passportAuth, coin } = await buildCall(env, account, 'take', legs, giveToken, entry.offerId);
+  const validUntil = signedValidUntil('take', Date.now());
+  const { payload, passportAuth, coin } = await buildCall(
+    env,
+    account,
+    'take',
+    legs,
+    giveToken,
+    validUntil,
+    entry.offerId,
+  );
   const summary = tradeSummary(legs.side, legs.baseRaw, pair.base, legs.effectivePrice, pair.quote);
   const takePayload: TakePayload = { ...payload, offerId: entry.offerId };
   const done = await runJob(env, account, 'take', takePayload as never, passportAuth, { summary });
@@ -191,6 +216,7 @@ export async function takeOffer(
     wantNonce: payload.wantNonce,
     createdAt: Date.now(),
     expiresAt: Date.now(),
+    validUntil,
     status: 'filled',
     kernelStatus: 'consumed',
     settledTx: r.txHash,
@@ -206,9 +232,11 @@ export async function takeOffer(
  * first, then decide each offer from the chain and the exchange:
  *   filled     a coin with the offer's want nonce reached the account (the settling tx is its
  *              creating transaction), or the exchange says consumed;
- *   expired    past the intent's TTL, or the exchange says so;
- *   cancelled  the account's auth nonce moved and the offer was not filled (another signed call);
- *   live       otherwise.
+ *   expired    past its SIGNED expiry (`validUntil`, audit C6), or the exchange says so;
+ *   cancelled  the account's auth nonce (read from the chain) moved and the offer was not filled
+ *              (another signed call, or "Cancel offer");
+ *   live       otherwise: the approval can still settle. Whether the exchange LISTS it is its
+ *              `kernelStatus` (`live` = listed), which the page shows apart (`offerShown`).
  * Returns the offers whose state changed.
  */
 export async function reconcileOffers(
@@ -255,6 +283,28 @@ export function guardFor(
   now = Date.now(),
 ) {
   return guardSignedAction(action, liveOffer(readTrades(env.store, env.scope, account), now), now);
+}
+
+/**
+ * "Cancel offer" (audit C6, questions Q30): land the nonce bump that ends every open approval of the
+ * account, then mark its open offers cancelled. Only when the chain shows the new nonce.
+ */
+export async function cancelOffers(env: OperationEnv, account: string): Promise<{ txId: string; cancelled: number }> {
+  const { txId } = await cancelOpenApprovals(env, account);
+  return { txId, cancelled: markLiveOffersCancelled(env, account) };
+}
+
+/** What the page shows for one of the account's offers: its state word, and whether the exchange
+ *  lists it. A live offer the exchange has not listed (yet) never shows "Listed" (P8.2 follow-up). */
+export function offerShown(t: Pick<TradeRecord, 'role' | 'status' | 'kernelStatus'>): {
+  state: TradeRecord['status'] | 'unlisted';
+  listed: boolean;
+} {
+  if (t.role === 'make' && t.status === 'live') {
+    const listed = t.kernelStatus === 'live';
+    return { state: listed ? 'live' : 'unlisted', listed };
+  }
+  return { state: t.status, listed: false };
 }
 
 /** After another signed call executed (a withdrawal, a re-filed change), every live offer of the

@@ -27,6 +27,7 @@ carries real value. Every command runs from the repository root unless it says o
 13. [Incidents](#13-incidents)
 14. [Reference: pins and addresses](#14-reference-pins-and-addresses)
 15. [Several domains: one build, one relay](#15-several-domains-one-build-one-relay)
+16. [The browser reads the chain itself; the Content-Security-Policy](#16-the-browser-reads-the-chain-itself-the-content-security-policy)
 
 ## 1. What runs
 
@@ -487,7 +488,12 @@ value; request bodies are never logged).
   coins stay on Midnight, but only the secret can read them).
 - **One live offer at a time**, and **one coin per payment**.
 - **A withdrawal that leaves change** asks for a second approval, to record the change in your
-  account.
+  account. The page computes the change itself; a market that reports another one is named.
+- **Your browser checks your account on Midnight itself** (section 16): an account that is not this
+  market's own, or that has any device besides your wallet, is refused, and nothing is signed for it.
+- **Offers expire**: an offer can be taken for one hour after you approve it (a take for five
+  minutes), whoever holds the approval. **Cancel offer** ends it sooner (one approval, one
+  transaction).
 - **Demo tokens**: once per wallet. These are test networks and test tokens.
 
 ## 11. Known limits
@@ -499,7 +505,12 @@ value; request bodies are never logged).
 - Proofs one at a time (section 9).
 - An account with 500 or more contract actions cannot be reconciled until the relay pages
   through the indexer (`/v1/accounts/<account>/zswap` answers `501 history-too-long`).
-- A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6).
+- A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6; questions Q28:
+  the one accepted exception to the trustless relay: a relay could hide a withdrawn coin from its
+  recipient's wallet scan, not take it).
+- The page reads its account from the public indexer, except which of its coins exist and which are
+  spent: the relay decodes those events, and the page keeps only what the indexer's own events carry
+  (section 16; questions Q31). A relay can still leave a coin out (hide it), never invent one.
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
 
 ## 12. Start, stop, upgrade and re-pin
@@ -619,3 +630,44 @@ services:
 
 Give each domain its own TLS site in your proxy. https is required on every domain. The relay
 needs no setting per domain: it knows every registry token.
+
+## 16. The browser reads the chain itself; the Content-Security-Policy
+
+The relay is trustless (AA 00047 questions Q26): it relays signatures, proves and pays, but what the
+page believes about an account it reads from Midnight's **public indexer**, straight from the
+browser:
+
+- **Before any deposit, trade, withdrawal or sealed note**, the page reads the account's contract
+  state and refuses it unless it carries exactly the market's circuits with the verifier keys pinned
+  in the web build (`packages/core/src/passport/pinned-account-keys.ts`, written by
+  `bun scripts/pin-account-keys.ts <key volume>` from the same key set as `RELAY_KEYS_FINGERPRINT`),
+  its maintenance authority is retired, it has ONE device and that device is the connected wallet,
+  its encryption key is the one the browser holds, and its network salt is this network's. A new
+  account is checked as soon as the relay reports it open (at its first entry, nothing signed yet).
+- **The auth nonce, the device counter, the inbox and the public (unshielded) balances** every
+  signature and every balance rests on come from the same read, not from the relay.
+- **Which coins exist and which are spent** come from the ledger's Zswap events, which only the relay
+  decodes (the browser bundle carries no ledger-v9); the page keeps a reported coin or spend only when
+  one of the account's transactions, as the indexer lists it, carries it (questions Q31).
+
+**Re-pin the web build with the key set.** When the relay's key set changes (a new `vendor/passport`
+pin), regenerate the pinned digests from the new key volume and rebuild the web image, or the page
+refuses every new account (`relay/test/pinned-account-keys.test.ts` fails while the pinned circuits
+differ from the market shape).
+
+**Which indexer.** The site's network profile (`indexer.stagenet.shielded.tools` on stagenet). A
+deployment can point it elsewhere with a mounted `config.json`:
+`{"network": "stagenet", "relayUrl": "/relay", "overrides": {"midnight": {"indexerUrl": "https://…/api/v4/graphql"}}}`.
+The stagenet indexer answers any origin (CORS `*`).
+
+**The Content-Security-Policy** (`WEB_CONTENT_SECURITY_POLICY`). Its `connect-src` must name the
+indexer, or the page cannot check any account (it then says so and signs nothing). The value below is
+tested (`test/e2e/chain.spec.ts`, with the test's own origins in place of these):
+
+```
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+```
+
+`'wasm-unsafe-eval'` is for the contract runtime's WebAssembly (the arm's message builder and the
+account decoder). The relay is the same-origin `/relay` here; a relay on another origin
+(`WEB_RELAY_URL`) and an indexer set in `config.json` must be added to `connect-src`.

@@ -2658,6 +2658,42 @@ select.input option {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* What the contract enforces for the call (AA 00047 P9.S, questions Q25 B′): base units, token ids. */
+.sign-facts {
+  margin-top: var(--space-2);
+}
+.sign-facts-list {
+  margin: var(--space-2) 0 var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--field);
+  font-size: var(--text-sm);
+}
+.sign-facts-list > div {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-1) 0;
+}
+.sign-facts-list dt {
+  color: var(--muted);
+}
+.sign-facts-list dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+@media (max-width: 480px) {
+  .sign-facts-list > div {
+    grid-template-columns: 1fr;
+  }
+}
+.check-problems {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-5);
+}
 .fingerprint {
   display: flex;
   flex-wrap: wrap;

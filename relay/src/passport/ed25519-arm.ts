@@ -159,7 +159,9 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
             ? core.withdrawRequest(p as never)
             : action === 'withdraw-unshielded'
               ? core.withdrawUnshieldedRequest(p as never)
-              : core.appendInboxRequest(p as never);
+              : action === 'cancel-offers'
+                ? core.cancelOffersRequest(p as never)
+                : core.appendInboxRequest(p as never);
         return (device, ctx, counter) => device.sign(ctx, request, counter);
       }) as never;
     },

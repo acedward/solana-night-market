@@ -29,8 +29,11 @@ export interface TradeRecord {
   /** The wanted coin's nonce: when a coin with it reaches the inbox, the offer was filled. */
   wantNonce: string;
   createdAt: number;
-  /** Unix ms after which the ledger refuses the offer (intent TTL). */
+  /** Unix ms after which the offer can no longer settle: its SIGNED expiry (`validUntil` × 1000;
+   *  AA 00047 P9.S, audit C6). Older records (signed "never") kept the relay's intent TTL here. */
   expiresAt: number;
+  /** The deadline the wallet signed (unix seconds, decimal), when there is one. */
+  validUntil?: string;
   /** Whether the offer can still settle (`live` blocks a second offer, Q9). */
   status: OfferState;
   /** The exchange's last word on it. */

@@ -121,3 +121,12 @@ condition = "AND"
 paths = ['''(^|/)web/dist/assets/[^/]+\.js(\.map)?$''']
 regexTarget = "match"
 regexes = ['''^(?:keySet|[a-z0-9_]*key[a-z0-9_]*_with_ed25519):`[0-9a-f]{64}`''']
+
+# relay/src/passport/arm.ts names the arm's circuits (AA 00047 P9.I): `rotateEncKey:
+# 'rotate_enc_key_with_ed25519'` is a circuit id, flagged because the field's name holds "Key".
+# Scoped to that rule, that file AND that exact assignment.
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''(^|/)relay/src/passport/arm\.ts$''']
+regexTarget = "match"
+regexes = ['''^rotateEncKey:\s*'rotate_enc_key_with_ed25519'$''']

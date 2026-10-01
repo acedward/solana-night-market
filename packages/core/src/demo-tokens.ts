@@ -49,6 +49,10 @@ export const DemoTokensInfoSchema = z.object({
   remainingToday: z.number().int(),
   /** Present when the request named an owner: whether that key has claimed (or is claiming). */
   claimed: z.boolean().optional(),
+  /** Present when the request named an owner (AA 00047 P9, audit C8 / F-B7): whether that key has a
+   *  pack that failed part-way, which it may claim again to get the rest (already charged: the day's
+   *  cap does not stop it). Optional so a page tolerates an older relay. */
+  resumable: z.boolean().optional(),
 });
 export type DemoTokensInfo = z.infer<typeof DemoTokensInfoSchema>;
 

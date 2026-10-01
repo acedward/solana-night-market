@@ -151,7 +151,9 @@ market.example.com {
 The web container believes the `X-Forwarded-For` header only from the addresses in
 `WEB_TRUSTED_PROXIES`. The default (loopback and the private ranges) fits a proxy on the same host.
 If your proxy runs elsewhere, put its address there. If this is wrong, every customer shares one
-rate-limit bucket.
+rate-limit bucket, and one per-address daily cap on opening accounts (section 9: 3 a day for the
+whole market). After the first deployment, open accounts from two different networks: each must
+count against its own address, not a shared one.
 
 The site must be served over **https**: the page derives and encrypts the account's keys with
 WebCrypto, which browsers only offer on a secure origin (https, or `localhost`), and Phantom only
@@ -418,7 +420,8 @@ the one device entry at that counter. A claim is reserved before it is queued (t
 charge, kept whatever happens next), each token is recorded as it lands, and the claim is confirmed
 with its transaction ids when every token landed. When a delivery fails part-way, the claim stays as
 **partial**: the same key may claim again, to the same account, and gets only the tokens still
-missing (no token is minted twice, and no second daily charge). After `DEMO_TOKENS_MAX_ATTEMPTS` (3)
+missing, with no second daily charge (a token is minted twice only if it landed while the claims
+file could not be written; faucet tokens cost nothing). After `DEMO_TOKENS_MAX_ATTEMPTS` (3)
 failed deliveries the key is refused (`attempts-exhausted`). Only a claim refused before its job ran
 (a full queue) is undone.
 
@@ -484,7 +487,7 @@ To measure what a run spent, compare two readings with `dustInFlightSpecks` at `
 indexer's `paidFees` (section 4.3).
 
 `GET /v1/demo-tokens` shows the pack, `remainingToday`, and (with `?owner=<key>`) whether a key
-has claimed.
+has claimed, and whether it may finish a pack that failed part-way (`resumable`).
 
 Also watch `docker compose ps` (`relay` and `web` `(healthy)`; the proof servers have no Docker
 health check) and `docker compose logs -f relay` (JSON lines; secrets are redacted by key and by

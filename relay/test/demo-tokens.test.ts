@@ -315,11 +315,17 @@ describe('POST /v1/actions/demo-tokens', () => {
     await r.queue.settled(first.job.requestId);
     expect(r.queue.get(first.job.requestId)!.state).toBe('failed');
     expect(r.claims.hasClaimed(r.devices[0]!.deviceKey)).toBe(false);
+    // GET /v1/demo-tokens says the key may finish its pack (AA 00047 P9, audit C8 / F-B7).
+    const info = (await (
+      await r.app.request(`${API_PATHS.demoTokens}?owner=${r.devices[0]!.deviceKey}`)
+    ).json()) as DemoTokensInfo;
+    expect(info).toMatchObject({ claimed: false, resumable: true });
     fail = false;
     const second = (await (await r.claim(r.devices[0]!)).json()) as { job: { requestId: string } };
     await r.queue.settled(second.job.requestId);
     expect(r.queue.get(second.job.requestId)!.state).toBe('succeeded');
     expect(r.claims.hasClaimed(r.devices[0]!.deviceKey)).toBe(true);
+    expect(r.claims.isResumable(r.devices[0]!.deviceKey)).toBe(false);
   });
 
   it('reports the endpoint as off when no pack is configured', async () => {

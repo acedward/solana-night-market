@@ -318,6 +318,13 @@ export class DemoTokenClaims {
     return r.state === 'claimed' || this.active.has(owner) || (r.failures ?? 0) >= this.maxAttempts;
   }
 
+  /** Whether a key has a partial claim it may resume (already charged: the daily cap does not apply). */
+  isResumable(ownerRaw: string): boolean {
+    const owner = ownerRaw.replace(/^0x/, '').toLowerCase();
+    const r = this.byOwner.get(owner);
+    return !!r && r.state !== 'claimed' && !this.active.has(owner) && (r.failures ?? 0) < this.maxAttempts;
+  }
+
   /** The record of a key (a copy), for operators and tests. */
   record(ownerRaw: string): ClaimRecord | undefined {
     const r = this.byOwner.get(ownerRaw.replace(/^0x/, '').toLowerCase());

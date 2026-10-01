@@ -83,7 +83,7 @@ export function demoTokensInfo(deps: Pick<DemoTokenDeps, 'claims' | 'pack'> & { 
     perKey: 1,
     dailyCap: deps.dailyCap,
     remainingToday: deps.claims.remainingToday(),
-    ...(owner ? { claimed: deps.claims.hasClaimed(norm(owner)) } : {}),
+    ...(owner ? { claimed: deps.claims.hasClaimed(norm(owner)), resumable: deps.claims.isResumable(norm(owner)) } : {}),
   });
 }
 

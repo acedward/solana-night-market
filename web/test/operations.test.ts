@@ -450,6 +450,8 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(claimState({ ...base, enabled: false })).toMatchObject({ ok: false, code: 'disabled' });
     expect(claimState({ ...base, claimed: true })).toMatchObject({ ok: false, code: 'claimed' });
     expect(claimState({ ...base, remainingToday: 0 })).toMatchObject({ ok: false, code: 'cap' });
+    // A pack that failed part-way is finished whatever the day's count (AA 00047 P9, audit C8 / F-B7).
+    expect(claimState({ ...base, remainingToday: 0, resumable: true })).toEqual({ ok: true });
   });
 
   it("re-files the change in the inbox, sealed to the account's key, with ONE signature (Q13)", async () => {

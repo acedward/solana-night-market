@@ -41,7 +41,8 @@ export function claimState(
   if (!info.enabled) return { ok: false, code: 'disabled', reason: 'Demo tokens are paused on this market.' };
   if (info.claimed)
     return { ok: false, code: 'claimed', reason: 'This wallet has had its demo tokens (one pack per wallet).' };
-  if (info.remainingToday <= 0)
+  // A pack that failed part-way can be finished whatever the day's count (it was counted already).
+  if (info.remainingToday <= 0 && !info.resumable)
     return { ok: false, code: 'cap', reason: 'Today’s demo tokens are all given out. Try again tomorrow (UTC).' };
   return { ok: true };
 }

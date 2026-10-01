@@ -50,7 +50,7 @@ RELAY_PORT="$(free_port)"
 LOCK_TAKEN=0
 take_lock() {
   local line deadline
-  line="{\"purpose\":\"AA 00047 P6.3 night-market relay stagenet acceptance ($STEPS)\",\"pid\":$$,\"host\":\"$(hostname)\",\"at\":\"$(date -u +%FT%TZ)\"}"
+  line="{\"purpose\":\"${LOCK_PURPOSE:-AA 00047 night-market relay stagenet run} ($STEPS)\",\"pid\":$$,\"host\":\"$(hostname)\",\"at\":\"$(date -u +%FT%TZ)\"}"
   deadline=$((SECONDS + LOCK_WAIT_MINUTES * 60))
   while :; do
     if (set -o noclobber; printf '%s' "$line" >"$FUNDING_LOCK") 2>/dev/null; then
@@ -196,6 +196,8 @@ if ((${#FLOW_STEPS[@]} > 0)); then
     -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$STATE_DIR:/state" -v "$OUT:/out" \
     -e RELAY_URL=http://relay:8080 -e NETWORK=stagenet -e STATE_DIR=/state -e OUT=/out -e STEPS="$flow_steps" \
     ${GIVE_AMOUNT:+-e GIVE_AMOUNT="$GIVE_AMOUNT"} ${WANT_AMOUNT:+-e WANT_AMOUNT="$WANT_AMOUNT"} \
+    ${MAKE_LIFETIME:+-e MAKE_LIFETIME="$MAKE_LIFETIME"} ${CANCEL_MAKE_LIFETIME:+-e CANCEL_MAKE_LIFETIME="$CANCEL_MAKE_LIFETIME"} \
+    -e CANCEL_TAKE_CHECK="${CANCEL_TAKE_CHECK:-0}" \
     -w /app "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"; then
     say "flows PASS ($flow_steps)"
   else

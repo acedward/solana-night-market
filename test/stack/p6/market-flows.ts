@@ -108,6 +108,10 @@ const EXPIRE_SECONDS = Number(process.env.EXPIRE_SECONDS ?? '75');
 /** The unshielded colour the `withdraw-unshielded` step pays out (NIGHT, the all-zero colour). */
 const UNSHIELDED_COLOUR = (process.env.UNSHIELDED_COLOUR ?? '00'.repeat(32)).toLowerCase();
 const UNSHIELDED_AMOUNT = BigInt(process.env.UNSHIELDED_AMOUNT ?? '1500000');
+/** The `cancel` step's offer lifetime, and whether B then tries to take the cancelled offer (on a
+ *  shared network the cancelled offer is not sent to the exchange's batcher: CANCEL_TAKE_CHECK=0). */
+const CANCEL_MAKE_LIFETIME = Number(process.env.CANCEL_MAKE_LIFETIME ?? String(OFFER_LIFETIME_SECONDS));
+const CANCEL_TAKE_CHECK = process.env.CANCEL_TAKE_CHECK !== '0';
 
 const tokens = registryFor(
   NETWORK,
@@ -1179,7 +1183,7 @@ async function cancelAll(who: 'A' | 'B') {
 
 async function cancel() {
   step('cancel: A makes a second offer, then cancels all its open offers (one prompt); B cannot take it');
-  const m = await signMake(OFFER_LIFETIME_SECONDS);
+  const m = await signMake(CANCEL_MAKE_LIFETIME);
   const { t, offer } = await postMake('open-swap A (to cancel)', m);
   if (!offer) throw new Error(`the second make failed: ${JSON.stringify(t.job.error)}`);
   state.cancelledOffer = offer;
@@ -1203,10 +1207,14 @@ async function cancel() {
   if (BigInt(c.authNonce.after) !== BigInt(c.authNonce.before) + 1n || !c.encKeyUnchanged)
     throw new Error(`the cancel did not move the nonce by one with the key kept: ${json(c)}`);
   say(`cancelled: A's nonce ${c.authNonce.before} → ${c.authNonce.after}, key unchanged`);
-  // The cancelled offer is still on the (mock) book, but its approval is dead: B's take cannot settle.
-  out.takeOfCancelled = await takeMustFail(offer, 'take B (cancelled offer)');
-  say(`B's take of the cancelled offer: ${json(out.takeOfCancelled)}`);
+  out.kernelAfter = await kernelView(offer.offerId, offer.giveColor);
   put('cancel', out);
+  // The cancelled offer may still be on the book, but its approval is dead: B's take cannot settle.
+  if (CANCEL_TAKE_CHECK) {
+    out.takeOfCancelled = await takeMustFail(offer, 'take B (cancelled offer)');
+    say(`B's take of the cancelled offer: ${json(out.takeOfCancelled)}`);
+    put('cancel', out);
+  }
 }
 
 async function expired() {

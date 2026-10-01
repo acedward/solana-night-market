@@ -5,6 +5,10 @@
 //   FUNDER_SEED_FILE=<a funded local seed file> MIDNIGHT_MANAGED_PATH=<key volume> \
 //   FAUCETS=twUSDC:6,twBTC:8 bun test/stack/b3/deploy-faucets.ts > tokens.json
 //
+// AA 00047 P9.I: FAUCET_BUNDLE=<a compiled mint-test-tokens v2 `unshielded-token.compact` bundle>
+// PRIVACY=unshielded deploys UNSHIELDED faucets the same way (same constructor), so the harness can
+// give an account an unshielded balance of a listed token (test/stack/p6/fund-unshielded.ts).
+//
 // Runs in a Bun container on the stack's network (test/stack/b3/run-local.sh). The seed is a LOCAL
 // development seed (the localnet's genesis wallets); only public values are printed.
 
@@ -26,6 +30,7 @@ const log = createLogger({ level: 'warn' }, { service: 'deploy-faucets' });
 const managedPath = env('MIDNIGHT_MANAGED_PATH', '/app/vendor/passport/contract/contracts/managed');
 const indexerUrl = env('MIDNIGHT_INDEXER_URL', 'http://indexer:8088/api/v4/graphql');
 const indexerWsUrl = env('MIDNIGHT_INDEXER_WS_URL', 'ws://indexer:8088/api/v4/graphql/ws');
+const privacy = env('PRIVACY', 'shielded') as 'shielded' | 'unshielded';
 const faucets = env('FAUCETS', 'twUSDC:6,twBTC:8')
   .split(',')
   .map((s) => {
@@ -60,7 +65,7 @@ const opened = await openFacadeWallet(
   { feeBlocksMargin: 20 },
 );
 try {
-  const bundle = join(managedPath, 'faucet');
+  const bundle = process.env.FAUCET_BUNDLE ?? join(managedPath, 'faucet');
   const mod = (await import(pathToFileURL(join(bundle, 'contract', 'index.js')).href)) as { Contract: unknown };
   const { CompiledContract } = await import('@midnight-ntwrk/compact-js');
   const { NodeZkConfigProvider } = await import('@midnight-ntwrk/midnight-js-node-zk-config-provider');
@@ -95,7 +100,7 @@ try {
     tokens.push({
       symbol: f.symbol,
       decimals: f.decimals,
-      privacy: 'shielded',
+      privacy,
       midnightColour: colour,
       contract: address,
       domainSeparator,

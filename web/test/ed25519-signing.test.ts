@@ -92,7 +92,9 @@ describe('ed25519ActionSigning (the browser side of the arm)', () => {
     expect(auth.useCounter).toBe('0');
   });
 
-  it("finds the device's use counter with the arm's own entry derivation", async () => {
+  // The last case derives every entry up to the scan's limit (4,096) through the contract runtime:
+  // about 5 s on a CI runner, so it gets its own timeout (it timed out at 5.1-5.3 s on 2026-10-01).
+  it("finds the device's use counter with the arm's own entry derivation", { timeout: 30_000 }, async () => {
     const { signer } = naclWallet(3);
     const signing = ed25519ActionSigning(signer, display);
     const { ed25519DeviceForKey } = await import('@nightmarket/core/passport');

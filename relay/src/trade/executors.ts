@@ -14,7 +14,7 @@
 // build a call); neither action spends the sponsor's DUST. The coin the give is paid from is the
 // call's private state for this job only, and is wiped when the job ends (Q5).
 
-import type { OpenSwapResult, TakeResult } from '@nightmarket/core';
+import type { ExpiryLimits, OpenSwapResult, TakeResult } from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
 import type { Logger } from '../log.js';
@@ -25,6 +25,7 @@ import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
 import { PublicError, type JobContext, type JobExecutor } from '../queue/jobs.js';
 import type { SponsorSession } from '../sponsor/session.js';
 import { AccountOfferError, proveGuaranteedOffer, type AccountOfferCall } from './account-offer.js';
+import { assertSignedExpiryOpen } from './expiry.js';
 import { fetchOfferBytes, publishOffer, waitOfferStatus } from './publish.js';
 import { TakeRefusal, checkMakerOffer, mergeForSettlement, submitSettlement } from './settle.js';
 
@@ -50,6 +51,10 @@ export interface TradeDeps {
   timings?: { publishRetryMs?: number; statusPollMs?: number; statusTimeoutMs?: number };
   /** Told when the batcher refuses a take (health shows the last one, plan P4-A). */
   onBatcherRefusal?: (httpStatus: number) => void;
+  /** The limits on a call's signed expiry (audit C6; default: packages/core's). */
+  expiry?: ExpiryLimits;
+  /** For tests: Unix seconds now. */
+  now?: () => number;
 }
 
 /**
@@ -94,6 +99,8 @@ async function recheck<A extends TradeAction>(deps: TradeDeps, action: A, raw: u
     ctx.log.info('trade call no longer valid at run time', { code: check.code });
     throw new PublicError(check.code === 'expired' ? 'stale-authorisation' : 'unauthorised', check.reason);
   }
+  // The signed expiry, again now that the job runs (audit C6): no proof for an approval that ended.
+  assertSignedExpiryOpen(action, check.payload.validUntil, deps.expiry, deps.now);
   return { rt, check };
 }
 

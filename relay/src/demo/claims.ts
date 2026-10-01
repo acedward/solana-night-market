@@ -11,11 +11,23 @@
 // full disk) is reported as what it is, with the path, the error code, the relay's uid/gid and the
 // fix (a data dir owned by another uid once looked like a lock conflict: AA 00047 P7.4).
 //
-// A claim is RESERVED at admission (before any queue slot), CONFIRMED when its job succeeds and
-// RELEASED when the route refuses it after admission or its job fails, so a failed pack can be
-// claimed again. A reservation found on disk at start (the relay stopped mid-job) is released, with
-// a warning: faucet tokens cost nothing, so a second attempt is harmless, and a stuck reservation
-// would lock the key out for good.
+// The claim's life (AA 00047 P9, audit C8: F-B7, F-B8, F-B9):
+//   - RESERVED at admission (before any queue slot). The reservation is the day's charge: the record
+//     keeps its time `at` for good, so the daily cap counts it whatever happens next;
+//   - each pack token that lands is recorded at once (`delivered`, by colour, with its transaction
+//     ids), so a pack that fails part-way never erases the quota of the tokens already minted, and
+//     resuming it never mints those again;
+//   - CONFIRMED (`claimed`) when every token landed;
+//   - when the job fails, the record stays as `partial` (resumable: the same key may claim again to
+//     get the REST of the pack, to the same account, without a new daily charge), and its failure is
+//     counted; after `maxAttempts` failures the key is refused. Only a reservation the route refused
+//     before any job ran (a full queue) is RELEASED: nothing was spent;
+//   - a reservation found on disk at start (the relay stopped mid-job) is kept as `partial`: its
+//     tokens may have landed, so its charge is kept and the rest can be resumed.
+// Every change is written to disk FIRST and only then applied in memory: a write that fails leaves
+// memory as it was (a reservation that could not be written is refused, not kept as a phantom). The
+// store reads and recovers its file only AFTER it holds the lock (`lock()`), so a second relay
+// refused the lock never rewrites a live relay's file.
 //
 // What it holds is public: the owner key (its Solana address is public), the account, the times and
 // the transaction ids.
@@ -37,23 +49,57 @@ import { dirname, join } from 'node:path';
 const DAY_SECONDS = 86_400;
 const FORMAT = 'night-market-demo-token-claims/1';
 
+/** The transaction ids of one pack token that landed (the faucet path's `MintOutcome`). */
+export interface DeliveredToken {
+  mintAndDeposit?: string;
+  mint?: string;
+  deposit?: string;
+}
+
 export interface ClaimRecord {
   /** The owner's device key (64 lowercase hex). */
   owner: string;
   /** The account the pack went to (64 lowercase hex). */
   account: string;
-  state: 'reserved' | 'claimed';
-  /** Unix seconds of the reservation. */
+  /** `reserved`: a job is (or was, when found at start) delivering it; `partial`: a job failed
+   *  part-way (resumable); `claimed`: every token landed. */
+  state: 'reserved' | 'partial' | 'claimed';
+  /** Unix seconds of the FIRST reservation: the day's charge, kept for good. */
   at: number;
   /** Unix seconds of the confirmation. */
   claimedAt?: number;
   /** Public transaction ids of the pack. */
   txs?: string[];
+  /** The pack tokens that landed so far, by colour (64 hex) (audit C8 / F-B7). */
+  delivered?: Record<string, DeliveredToken>;
+  /** Attempts that failed while minting (a relay stopped mid-job does not count). */
+  failures?: number;
+}
+
+/** A reservation the executor drives: record each token as it lands, then confirm or fail. */
+export interface ClaimHandle {
+  /** The tokens that already landed (a resumed claim), by colour. */
+  readonly delivered: Readonly<Record<string, DeliveredToken>>;
+  /** Whether this reservation resumes an earlier partial claim. */
+  readonly resumed: boolean;
+  /** Record one token that landed. Throws when the store cannot write (the job must stop). */
+  progress(colour: string, txs: DeliveredToken): void;
+  /** Every token landed. Throws when the store cannot write. */
+  confirm(txs: string[]): void;
+  /** The job failed: keep the record (resumable); count the failure when `counted` (a token was
+   *  being minted: the attempt spent DUST and prover time). Never throws. */
+  fail(counted?: boolean): void;
+  /** The route refused the request before any job ran: undo the reservation. Never throws. */
+  release(): void;
 }
 
 export type ReserveOutcome =
-  | { ok: true; release: () => void; confirm: (txs: string[]) => void }
-  | { ok: false; code: 'already-claimed' | 'daily-cap'; reason: string };
+  | ({ ok: true } & ClaimHandle)
+  | {
+      ok: false;
+      code: 'already-claimed' | 'daily-cap' | 'attempts-exhausted' | 'store-unavailable';
+      reason: string;
+    };
 
 /**
  * Why the claims store cannot start: its lock is `held` by another live relay, or the data dir
@@ -75,28 +121,50 @@ export interface ClaimsOptions {
   /** The JSON file (null: in memory only, for tests and keyless development). */
   file: string | null;
   dailyCap: number;
+  /** Failed attempts after which a key's partial claim is not resumed (default 3). */
+  maxAttempts?: number;
   now?: () => number;
-  /** Told about a reservation released at start. */
+  /** Told about reservations found at start (kept as resumable partial claims). */
   onRecovered?: (count: number) => void;
+  /** Told when a failure could not be written (memory and disk then differ until the next write). */
+  onWriteFailed?: (what: string, error: unknown) => void;
 }
 
 export class DemoTokenClaims {
   private readonly now: () => number;
   private readonly byOwner = new Map<string, ClaimRecord>();
+  /** Owners with a reservation admitted and not yet finished (memory only). */
+  private readonly active = new Set<string>();
   private lockFile: string | null = null;
 
   constructor(private readonly o: ClaimsOptions) {
     this.now = o.now ?? (() => Math.floor(Date.now() / 1000));
-    if (o.file) this.load(o.file);
+    // Nothing is read here: a file-backed store loads (and recovers) its file in `lock()`, once it
+    // holds the data dir's lock (audit C8 / F-B8).
+  }
+
+  private get maxAttempts(): number {
+    return this.o.maxAttempts ?? 3;
   }
 
   /**
-   * Take the data dir's lock (one relay per claims file). Throws a ClaimsStoreError: `held` when
-   * another live process holds it, `filesystem` when the lock cannot be created at all.
+   * Take the data dir's lock (one relay per claims file), THEN read the claims file and recover it.
+   * Throws a ClaimsStoreError: `held` when another live process holds the lock (the file is not
+   * touched), `filesystem` when the lock or the file cannot be used.
    */
   lock(): void {
     if (!this.o.file || this.lockFile) return;
-    const path = `${this.o.file}.lock`;
+    this.takeLock(this.o.file);
+    try {
+      this.load(this.o.file);
+    } catch (e) {
+      this.unlock();
+      throw e;
+    }
+  }
+
+  private takeLock(file: string): void {
+    const path = `${file}.lock`;
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     } catch (e) {
@@ -144,7 +212,14 @@ export class DemoTokenClaims {
     this.lockFile = null;
   }
 
+  /** Whether the store can be used: in memory, or file-backed and opened by `lock()`. */
+  get open(): boolean {
+    return !this.o.file || this.lockFile !== null;
+  }
+
   private load(file: string): void {
+    this.byOwner.clear();
+    this.active.clear();
     if (!existsSync(file)) return;
     let text: string;
     try {
@@ -156,42 +231,73 @@ export class DemoTokenClaims {
     if (parsed.format !== FORMAT || !Array.isArray(parsed.claims)) {
       throw new Error(`${file} is not a ${FORMAT} file`);
     }
+    const records = new Map<string, ClaimRecord>();
     let recovered = 0;
     for (const c of parsed.claims) {
       if (!/^[0-9a-f]{64}$/.test(c.owner) || !/^[0-9a-f]{64}$/.test(c.account)) continue;
       if (c.state === 'reserved') {
+        // The relay stopped mid-job: tokens may have landed. Keep the charge; resume the rest.
         recovered++;
+        records.set(c.owner, { ...c, state: 'partial' });
         continue;
       }
-      this.byOwner.set(c.owner, c);
+      records.set(c.owner, c);
     }
     if (recovered > 0) {
-      this.o.onRecovered?.(recovered);
       try {
-        this.persist();
+        this.writeFile([...records.values()]);
       } catch (e) {
         throw filesystemProblem('rewrite its claims file', file, e);
       }
+      this.o.onRecovered?.(recovered);
     }
+    for (const [k, v] of records) this.byOwner.set(k, v);
   }
 
-  private persist(): void {
+  private writeFile(claims: ClaimRecord[]): void {
     const file = this.o.file;
     if (!file) return;
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    const body = `${JSON.stringify({ format: FORMAT, claims: [...this.byOwner.values()] }, null, 1)}\n`;
+    const body = `${JSON.stringify({ format: FORMAT, claims }, null, 1)}\n`;
     const tmp = join(dirname(file), `.${process.pid}.${Date.now()}.claims.tmp`);
     const fd = openSync(tmp, 'w', 0o600);
     try {
-      writeSync(fd, body);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
+      try {
+        writeSync(fd, body);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, file);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
     }
-    renameSync(tmp, file);
   }
 
-  /** Claims (reserved or confirmed) in the last 24 hours. */
+  /**
+   * Write the store with `owner`'s record replaced by `next` (null: removed), and only when that
+   * succeeded apply it in memory (audit C8 / F-B9). Throws when the write fails; memory is unchanged.
+   */
+  private put(owner: string, next: ClaimRecord | null): void {
+    if (this.o.file) {
+      const claims: ClaimRecord[] = [];
+      let seen = false;
+      for (const [k, v] of this.byOwner) {
+        if (k !== owner) claims.push(v);
+        else {
+          seen = true;
+          if (next) claims.push(next);
+        }
+      }
+      if (!seen && next) claims.push(next);
+      this.writeFile(claims);
+    }
+    if (next) this.byOwner.set(owner, next);
+    else this.byOwner.delete(owner);
+  }
+
+  /** Claims (in any state) first reserved in the last 24 hours: the day's charges. */
   claimedToday(): number {
     const since = this.now() - DAY_SECONDS;
     let n = 0;
@@ -203,17 +309,39 @@ export class DemoTokenClaims {
     return Math.max(0, this.o.dailyCap - this.claimedToday());
   }
 
-  /** Whether a key has claimed (or is claiming). */
-  hasClaimed(owner: string): boolean {
-    return this.byOwner.has(owner.toLowerCase());
+  /** Whether a key has claimed, is claiming, or may not claim again (its attempts are spent). A
+   *  partial claim that can still be resumed is not "claimed": its owner may ask for the rest. */
+  hasClaimed(ownerRaw: string): boolean {
+    const owner = ownerRaw.replace(/^0x/, '').toLowerCase();
+    const r = this.byOwner.get(owner);
+    if (!r) return false;
+    return r.state === 'claimed' || this.active.has(owner) || (r.failures ?? 0) >= this.maxAttempts;
   }
 
-  /** Reserve the pack for `owner` → `account`: once per key, within the daily cap. Synchronous. */
+  /** Whether a key has a partial claim it may resume (already charged: the daily cap does not apply). */
+  isResumable(ownerRaw: string): boolean {
+    const owner = ownerRaw.replace(/^0x/, '').toLowerCase();
+    const r = this.byOwner.get(owner);
+    return !!r && r.state !== 'claimed' && !this.active.has(owner) && (r.failures ?? 0) < this.maxAttempts;
+  }
+
+  /** The record of a key (a copy), for operators and tests. */
+  record(ownerRaw: string): ClaimRecord | undefined {
+    const r = this.byOwner.get(ownerRaw.replace(/^0x/, '').toLowerCase());
+    return r ? structuredClone(r) : undefined;
+  }
+
+  /**
+   * Reserve the pack for `owner` → `account`: once per key, within the daily cap, or resume the
+   * key's partial claim (same account, no new charge). Synchronous. Nothing is kept unless it was
+   * written.
+   */
   reserve(ownerRaw: string, accountRaw: string): ReserveOutcome {
+    if (!this.open) throw new Error('the demo-token claims store is not open: call lock() first');
     const owner = ownerRaw.replace(/^0x/, '').toLowerCase();
     const account = accountRaw.replace(/^0x/, '').toLowerCase();
     const prior = this.byOwner.get(owner);
-    if (prior) {
+    if (prior && (prior.state === 'claimed' || this.active.has(owner))) {
       return {
         ok: false,
         code: 'already-claimed',
@@ -223,34 +351,89 @@ export class DemoTokenClaims {
             : 'this wallet is already receiving its demo tokens',
       };
     }
-    if (this.claimedToday() >= this.o.dailyCap) {
+    if (prior && prior.account !== account) {
+      return {
+        ok: false,
+        code: 'already-claimed',
+        reason: "this wallet's demo tokens went to another account; claim the rest there",
+      };
+    }
+    if (prior && (prior.failures ?? 0) >= this.maxAttempts) {
+      return {
+        ok: false,
+        code: 'attempts-exhausted',
+        reason: `delivering this wallet's demo tokens failed ${prior.failures} times; the market will not try again`,
+      };
+    }
+    if (!prior && this.claimedToday() >= this.o.dailyCap) {
       return {
         ok: false,
         code: 'daily-cap',
         reason: "the market has given out today's demo tokens; try again tomorrow",
       };
     }
-    const record: ClaimRecord = { owner, account, state: 'reserved', at: this.now() };
-    this.byOwner.set(owner, record);
-    this.persist();
-    let settled = false;
+    const reserved: ClaimRecord = prior
+      ? { ...prior, state: 'reserved' }
+      : { owner, account, state: 'reserved', at: this.now() };
+    try {
+      this.put(owner, reserved);
+    } catch (e) {
+      this.o.onWriteFailed?.('reserve', e);
+      return {
+        ok: false,
+        code: 'store-unavailable',
+        reason: 'the market cannot record demo-token claims right now; try again later',
+      };
+    }
+    this.active.add(owner);
+    return this.handle(owner, prior ?? null);
+  }
+
+  private handle(owner: string, prior: ClaimRecord | null): { ok: true } & ClaimHandle {
+    let finished = false;
+    const current = () => this.byOwner.get(owner)!;
+    const end = () => {
+      finished = true;
+      this.active.delete(owner);
+    };
     return {
       ok: true,
-      release: () => {
-        if (settled) return;
-        settled = true;
-        if (this.byOwner.get(owner) === record) {
-          this.byOwner.delete(owner);
-          this.persist();
-        }
+      resumed: prior !== null,
+      get delivered() {
+        return { ...(current()?.delivered ?? {}) };
+      },
+      progress: (colour: string, txs: DeliveredToken) => {
+        if (finished) return;
+        const r = current();
+        this.put(owner, { ...r, delivered: { ...(r.delivered ?? {}), [colour.toLowerCase()]: { ...txs } } });
       },
       confirm: (txs: string[]) => {
-        if (settled) return;
-        settled = true;
-        record.state = 'claimed';
-        record.claimedAt = this.now();
-        record.txs = [...txs];
-        this.persist();
+        if (finished) return;
+        const r = current();
+        this.put(owner, { ...r, state: 'claimed', claimedAt: this.now(), txs: [...txs] });
+        end();
+      },
+      fail: (counted = true) => {
+        if (finished) return;
+        const r = current();
+        try {
+          this.put(owner, { ...r, state: 'partial', failures: (r.failures ?? 0) + (counted ? 1 : 0) });
+        } catch (e) {
+          // Memory keeps the record (it was written as reserved); a restart turns it partial.
+          this.o.onWriteFailed?.('fail', e);
+        }
+        end();
+      },
+      release: () => {
+        if (finished) return;
+        try {
+          // A new reservation goes; a resumed one returns to what it was. Nothing ran, nothing landed.
+          this.put(owner, prior);
+        } catch (e) {
+          // Memory keeps the reservation as written; it is resumable (not active) until a restart.
+          this.o.onWriteFailed?.('release', e);
+        }
+        end();
       },
     };
   }

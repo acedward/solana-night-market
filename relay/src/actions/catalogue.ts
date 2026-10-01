@@ -27,8 +27,10 @@ import {
 
 import type { AuthKind } from '../auth/verifiers.js';
 import type { AdmissionCheck } from './admission.js';
+import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import { expiryAdmission } from '../trade/expiry.js';
 
 export interface ActionDefinition {
   action: RelayActionName;
@@ -144,7 +146,8 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
 
 /**
  * The catalogue with the trade executors added: making an offer (`open-swap`) and taking one
- * (`take`), each authorised by the swap call's OWN signature (one prompt).
+ * (`take`), each authorised by the swap call's OWN signature (one prompt), and admitted only inside
+ * the call's signed expiry (AA 00047 P9, audit C6: ../trade/expiry.ts).
  */
 export function withTrade(
   map: Map<RelayActionName, ActionDefinition>,
@@ -152,8 +155,18 @@ export function withTrade(
 ): Map<RelayActionName, ActionDefinition> {
   const set = (action: RelayActionName, patch: Partial<ActionDefinition>) =>
     map.set(action, { ...map.get(action)!, ...patch });
-  set('open-swap', { auth: 'passport-call', payload: OpenSwapPayloadSchema, executor: openSwapExecutor(deps) });
-  set('take', { auth: 'passport-call', payload: TakePayloadSchema, executor: takeExecutor(deps) });
+  set('open-swap', {
+    auth: 'passport-call',
+    payload: OpenSwapPayloadSchema,
+    admit: expiryAdmission('open-swap', deps.expiry, deps.now),
+    executor: openSwapExecutor(deps),
+  });
+  set('take', {
+    auth: 'passport-call',
+    payload: TakePayloadSchema,
+    admit: expiryAdmission('take', deps.expiry, deps.now),
+    executor: takeExecutor(deps),
+  });
   return map;
 }
 
@@ -172,5 +185,17 @@ export function withDemoTokens(
     admit: demo.admit,
     executor: demo.executor,
   });
+  return map;
+}
+
+/**
+ * The catalogue with registration capped (AA 00047 P9, audit C4: ./registration-caps.ts): a global
+ * and a per-client daily cap, and at most a few registrations queued or running at once.
+ */
+export function withRegistrationCaps(
+  map: Map<RelayActionName, ActionDefinition>,
+  caps: RegistrationCaps,
+): Map<RelayActionName, ActionDefinition> {
+  map.set('register', { ...map.get('register')!, admit: registrationAdmission(caps) });
   return map;
 }

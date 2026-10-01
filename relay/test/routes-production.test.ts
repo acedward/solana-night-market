@@ -33,7 +33,9 @@ import {
 } from '@nightmarket/core';
 
 import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
-import { accountCatalogue, withDemoTokens, withTrade } from '../src/actions/catalogue.js';
+import { accountCatalogue, withDemoTokens, withRegistrationCaps, withTrade } from '../src/actions/catalogue.js';
+import { FailureBudget } from '../src/actions/failure-budget.js';
+import { RegistrationCaps } from '../src/actions/registration-caps.js';
 import { demoTokens } from '../src/demo/action.js';
 import { DemoTokenClaims } from '../src/demo/claims.js';
 import { createApp } from '../src/app.js';
@@ -100,7 +102,12 @@ function productionRelay(
   const rt = fakeAccountRuntime(ACCOUNT, [device.calls.deviceKey], AUTH_NONCE);
   const sponsor = opts.sponsor ?? new CountingSponsor();
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
-  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxNonces);
+  const nonces = new NonceStore(
+    config.limits.nonceTtlSeconds,
+    config.limits.maxNonces,
+    undefined,
+    config.limits.maxNoncesPerClient,
+  );
   const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
   const entitlements = testEntitlements({ maxPerAccountPerDay: opts.appendsPerDay ?? 20 });
   const catalogue = withTrade(
@@ -122,9 +129,12 @@ function productionRelay(
       kernelUrl: 'http://kernel.test',
       batcherUrl: 'http://batcher.test',
       replay,
+      expiry: config.expiry,
       log,
     },
   );
+  // As main.ts (AA 00047 P9, audit C4): registration caps and the failure budget.
+  withRegistrationCaps(catalogue, new RegistrationCaps(config.registration));
   const claims = new DemoTokenClaims({ file: null, dailyCap: 100 });
   withDemoTokens(
     catalogue,
@@ -149,6 +159,7 @@ function productionRelay(
     nonces,
     queue,
     catalogue,
+    failures: new FailureBudget(config.failureBudget),
     sponsor,
     health,
     chain: notImplementedChainReader,
@@ -198,7 +209,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
     case 'withdraw-unshielded':
       return { recipient: '44'.repeat(32), color: COLOUR_A, amount, authNonce: a } satisfies WithdrawUnshieldedPayload;
     case 'demo-tokens':
-      return {};
+      // The device's live use counter (AA 00047 P9, audit C8 / F-B10): the fake account's is 0.
+      return { useCounter: '0' };
     case 'cancel-offers':
       return { newKey: (0xe0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies CancelOffersPayload;
     case 'open-swap':
@@ -211,7 +223,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
         wantNonce: '11'.repeat(32),
         wantEntry: '22'.repeat(192),
         changeEntry: '00'.repeat(192),
-        validUntil: '0',
+        // A real signed expiry (AA 00047 P9, audit C6): a make an hour ahead at most, a take minutes.
+        validUntil: String(Math.floor(Date.now() / 1000) + (action === 'take' ? 300 : 1800)),
         coin: { nonce: '33'.repeat(32), color: COLOUR_A, value: '3000000', mtIndex: '9' },
         authNonce: a,
       };
@@ -240,7 +253,7 @@ async function body(r: Relay, action: RelayActionName, t: Tamper = {}) {
   const owner = t.owner ?? signer;
   const account = action === 'register' ? undefined : ACCOUNT;
   // demo-tokens is claimed once per key: a variant `n` is a different key's claim in these tests
-  // only where the test says so; its body is always empty.
+  // only where the test says so; its body always names the device's use counter.
   if (KIND[action] === 'relay-action') {
     const payload = payloadFor(action, t.n);
     const nonce =

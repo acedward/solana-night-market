@@ -30,7 +30,9 @@ import { join } from 'node:path';
 import {
   API_PATHS,
   KernelClient,
+  OFFER_LIFETIME_SECONDS,
   PROFILES,
+  TAKE_LIFETIME_SECONDS,
   buildRelayActionMessage,
   bytesToHex,
   hexToBytes,
@@ -363,10 +365,12 @@ async function demo(who: 'A' | 'B') {
   if (info.claimed) {
     say('already claimed');
   } else {
-    const env = await envelope(who, 'demo-tokens', account, {});
+    // The claim names the device's live use counter (AA 00047 P9, audit C8 / F-B10).
+    const counter = { useCounter: useCounter(who, (await readState(account)).s).toString(10) };
+    const env = await envelope(who, 'demo-tokens', account, counter);
     const r = await post('demo-tokens', {
       account,
-      payload: {},
+      payload: counter,
       auth: { message: env.message, signature: env.signature },
     });
     if (r.status !== 202 || !r.body.job) throw new Error(`demo-tokens refused: ${r.status} ${JSON.stringify(r.body)}`);
@@ -384,10 +388,11 @@ async function demo(who: 'A' | 'B') {
     put(`demo${who}`, out);
   }
   if (who === 'A') {
-    const again = await envelope(who, 'demo-tokens', account, {});
+    const counter = { useCounter: useCounter(who, (await readState(account)).s).toString(10) };
+    const again = await envelope(who, 'demo-tokens', account, counter);
     const r2 = await post('demo-tokens', {
       account,
-      payload: {},
+      payload: counter,
       auth: { message: again.message, signature: again.signature },
     });
     out.secondClaim = { status: r2.status, code: r2.body.error?.code };
@@ -427,7 +432,8 @@ async function make() {
     wantNonce: bytesToHex(want.nonce),
     wantEntry: bytesToHex(entries.wantEntry),
     changeEntry: bytesToHex(entries.changeEntry),
-    validUntil: '0',
+    // A real signed expiry (AA 00047 P9, audit C6): the make lives an hour.
+    validUntil: String(Math.floor(Date.now() / 1000) + OFFER_LIFETIME_SECONDS),
     coin: { nonce: held.nonce, color: held.color, value: held.value, mtIndex: held.mtIndex! },
     authNonce: s.authNonce,
   };
@@ -547,7 +553,8 @@ async function take() {
     wantNonce: bytesToHex(want.nonce),
     wantEntry: bytesToHex(entries.wantEntry),
     changeEntry: bytesToHex(entries.changeEntry),
-    validUntil: '0',
+    // A real signed expiry (AA 00047 P9, audit C6): a take lives minutes.
+    validUntil: String(Math.floor(Date.now() / 1000) + TAKE_LIFETIME_SECONDS),
     coin: { nonce: held.nonce, color: held.color, value: held.value, mtIndex: held.mtIndex! },
     authNonce: s.authNonce,
   };

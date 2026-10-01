@@ -275,27 +275,35 @@ describe('the funding lock', () => {
 });
 
 describe('nonces', () => {
+  /** A nonce the store issued (the test fails if it refused). */
+  const issued = (store: NonceStore, client?: string) => {
+    const r = store.issue(client);
+    if (!r.ok) throw new Error(`refused: ${r.refused}`);
+    return r;
+  };
+
   it('are single use, expire, and are forgotten by a new store (a restart)', () => {
     let now = 100;
     const store = new NonceStore(60, 3, () => now);
-    const { nonce, expiresAt } = store.issue();
+    const { nonce, expiresAt } = issued(store);
     expect(nonce).toMatch(/^0x[0-9a-f]{64}$/);
     expect(expiresAt).toBe(160);
     expect(store.consume(nonce)).toBe('ok');
     expect(store.consume(nonce)).toBe('used');
-    const late = store.issue().nonce;
+    const late = issued(store).nonce;
     now = 161;
     expect(store.consume(late)).toBe('unknown');
-    expect(new NonceStore(60, 3, () => now).consume(store.issue().nonce)).toBe('unknown');
+    expect(new NonceStore(60, 3, () => now).consume(issued(store).nonce)).toBe('unknown');
   });
 
-  it('keeps at most the configured number outstanding', () => {
+  it('keeps at most the configured number outstanding, refusing more instead of evicting (audit C9)', () => {
     const store = new NonceStore(60, 2);
-    const first = store.issue().nonce;
-    store.issue();
-    store.issue();
-    expect(store.consume(first)).toBe('unknown');
+    const first = issued(store).nonce;
+    issued(store);
+    expect(store.issue()).toMatchObject({ ok: false, refused: 'full' });
     expect(store.size.issued).toBe(2);
+    // The outstanding nonce was not pushed out: it still works.
+    expect(store.consume(first)).toBe('ok');
   });
 });
 

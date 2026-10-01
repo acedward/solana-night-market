@@ -235,6 +235,11 @@ export class MockRelay {
       if (!this.nonces.delete(m.nonce)) return 'unknown-nonce';
       if (action === 'demo-tokens' && (m.account !== `0x${ACCOUNT}` || m.owner !== this.deviceKey))
         return 'wrong-account';
+      // The claim names the device's live use counter (AA 00047 P9, audit C8 / F-B10).
+      if (action === 'demo-tokens') {
+        const counter = payload.useCounter;
+        if (!counter || !/^[0-9]+$/.test(counter) || BigInt(counter) !== this.useCounter) return 'wrong-signer';
+      }
       return solanaRelayActionScheme.verify(m, hexToBytes(auth.signature, 64)) ? 'ok' : 'bad-signature';
     }
     const pa = body.passportAuth as { owner: string; signature: string; useCounter: string } | undefined;

@@ -200,11 +200,12 @@ export function signedValidUntil(kind: 'make' | 'take', nowMs: number): string {
   return String(Math.floor(nowMs / 1000) + lifetime);
 }
 
-/** "2026-10-01 15:04 UTC": a signed deadline (unix seconds) as people read it. */
+/** "2026-10-01 15:04:05 UTC": a signed deadline (unix seconds) as people read it, the way the F3 v2
+ *  wallet text renders it (P9.C `Expires YYYY-MM-DD hh:mm:ss UTC`). */
 export function deadlineText(validUntil: string | bigint | number): string {
   const s = Number(validUntil);
   if (!Number.isFinite(s) || s <= 0) return 'never';
-  return `${new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  return `${new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
 }
 
 /** The kernel's lifecycle words, plus what only the browser can know. */

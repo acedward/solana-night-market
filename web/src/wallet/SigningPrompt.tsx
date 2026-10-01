@@ -58,17 +58,21 @@ function SignFactsList({ facts }: { facts: SignFacts }) {
             <dt>{f.label}</dt>
             {f.kind === 'amount' ? (
               <dd>
-                <span className="num" data-testid="sign-fact-base-units">
-                  {f.baseUnits}
-                </span>{' '}
-                base units of token{' '}
-                <span className="mono break" data-testid="sign-fact-token-id">
-                  {f.tokenId}
+                <span className="fact-line">
+                  Base units{' '}
+                  <span className="num" data-testid="sign-fact-base-units">
+                    {f.baseUnits}
+                  </span>
                 </span>
-                <br />
-                <span className="xsmall muted" data-testid="sign-fact-site-label">
+                <span className="fact-line">
+                  Token{' '}
+                  <span className="mono break" data-testid="sign-fact-token-id">
+                    {f.tokenId}
+                  </span>
+                </span>
+                <span className="fact-line xsmall muted" data-testid="sign-fact-site-label">
                   {f.siteLabel
-                    ? `This site labels it: ${f.siteLabel} (a name and decimals the site shows, not something the contract checks).`
+                    ? `This site labels it: ${f.siteLabel} (the site's name and decimals; the contract does not check them).`
                     : 'This site does not list this token.'}
                 </span>
               </dd>

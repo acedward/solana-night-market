@@ -39,7 +39,7 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
     expect(f.facts).toEqual([
       { kind: 'amount', label: 'You give', baseUnits: '1000000', tokenId: twBTC, siteLabel: '0.01 twBTC' },
       { kind: 'amount', label: 'You get', baseUnits: '10000000', tokenId: twUSDC, siteLabel: '10.00 twUSDC' },
-      { kind: 'text', label: 'Valid until', value: '2026-10-01 15:25 UTC' },
+      { kind: 'text', label: 'Expires', value: '2026-10-01 15:25:12 UTC' },
       { kind: 'text', label: 'Paid from one coin of', value: '10000000 base units', mono: true },
     ]);
   });
@@ -58,7 +58,7 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
 
   it('shows an unsigned deadline as never (the page no longer sends one)', () => {
     const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap({ validUntil: '0' }) }, tokens)!;
-    expect(f.facts[2]).toEqual({ kind: 'text', label: 'Valid until', value: 'never (no expiry)' });
+    expect(f.facts[2]).toEqual({ kind: 'text', label: 'Expires', value: 'never (no expiry)' });
   });
 
   it('lists a withdrawal’s amount and recipient, and a cancel’s unchanged key', () => {
@@ -91,7 +91,7 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
       { kind: 'gated', request: cancelOffersRequest({ newKey: 'ab'.repeat(32), authNonce: '5' }) },
       tokens,
     )!;
-    expect(c.title).toBe('Cancel your open offers');
+    expect(c.title).toBe('Cancel all open offers');
     expect(c.facts[1]).toEqual({
       kind: 'text',
       label: 'Encryption key (unchanged)',

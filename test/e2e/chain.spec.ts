@@ -142,8 +142,8 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     // The wallet's text carries it (P9.C renders it as a date; the 451f761 client prints the seconds).
     expect(phantom.requests[0]!.text).toContain(`Expires`);
     expect(phantom.requests[0]!.text).not.toMatch(/Expires +never/);
-    const readable = new Date(until * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-    await expect(page.getByTestId('my-trade-expiry')).toHaveText(`until ${readable.slice(11)}`);
+    const readable = new Date(until * 1000).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+    await expect(page.getByTestId('my-trade-expiry')).toHaveText(`until ${readable.slice(11, 16)} UTC`);
     await expect(page.getByTestId('my-trade-expiry')).toHaveAttribute('title', `Expires ${readable}`);
     await expect(page.getByTestId('live-offer-banner')).toContainText(`until ${readable} (the expiry you approved)`);
 
@@ -264,8 +264,8 @@ test('the signing panel lists what the contract enforces: base units and full to
   const get = facts.locator('[data-testid=sign-fact][data-label="You get"]');
   await expect(get.getByTestId('sign-fact-base-units')).toHaveText('3000000000');
   await expect(get.getByTestId('sign-fact-token-id')).toHaveText(COLOUR.twUSDC);
-  await expect(facts.locator('[data-testid=sign-fact][data-label="Valid until"]')).toContainText(
-    /\d{4}-\d\d-\d\d \d\d:\d\d UTC/,
+  await expect(facts.locator('[data-testid=sign-fact][data-label="Expires"]')).toContainText(
+    /\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC/,
   );
   release();
   await expect(page.getByTestId('sign-prompt')).toHaveCount(0);

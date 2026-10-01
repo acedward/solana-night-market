@@ -2679,6 +2679,9 @@ select.input option {
 .sign-facts-list dt {
   color: var(--muted);
 }
+.sign-facts-list .fact-line {
+  display: block;
+}
 .sign-facts-list dd {
   margin: 0;
   color: var(--ink);

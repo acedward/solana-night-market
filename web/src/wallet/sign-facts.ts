@@ -6,10 +6,12 @@
 // shows the base units and the full token id, and the site's reading ("this site labels it: 10.00
 // twUSDC") marked as the site's. Recipients and deadlines are shown in full too.
 //
-// TODO(P9.I): lane P9.C changes the wallet's own F3 text to the B′ layout (base units, the token id,
-// and the site's label marked as such; plan P9.C (2), (4)). When its client API and renderer are
-// published in the plan's Evidence log, align this panel's wording with that text and add a guard
-// that every amount fact below appears verbatim in the signed text (refuse to ask the wallet if not).
+// The wording follows lane P9.C's F3 v2 wallet text (plan Evidence log "P9.C client API"): per amount
+// `Base units <n>`, `Token <64 hex>`, `This site labels it: <amount> <symbol>`; the deadline
+// `Expires YYYY-MM-DD hh:mm:ss UTC`; a same-key rotate is "Cancel all open offers".
+// TODO(P9.I): once vendor/passport is re-pinned to the F3 v2 client, render the site label with the
+// client's `renderSiteLabel` (byte-identical to the wallet's line) and refuse to ask the wallet when
+// an amount fact here does not appear verbatim in the signed text.
 
 import { deadlineText, formatUnits, type TokenRegistry } from '@nightmarket/core';
 import type { AuthRequest } from '@nightmarket/core/passport';
@@ -88,13 +90,13 @@ function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
       };
     case 'rotateEncKey':
       return {
-        title: 'Cancel your open offers',
+        title: 'Cancel all open offers',
         facts: [
           {
             kind: 'text',
             label: 'What it does',
             value:
-              "Keeps your account's encryption key and moves its approval counter: every offer or approval signed before can never be used.",
+              "Your key does not change; the account's approval counter moves, so every offer or approval signed before can never be used.",
           },
           { kind: 'text', label: 'Encryption key (unchanged)', value: hex(r.newKey), mono: true },
         ],
@@ -115,7 +117,7 @@ export function signFacts(call: CallToAuthorise, tokens: TokenRegistry): SignFac
       amountFact('You get', BigInt(p.wantAmount), p.wantColor, tokens),
       {
         kind: 'text',
-        label: 'Valid until',
+        label: 'Expires',
         value: BigInt(p.validUntil) === 0n ? 'never (no expiry)' : deadlineText(p.validUntil),
       },
       { kind: 'text', label: 'Paid from one coin of', value: `${p.coin.value} base units`, mono: true },

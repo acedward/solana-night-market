@@ -14,6 +14,7 @@ import {
   formatShieldedAddress,
   formatUnshieldedAddress,
   hexToBytes,
+  holdingsByColour,
   payloadHash,
   type AccountStateView,
   type ActionRequest,
@@ -27,6 +28,7 @@ import {
   openEntryPortable,
   predictWithdrawChange,
   sealEntryPortable,
+  restoreEncKeyRequest,
   sendShieldedChangeNonce,
   withdrawRequest,
 } from '@nightmarket/core/passport';
@@ -37,11 +39,17 @@ import { testScheme } from '../../packages/core/test/fixtures/test-signing.js';
 import { exportFileText, importFile } from '../src/pages/LocalData.js';
 import {
   AccountCheckError,
+  CHANGE_PENDING,
+  JobFailedError,
   NEW_ACCOUNT_POLL_MS,
+  RESTORE_UNAVAILABLE,
   openAccount,
+  restoreEncryptionKey,
   secureChange,
   syncAccount,
+  unconfirmedNotes,
   unsecuredCoins,
+  verifiedAccount,
   withdrawToWallet,
   withdrawUnshieldedToWallet,
   type OperationEnv,
@@ -63,6 +71,8 @@ class FakeRelay {
   results: Record<string, Record<string, unknown>> = {};
   failNext: string | null = null;
   failCode = 'x';
+  /** What a job does on the chain once it succeeds (AA 00047 P10), by action. */
+  afterJob: Record<string, () => void | Promise<void>> = {};
   state: AccountStateView | null = null;
   entries: Array<string | null> = [];
   zswapActivity: ZswapActivity = { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 };
@@ -115,6 +125,7 @@ class FakeRelay {
         networkSalt: '5a'.repeat(32),
       };
     }
+    if (job.state === 'succeeded') await this.afterJob[action]?.();
     this.failNext = null;
     this.failCode = 'x';
     onUpdate(job);
@@ -642,7 +653,13 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const { localCoin } = await import('@nightmarket/core');
     const appendEntitlement = `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`;
     const changeOf = { spent: contractCoinCommitment(paidFrom, ACCOUNT), amount: '30000000' };
-    const r = await secureChange(e, ACCOUNT, { ...localCoin(change, ACCOUNT), appendEntitlement, changeOf });
+    // A change the chain shows (its leaf positioned it): only such a change is filed (AA 00047 P10, R2-5).
+    const r = await secureChange(e, ACCOUNT, {
+      ...localCoin(change, ACCOUNT),
+      mtIndex: '300',
+      appendEntitlement,
+      changeOf,
+    });
     expect(r.txId).toBe('ai1');
     expect(calls).toEqual(['authorise:appendInbox']);
     const payload = relay.submitted[0]!.request.payload as { entry: string; entitlement?: string };
@@ -738,5 +755,207 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const kept = unsecuredCoins(after);
     expect(kept.map((c) => c.nonce).sort()).toEqual(unsecured.map((c) => c.nonce).sort());
     for (const c of unsecured) expect(kept.find((k) => k.nonce === c.nonce)).toEqual(c);
+  });
+
+  // ── AA 00047 P10, the site lane of the round-2 fix pass (spec FR-004b "Round 2") ──────────────
+
+  // R2-5 / F-B2-2: a withdrawal's change used to be written down only after the relay reported
+  // success: a reported failure (or no answer at all) lost its description, though the relay may have
+  // landed it.
+  it('R2-5: writes the change down BEFORE the approval leaves the page; it survives a reported failure and a reload', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    let atSubmit: ReturnType<typeof readCoins> = [];
+    const submit = relay.submit.bind(relay);
+    relay.submit = async (a, r) => {
+      atSubmit = readCoins(e.store, e.scope, ACCOUNT);
+      return submit(a, r);
+    };
+    relay.failNext = 'the prover crashed';
+    relay.failCode = 'proof-failed';
+    await expect(
+      withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) }),
+    ).rejects.toBeInstanceOf(JobFailedError);
+    const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    const expected = predictWithdrawChange(paidFrom, 30_000_000n)!;
+    const record = {
+      ...expected,
+      origin: 'change',
+      inInbox: false,
+      mtIndex: null,
+      changeOf: { spent: contractCoinCommitment(paidFrom, ACCOUNT), amount: '30000000' },
+      pending: { authNonce: '7', input: paidFrom },
+    };
+    // Already there when the request went out: the input coin, the amount, the change, the signed nonce.
+    expect(atSubmit.find((c) => c.nonce === expected.nonce)).toMatchObject(record);
+    // A reload (a new store over the same browser storage) still holds it.
+    const reloaded = new LocalStore(storage);
+    expect(readCoins(reloaded, e.scope, ACCOUNT).find((c) => c.nonce === expected.nonce)).toMatchObject(record);
+    expectImportRoundTrip(e.store, e.scope);
+    // Pending: not in a balance, not spendable, not filed in the inbox.
+    expect(holdingsByColour(readCoins(e.store, e.scope, ACCOUNT))[0]).toMatchObject({ total: 100_000_000n });
+    const pending = readCoins(e.store, e.scope, ACCOUNT).find((c) => c.nonce === expected.nonce)!;
+    const appendEntitlement = `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}`;
+    await expect(secureChange(e, ACCOUNT, { ...pending, appendEntitlement })).rejects.toThrow(CHANGE_PENDING);
+    // The relay DID land it (and lied about failing): the chain shows the spend and the change's leaf.
+    relay.state!.authNonce = '8';
+    relay.zswapActivity.outputs.push({ commitment: pending.commitment, mtIndex: '300', txHash: 'wd9', blockHeight: 5 });
+    relay.zswapActivity.inputs.push({
+      nullifier: contractCoinNullifier(paidFrom, ACCOUNT),
+      txHash: 'wd9',
+      blockHeight: 5,
+    });
+    await syncAccount(e, ACCOUNT);
+    const confirmed = readCoins(e.store, e.scope, ACCOUNT).find((c) => c.nonce === expected.nonce)!;
+    expect(confirmed.pending).toBeUndefined();
+    expect(confirmed).toMatchObject({ mtIndex: '300', value: '10000000', createdTx: 'wd9' });
+    // 60 + the 10 of change: the 40 is spent.
+    expect(holdingsByColour(readCoins(e.store, e.scope, ACCOUNT))[0]).toMatchObject({ total: 70_000_000n });
+  });
+
+  it('R2-5: a withdrawal that can never land is dropped once the nonce moves on, and its coin is spendable again', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    relay.results.withdraw = { txId: 'wd1', change: null };
+    const out = await withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) });
+    expect(out.change?.pending).toMatchObject({ authNonce: '7' });
+    const forty = (c: ReturnType<typeof readCoins>) => c.find((x) => x.value === '40000000')!;
+    expect(forty(readCoins(e.store, e.scope, ACCOUNT)).spent).toBe(true); // set aside on the relay's report
+    // The nonce has not moved: it may still land, so it stays pending.
+    await syncAccount(e, ACCOUNT);
+    expect(readCoins(e.store, e.scope, ACCOUNT).some((c) => c.commitment === out.change!.commitment)).toBe(true);
+    // The account moved on (another call landed at nonce 7) and the 40 was never spent on chain: this
+    // withdrawal can never land. Its record goes, and the 40 is the account's again.
+    relay.state!.authNonce = '8';
+    const r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.some((c) => c.commitment === out.change!.commitment)).toBe(false);
+    expect(forty(r.coins)).toMatchObject({ spent: false });
+    expect(forty(r.coins).spentTx).toBeUndefined();
+    expect(holdingsByColour(r.coins)[0]).toMatchObject({ total: 100_000_000n, largest: 60_000_000n });
+  });
+
+  // R2-6 / F-A2-4: anyone can file an inbox note (`deposit_shielded`) describing a coin that exists
+  // nowhere; it counted in the balance.
+  it('R2-6: an inbox note whose coin the chain does not confirm never counts as a coin', async () => {
+    const { relay, e, pk } = await fundedAccount();
+    const fake = { nonce: '0f'.repeat(32), color: COLOUR, value: 1_000_000_000_000n };
+    relay.entries.push(
+      bytesToHex(
+        await sealEntryPortable(pk, {
+          nonce: hexToBytes(fake.nonce),
+          color: hexToBytes(fake.color),
+          value: fake.value,
+        }),
+      ),
+    );
+    const r = await syncAccount(e, ACCOUNT);
+    expect(r.unconfirmed).toBe(1);
+    expect(unconfirmedNotes(r.coins).map((c) => c.value)).toEqual(['1000000000000']);
+    expect(holdingsByColour(r.coins)).toEqual([
+      { color: COLOUR, total: 100_000_000n, largest: 60_000_000n, coins: 2, unpositioned: 1, notInInbox: 0 },
+    ]);
+  });
+
+  it('R2-6: asks the chain for the transactions the relay names for its own coins (read past the newest page)', async () => {
+    const { relay, e } = await fundedAccount();
+    const chain = e.chain as FakeChain;
+    relay.zswapActivity.outputs.push({ commitment: 'ee'.repeat(32), mtIndex: '9', txHash: 'not-ours', blockHeight: 9 });
+    await syncAccount(e, ACCOUNT);
+    expect(chain.needs.at(-1)).toEqual(['d1', 'd2']); // the two coins' transactions, not the stranger's
+  });
+
+  it('R2-6: a new account that was not empty is refused at opening AND afterwards (the refusal is kept)', async () => {
+    const relay = new FakeRelay();
+    const { signing, calls } = fakeSigning();
+    const chain = new FakeChain(relay);
+    chain.check = {
+      ok: false,
+      useCounter: null,
+      problems: [
+        {
+          code: 'not-empty',
+          message: 'It was opened with notes already in its inbox, which this site did not put there.',
+        },
+      ],
+    };
+    const e = env(signing, relay, chain);
+    relay.results.register = {
+      account: ACCOUNT,
+      device: signing.deviceKey,
+      txs: { waveOne: 'w1', waveTwo: 'w2', activation: 'act' },
+      seconds: {},
+    };
+    await expect(openAccount(e)).rejects.toBeInstanceOf(AccountCheckError);
+    // Later the chain check passes (an account in use is neither fresh nor empty): still refused.
+    chain.check = null;
+    const err = await verifiedAccount(e, ACCOUNT).catch((x: unknown) => x);
+    expect(err).toBeInstanceOf(AccountCheckError);
+    expect((err as Error).message).toMatch(/notes already in its inbox/);
+    await expect(
+      withdrawUnshieldedToWallet(e, ACCOUNT, {
+        color: COLOUR,
+        amount: 1n,
+        recipient: formatUnshieldedAddress('66'.repeat(32), 'undeployed'),
+      }),
+    ).rejects.toBeInstanceOf(AccountCheckError);
+    expect(calls).toEqual(['relayAction']);
+    expectImportRoundTrip(e.store, e.scope);
+  });
+
+  // R2-3 (F-A2-3): a page that passed a real key change off as a cancel left the account with another
+  // encryption key; the site refused every action and the relay refused any rotation back.
+  it('R2-3: restores THIS browser’s key with ONE signature, done when the chain shows it', async () => {
+    const { relay, e, calls, pk } = await fundedAccount();
+    const mine = bytesToHex(pk);
+    relay.state!.encKey = 'e1'.repeat(32); // the key someone else put there
+    const chain = e.chain as FakeChain;
+    chain.check = {
+      ok: false,
+      useCounter: null,
+      problems: [{ code: 'enc-key', message: 'Its encryption key is not the one this browser holds.' }],
+    };
+    // Every other action stays refused meanwhile.
+    await expect(syncAccount(e, ACCOUNT)).resolves.toBeTruthy(); // reading is fine
+    relay.results['restore-enc-key'] = { txId: 'rk1' };
+    relay.afterJob['restore-enc-key'] = () => {
+      relay.state!.encKey = mine;
+    };
+    const r = await restoreEncryptionKey(e, ACCOUNT);
+    expect(r).toEqual({ txId: 'rk1' });
+    expect(calls).toEqual(['authorise:rotateEncKey']);
+    const sub = relay.submitted[0]!;
+    expect(sub.action).toBe('restore-enc-key');
+    expect(sub.request.payload).toEqual({ newKey: mine, authNonce: '7' });
+    // Signed against the account's CURRENT key, for a key restore (not a cancel).
+    const pa = sub.request.passportAuth as { signature: string };
+    const message = fakeCallMessage(
+      { account: ACCOUNT, authNonce: 7n, networkSalt: '5a'.repeat(32), encKey: 'e1'.repeat(32) },
+      { kind: 'gated', request: restoreEncKeyRequest({ newKey: mine, authNonce: '7' }), purpose: 'restore-enc-key' },
+    );
+    expect(ed25519.verify(unhex(pa.signature), message, unhex(e.signing.deviceKey))).toBe(true);
+  });
+
+  it('R2-3: offers no restore when anything else is wrong, or nothing is; says plainly when the market cannot', async () => {
+    const { relay, e, calls } = await fundedAccount();
+    const chain = e.chain as FakeChain;
+    // Fine already: nothing to restore.
+    await expect(restoreEncryptionKey(e, ACCOUNT)).rejects.toThrow(/already uses this browser/);
+    // Another device as well (the wallet is not its one device): refused, no signature.
+    chain.check = {
+      ok: false,
+      useCounter: null,
+      problems: [
+        { code: 'enc-key', message: 'Its encryption key is not the one this browser holds.' },
+        { code: 'devices', message: 'Its one device is not your wallet.' },
+      ],
+    };
+    await expect(restoreEncryptionKey(e, ACCOUNT)).rejects.toBeInstanceOf(AccountCheckError);
+    expect(calls).toEqual([]);
+    // Restorable, but this market does not run it yet.
+    chain.check = { ok: false, useCounter: null, problems: [{ code: 'enc-key', message: 'not this browser’s key' }] };
+    relay.state!.encKey = 'e1'.repeat(32);
+    relay.failNext = 'the restore-enc-key operation is not available yet (plan lane P10.R)';
+    relay.failCode = 'not-implemented';
+    await expect(restoreEncryptionKey(e, ACCOUNT)).rejects.toThrow(RESTORE_UNAVAILABLE);
   });
 });

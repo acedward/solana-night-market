@@ -24,6 +24,7 @@ import {
   buildRelayActionMessage,
   type AppendInboxPayload,
   type CancelOffersPayload,
+  type RestoreEncKeyPayload,
   type HealthResponse,
   type OpenSwapPayload,
   type RelayActionName,
@@ -65,6 +66,8 @@ const KIND: Record<RelayActionName, Kind> = {
   'withdraw-unshielded': 'passport-call',
   'demo-tokens': 'relay-action',
   'cancel-offers': 'passport-call',
+  // AA 00047 P10.S: a placeholder until lane P10.R wires it as a passport call (its own signature).
+  'restore-enc-key': 'relay-action',
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -213,6 +216,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
       return { useCounter: '0' };
     case 'cancel-offers':
       return { newKey: (0xe0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies CancelOffersPayload;
+    case 'restore-enc-key':
+      return { newKey: (0xb0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies RestoreEncKeyPayload;
     case 'open-swap':
     case 'take': {
       const make: OpenSwapPayload = {

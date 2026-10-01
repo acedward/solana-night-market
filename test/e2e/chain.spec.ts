@@ -113,13 +113,13 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
     indexer.hideFromEvents.add(contractCoinCommitment(twEthCoin, ACCOUNT));
     await page.goto('/#account');
     await connectPhantom(page);
-    const row = portfolioRow(page, 'twETH');
-    await expect(row.getByTestId('passport-amount')).toHaveAttribute('data-raw', twEthCoin.value);
-    // Held, but not spendable: no position the chain confirms.
-    await expect(row.getByTestId('passport-largest')).toHaveAttribute('data-raw', '0');
+    // No position the chain confirms: not spendable, and (AA 00047 P10, R2-6) not in the balance
+    // either, only counted as a note Midnight does not show.
     await expect(
       page.locator('[data-testid=passport-row][data-symbol="twBTC"]').getByTestId('passport-largest'),
     ).toHaveAttribute('data-raw', '10000000');
+    await expect(portfolioRow(page, 'twETH')).toHaveCount(0);
+    await expect(page.getByTestId('unconfirmed-notes')).toHaveAttribute('data-count', '1');
   });
 });
 

@@ -10,7 +10,7 @@ import { networkSaltFor } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
 import { accountStateHex } from '../../packages/core/test/fixtures/account-state.js';
-import { AccountHistoryTooLongError, ChainReadError, ChainReader } from '../src/chain/indexer.js';
+import { ChainReadError, ChainReader, TX_PAGE } from '../src/chain/indexer.js';
 
 const ACCOUNT = '7e'.repeat(32);
 const DEVICE = bytesToHex(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(4)).publicKey);
@@ -56,6 +56,35 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
     expect(r.check.problems.map((p) => p.code)).toEqual(['network-salt']);
   });
 
+  // AA 00047 P10 (R2-6, questions Q42): a just-opened account must start empty AS DEPLOYED: the page
+  // reads its state at the deploy's block, so a deposit by anyone since does not get it refused.
+  it('checks a fresh account’s emptiness on its deploy-time state, read once', async () => {
+    const base = { account: ACCOUNT, deviceKey: DEVICE, encKey: ENC, salt: networkSaltFor('stagenet') };
+    const now = await accountStateHex({ ...base, inbox: ['ab'.repeat(192)] }); // someone deposited since
+    let asDeployed = await accountStateHex({ ...base, noDevice: true, booted: false });
+    const { calls, fetchImpl } = stubIndexer((b) => {
+      if (b.query.includes('type: DEPLOY'))
+        return { data: { contract: { actions: [{ transaction: { block: { height: 41 } } }] } } };
+      if (b.query.includes('offset: { height')) return { data: { contract: { state: asDeployed } } };
+      return { data: { contract: { state: now }, block: { height: 77 } } };
+    });
+    const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
+    const ok = await chain.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
+    expect(ok.check).toEqual({ ok: true, problems: [], useCounter: 0n });
+    expect(calls.map((c) => c.body.variables)).toContainEqual({ address: ACCOUNT, height: 41 });
+    // Not fresh: the deploy is not read.
+    const n = calls.length;
+    await chain.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC });
+    expect(calls).toHaveLength(n + 1);
+    // Seeded at the deploy (the relay's doing): refused. (Another reader: the deploy state is kept.)
+    asDeployed = await accountStateHex({ ...base, noDevice: true, booted: false, inbox: ['cd'.repeat(192)] });
+    const other = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
+    const seeded = await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
+    expect(seeded.check.problems.map((p) => p.code)).toEqual(['not-empty']);
+    await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
+    expect(calls.filter((c) => c.body.query.includes('type: DEPLOY'))).toHaveLength(2); // once per reader
+  });
+
   it('shares reads already on their way, and reads again after', async () => {
     const state = await accountStateHex({
       account: ACCOUNT,
@@ -90,7 +119,7 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
     await expect(chain.account('nope')).rejects.toThrow(/not an account address/);
   });
 
-  it('reads the account’s transactions with their raw events, and refuses a history it cannot page', async () => {
+  it('reads the account’s transactions with their raw events', async () => {
     const tx = (hash: string, height: number) => ({
       transaction: { hash, block: { height }, zswapLedgerEvents: [{ id: height, raw: `${hash}00` }] },
     });
@@ -104,16 +133,62 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
     ]);
     expect(calls[0]!.body.query).toMatch(/zswapLedgerEvents \{ id raw \}/);
     expect(calls[0]!.body.variables).toEqual({ address: ACCOUNT, limit: 10 });
-    const full = stubIndexer(() => ({
-      data: { contract: { actions: Array.from({ length: 3 }, (_, i) => tx(`c${i}`, i)) } },
+    // A page that is not full is the whole history: nothing is read by hash.
+    const more = await chain.accountTransactions(ACCOUNT, ['ee'.repeat(32)]);
+    expect(more.map((t) => t.hash)).toEqual(['aa', 'bb']);
+    expect(calls).toHaveLength(2);
+  });
+
+  // AA 00047 P10 (audit round 2, R2-6 / F-A2-4): from 500 actions on, every sync used to throw, so new
+  // coins never got a position. A griefer could force it with ~500 one-unit deposits. The indexer
+  // serves only the newest 500 (no offset): the page reads the older transactions it needs by hash.
+  it('reads past a full page by transaction hash, keeping only the account’s own transactions', async () => {
+    const h = (n: number) => n.toString(16).padStart(64, '0');
+    const OTHER = '3c'.repeat(32);
+    // The newest page: 500 recent actions (the griefer's), none of them the ones the report needs.
+    const page = Array.from({ length: 500 }, (_, i) => ({
+      transaction: { hash: h(10_000 + i), block: { height: 10_000 + i }, zswapLedgerEvents: [] },
     }));
-    await expect(
-      new ChainReader({
-        indexerUrl: URL_,
-        networkId: 'stagenet',
-        fetchImpl: full.fetchImpl,
-        maxActions: 3,
-      }).accountTransactions(ACCOUNT),
-    ).rejects.toThrow(AccountHistoryTooLongError);
+    // Older transactions, served by hash: 120 of the account's, one that is NOT the account's.
+    const older = new Map<string, unknown>();
+    for (let i = 0; i < 120; i++)
+      older.set(h(i), {
+        hash: h(i),
+        block: { height: i },
+        contractActions: [{ address: ACCOUNT }],
+        zswapLedgerEvents: [{ id: i, raw: `${ACCOUNT}${h(i)}` }],
+      });
+    older.set(h(999), {
+      hash: h(999),
+      block: { height: 999 },
+      contractActions: [{ address: OTHER }],
+      zswapLedgerEvents: [],
+    });
+    const { calls, fetchImpl } = stubIndexer((b) => {
+      if (b.query.includes('contract(address')) return { data: { contract: { actions: page } } };
+      const data: Record<string, unknown[]> = {};
+      for (const [k, v] of Object.entries(b.variables)) {
+        const t = older.get(String(v));
+        data[k.replace(/^h/, 't')] = t ? [t] : [];
+      }
+      return { data };
+    });
+    const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
+    const need = [...Array.from({ length: 120 }, (_, i) => h(i)), h(999), h(10_001), 'nonsense', h(5)];
+    const txs = await chain.accountTransactions(`0x${ACCOUNT}`, need);
+    expect(txs).toHaveLength(620); // the page, plus the 120 older ones; never the other contract's
+    expect(txs[0]!.hash).toBe(h(0)); // oldest first
+    expect(txs.some((t) => t.hash === h(999))).toBe(false);
+    expect(txs.find((t) => t.hash === h(7))!.events).toEqual([{ id: 7, raw: `${ACCOUNT}${h(7)}` }]);
+    // One page read, then the by-hash pages: 121 hashes (deduplicated, valid, not on the page).
+    const byHash = calls.slice(1);
+    expect(byHash).toHaveLength(Math.ceil(121 / TX_PAGE));
+    expect(byHash[0]!.body.query).toMatch(
+      /t0: transactions\(offset: \{ hash: \$h0 \}\) \{ hash block \{ height \} contractActions \{ address \}/,
+    );
+    expect(Object.keys(byHash[0]!.body.variables)).toHaveLength(TX_PAGE);
+    // Final transactions are not read twice.
+    await chain.accountTransactions(ACCOUNT, need);
+    expect(calls).toHaveLength(1 + byHash.length + 1);
   });
 });

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   bytesToHex,
   contractCoinCommitment,
+  contractCoinNullifier,
   hexToBytes,
   orderLegs,
   parsePrice,
@@ -33,12 +34,14 @@ import {
   cancelOffers,
   confirmCancelsOffer,
   guardFor,
+  decideApproval,
   makeOffer,
   offerShown,
+  reconcileFromChain,
   reconcileOffers,
   takeOffer,
 } from '../src/trade/operations.js';
-import { liveOffer, readTrades } from '../src/trade/records.js';
+import { liveOffer, putTrade, readTrades } from '../src/trade/records.js';
 import { FakeChain } from './fake-chain.js';
 import { fakeCallMessage, fakeDeviceEntry, fakeSigning } from './fake-signing.js';
 import { expectImportRoundTrip } from './roundtrip.js';
@@ -57,7 +60,7 @@ class FakeRelay {
   failNext: string | null = null;
   failCode = 'x';
   /** Side effects of a job on the chain, by action (the fake chain reads `state`). */
-  afterJob: Record<string, () => void> = {};
+  afterJob: Record<string, () => void | Promise<void>> = {};
   state!: AccountStateView;
   entries: Array<string | null> = [];
   zswapActivity: ZswapActivity = { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 };
@@ -86,7 +89,7 @@ class FakeRelay {
       this.failNext !== null
         ? this.view(requestId, action, 'failed', { error: { code: this.failCode, message: this.failNext } })
         : this.view(requestId, action, 'succeeded', { result: this.results[action] ?? {} });
-    if (job.state === 'succeeded') this.afterJob[action]?.();
+    if (job.state === 'succeeded') await this.afterJob[action]?.();
     this.failNext = null;
     onUpdate(job);
     return job;
@@ -143,6 +146,21 @@ async function setup() {
   await addInbox(relay, pk, coins);
   await syncAccount(e, ACCOUNT);
   return { signing, relay, e, pk, sk, signed };
+}
+
+/** What the chain shows once a swap call of this account executes (the relay's fake doing it): the
+ *  wanted coin's note and leaf in `txHash`, the paid coin spent, the nonce moved. */
+async function executeSwap(relay: FakeRelay, pk: Uint8Array, payload: Record<string, unknown>, txHash: string) {
+  const p = payload as {
+    wantNonce: string;
+    wantColor: string;
+    wantAmount: string;
+    coin: { nonce: string; color: string; value: string };
+  };
+  await addInbox(relay, pk, [{ nonce: p.wantNonce, color: p.wantColor, value: BigInt(p.wantAmount) }]);
+  relay.zswapActivity.outputs.at(-1)!.txHash = txHash;
+  relay.zswapActivity.inputs.push({ nullifier: contractCoinNullifier(p.coin, ACCOUNT), txHash, blockHeight: 2 });
+  relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
 }
 
 async function addInbox(
@@ -287,7 +305,9 @@ describe('make an offer (L-TRD.1)', () => {
 
 describe('take an offer (L-TRD.2)', () => {
   it('buys a whole ask with ONE signature, pays from the smallest covering coin, and records the settlement', async () => {
-    const { relay, e, signed } = await setup();
+    const { relay, e, signed, pk } = await setup();
+    relay.afterJob.take = () =>
+      executeSwap(relay, pk, relay.submitted.at(-1)!.request.payload as never, 'aa'.repeat(32));
     relay.results.take = {
       offerId: 'e1'.repeat(32),
       txHash: 'aa'.repeat(32),
@@ -322,8 +342,10 @@ describe('take an offer (L-TRD.2)', () => {
     expectImportRoundTrip(e.store, e.scope); // F-B4: what the page wrote imports unchanged
   });
 
-  it('a take cancels this account’s live offer', async () => {
-    const { relay, e } = await setup();
+  it('a take cancels this account’s live offer (once the chain shows the take)', async () => {
+    const { relay, e, pk } = await setup();
+    relay.afterJob.take = () =>
+      executeSwap(relay, pk, relay.submitted.at(-1)!.request.payload as never, 'ab'.repeat(32));
     relay.results['open-swap'] = {
       offerId: 'f0'.repeat(32),
       kernel: { accepted: true, status: 'live', code: null, reason: null },
@@ -386,7 +408,7 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
     expect(quote.map((c) => c.value).sort()).toEqual(['2100000', '6000000', '8000000']);
   });
 
-  it('fills in the settling transaction later when the exchange says consumed before the inbox shows the coin', async () => {
+  it('shows "settling" when the exchange says consumed before the chain shows it, and Filled once it does (R2-4)', async () => {
     const { relay, e, pk } = await setup();
     relay.results['open-swap'] = {
       offerId: 'f0'.repeat(32),
@@ -398,12 +420,13 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
     };
     await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
     const consumed = { offerStatus: async () => 'consumed' as const };
-    const [first] = await reconcileOffers(e, ACCOUNT, consumed);
-    expect(first).toMatchObject({ status: 'filled' });
-    expect(first!.settledTx).toBeUndefined();
-    const payload = relay.submitted[0]!.request.payload as { wantNonce: string };
-    await addInbox(relay, pk, [{ nonce: payload.wantNonce, color: QUOTE.midnightColour, value: 2_100_000n }]);
-    relay.zswapActivity.outputs.at(-1)!.txHash = 'late-tx';
+    // The exchange's word alone ends nothing: the approval may still execute.
+    expect(await reconcileOffers(e, ACCOUNT, consumed)).toEqual([]);
+    const [first] = readTrades(e.store, e.scope, ACCOUNT);
+    expect(first).toMatchObject({ status: 'live', kernelStatus: 'consumed' });
+    expect(offerShown(first!)).toEqual({ state: 'settling', listed: false });
+    expect(liveOffer(readTrades(e.store, e.scope, ACCOUNT), Date.now())).not.toBeNull(); // still blocks a second
+    await executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'late-tx');
     const [second] = await reconcileOffers(e, ACCOUNT, consumed);
     expect(second).toMatchObject({ status: 'filled', settledTx: 'late-tx' });
   });
@@ -466,6 +489,119 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       state: 'filled',
       listed: false,
     });
+  });
+});
+
+describe('an approval ends only on the chain’s word and its signed expiry (AA 00047 P10, audit round 2 R2-4)', () => {
+  const listed = {
+    offerId: 'f5'.repeat(32),
+    kernel: { accepted: true, status: 'live', code: null, reason: null },
+    legSegment: 0,
+    proveSeconds: 1,
+    expiresAt: Date.now() + 3_600_000,
+    bytes: 1,
+  };
+
+  it('another call the relay reports done does not cancel a live offer; the chain’s nonce does', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    // A take the relay reports settled, while the chain shows nothing (it holds it, or lies).
+    relay.results.take = {
+      offerId: 'e1'.repeat(32),
+      txHash: 'aa'.repeat(32),
+      proveSeconds: 1,
+      cost: {},
+      path: 'batcher',
+    };
+    const take = await takeOffer(e, ACCOUNT, { offerId: 'e1'.repeat(32), side: 'ask', baseRaw: U, quoteRaw: U }, PAIR);
+    expect(take).toMatchObject({ role: 'take', status: 'live', kernelStatus: 'consumed' }); // settling, not Filled
+    expect(take.settledTx).toBeUndefined();
+    const make = () => readTrades(e.store, e.scope, ACCOUNT).find((t) => t.role === 'make')!;
+    expect(make().status).toBe('live');
+    // Once the chain shows the nonce moved (and no fill of the make), the make is cancelled.
+    relay.state.authNonce = '5';
+    await reconcileFromChain(e, ACCOUNT);
+    expect(make().status).toBe('cancelled');
+  });
+
+  it('a cancel the relay reports done while it SETTLED the offer instead shows Filled, never Cancelled', async () => {
+    const { relay, e, pk } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    relay.results['cancel-offers'] = { txId: 'c0'.repeat(32) };
+    relay.afterJob['cancel-offers'] = () =>
+      executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'settled-instead');
+    const r = await cancelOffers(e, ACCOUNT);
+    expect(r).toEqual({ txId: 'c0'.repeat(32), cancelled: 0 });
+    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'filled', settledTx: 'settled-instead' });
+  });
+
+  it('the exchange’s "expired" is the listing’s, not the approval’s: only the SIGNED expiry ends it', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = listed;
+    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    const expired = { offerStatus: async () => 'expired' as const };
+    expect(await reconcileOffers(e, ACCOUNT, expired)).toEqual([]);
+    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'live', kernelStatus: 'expired' });
+    const [x] = await reconcileOffers(e, ACCOUNT, expired, Number(rec.validUntil) * 1000);
+    expect(x).toMatchObject({ status: 'expired' });
+  });
+
+  it('records an older page ended too early (on a relay’s or the exchange’s word) are decided again', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = listed;
+    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    for (const early of ['cancelled', 'expired', 'filled'] as const) {
+      putTrade(e.store, e.scope, ACCOUNT, { ...rec, status: early });
+      const [back] = await reconcileOffers(e, ACCOUNT, { offerStatus: async () => 'live' as const });
+      expect(back).toMatchObject({ status: 'live' }); // the nonce has not moved; its signed expiry is ahead
+    }
+  });
+
+  it('decideApproval: filled needs the call’s own note AND the moved nonce; a note alone proves nothing', () => {
+    const t = {
+      offerId: 'f6'.repeat(32),
+      role: 'make' as const,
+      side: 'sell' as const,
+      pair: PAIR.id,
+      base: BASE.midnightColour,
+      quote: QUOTE.midnightColour,
+      baseRaw: '1',
+      quoteRaw: '1',
+      summary: 's',
+      coin: '01'.repeat(32),
+      authNonce: '4',
+      wantNonce: '0d'.repeat(32),
+      createdAt: 0,
+      expiresAt: 2_000_000_000_000,
+      validUntil: '2000000000',
+      status: 'live' as const,
+    };
+    const note = {
+      nonce: '0d'.repeat(32),
+      color: QUOTE.midnightColour,
+      value: '1',
+      mtIndex: null,
+      commitment: 'x',
+      origin: 'inbox' as const,
+      inInbox: true,
+      spent: false,
+    };
+    // A note filed by anyone (deposit_shielded) while the nonce has not moved: still live.
+    expect(decideApproval(t, { authNonce: 4n, coins: [note] }, 0).status).toBe('live');
+    // The nonce moved and the note is there: filled (settled once the chain shows the coin's leaf).
+    expect(decideApproval(t, { authNonce: 5n, coins: [note] }, 0)).toMatchObject({ status: 'filled' });
+    expect(decideApproval(t, { authNonce: 5n, coins: [{ ...note, mtIndex: '7', createdTx: 'tx7' }] }, 0)).toMatchObject(
+      {
+        status: 'filled',
+        settledTx: 'tx7',
+      },
+    );
+    // The nonce moved and no note: cancelled. Signed "never" (an older record): no expiry from time.
+    expect(decideApproval(t, { authNonce: 5n, coins: [] }, 0).status).toBe('cancelled');
+    const { validUntil: _v, ...never } = t;
+    expect(decideApproval(never, { authNonce: 4n, coins: [] }, 9e15).status).toBe('live');
   });
 });
 

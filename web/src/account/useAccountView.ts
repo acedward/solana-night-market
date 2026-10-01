@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { NetworkProfile, UnshieldedBalancesView } from '@nightmarket/core';
+import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import type { AccountChain } from '../chain/indexer.js';
@@ -37,6 +38,7 @@ export function useAccountView(network: NetworkProfile, relayUrl: string) {
     owner,
     secret?.encPublicKey ?? null,
     revision,
+    (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
   );
   const coins = useMemo(
     () => (store && scope && account ? readCoins(store, scope, account.address) : []),

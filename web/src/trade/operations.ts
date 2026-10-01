@@ -14,8 +14,18 @@
 // call after it, whoever holds the approval, and the offer's status here follows that signed expiry
 // (never the relay's transaction TTL). "Cancel offer" ends it sooner (../passport/operations.ts
 // `cancelOpenApprovals`, questions Q30).
+//
+// An approval is marked ENDED only from what this browser reads on the CHAIN, and its own signed
+// expiry (AA 00047 P10, audit round 2 R2-4; spec FR-004b "Round 2"), never from the relay's or the
+// exchange's word: filled once its own call's wanted-coin note is in the account's inbox and the
+// account's nonce moved; cancelled once the nonce moved and no such note is there; expired once its
+// signed `validUntil` passed. The exchange's "consumed" or "expired" is the LISTING's state, shown
+// apart (`kernelStatus`); one they call taken shows "Settling" until the chain shows it (questions
+// Q44). Records an older page ended too early (on a relay's "succeeded" or the exchange's
+// "expired") are decided again (`reconcileOffers`).
 
 import {
+  confirmedOnChain,
   type BookEntry,
   type JobView,
   type KernelClient,
@@ -155,7 +165,9 @@ export async function makeOffer(
     // The SIGNED expiry, not the relay's transaction TTL (audit C6).
     expiresAt: Number(validUntil) * 1000,
     validUntil,
-    status: r.kernel.status === 'consumed' ? 'filled' : 'live',
+    // Live until the CHAIN shows it ended (R2-4): an exchange that already says "consumed" shows it
+    // as settling (`offerShown`), and the next reconcile decides it from the chain.
+    status: 'live',
     kernelStatus: r.kernel.status,
     checkedAt: Date.now(),
   };
@@ -190,17 +202,14 @@ export async function takeOffer(
   const takePayload: TakePayload = { ...payload, offerId: entry.offerId };
   const done = await runJob(env, account, 'take', takePayload as never, passportAuth, { summary });
   const r = done.result as unknown as TakeResult;
-  // The call executed: the counter moved, the coin is spent, and any live offer of ours is dead.
+  // The market reports it settled: the device's counter hint moves, and the coin is set aside (the
+  // next walk confirms the spend from the ledger's nullifier). Whether the take, and any live offer of
+  // ours, ENDED is the chain's to say (R2-4): decided below from the account as the indexer shows it.
   env.store.put(env.scope, 'roster', { useCounter: (BigInt(passportAuth.useCounter) + 1n).toString(10) }, { account });
   const coins = readCoins(env.store, env.scope, account).map((c) =>
     c.commitment === coin.commitment ? { ...c, spent: true, spentTx: r.txHash } : c,
   );
   env.store.put(env.scope, 'coins', coins, { account });
-  const trades = readTrades(env.store, env.scope, account);
-  for (const other of trades) {
-    if (other.role === 'make' && other.status === 'live')
-      putTrade(env.store, env.scope, account, { ...other, status: 'cancelled' });
-  }
   const record: TradeRecord = {
     offerId: entry.offerId,
     role: 'take',
@@ -215,59 +224,96 @@ export async function takeOffer(
     authNonce: payload.authNonce,
     wantNonce: payload.wantNonce,
     createdAt: Date.now(),
-    expiresAt: Date.now(),
+    expiresAt: Number(validUntil) * 1000,
     validUntil,
-    status: 'filled',
+    // Settled as far as the market says: the chain decides (filled, once the wanted coin's note and
+    // leaf are on it; `settledTx` is then the chain's transaction, not the relay's report).
+    status: 'live',
     kernelStatus: 'consumed',
-    settledTx: r.txHash,
     checkedAt: Date.now(),
   };
   putTrade(env.store, env.scope, account, record);
-  await syncAccount(env, account).catch(() => undefined);
-  return record;
+  await reconcileOffers(env, account, null).catch(() => undefined);
+  return (
+    readTrades(env.store, env.scope, account).find((t) => t.role === 'take' && t.offerId === entry.offerId) ?? record
+  );
+}
+
+/** The expiry an approval SIGNED (unix ms), or null when it signed none (older records signed
+ *  "never"): the only expiry the page goes by (R2-4), never the exchange's or the relay's TTL. */
+export function signedExpiryMs(t: Pick<TradeRecord, 'validUntil'>): number | null {
+  if (!t.validUntil || !/^[0-9]+$/.test(t.validUntil)) return null;
+  const s = BigInt(t.validUntil);
+  return s > 0n ? Number(s) * 1000 : null;
+}
+
+/** One read of the account on the chain: its auth nonce and its coins (the inbox walk's). */
+export interface ChainView {
+  authNonce: bigint;
+  coins: readonly StoredCoin[];
 }
 
 /**
- * Reconcile My offers (FR-011: "reconcile the account when anyone settles it"): walk the inbox
- * first, then decide each offer from the chain and the exchange:
- *   filled     a coin with the offer's want nonce reached the account (the settling tx is its
- *              creating transaction), or the exchange says consumed;
- *   expired    past its SIGNED expiry (`validUntil`, audit C6), or the exchange says so;
- *   cancelled  the account's auth nonce (read from the chain) moved and the offer was not filled
- *              (another signed call, or "Cancel offer");
- *   live       otherwise: the approval can still settle. Whether the exchange LISTS it is its
- *              `kernelStatus` (`live` = listed), which the page shows apart (`offerShown`).
- * Returns the offers whose state changed.
+ * What the CHAIN (and the approval's own signed expiry) says of one of the account's approvals, a
+ * make or a take (AA 00047 P10, R2-4). From one read of the account (its nonce and its inbox are one
+ * state, so a fill and the nonce it moves are seen together):
+ *   filled     the account's nonce moved past the one it signed AND its own call's wanted-coin note
+ *              is in the inbox (the call files it in the same transaction); `settledTx` once the
+ *              chain shows that coin's leaf (its creating transaction);
+ *   cancelled  the nonce moved and no such note is there: it can never execute (another signed call,
+ *              or "Cancel offer");
+ *   expired    the nonce has not moved but its SIGNED `validUntil` passed: the circuit refuses it;
+ *   live       otherwise: it can still execute, whatever the exchange or the relay says.
+ */
+export function decideApproval(t: TradeRecord, chain: ChainView, now: number): TradeRecord {
+  if (chain.authNonce > BigInt(t.authNonce)) {
+    const note = chain.coins.find((c) => c.inInbox && c.nonce === t.wantNonce);
+    if (!note) {
+      const { settledTx: _s, ...rest } = t;
+      return { ...rest, status: 'cancelled' };
+    }
+    return {
+      ...t,
+      status: 'filled',
+      ...(confirmedOnChain(note) && note.createdTx ? { settledTx: note.createdTx } : {}),
+    };
+  }
+  const { settledTx: _s, ...open } = t;
+  const until = signedExpiryMs(t);
+  return { ...open, status: until !== null && now >= until ? 'expired' : 'live' };
+}
+
+/**
+ * Reconcile My offers and takes (FR-011: "reconcile the account when anyone settles it"): walk the
+ * inbox first, then decide every approval that is not settled for good from the CHAIN and its signed
+ * expiry (`decideApproval`, R2-4), records an older page marked ended too early included. The
+ * exchange (`kernel`, when given) is asked about the makes still live, for whether it LISTS them
+ * (`kernelStatus`, shown apart by `offerShown`), never for whether they ended. Returns the records
+ * whose state changed.
  */
 export async function reconcileOffers(
   env: OperationEnv,
   account: string,
-  kernel: Pick<KernelClient, 'offerStatus'>,
+  kernel: Pick<KernelClient, 'offerStatus'> | null,
   now = Date.now(),
 ): Promise<TradeRecord[]> {
-  // Live offers, and filled ones whose settling transaction the inbox walk has not shown yet (the
-  // exchange can report "consumed" a moment before the indexer serves the new inbox entries).
-  const makes = readTrades(env.store, env.scope, account).filter(
-    (t) => t.role === 'make' && (t.status === 'live' || (t.status === 'filled' && !t.settledTx)),
+  // Everything but a fill the chain confirmed (its settling transaction known) and a refusal.
+  const open = readTrades(env.store, env.scope, account).filter(
+    (t) => t.status !== 'refused' && !(t.status === 'filled' && t.settledTx),
   );
-  if (makes.length === 0) return [];
+  if (open.length === 0) return [];
   const synced = await syncAccount(env, account);
+  const chain: ChainView = { authNonce: BigInt(synced.state.authNonce), coins: synced.coins };
   const changed: TradeRecord[] = [];
-  for (const o of makes) {
-    let kernelStatus: KernelOfferStatus | undefined;
-    try {
-      kernelStatus = await kernel.offerStatus(o.offerId);
-    } catch {
-      kernelStatus = undefined;
-    }
-    const received = synced.coins.find((c) => c.nonce === o.wantNonce);
-    let next: TradeRecord = { ...o, checkedAt: now, ...(kernelStatus ? { kernelStatus } : {}) };
-    if (received || kernelStatus === 'consumed') {
-      next = { ...next, status: 'filled', ...(received?.createdTx ? { settledTx: received.createdTx } : {}) };
-    } else if (kernelStatus === 'expired' || now >= o.expiresAt) {
-      next = { ...next, status: 'expired' };
-    } else if (BigInt(synced.state.authNonce) !== BigInt(o.authNonce)) {
-      next = { ...next, status: 'cancelled' };
+  for (const o of open) {
+    let next: TradeRecord = { ...decideApproval(o, chain, now), checkedAt: now };
+    if (kernel && next.role === 'make' && next.status === 'live') {
+      try {
+        const kernelStatus: KernelOfferStatus = await kernel.offerStatus(o.offerId);
+        next = { ...next, kernelStatus };
+      } catch {
+        /* the listing's state stays the last one seen */
+      }
     }
     putTrade(env.store, env.scope, account, next);
     if (next.status !== o.status || next.settledTx !== o.settledTx) changed.push(next);
@@ -287,37 +333,34 @@ export function guardFor(
 
 /**
  * "Cancel offer" (audit C6, questions Q30): land the nonce bump that ends every open approval of the
- * account, then mark its open offers cancelled. Only when the chain shows the new nonce.
+ * account. Done only when the CHAIN shows the new nonce (`cancelOpenApprovals`), and an offer shows
+ * Cancelled only when, on that chain read, it was not filled instead (R2-4: a fill moves the nonce
+ * too, and a relay can settle the offer it holds and report the cancel done).
  */
 export async function cancelOffers(env: OperationEnv, account: string): Promise<{ txId: string; cancelled: number }> {
   const { txId } = await cancelOpenApprovals(env, account);
-  return { txId, cancelled: markLiveOffersCancelled(env, account) };
+  const changed = await reconcileOffers(env, account, null);
+  return { txId, cancelled: changed.filter((t) => t.status === 'cancelled').length };
 }
 
+/** After another signed call of the account (a withdrawal, a re-filed change, a key restore): decide
+ *  its approvals again from the CHAIN (R2-4), never from the relay's "succeeded". */
+export const reconcileFromChain = (env: OperationEnv, account: string, now = Date.now()) =>
+  reconcileOffers(env, account, null, now);
+
 /** What the page shows for one of the account's offers: its state word, and whether the exchange
- *  lists it. A live offer the exchange has not listed (yet) never shows "Listed" (P8.2 follow-up). */
+ *  lists it. A live offer the exchange has not listed (yet) never shows "Listed" (P8.2 follow-up);
+ *  one the exchange (or the relay) says is taken shows "settling" until the chain shows the fill (R2-4). */
 export function offerShown(t: Pick<TradeRecord, 'role' | 'status' | 'kernelStatus'>): {
-  state: TradeRecord['status'] | 'unlisted';
+  state: TradeRecord['status'] | 'unlisted' | 'settling';
   listed: boolean;
 } {
+  if (t.status === 'live' && t.kernelStatus === 'consumed') return { state: 'settling', listed: false };
   if (t.role === 'make' && t.status === 'live') {
     const listed = t.kernelStatus === 'live';
     return { state: listed ? 'live' : 'unlisted', listed };
   }
   return { state: t.status, listed: false };
-}
-
-/** After another signed call executed (a withdrawal, a re-filed change), every live offer of the
- *  account is dead: its auth nonce moved (Q9). */
-export function markLiveOffersCancelled(env: Pick<OperationEnv, 'store' | 'scope'>, account: string): number {
-  let n = 0;
-  for (const t of readTrades(env.store, env.scope, account)) {
-    if (t.role === 'make' && t.status === 'live') {
-      putTrade(env.store, env.scope, account, { ...t, status: 'cancelled' });
-      n++;
-    }
-  }
-  return n;
 }
 
 /**

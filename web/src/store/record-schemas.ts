@@ -36,6 +36,10 @@ const account = z
     network: z.string().regex(/^[a-z0-9-]{1,32}$/),
     createdAt: ms,
     txs: z.object({ waveOne: txId, waveTwo: txId, activation: txId }).strict().optional(),
+    refusedAtOpen: z
+      .array(z.object({ code: z.string().regex(/^[a-z-]{1,32}$/), message: text(300) }).strict())
+      .max(16)
+      .optional(),
   })
   .strict();
 
@@ -56,6 +60,14 @@ const storedCoin = z
     spentTx: txId.optional(),
     appendEntitlement: entitlement.optional(),
     changeOf: z.object({ spent: hex32, amount: decimal }).strict().optional(),
+    pending: z
+      .object({
+        authNonce: decimal,
+        input: z.object({ nonce: hex32, color: hex32, value: decimal }).strict(),
+        since: ms,
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 // No count bound of its own (security review F-B8): an account's list only grows (spent coins are
@@ -102,6 +114,7 @@ const job = z
       'take',
       'demo-tokens',
       'cancel-offers',
+      'restore-enc-key',
     ]),
     startedAt: ms,
     state: z.enum(['queued', 'running', 'succeeded', 'failed']),

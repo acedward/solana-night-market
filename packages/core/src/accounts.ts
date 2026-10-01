@@ -160,6 +160,28 @@ export interface CancelOffersResult {
   txId: string;
 }
 
+/**
+ * `restore-enc-key` (AA 00047 P10, audit round 2 R2-3, questions Q36): an account whose on-chain
+ * encryption key is no longer the one this browser holds (a page that passed a real key change off
+ * as something else, F-A2-3) gets this browser's key back, with the same circuit as `cancel-offers`,
+ * `rotate_enc_key_with_ed25519`, to ANOTHER key: the F3 v2 text reads "Rotate encryption key / New
+ * key <16 hex>". Authorised by the call's own signature (one prompt). `newKey` is the BROWSER's
+ * encryption public key and differs from the on-chain one (the same key would be a cancel).
+ */
+export const RestoreEncKeyPayloadSchema = z
+  .object({
+    /** This browser's encryption public key for the account (64 hex): the key to put back. */
+    newKey: hex32,
+    /** The auth nonce the signed challenge binds. */
+    authNonce: decimal,
+  })
+  .strict();
+export type RestoreEncKeyPayload = z.infer<typeof RestoreEncKeyPayloadSchema>;
+
+export interface RestoreEncKeyResult {
+  txId: string;
+}
+
 // ── Results (the job's public outcome) ────────────────────────────────────────
 
 export interface RegisterResult {

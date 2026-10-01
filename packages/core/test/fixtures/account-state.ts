@@ -71,6 +71,9 @@ export interface AccountStateSpec {
   inbox?: readonly string[];
   /** Public balances: colour (64 hex) → base units. */
   unshielded?: ReadonlyArray<readonly [string, bigint]>;
+  /** The account's own credited unshielded amounts (its `unshielded_balances` map): colour → units
+   *  (AA 00047 P10, R2-6: what a deployer could seed). */
+  credited?: ReadonlyArray<readonly [string, bigint]>;
   /** The operations and their verifier keys (hex); default: the pinned key set's. */
   operations?: Readonly<Record<string, string>>;
   /** The maintenance authority; default retired (no committee, threshold 1). */
@@ -97,6 +100,7 @@ const uintLike = (cell: AlignedValue, value: bigint): AlignedValue => {
 const bytes32 = new CompactTypeBytes(32);
 const bytes192 = new CompactTypeBytes(192);
 const u64 = new CompactTypeUnsignedInteger((1n << 64n) - 1n, 8);
+const u128 = new CompactTypeUnsignedInteger((1n << 128n) - 1n, 16);
 const aligned = <T>(t: { toValue(v: T): AlignedValue['value']; alignment(): AlignedValue['alignment'] }, v: T) => ({
   value: t.toValue(v),
   alignment: t.alignment(),
@@ -137,6 +141,12 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
   });
   set(2, StateValue.newMap(inboxMap));
   set(3, StateValue.newCell(uintLike(base[3]!.asCell(), BigInt(inbox.length))));
+  if (spec.credited?.length) {
+    let credited = new StateMap();
+    for (const [colour, v] of spec.credited)
+      credited = credited.insert(aligned(bytes32, hexToBytes(colour, 32)), StateValue.newCell(aligned(u128, v)));
+    set(4, StateValue.newMap(credited));
+  }
   let deviceMap = new StateMap();
   for (const d of devices) deviceMap = deviceMap.insert(aligned(bytes32, hexToBytes(d, 32)), StateValue.newNull());
   set(6, StateValue.newMap(deviceMap));
@@ -192,6 +202,9 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
   for (const [k, e] of inbox.entries())
     if (bytesToHex(l.inbox.lookup(BigInt(k))) !== e.toLowerCase())
       throw new Error('account-state fixture: the inbox layout changed');
+  for (const [colour, v] of spec.credited ?? [])
+    if (l.unshielded_balances.lookup(hexToBytes(colour, 32)) !== v)
+      throw new Error('account-state fixture: the unshielded_balances layout changed');
   return cs;
 }
 

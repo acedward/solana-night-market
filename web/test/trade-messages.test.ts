@@ -29,15 +29,22 @@ describe('the make and take toasts', () => {
     }
   });
 
-  it('an offer taken before the relay stopped waiting: that take settled on Midnight', () => {
+  it('an offer taken before the relay stopped waiting: the exchange says so; Filled once Midnight shows it (R2-4)', () => {
     expect(madeOfferText({ summary, offerId, kernelStatus: 'consumed' })).toMatch(
-      /^Your offer was listed and someone has already taken it: .* It settled on Midnight/,
+      /^Your offer was listed and the exchange says someone has already taken it: .* Filled once Midnight shows/,
     );
   });
 
-  it('a take is the one transaction', () => {
+  it('a take is the one transaction, once the chain shows it (R2-4)', () => {
     expect(tookOfferText({ summary: 'buy 0.05 twBTC at 61,500.00 twUSDC', settledTx: 'cd'.repeat(32) })).toBe(
       'Done: buy 0.05 twBTC at 61,500.00 twUSDC, settled in one transaction on Midnight (tx cdcdcdcd…cdcdcd).',
+    );
+    expect(tookOfferText({ summary: 'buy 0.05 twBTC', settledTx: 'cd'.repeat(32), status: 'filled' })).toMatch(
+      /^Done: /,
+    );
+    // The market's report alone is not the chain's (a relay can say "settled" and hold the approval).
+    expect(tookOfferText({ summary: 'buy 0.05 twBTC', status: 'live' })).toBe(
+      'The market reports it settled: buy 0.05 twBTC. Midnight does not show it yet; it shows here as Filled once it does.',
     );
   });
 

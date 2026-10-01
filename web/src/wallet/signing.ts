@@ -44,7 +44,14 @@ import { SignFactsMismatchError, missingFromSignedText, signFacts, type SignFact
 /** One call to authorise: a gated account call (a withdrawal, an inbox append) or a swap (a make or
  *  a take, one `open_swap_shielded_with_ed25519` call). */
 export type CallToAuthorise =
-  { kind: 'gated'; request: AuthRequest } | { kind: 'swap'; action: 'open-swap' | 'take'; payload: OpenSwapPayload };
+  | {
+      kind: 'gated';
+      request: AuthRequest;
+      /** A key change BACK to this browser's own key (AA 00047 P10, R2-3): the only purpose for which a
+       *  `rotateEncKey` may move the key; without it, a `rotateEncKey` is the market's cancel. */
+      purpose?: 'restore-enc-key';
+    }
+  | { kind: 'swap'; action: 'open-swap' | 'take'; payload: OpenSwapPayload };
 
 export interface ActionSigning {
   /** The device key (64 lowercase hex): the Solana wallet's public key. */
@@ -99,7 +106,7 @@ export function ed25519ActionSigning(
     },
     async authorise(ctx, call, useCounter) {
       const cc = callContext(ctx);
-      const facts = signFacts(call, display.tokens);
+      const facts = signFacts(call, display.tokens, ctx);
       // The device hands the wallet exactly the bytes the contract renders (after its own checks);
       // this gate sits between the two: the panel's facts must each be a line of those bytes, or
       // the wallet is never asked.

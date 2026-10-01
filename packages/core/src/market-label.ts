@@ -12,6 +12,9 @@ import type { NetworkName } from './network.js';
  *  holds the two equal). */
 export const MARKET_LABEL_BYTES = 24;
 
+// TODO(P10.I): P10.C's F3 v3 (questions Q36) renders a fixed marker in front of this label and accepts
+// only words of visible characters with single spaces; both labels below already are. Re-check them
+// against the client's label rule at the re-pin (its "P10.C client API" Evidence row).
 export const MARKET_LABELS: Readonly<Record<NetworkName, string>> = {
   stagenet: 'Night Market - stagenet',
   // "Night Market - undeployed" would be 25 characters.

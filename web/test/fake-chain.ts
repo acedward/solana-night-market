@@ -17,6 +17,8 @@ export interface FakeChainSource {
   entries: Array<string | null>;
   zswapActivity: ZswapActivity;
   unshielded?: Array<{ colour: string; amount: string }>;
+  /** The account's credited unshielded amounts (its `unshielded_balances` map). */
+  credited?: Array<{ colour: string; amount: string }>;
 }
 
 const PREFIX = Buffer.from('midnight:event[v14]:').toString('hex');
@@ -62,6 +64,7 @@ export class FakeChain implements AccountChain {
       authority: { committee: 0, threshold: 1 },
       inbox: [...this.source.entries],
       unshielded: this.source.unshielded ?? [],
+      credited: this.source.credited ?? [],
       blockHeight: 9,
     };
   }
@@ -70,8 +73,12 @@ export class FakeChain implements AccountChain {
     return (await this.account(account))?.view ?? null;
   }
 
-  async accountTransactions(account: string): Promise<RawAccountTx[]> {
+  /** The transactions the page said it needs (the relay report's, AA 00047 P10 R2-6). */
+  readonly needs: string[][] = [];
+
+  async accountTransactions(account: string, need: Iterable<string> = []): Promise<RawAccountTx[]> {
     this.reads.push(`txs:${account}`);
+    this.needs.push([...need]);
     return this.txs ?? rawTxsFor(account, this.source.zswapActivity);
   }
 

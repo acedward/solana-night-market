@@ -37,12 +37,15 @@ export type AccountCheckState =
 /**
  * The market-account check of `account` for this wallet and this browser's encryption key, read
  * from the chain: again whenever `revision` changes (a store write: a finished action, an import).
+ * `refusedAtOpen` is the account's kept refusal from its opening (AA 00047 P10, R2-6: not fresh or
+ * not empty then), which no later read can clear: the check fails with it, whatever the chain says now.
  */
 export function useAccountCheck(
   account: string | null,
   deviceKey: string | null,
   encPublicKey: string | null,
   revision = 0,
+  refusedAtOpen?: readonly AccountCheckProblem[] | null,
 ): AccountCheckState & { reload: () => void } {
   const chain = useChain();
   const [state, setState] = useState<AccountCheckState>({ status: 'idle' });
@@ -78,5 +81,8 @@ export function useAccountCheck(
       clearTimeout(t);
     };
   }, [chain, account, deviceKey, encPublicKey, revision, tick]);
-  return { ...state, reload: () => setTick((n) => n + 1) };
+  const reload = () => setTick((n) => n + 1);
+  if (account && refusedAtOpen?.length)
+    return { status: 'failed', problems: [...refusedAtOpen], blockHeight: null, reload };
+  return { ...state, reload };
 }

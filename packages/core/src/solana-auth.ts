@@ -47,6 +47,7 @@ export const SOLANA_ENVELOPE_PURPOSES: Readonly<Record<RelayActionName, string>>
   'open-swap': 'Approve a Night Market request',
   take: 'Approve a Night Market request',
   'cancel-offers': 'Approve a Night Market request',
+  'restore-enc-key': 'Approve a Night Market request',
 };
 
 /** The envelope digest: SHA-256 over the domain and the envelope's canonical JSON, 64 hex. */

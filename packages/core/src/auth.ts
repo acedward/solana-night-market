@@ -40,6 +40,9 @@ export const RELAY_ACTIONS = [
   // AA 00047 P9.S (audit C6, questions Q30): end every open approval (open offers included) with the
   // arm's `rotate_enc_key_with_ed25519` to the account's current key (./accounts.ts).
   'cancel-offers',
+  // AA 00047 P10 (audit round 2, R2-3; questions Q36): put THIS browser's encryption key back on an
+  // account whose on-chain key was changed, with the same circuit to another key (./accounts.ts).
+  'restore-enc-key',
 ] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 

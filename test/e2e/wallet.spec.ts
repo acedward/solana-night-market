@@ -114,6 +114,8 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('my-offers-off-chain')).toContainText('listed on the market, not on-chain');
   expect(phantom.requests).toHaveLength(1);
   const make = lines(phantom.requests[0]!.text);
+  // TODO(P10.I): with P10.C's F3 v3 (questions Q36) the circuit puts a fixed marker in front of the
+  // label ("Site: Night Market - stagenet ", per its "P10.C client API" Evidence row): update at the re-pin.
   expect(make[0]).toBe('Night Market - stagenet '); // the arm's 24-character label field
   expect(make[1]).toBe('Swap offer');
   // F3 v2 (questions Q25 B′, Q32): the enforced base units and full token ids, the site's reading as

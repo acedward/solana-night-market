@@ -10,6 +10,8 @@ import {
   contractCoinCommitment,
   contractCoinNullifier,
   holdingsByColour,
+  confirmedOnChain,
+  unconfirmedCoins,
   localCoin,
   reconcileCoins,
   type OwnedInput,
@@ -169,12 +171,31 @@ describe('holdings and the coin a payment uses (Q9)', () => {
     previous: [],
   });
 
-  it('adds the unspent coins and names the largest single payment', () => {
+  it('adds the unspent coins the chain confirms and names the largest single payment', () => {
     // 100 wUSDC as 60 + 40 shows "largest single payment 60" (spec US2 scenario 1); the spent
-    // coin is out, and the coin without a position counts in the total but cannot pay yet.
+    // coin is out. The coin without a position is NOT in the total (AA 00047 P10, R2-6): only
+    // counted as unconfirmed, since an inbox note alone proves nothing.
     expect(holdingsByColour(coins)).toEqual([
-      { color: USDC, total: 199_000_000n, largest: 60_000_000n, coins: 3, unpositioned: 1, notInInbox: 0 },
+      { color: USDC, total: 100_000_000n, largest: 60_000_000n, coins: 2, unpositioned: 1, notInInbox: 0 },
     ]);
+    expect(unconfirmedCoins(coins).map((c) => c.value)).toEqual(['99000000']);
+  });
+
+  // AA 00047 P10 (audit round 2, R2-6 / F-A2-4): anyone can file an inbox note with
+  // `deposit_shielded`, describing a coin that exists nowhere. It must never show as a coin.
+  it('never counts an inbox note whose coin the chain does not confirm (a fake deposit note)', () => {
+    const fake = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [{ ...coin(9, STK, 1_000_000_000_000n), inboxIndex: '0' }],
+      outputs: [], // no leaf anywhere: the note describes nothing on chain
+      inputs: [],
+      previous: [],
+    });
+    expect(fake).toHaveLength(1);
+    expect(confirmedOnChain(fake[0]!)).toBe(false);
+    expect(holdingsByColour(fake)).toEqual([]); // no row, no total
+    expect(unconfirmedCoins(fake)).toHaveLength(1);
+    expect(() => chooseCoin(fake, STK, 1n)).toThrow(/no spendable coin/);
   });
 
   it('pays from the smallest single coin that covers the amount', () => {

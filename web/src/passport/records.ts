@@ -20,6 +20,9 @@ export interface AccountRecord {
   network: string;
   createdAt: number;
   txs?: { waveOne: string; waveTwo: string; activation: string };
+  /** The new-account check failed when it was opened (AA 00047 P10, R2-6: it was not fresh or not
+   *  empty). Kept so the refusal holds later too: nothing is ever signed for this account. */
+  refusedAtOpen?: Array<{ code: string; message: string }>;
 }
 
 export interface SecretRecord {
@@ -41,7 +44,8 @@ export type JobAction =
   | 'open-swap'
   | 'take'
   | 'demo-tokens'
-  | 'cancel-offers';
+  | 'cancel-offers'
+  | 'restore-enc-key';
 
 export interface JobRecord {
   requestId: string;

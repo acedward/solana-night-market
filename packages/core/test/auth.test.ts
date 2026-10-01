@@ -73,6 +73,7 @@ describe('the RelayAction envelope', () => {
       'withdraw-unshielded',
       'demo-tokens',
       'cancel-offers', // AA 00047 P9.S (questions Q30)
+      'restore-enc-key', // AA 00047 P10 (audit round 2, R2-3)
     ]);
   });
 

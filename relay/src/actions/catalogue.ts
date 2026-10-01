@@ -99,6 +99,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
     // AA 00047 P9.S (questions Q30): the site's "Cancel offer" (executor: P9.I).
     def('cancel-offers', 'prover', 'P9.I'),
+    // AA 00047 P10 (audit round 2, R2-3): the site's "Restore my encryption key" (executor: P10.R).
+    def('restore-enc-key', 'prover', 'P10.R'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);

@@ -14,6 +14,11 @@
 // wallet is about to sign (`missingFromSignedText`), so the panel never shows a fact the signature
 // does not carry. Facts with no `signed` line (the coin a spend pays from, what a call does) are
 // bound by the message's digest, not by a readable line, and the panel says so.
+//
+// The lines must be there IN ORDER (AA 00047 P10, audit round 2 R2-9): the operation line is the
+// text's second line (its first is the site's label, never matched), and every fact's lines follow
+// it in the order the panel lists them, so a swap's "This site labels it:" line for what it gives is
+// the one after the give's token line, not the get's.
 
 import { bytesToHex, hexToBytes, type TokenRegistry } from '@nightmarket/core';
 import {
@@ -94,7 +99,12 @@ function amountFact(
   };
 }
 
-function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
+function gatedFacts(
+  r: AuthRequest,
+  tokens: TokenRegistry,
+  purpose: 'restore-enc-key' | undefined,
+  currentKey: string | undefined,
+): SignFacts | null {
   switch (r.op) {
     case 'withdrawShielded':
     case 'withdrawShieldedToContract': {
@@ -153,9 +163,48 @@ function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
         ],
       };
     case 'rotateEncKey':
-      // The market only ever re-affirms the account's CURRENT key (questions Q30): the F3 v2 text is
-      // then "Cancel all open offers / Your key does not change". A request for any other key renders
-      // "Rotate encryption key", which these lines do not match, so it is refused before the wallet.
+      // "Restore my encryption key" (AA 00047 P10, R2-3): the ONE call that moves the key, and only
+      // back to this browser's own (../passport/operations.ts `restoreEncryptionKey`). Its text is
+      // "Rotate encryption key / New key <16 hex>"; the same key would read as a cancel, which these
+      // lines do not match, so it is refused before the wallet.
+      if (purpose === 'restore-enc-key') {
+        const newKey = bytesToHex(r.newKey);
+        return {
+          title: 'Restore my encryption key',
+          signedTitle: 'Rotate encryption key',
+          facts: [
+            {
+              kind: 'text',
+              label: 'What it does',
+              value:
+                "Sets your account's encryption key back to this browser's key, so the notes your coins are filed with are sealed to you again. Like any approval, it ends every open offer.",
+              signed: [],
+            },
+            {
+              kind: 'text',
+              label: "New key (this browser's)",
+              value: newKey,
+              mono: true,
+              signed: [`New key ${fp8(newKey)}`],
+            },
+            ...(currentKey
+              ? [
+                  {
+                    kind: 'text' as const,
+                    label: 'Replaces the key on Midnight now',
+                    value: norm(currentKey),
+                    mono: true,
+                    signed: [],
+                  },
+                ]
+              : []),
+          ],
+        };
+      }
+      // Otherwise the market only ever re-affirms the account's CURRENT key (questions Q30): the F3
+      // v2 text is then "Cancel all open offers / Your key does not change". A request for any other
+      // key renders "Rotate encryption key", which these lines do not match, so it is refused before
+      // the wallet.
       return {
         title: 'Cancel all open offers',
         signedTitle: 'Cancel all open offers',
@@ -181,9 +230,10 @@ function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
   }
 }
 
-/** The facts for one call, or null when there are none to add (a relay envelope, an unknown call). */
-export function signFacts(call: CallToAuthorise, tokens: TokenRegistry): SignFacts | null {
-  if (call.kind === 'gated') return gatedFacts(call.request, tokens);
+/** The facts for one call, or null when there are none to add (a relay envelope, an unknown call).
+ *  `ctx` (the call's context) adds the account's current key to a key restore's facts. */
+export function signFacts(call: CallToAuthorise, tokens: TokenRegistry, ctx?: { encKey: string }): SignFacts | null {
+  if (call.kind === 'gated') return gatedFacts(call.request, tokens, call.purpose, ctx?.encKey);
   const p = call.payload;
   const deadline = renderDeadline(BigInt(p.validUntil)).trimEnd();
   return {
@@ -203,11 +253,23 @@ export function signFacts(call: CallToAuthorise, tokens: TokenRegistry): SignFac
   };
 }
 
-/** The lines `facts` stands for that are not, verbatim, a line of `text` (the wallet's text, trailing
- *  spaces trimmed); empty when the text carries every fact the panel shows. */
+/** The text's line that names the operation: its second (the first is the site's label). */
+export const OPERATION_LINE = 1;
+
+/** The lines `facts` stands for that are not, verbatim and IN ORDER, lines of `text` (the wallet's
+ *  text, trailing spaces trimmed): the operation line exactly at `OPERATION_LINE`, then every fact's
+ *  lines after it in the panel's order (R2-9). Empty when the text carries every fact as shown. */
 export function missingFromSignedText(facts: SignFacts, text: string): string[] {
-  const lines = new Set(text.split('\n').map((l) => l.trimEnd()));
-  return [facts.signedTitle, ...facts.facts.flatMap((f) => f.signed)].filter((l) => !lines.has(l));
+  const lines = text.split('\n').map((l) => l.trimEnd());
+  const missing: string[] = [];
+  if (lines[OPERATION_LINE] !== facts.signedTitle) missing.push(facts.signedTitle);
+  let from = OPERATION_LINE + 1;
+  for (const want of facts.facts.flatMap((f) => f.signed)) {
+    const at = lines.indexOf(want, from);
+    if (at < 0) missing.push(want);
+    else from = at + 1;
+  }
+  return missing;
 }
 
 /** The page would show a fact the wallet's text does not carry: nothing is sent to the wallet. */

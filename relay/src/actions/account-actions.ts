@@ -1,5 +1,5 @@
-// The account executors (plan L-ACC): register, withdraw, withdraw-unshielded (AA 00047 B3) and
-// append-inbox.
+// The account executors (plan L-ACC): register, withdraw, withdraw-unshielded (AA 00047 B3),
+// append-inbox and cancel-offers (AA 00047 P9.I, questions Q30).
 //
 // Every one runs on the prover lane (one proof at a time), pays its DUST from the sponsor wallet,
 // keeps the call's private state (the coin a spend consumes) in a per-job in-memory store that is
@@ -10,6 +10,7 @@ import {
   RegisterPayloadSchema,
   checkRelayActionBinding,
   type AppendInboxResult,
+  type CancelOffersResult,
   type RegisterResult,
   type RelayActionScheme,
   type SignedRelayAction,
@@ -386,4 +387,43 @@ async function appendInbox(deps: AccountActionDeps, raw: unknown, ctx: JobContex
       }),
     ),
   );
+}
+
+/**
+ * "Cancel all open offers" (AA 00047 P9.I; questions Q30, audit C6): the arm's
+ * `rotate_enc_key_with_ed25519` with `newKey` = the account's CURRENT encryption key. The state does
+ * not change apart from the auth nonce, so every approval the device signed before (its open offers
+ * included, wherever a copy of them is kept) can never be used again. The arm's check refuses any
+ * other key (`cancelKeepsTheKey`: at admission and again here), and the call context carries the
+ * current key, so the wallet's text reads "Cancel all open offers / Your key does not change". On
+ * the prover lane like every gated call; the failure budget applies (app.ts `budgeted`).
+ */
+export function cancelOffersExecutor(deps: AccountActionDeps): JobExecutor {
+  return async (raw, ctx) => {
+    const { rt, check } = await recheck(deps, 'cancel-offers', raw, ctx);
+    const p = check.payload;
+    return runGated(deps, check.digestHex, () =>
+      ctx.prove(() =>
+        deps.sponsor.withWallet(async (w) => {
+          const privateState = new MemoryPrivateStateProvider();
+          try {
+            const providers = await rt.providers(w as SponsorWalletHandle, privateState);
+            const custody = await rt.client.account.CustodyAccount.connect(
+              providers,
+              rt.compiledAccount(),
+              check.account,
+              rt.client.witnesses.emptyCoinStore(),
+            );
+            ctx.stage('proving', { circuit: deps.arm.circuits.rotateEncKey });
+            const out = await custody.rotateEncKeyWithAuth(unhex(p.newKey), check.auth);
+            ctx.stage('submitted', { tx: String(out.txId) });
+            const result: CancelOffersResult = { txId: String(out.txId) };
+            return result as unknown as Record<string, unknown>;
+          } finally {
+            privateState.wipe();
+          }
+        }),
+      ),
+    );
+  };
 }

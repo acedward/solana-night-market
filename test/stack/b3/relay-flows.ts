@@ -149,7 +149,7 @@ const useCounter = (s: AccountStateView) =>
   findUseCounter(s.devices, (k) => bytesToHex(device.entryAt(hexToBytes(s.account, 32), BigInt(s.deviceEpoch), k)));
 
 const ctxOf = (s: AccountStateView) =>
-  callContext({ account: s.account, authNonce: BigInt(s.authNonce), networkSalt: s.networkSalt });
+  callContext({ account: s.account, authNonce: BigInt(s.authNonce), networkSalt: s.networkSalt, encKey: s.encKey });
 
 async function main() {
   const enc = generateEncKeyPairPortable();

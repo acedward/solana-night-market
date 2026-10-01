@@ -30,7 +30,7 @@ RUN COMPACTC_DIR=/opt/compactc-0.35.0 bash /tmp/fetch-compactc.sh 0.35.0 \
  && COMPACTC_DIR=/opt/compactc-0.34.0 bash /tmp/fetch-compactc.sh 0.34.0
 
 FROM ${BUN_IMAGE}
-ARG PASSPORT_COMMIT=451f7610e90000e0c5550877418122a04b85d0e6
+ARG PASSPORT_COMMIT=b2f1847271435d37c441966271aa8e20c9b09ecf
 ENV PASSPORT_COMMIT=${PASSPORT_COMMIT} \
     NODE_ENV=production \
     HOME=/tmp

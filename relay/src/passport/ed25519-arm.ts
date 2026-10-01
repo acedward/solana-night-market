@@ -27,22 +27,22 @@
 // Track A's client loads the compiled account module (in a deployment, the key volume's), so it is
 // imported here at run time only: a relay without a key volume still starts and serves reads.
 //
-// TODO(P9.I): AA 00047 P9 re-pins vendor/passport to the P9.C head (F3 v2, questions Q25 B′: every
-// amount shows its base units and full token id, the site's name and decimals marked as the site's
-// label; deadlines as a UTC date and time). The rebuild above goes through core's
-// `ed25519DeviceForCheck`, so the relay renders whatever the pinned client renders; at the re-pin:
-//   - packages/core/src/passport/ed25519.ts `ed25519TokenResolver` must apply the client's
-//     `isRenderableTokenDisplay` (a symbol of 1..8 printable characters WITHOUT a space), or the page
-//     and the circuit disagree on a symbol with a space;
-//   - relay/test/ed25519-arm.test.ts's expected texts follow F3 v2;
-//   - the `cancel-offers` action (P9.S, questions Q30: `rotate_enc_key_with_ed25519` with the current
-//     key) needs a check here (`{ op: 'rotateEncKey', newKey }`, `newKey` equal to the on-chain
-//     `enc_key`, which the F3 v2 client also takes as `CallContext.encKey` to render "Cancel all open
-//     offers") and an executor (`rotateEncKeyWithAuth`) in ../actions/account-actions.ts.
+// The message is format F3 v2 (vendor/passport @ b2f1847, AA 00047 P9.C; questions Q25 B′, Q32):
+// every amount shows its exact base units and its full 64-hex token id, and the site's name and
+// decimals only on a line marked as the site's label ("This site labels it: …", from
+// `ed25519TokenResolver`, the client's own `isRenderableTokenDisplay` rule); an offer's deadline
+// reads as a UTC date and time. The relay renders it through core's `ed25519DeviceForCheck`, so it
+// renders exactly what the browser and the circuit render.
+//
+// `cancel-offers` (questions Q30) is the arm's `rotate_enc_key` with `newKey` = the account's
+// CURRENT `enc_key`: the check refuses any other key (the market never changes a key), and the call
+// context carries that key (`CallContext.encKey`), so the rebuilt message reads "Cancel all open
+// offers / Your key does not change". A wallet that signed "Rotate encryption key" signed other
+// bytes, and is refused like any other mismatch.
 
 import { createHash } from 'node:crypto';
 
-import type { NetworkName, TokenRegistry } from '@nightmarket/core';
+import type { CancelOffersPayload, NetworkName, TokenRegistry } from '@nightmarket/core';
 
 import type * as CorePassport from '@nightmarket/core/passport';
 
@@ -107,10 +107,14 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
     payload: P | null,
     passportRaw: unknown,
     rebuild: (payload: P, core: typeof CorePassport) => Rebuild,
+    keep?: (payload: P, ledger: AccountLedger) => GatedCheckFail | null,
   ): Promise<CallCheckOk<P> | GatedCheckFail> {
     const pre = await preflightCall(runtime, accountRaw, payload, passportRaw);
     if (!pre.ok) return pre;
     const { account, passport, ledger } = pre;
+
+    const keyRefusal = keep?.(pre.payload, ledger);
+    if (keyRefusal) return keyRefusal;
 
     if (options.accountKeys) {
       const keys = await options.accountKeys(account);
@@ -128,6 +132,8 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
       account,
       authNonce: ledger.auth_nonce,
       networkSalt: hex(Uint8Array.from(ledger.evm_domain_salt)),
+      // F3 v2: the arm's rotate_enc_key renders the cancel from the account's current key.
+      encKey: hex(Uint8Array.from(ledger.enc_key)),
     });
     const counter = BigInt(passport.useCounter);
     let auth: Ed25519Authorisation;
@@ -166,17 +172,24 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
       passportAuth: unknown,
     ) {
       const parsed = parseGatedPayload(action, payload);
-      return check(runtime, account, parsed, passportAuth, (p, core) => {
-        const request =
-          action === 'withdraw'
-            ? core.withdrawRequest(p as never)
-            : action === 'withdraw-unshielded'
-              ? core.withdrawUnshieldedRequest(p as never)
-              : action === 'cancel-offers'
-                ? core.cancelOffersRequest(p as never)
-                : core.appendInboxRequest(p as never);
-        return (device, ctx, counter) => device.sign(ctx, request, counter);
-      }) as never;
+      return check(
+        runtime,
+        account,
+        parsed,
+        passportAuth,
+        (p, core) => {
+          const request =
+            action === 'withdraw'
+              ? core.withdrawRequest(p as never)
+              : action === 'withdraw-unshielded'
+                ? core.withdrawUnshieldedRequest(p as never)
+                : action === 'cancel-offers'
+                  ? core.cancelOffersRequest(p as never)
+                  : core.appendInboxRequest(p as never);
+          return (device, ctx, counter) => device.sign(ctx, request, counter);
+        },
+        action === 'cancel-offers' ? (p, ledger) => cancelKeepsTheKey(p as CancelOffersPayload, ledger) : undefined,
+      ) as never;
     },
     checkTradeCall<A extends TradeAction>(
       runtime: PassportRuntime,
@@ -199,6 +212,19 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
       const device = ed25519DeviceForKey(deviceKey, display);
       return { device, entryAt: (account, epoch, counter) => device.entryAt(account, epoch, counter) };
     },
+  };
+}
+
+/** `cancel-offers` re-affirms the account's CURRENT encryption key (questions Q30): any other key
+ *  would be a real key change, which the market never asks a wallet for. Refused before any
+ *  signature work (at admission, and again when the job runs). */
+export function cancelKeepsTheKey(payload: CancelOffersPayload, ledger: AccountLedger): GatedCheckFail | null {
+  const onChain = hex(Uint8Array.from(ledger.enc_key));
+  if (payload.newKey.replace(/^0x/, '').toLowerCase() === onChain) return null;
+  return {
+    ok: false,
+    code: 'malformed',
+    reason: "a cancel re-affirms the account's current encryption key; this key is not the one on chain",
   };
 }
 

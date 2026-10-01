@@ -41,8 +41,9 @@ NM="$APP/node_modules"
 CC=/opt/compactc-0.35.0/compactc
 CALLEE_CC=/opt/compactc-0.34.0/compactc
 KV=(bun "$APP/relay/src/tools/key-volume.ts")
-# account.compact @ acedward/passport 451f761 (branch 00047-solana-ed25519-arm, the Ed25519 arm).
-ACCOUNT_PIN="${KEYS_ACCOUNT_SOURCE_SHA256:-800dd4a38f2d25228d4732fdb39b3f5f0cbe42d792eef020914b8532c85f6f26}"
+# account.compact @ acedward/passport b2f1847 (branch 00047-solana-ed25519-arm, the Ed25519 arm with the
+# P9.C fix pass: C2, F3 v2, one device per account; AA 00047 P9.I).
+ACCOUNT_PIN="${KEYS_ACCOUNT_SOURCE_SHA256:-682d9274efbfbca66a6d2d49f4a52edbfdfa61d84e53b595e0fb4948c616cfe3}"
 # contracts/faucet/shielded-token.compact @ effectstream/mint-test-tokens a51cf3a, and the SHA-256 of
 # the `mint` verifier key the stagenet faucets were deployed with (contracts/faucet/PROVENANCE.md).
 FAUCET_SRC="$APP/contracts/faucet/shielded-token.compact"

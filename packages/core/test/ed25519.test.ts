@@ -24,11 +24,13 @@ import {
   assertDeviceKeyDecodes,
   assertSafeEd25519Message,
   callContext,
+  cancelOffersRequest,
   ed25519DeviceForCheck,
   ed25519DeviceForKey,
   ed25519DeviceOf,
   ed25519SignatureHex,
   ed25519TokenResolver,
+  isRenderableTokenDisplay,
   marketLabel,
   openSwapArgs,
   passportAuthOf,
@@ -42,7 +44,7 @@ const display = { network: 'stagenet', tokens } as const;
 const twUSDC = tokens.bySymbol('twUSDC')!.midnightColour;
 const twBTC = tokens.bySymbol('twBTC')!.midnightColour;
 const ACCOUNT = '7775594c1df2808a'.padEnd(64, '3');
-const ctx = { account: ACCOUNT, authNonce: 17n, networkSalt: '5a'.repeat(32) };
+const ctx = { account: ACCOUNT, authNonce: 17n, networkSalt: '5a'.repeat(32), encKey: '6b'.repeat(32) };
 
 const withdraw = withdrawRequest({
   recipient: '11'.repeat(32),
@@ -74,8 +76,20 @@ describe('what the browser and the relay agree on', () => {
     expect(ed25519TokenResolver(long)('ab'.repeat(32))).toBeUndefined();
   });
 
+  it('the token display follows the F3 v2 client’s own rule (isRenderableTokenDisplay): no space in a symbol', () => {
+    // The registry refuses a symbol with a space; the rule is the client's all the same, so a
+    // registry built another way can never make the page and the circuit disagree.
+    const spaced = {
+      byColour: (c: string) => (c === 'ab'.repeat(32) ? { symbol: 'tw USD', decimals: 6 } : undefined),
+    } as unknown as typeof tokens;
+    expect(ed25519TokenResolver(spaced)('ab'.repeat(32))).toBeUndefined();
+    expect(isRenderableTokenDisplay({ symbol: 'tw USD', decimals: 6 })).toBe(false);
+    expect(isRenderableTokenDisplay({ symbol: 'twUSDC', decimals: 19 })).toBe(false);
+    expect(isRenderableTokenDisplay({ symbol: 'twUSDC', decimals: 6 })).toBe(true);
+  });
+
   it('the pinned client is Track A’s branch head', () => {
-    expect(PASSPORT_CLIENT_COMMIT).toBe('451f7610e90000e0c5550877418122a04b85d0e6');
+    expect(PASSPORT_CLIENT_COMMIT).toBe('b2f1847271435d37c441966271aa8e20c9b09ecf');
   });
 });
 
@@ -90,10 +104,16 @@ describe('a gated call: the wallet signs the readable message, the relay re-chec
     const auth = await device.sign(callContext(ctx), withdraw, 3n);
     expect(asked).toHaveLength(1);
     const text = new TextDecoder().decode(asked[0]);
-    expect(text.split('\n').slice(0, 3)).toEqual([
+    // F3 v2 (questions Q25 B′, Q32): the enforced base units and the full token id, then the site's
+    // name and decimals marked as the site's label.
+    expect(text.split('\n').slice(0, 7)).toEqual([
       'Night Market - stagenet ',
       'Withdraw shielded',
-      `Amount ${'10.000000'.padStart(25)} twUSDC   [${twUSDC.slice(0, 8)}]`,
+      `Base units ${'10000000'.padEnd(24)}`,
+      `Token ${twUSDC}`,
+      `This site labels it: ${'10.000000 twUSDC'.padEnd(34)}`,
+      `To key ${'11'.repeat(8)}`,
+      `Account ${ACCOUNT.slice(0, 16)} nonce ${'17'.padEnd(20)}`,
     ]);
     expect(asked[0]).toHaveLength(ED25519_MESSAGE_BYTES.withdrawShielded);
     expect(() => assertSafeEd25519Message(asked[0]!)).not.toThrow();
@@ -163,13 +183,22 @@ describe('an offer: the swap call is signed once, over its readable terms', () =
     const { call, coin } = openSwapArgs(payload);
     const device = ed25519DeviceOf(wallet, display);
     const preview = device.previewOffer(callContext(ctx), call, coin);
-    expect(preview.text.split('\n').slice(1, 6)).toEqual([
+    expect(preview.text.split('\n').slice(1, 10)).toEqual([
       'Swap offer',
-      `Give ${'10.000000'.padStart(25)} twUSDC   [${twUSDC.slice(0, 8)}]`,
-      `Get  ${'0.00020000'.padStart(25)} twBTC    [${twBTC.slice(0, 8)}]`,
+      `Give base units ${'10000000'.padEnd(24)}`,
+      `Give token ${twUSDC}`,
+      `This site labels it: ${'10.000000 twUSDC'.padEnd(34)}`,
+      `Get base units ${'20000'.padEnd(24)}`,
+      `Get token ${twBTC}`,
+      `This site labels it: ${'0.00020000 twBTC'.padEnd(34)}`,
       `Taker ${'anyone'.padEnd(16)}`,
-      `Expires ${'never'.padStart(20)}`,
+      `Expires ${'never'.padEnd(23)}`,
     ]);
+    // A real signed expiry reads as a UTC date and time (audit C6).
+    const until = openSwapArgs({ ...payload, validUntil: '1790868312' });
+    expect(device.previewOffer(callContext(ctx), until.call, until.coin).text).toContain(
+      '\nExpires 2026-10-01 15:25:12 UTC\n',
+    );
     const auth = await device.signOffer(callContext(ctx), call, coin, 1n);
     expect(bytesToHex(auth.message)).toBe(bytesToHex(preview.bytes));
     const rebuilt = await ed25519DeviceForCheck(passportAuthOf(auth), display).signOffer(
@@ -179,6 +208,25 @@ describe('an offer: the swap call is signed once, over its readable terms', () =
       1n,
     );
     expect(rebuilt.sig).toEqual(auth.sig);
+  });
+});
+
+describe('the cancel (questions Q30): rotate_enc_key with the account’s current key', () => {
+  it('reads "Cancel all open offers" for the current key, and a key change for any other', async () => {
+    const wallet = testDevice();
+    const device = ed25519DeviceOf(wallet, display);
+    const same = cancelOffersRequest({ newKey: ctx.encKey, authNonce: '17' });
+    const lines = device.preview(callContext(ctx), same).text.split('\n');
+    expect(lines.slice(1, 3)).toEqual(['Cancel all open offers', 'Your key does not change']);
+    const other = cancelOffersRequest({ newKey: '7d'.repeat(32), authNonce: '17' });
+    expect(device.preview(callContext(ctx), other).text.split('\n')[1]).toBe('Rotate encryption key ');
+    // The relay rebuilds with the account's on-chain key: a cancel signed against another "current"
+    // key is other bytes, and is refused.
+    const wire = passportAuthOf(await device.sign(callContext(ctx), same, 0n));
+    await expect(ed25519DeviceForCheck(wire, display).sign(callContext(ctx), same, 0n)).resolves.toBeTruthy();
+    await expect(
+      ed25519DeviceForCheck(wire, display).sign(callContext({ ...ctx, encKey: '7d'.repeat(32) }), same, 0n),
+    ).rejects.toThrow(/tweetnacl pre-check/);
   });
 });
 

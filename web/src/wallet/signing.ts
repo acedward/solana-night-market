@@ -39,7 +39,7 @@ import {
   type GatedContext,
 } from '@nightmarket/core/passport';
 
-import { signFacts, type SignFacts } from './sign-facts.js';
+import { SignFactsMismatchError, missingFromSignedText, signFacts, type SignFacts } from './sign-facts.js';
 
 /** One call to authorise: a gated account call (a withdrawal, an inbox append) or a swap (a make or
  *  a take, one `open_swap_shielded_with_ed25519` call). */
@@ -72,7 +72,9 @@ export class EnvelopeSignatureError extends Error {
 /** `ActionSigning` over Track A's Ed25519 arm, for any wallet that signs messages. `envelope` is the
  *  relay envelope's scheme (lane B3's Solana scheme; a test may pass another). `announce` hears the
  *  facts the contract enforces for each account call just before the wallet is asked (the signing
- *  panel lists them, ./sign-facts.ts; AA 00047 P9.S, questions Q25 B′), then null. */
+ *  panel lists them, ./sign-facts.ts; AA 00047 P9.S, questions Q25 B′), then null. The wallet is
+ *  asked only when EVERY one of those facts is a line of the exact bytes it would sign (AA 00047
+ *  P9.I): a fact the text does not carry throws `SignFactsMismatchError` and nothing is signed. */
 export function ed25519ActionSigning(
   signer: DeviceSigner,
   display: Ed25519Display,
@@ -97,11 +99,29 @@ export function ed25519ActionSigning(
     },
     async authorise(ctx, call, useCounter) {
       const cc = callContext(ctx);
-      announce?.(signFacts(call, display.tokens));
+      const facts = signFacts(call, display.tokens);
+      // The device hands the wallet exactly the bytes the contract renders (after its own checks);
+      // this gate sits between the two: the panel's facts must each be a line of those bytes, or
+      // the wallet is never asked.
+      const gated = ed25519DeviceOf(
+        {
+          deviceKey: signer.deviceKey,
+          address: signer.address,
+          signMessage: async (message: Uint8Array) => {
+            if (facts) {
+              const missing = missingFromSignedText(facts, String.fromCharCode(...message));
+              if (missing.length > 0) throw new SignFactsMismatchError(missing);
+            }
+            announce?.(facts);
+            return signer.signMessage(message);
+          },
+        },
+        display,
+      );
       try {
-        if (call.kind === 'gated') return passportAuthOf(await device.sign(cc, call.request, useCounter));
+        if (call.kind === 'gated') return passportAuthOf(await gated.sign(cc, call.request, useCounter));
         const { call: args, coin } = openSwapArgs(call.payload);
-        return passportAuthOf(await device.signOffer(cc, args, coin, useCounter));
+        return passportAuthOf(await gated.signOffer(cc, args, coin, useCounter));
       } finally {
         announce?.(null);
       }

@@ -5,7 +5,7 @@
 // what main.ts serves when no device arm can run (no key volume). `accountCatalogue`, `withTrade`
 // and `withDemoTokens` add the executors, which are arm-agnostic given a `DeviceArm`: register and
 // demo-tokens (authorised by a RelayAction envelope in the Solana scheme, which for registration is
-// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, open-swap and take, each
+// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, cancel-offers, open-swap and take, each
 // authorised by the call's OWN Passport signature (`passport-call`, the F3 message the circuit
 // verifies), so every action is one wallet prompt.
 
@@ -54,6 +54,7 @@ export interface ActionDefinition {
 
 import {
   appendInboxExecutor,
+  cancelOffersExecutor,
   registerExecutor,
   withdrawExecutor,
   withdrawUnshieldedExecutor,
@@ -96,8 +97,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('take', 'prover', 'B3'),
     def('withdraw-unshielded', 'prover', 'B3'),
     def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
-    // AA 00047 P9.S (questions Q30): the site's "Cancel offer".
-    def('cancel-offers', 'prover', 'P9.R'),
+    // AA 00047 P9.S (questions Q30): the site's "Cancel offer" (executor: P9.I).
+    def('cancel-offers', 'prover', 'P9.I'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -128,12 +129,16 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
     payload: WithdrawUnshieldedPayloadSchema,
     executor: withdrawUnshieldedExecutor(deps),
   });
-  // AA 00047 P9.S (questions Q30): "Cancel offer" is the arm's `rotate_enc_key_with_ed25519` to the
-  // account's CURRENT key (@nightmarket/core `CancelOffersPayloadSchema`, `cancelOffersRequest`),
-  // authorised by its own F3 signature like the other gated calls (relay/src/passport/arm.ts). Its
-  // executor is still the placeholder (`not-implemented`): lane P9.R / P9.I add it, with the
-  // admission check "newKey is the on-chain enc_key" and the rotate prover key in the key volume.
-  set('cancel-offers', { auth: 'passport-call', payload: CancelOffersPayloadSchema });
+  // AA 00047 P9.S/P9.I (questions Q30): "Cancel offer" is the arm's `rotate_enc_key_with_ed25519` to
+  // the account's CURRENT key (@nightmarket/core `CancelOffersPayloadSchema`, `cancelOffersRequest`),
+  // authorised by its own F3 signature like the other gated calls; the arm's check refuses any key
+  // but the on-chain `enc_key` (relay/src/passport/ed25519-arm.ts `cancelKeepsTheKey`), and the key
+  // volume keeps the rotate prover key (relay/src/prover/required.ts).
+  set('cancel-offers', {
+    auth: 'passport-call',
+    payload: CancelOffersPayloadSchema,
+    executor: cancelOffersExecutor(deps),
+  });
   set('append-inbox', {
     auth: 'passport-call',
     payload: AppendInboxPayloadSchema,

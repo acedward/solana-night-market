@@ -8,20 +8,18 @@
 
 export const PINNED_ACCOUNT_KEYS = {
   /** The relay key volume's fingerprint these were taken from (RELAY_KEYS_FINGERPRINT). */
-  keySet: 'a627edb18f6aa54c48194ee9fb38b89140887cfc56b0efb377c9504b79edda92',
+  keySet: 'efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f',
   /** The acedward/passport commit the key set was compiled from. */
-  passportCommit: '451f7610e90000e0c5550877418122a04b85d0e6',
+  passportCommit: 'b2f1847271435d37c441966271aa8e20c9b09ecf',
   circuits: {
     activate_initial_device_with_ed25519: '883151b8b20534627a7938624f2f8f681ab659673cc43d22ddbfd0e4848c8110',
-    add_device_with_ed25519: '69c9d015b6416eb0b1b9a4534a98621f4bcb0d7899e781f6ce65a7561d5c4b66',
-    append_inbox_with_ed25519: '9dc6780e376c937669803e20e421e98e92bebb7507f9ab552d10e5126e9abbef',
+    append_inbox_with_ed25519: 'd13f69820546291f7afa916d7d4bd2bb630efaeeac330ce9fadd93541f403701',
     deposit_shielded: '6761a2e9cb905a115e7705b63b7df57b3c14dfa39fa48411ff6f512b8ff916b3',
     deposit_unshielded: '3deb950234a50b1515d496d687bd173118cf2e7461ab02d63270dbbd5ac5a973',
-    open_swap_shielded_with_ed25519: 'ff9d9b687906fea423a1a9e7527aa65d397170cb8132ce712e431bbea1db6696',
-    remove_device_with_ed25519: 'a7cca7a173f3b4c244b56265f273c05530d8937bbcef1abd817605810820950e',
-    rotate_enc_key_with_ed25519: '6199d27c69d3da2899aa3c4444305716685c26a1b8f2c22ffe9990055f1e75b2',
-    withdraw_shielded_to_contract_with_ed25519: '24abdca52084d92ae64f78cfe91318e7a6ca16100d76226cc2dfffa901a03a7e',
-    withdraw_shielded_with_ed25519: '35eeb8eb2ca14c2252486cd642165479b50adfe90c2f1f7a25485385c1b0813b',
-    withdraw_unshielded_with_ed25519: '1f8e9b9f15d2796185e9bb0ce95be2324a9cf3095697160260716f7bca4ccb45',
+    open_swap_shielded_with_ed25519: '4794a0e3c6c87da4a5b49fc1a4502691ba452bbb9460cd246e569da14fb72eeb',
+    rotate_enc_key_with_ed25519: 'd3c0cfb87d19be79cfb62e8aedb2d2009ace4f9f7e76e30d20a7de4ad933babe',
+    withdraw_shielded_to_contract_with_ed25519: '4ed29c43fb52744927830cbbe0bf33bb9d50722ae268806f10292ded8057e34b',
+    withdraw_shielded_with_ed25519: '41a81b9255b57127555534026491d345aba6998f3497b6b79fbce3bf7c7fc316',
+    withdraw_unshielded_with_ed25519: '7123727581e745741349fff384b9aec0308a93363bac6db262781098a9361a52',
   },
 } as const;

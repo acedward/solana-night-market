@@ -1,24 +1,30 @@
 // What the signing panel lists beside the wallet's text: the facts the CONTRACT enforces for the call
-// being approved (AA 00047 P9.S; spec FR-004b; questions Q25 option B′).
+// being approved (AA 00047 P9.S/P9.I; spec FR-004b; questions Q25 option B′, Q32).
 //
 // Q25 B′: a token's name and decimals are only this site's label; what the circuit binds is the
 // exact amount in BASE UNITS and the full 32-byte TOKEN ID (its colour). So for every amount the panel
 // shows the base units and the full token id, and the site's reading ("This site labels it:
 // 10.000000 twUSDC") marked as the site's. Recipients and deadlines are shown in full too.
 //
-// The text follows lane P9.C's F3 v2 wallet message (passport `00047-solana-ed25519-arm` @ `b2f1847`,
-// plan Evidence log "P9.C client API"): per amount `Base units <n>`, `Token <64 hex>` and
-// `This site labels it: <renderDecimal(n, decimals)> <symbol>` (a token the arm cannot show: `<n> ?`;
-// a swap's lines start `Give …` / `Get …`); the deadline `Expires YYYY-MM-DD hh:mm:ss UTC`; a
-// same-key rotate is "Cancel all open offers / Your key does not change". The site label below is
-// computed by the same rule as the client's `renderSiteLabel` and with the same token resolver the
-// message builder uses (`ed25519TokenResolver`).
-// TODO(P9.I): once vendor/passport is re-pinned to the F3 v2 client, call its `renderSiteLabel` /
-// `tokenDisplayFor` directly, and refuse to ask the wallet when an amount fact here does not appear
-// verbatim in the signed text (`renderEd25519Message`).
+// Every value here comes from the pinned F3 v2 client itself (vendor/passport @ b2f1847:
+// `renderUnits`, `renderSiteLabel`, `tokenDisplayFor`, `renderDeadline`), with the same token
+// resolver the message builder uses (`ed25519TokenResolver`), so the panel and the wallet's text
+// cannot drift apart. And each fact names the LINES of the wallet's text it stands for (`signed`):
+// ./signing.ts refuses to ask the wallet when any of them is not, verbatim, a line of the bytes the
+// wallet is about to sign (`missingFromSignedText`), so the panel never shows a fact the signature
+// does not carry. Facts with no `signed` line (the coin a spend pays from, what a call does) are
+// bound by the message's digest, not by a readable line, and the panel says so.
 
-import { deadlineText, type TokenRegistry } from '@nightmarket/core';
-import { ed25519TokenResolver, type AuthRequest } from '@nightmarket/core/passport';
+import { bytesToHex, hexToBytes, type TokenRegistry } from '@nightmarket/core';
+import {
+  UNKNOWN_TOKEN,
+  ed25519TokenResolver,
+  renderDeadline,
+  renderSiteLabel,
+  renderUnits,
+  tokenDisplayFor,
+  type AuthRequest,
+} from '@nightmarket/core/passport';
 
 import type { CallToAuthorise } from './signing.js';
 
@@ -35,85 +41,139 @@ export type SignFact =
       siteLabel: string;
       /** Whether the site lists the token (its label has a symbol). */
       listed: boolean;
+      /** The wallet text's lines this fact stands for (trailing spaces trimmed). */
+      signed: string[];
     }
-  | { kind: 'text'; label: string; value: string; mono?: boolean };
+  | {
+      kind: 'text';
+      label: string;
+      value: string;
+      mono?: boolean;
+      /** The wallet text's lines this fact stands for (trailing spaces trimmed); empty when the fact
+       *  is bound by the message's digest only (not a readable line). */
+      signed: string[];
+    };
 
 export interface SignFacts {
   /** One line: what the call does. */
   title: string;
+  /** The operation line of the wallet's text (its second line), e.g. "Withdraw shielded". */
+  signedTitle: string;
   facts: SignFact[];
 }
 
-const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 const norm = (h: string) => h.replace(/^0x/, '').toLowerCase();
+/** The 8-byte fingerprint the F3 text shows for a recipient, a note or a key: 16 hex. */
+const fp8 = (h: string) => norm(h).slice(0, 16);
 
-/** The F3 v2 client's `renderDecimal`: the base units with `decimals` digits after the point. */
-function renderDecimal(value: bigint, decimals: number): string {
-  if (decimals === 0) return value.toString();
-  const text = value.toString().padStart(decimals + 1, '0');
-  return `${text.slice(0, text.length - decimals)}.${text.slice(text.length - decimals)}`;
-}
-
-function amountFact(label: string, amount: bigint, colour: string, tokens: TokenRegistry): SignFact {
+/** An amount fact, with the three wallet lines it stands for. `role` is the F3 v2 line prefix: none
+ *  for a withdrawal ("Base units …", "Token …"), "Give"/"Get" for a swap's legs. */
+function amountFact(
+  label: string,
+  amount: bigint,
+  colour: string,
+  tokens: TokenRegistry,
+  role?: 'Give' | 'Get',
+): SignFact {
   const id = norm(colour);
-  const t = ed25519TokenResolver(tokens)(id);
+  const shown = tokenDisplayFor(ed25519TokenResolver(tokens), hexToBytes(id, 32));
+  const siteLabel = renderSiteLabel(amount, shown);
+  const units = renderUnits(amount);
   return {
     kind: 'amount',
     label,
-    baseUnits: amount.toString(10),
+    baseUnits: units,
     tokenId: id,
-    siteLabel: t ? `${renderDecimal(amount, t.decimals)} ${t.symbol}` : `${amount.toString(10)} ?`,
-    listed: !!t,
+    siteLabel,
+    listed: shown !== UNKNOWN_TOKEN,
+    signed: [
+      role ? `${role} base units ${units}` : `Base units ${units}`,
+      role ? `${role} token ${id}` : `Token ${id}`,
+      `This site labels it: ${siteLabel}`,
+    ],
   };
 }
 
 function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
   switch (r.op) {
     case 'withdrawShielded':
-    case 'withdrawShieldedToContract':
+    case 'withdrawShieldedToContract': {
+      const toContract = r.op === 'withdrawShieldedToContract';
+      const recipient = bytesToHex(r.recipient);
       return {
         title: 'Withdraw private tokens',
+        signedTitle: toContract ? 'Withdraw to contract' : 'Withdraw shielded',
         facts: [
-          amountFact('Amount', r.amount, hex(r.color), tokens),
-          { kind: 'text', label: 'To (coin key)', value: hex(r.recipient), mono: true },
+          amountFact('Amount', r.amount, bytesToHex(r.color), tokens),
+          {
+            kind: 'text',
+            label: toContract ? 'To (contract)' : 'To (coin key)',
+            value: recipient,
+            mono: true,
+            signed: [`${toContract ? 'To contract' : 'To key'} ${fp8(recipient)}`],
+          },
           {
             kind: 'text',
             label: 'Paid from one coin of',
             value: `${r.coin.value.toString(10)} base units`,
             mono: true,
+            signed: [],
           },
         ],
       };
-    case 'withdrawUnshielded':
+    }
+    case 'withdrawUnshielded': {
+      const recipient = bytesToHex(r.recipient);
       return {
         title: 'Withdraw public tokens',
+        signedTitle: 'Withdraw unshielded',
         facts: [
-          amountFact('Amount', r.amount, hex(r.color), tokens),
-          { kind: 'text', label: 'To (address)', value: hex(r.recipient), mono: true },
+          amountFact('Amount', r.amount, bytesToHex(r.color), tokens),
+          {
+            kind: 'text',
+            label: 'To (address)',
+            value: recipient,
+            mono: true,
+            signed: [`To address ${fp8(recipient)}`],
+          },
         ],
       };
+    }
     case 'appendInbox':
       return {
         title: "Save a note in your account's inbox",
+        signedTitle: 'File inbox note',
         facts: [
           {
             kind: 'text',
             label: 'What it does',
             value: 'Files one note, sealed to your own key, so a backup can restore the coin it describes.',
+            signed: [`Note ${fp8(bytesToHex(r.entry))}`],
           },
         ],
       };
     case 'rotateEncKey':
+      // The market only ever re-affirms the account's CURRENT key (questions Q30): the F3 v2 text is
+      // then "Cancel all open offers / Your key does not change". A request for any other key renders
+      // "Rotate encryption key", which these lines do not match, so it is refused before the wallet.
       return {
         title: 'Cancel all open offers',
+        signedTitle: 'Cancel all open offers',
         facts: [
           {
             kind: 'text',
             label: 'What it does',
             value:
               "Your key does not change; the account's approval counter moves, so every offer or approval signed before can never be used.",
+            signed: ['Your key does not change'],
           },
-          { kind: 'text', label: 'Encryption key (unchanged)', value: hex(r.newKey), mono: true },
+          {
+            kind: 'text',
+            label: 'Encryption key (unchanged)',
+            value: bytesToHex(r.newKey),
+            mono: true,
+            signed: [],
+          },
         ],
       };
     default:
@@ -125,17 +185,37 @@ function gatedFacts(r: AuthRequest, tokens: TokenRegistry): SignFacts | null {
 export function signFacts(call: CallToAuthorise, tokens: TokenRegistry): SignFacts | null {
   if (call.kind === 'gated') return gatedFacts(call.request, tokens);
   const p = call.payload;
+  const deadline = renderDeadline(BigInt(p.validUntil)).trimEnd();
   return {
     title: call.action === 'take' ? 'Take an offer' : 'Make an offer',
+    signedTitle: 'Swap offer',
     facts: [
-      amountFact('Give', BigInt(p.giveAmount), p.giveColor, tokens),
-      amountFact('Get', BigInt(p.wantAmount), p.wantColor, tokens),
+      amountFact('Give', BigInt(p.giveAmount), p.giveColor, tokens, 'Give'),
+      amountFact('Get', BigInt(p.wantAmount), p.wantColor, tokens, 'Get'),
       {
         kind: 'text',
         label: 'Expires',
-        value: BigInt(p.validUntil) === 0n ? 'never (no expiry)' : deadlineText(p.validUntil),
+        value: deadline === 'never' ? 'never (no expiry)' : deadline,
+        signed: [`Expires ${deadline}`],
       },
-      { kind: 'text', label: 'Paid from one coin of', value: `${p.coin.value} base units`, mono: true },
+      { kind: 'text', label: 'Paid from one coin of', value: `${p.coin.value} base units`, mono: true, signed: [] },
     ],
   };
+}
+
+/** The lines `facts` stands for that are not, verbatim, a line of `text` (the wallet's text, trailing
+ *  spaces trimmed); empty when the text carries every fact the panel shows. */
+export function missingFromSignedText(facts: SignFacts, text: string): string[] {
+  const lines = new Set(text.split('\n').map((l) => l.trimEnd()));
+  return [facts.signedTitle, ...facts.facts.flatMap((f) => f.signed)].filter((l) => !lines.has(l));
+}
+
+/** The page would show a fact the wallet's text does not carry: nothing is sent to the wallet. */
+export class SignFactsMismatchError extends Error {
+  override name = 'SignFactsMismatchError';
+  constructor(readonly missing: string[]) {
+    super(
+      `The approval text does not show what this page shows (${missing.length} line${missing.length === 1 ? '' : 's'} missing), so the wallet was not asked. Nothing was signed.`,
+    );
+  }
 }

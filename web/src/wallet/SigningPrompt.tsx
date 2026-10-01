@@ -153,7 +153,9 @@ export function SigningPrompt({
         )}
         {prompt.facts && <SignFactsList facts={prompt.facts} />}
         <p className="sign-label">What {prompt.wallet} shows</p>
-        <pre className="sign-text mono" data-testid="sign-prompt-text">
+        {/* Focusable: the F3 v2 text (base units, full token ids) is long enough to scroll on a phone,
+            and a keyboard user must be able to scroll it too (axe scrollable-region-focusable). */}
+        <pre className="sign-text mono" data-testid="sign-prompt-text" tabIndex={0}>
           {prompt.text}
         </pre>
         <p className="fingerprint">

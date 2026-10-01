@@ -361,7 +361,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     // The device signed exactly this call: the account, its auth nonce and the withdrawal's request.
     expect(pa.owner).toBe(signing.deviceKey);
     const message = fakeCallMessage(
-      { account: ACCOUNT, authNonce: 7n, networkSalt: '5a'.repeat(32) },
+      { account: ACCOUNT, authNonce: 7n, networkSalt: '5a'.repeat(32), encKey: relay.state!.encKey },
       { kind: 'gated', request: withdrawRequest(sub.request.payload as never) },
     );
     expect(ed25519.verify(unhex(pa.signature), message, unhex(signing.deviceKey))).toBe(true);

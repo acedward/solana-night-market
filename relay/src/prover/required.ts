@@ -9,6 +9,7 @@
 //   account/withdraw_shielded_with_ed25519         a shielded withdrawal (actions/account-actions.ts)
 //   account/withdraw_unshielded_with_ed25519       an unshielded withdrawal (actions/account-actions.ts, B3)
 //   account/append_inbox_with_ed25519              re-filing a change coin's entry, Q13 (actions/account-actions.ts)
+//   account/rotate_enc_key_with_ed25519            "Cancel all open offers", Q30 (actions/account-actions.ts, P9.I)
 //   account/open_swap_shielded_with_ed25519        making and taking offers (trade/account-offer.ts)
 // and, when the demo-token endpoint is on (AA 00047 B3, demo/faucet.ts):
 //   account/deposit_shielded                       the pack's deposit into the account
@@ -28,6 +29,7 @@ export const ACCOUNT_PROVEN_CIRCUITS: readonly string[] = [
   ARM_CIRCUITS.withdrawShielded,
   ARM_CIRCUITS.withdrawUnshielded,
   ARM_CIRCUITS.appendInbox,
+  ARM_CIRCUITS.rotateEncKey,
   ARM_CIRCUITS.openSwap,
 ];
 

@@ -24,9 +24,21 @@ describe('gated call arguments', () => {
       account: `0x${ACCOUNT.toUpperCase()}`,
       authNonce: 3n,
       networkSalt: `0x${'AB'.repeat(32)}`,
+      encKey: `0x${'CD'.repeat(32)}`,
     });
-    expect(cc).toEqual({ contractAddress: bytes(ACCOUNT), authNonce: 3n, evmDomainSalt: bytes('ab'.repeat(32)) });
-    expect(() => callContext({ account: ACCOUNT, authNonce: 3n, networkSalt: 'ab' })).toThrow();
+    // The account's current enc key too (AA 00047 P9.I): the F3 v2 client renders the cancel from it.
+    expect(cc).toEqual({
+      contractAddress: bytes(ACCOUNT),
+      authNonce: 3n,
+      evmDomainSalt: bytes('ab'.repeat(32)),
+      encKey: bytes('cd'.repeat(32)),
+    });
+    expect(() =>
+      callContext({ account: ACCOUNT, authNonce: 3n, networkSalt: 'ab', encKey: 'cd'.repeat(32) }),
+    ).toThrow();
+    expect(() =>
+      callContext({ account: ACCOUNT, authNonce: 3n, networkSalt: 'ab'.repeat(32), encKey: 'cd' }),
+    ).toThrow();
   });
 
   it('a withdrawal binds the recipient, the amount and the exact coin', () => {

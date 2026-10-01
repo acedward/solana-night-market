@@ -51,6 +51,7 @@ import {
   type ZkArtifactManifest,
 } from '@midnight-ntwrk/midnight-js-utils';
 
+import { InfrastructureError } from '../actions/failure-budget.js';
 import type { Logger } from '../log.js';
 import { assembleProveBody, equalBytes, proveBodyFrame, proveBodyParts, type ProveBodyParts } from './prove-body.js';
 
@@ -339,7 +340,11 @@ export async function relayProofProvider(
       if (integrity) throw integrity;
       if (response && !RETRY_ON.includes(response.status)) break;
       if (attempt >= RETRIES) {
-        if (failure !== null) throw failure;
+        // The proof server could not be reached (AA 00047 P10, R2-2): never the requester's doing.
+        if (failure !== null) {
+          const text = failure instanceof Error ? failure.message : String(failure);
+          throw new InfrastructureError(`the proof server could not be reached: ${text}`, { cause: failure });
+        }
         break;
       }
       await response?.body?.cancel().catch(() => undefined);
@@ -347,9 +352,10 @@ export async function relayProofProvider(
     }
     const res = response!;
     if (!res.ok) {
-      throw new Error(
-        `Failed Proof Server response: url="${res.url}", code="${res.status}", status="${res.statusText}"`,
-      );
+      const text = `Failed Proof Server response: url="${res.url}", code="${res.status}", status="${res.statusText}"`;
+      // A 5xx is the proof server failing (plan R7: it runs out of memory and restarts): an
+      // infrastructure failure (AA 00047 P10, R2-2). A 4xx is a refusal of what it was sent.
+      throw res.status >= 500 ? new InfrastructureError(text) : new Error(text);
     }
     return new Uint8Array(await res.arrayBuffer());
   };

@@ -6,9 +6,14 @@
 
 import { readFileSync } from 'node:fs';
 
+import { KernelClient } from '@nightmarket/core';
+
+import { AccountCaps } from './actions/account-caps.js';
+import { AccountGate } from './actions/account-gate.js';
 import {
   accountCatalogue,
   defaultCatalogue,
+  withAccountCaps,
   withDemoTokens,
   withRegistrationCaps,
   withTrade,
@@ -207,6 +212,10 @@ async function main(): Promise<void> {
           ),
         onWriteFailed: (what, error) =>
           log.error('the demo-token claims file could not be written', { during: what, error }),
+        onLockLost: () =>
+          log.error(
+            'another relay took over the demo-token claims lock: this relay stops writing claims (one relay per data dir)',
+          ),
       });
       // Takes the lock FIRST, then reads and recovers the file (audit C8 / F-B8).
       claims.lock();
@@ -235,15 +244,16 @@ async function main(): Promise<void> {
     ttlSeconds: config.limits.appendEntitlementTtlSeconds,
     maxPerAccountPerDay: config.limits.appendsPerAccountPerDay,
   });
-  const nonces = new NonceStore(
-    config.limits.nonceTtlSeconds,
-    config.limits.maxNonces,
-    undefined,
-    config.limits.maxNoncesPerClient,
-  );
+  // Stateless nonces (AA 00047 P10, R2-8): only used ones are remembered.
+  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   // Audit C4 (AA 00047 P9): registration caps and the failure budget (RUNBOOK section 9).
   const registrationCaps = new RegistrationCaps(config.registration);
   const failures = new FailureBudget(config.failureBudget);
+  // Audit round 2 R2-1 (AA 00047 P10): per-account caps on offers, cancels and key restores, and one
+  // queued-or-running job per account (RUNBOOK section 9).
+  const kernel = new KernelClient({ baseUrl: config.network.zswap.kernelUrl, retries: 1, timeoutMs: 10_000 });
+  const accountCaps = new AccountCaps({ ...config.accountCaps, offerStatus: (id) => kernel.offerStatus(id) });
+  const accountGate = new AccountGate(config.limits.jobsPerAccount);
   const queue = new JobQueue({
     ttlSeconds: config.limits.jobTtlSeconds,
     maxJobs: config.limits.maxJobs,
@@ -314,11 +324,13 @@ async function main(): Promise<void> {
           o.path === 'direct'
             ? faucets.direct({ ...o, networkId: config.network.midnightNetworkId })
             : faucets.viaSponsor(o),
+        pendingSettleSeconds: config.demoTokens.pendingSettleSeconds,
         log: log.child({ component: 'demo-tokens' }),
       }),
     );
   }
   catalogue = withRegistrationCaps(catalogue, registrationCaps);
+  catalogue = withAccountCaps(catalogue, accountCaps);
   const app = createApp({
     config,
     version: RELAY_VERSION,
@@ -327,6 +339,7 @@ async function main(): Promise<void> {
     queue,
     catalogue,
     failures,
+    accountGate,
     sponsor,
     health,
     chain,

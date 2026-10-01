@@ -14,6 +14,7 @@ import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-s
 
 import { defaultCatalogue, type ActionDefinition } from '../src/actions/catalogue.js';
 import { AppendEntitlements } from '../src/actions/entitlements.js';
+import type { FailureBudget } from '../src/actions/failure-budget.js';
 import { createApp, type AppDeps } from '../src/app.js';
 import { NonceStore } from '../src/auth/nonces.js';
 import { notImplementedChainReader, type ChainReader } from '../src/chain/reader.js';
@@ -77,11 +78,13 @@ export function harness(
     chain?: ChainReader;
     /** The envelope scheme: the test scheme unless given (null: none, as main.ts until lane B3). */
     scheme?: RelayActionScheme | null;
+    /** The failure budget (AA 00047 P9 C4 / P10 R2-2); none unless given. */
+    failures?: FailureBudget;
   } = {},
 ) {
   const config = opts.config ?? testConfig();
   const log = silentLog();
-  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxNonces);
+  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
   const catalogue = opts.catalogue ?? defaultCatalogue();
   const health = async (): Promise<HealthResponse> => ({
@@ -112,6 +115,7 @@ export function harness(
     health,
     chain: opts.chain ?? notImplementedChainReader,
     ...(opts.passportCall ? { passportCall: opts.passportCall } : {}),
+    ...(opts.failures ? { failures: opts.failures } : {}),
     ...(opts.scheme === null ? {} : { scheme: opts.scheme ?? testScheme }),
     clientAddress: () => '198.51.100.7',
   });

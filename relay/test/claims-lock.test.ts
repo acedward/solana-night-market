@@ -35,6 +35,9 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** The pid a lock file names (AA 00047 P10, F-A2-7: the lock is JSON with the pid, host and a token). */
+const lockPid = (file: string): number => (JSON.parse(readFileSync(`${file}.lock`, 'utf8')) as { pid: number }).pid;
+
 /** An error shaped as node:fs throws it. */
 const errno = (code: string, syscall: string, path: string) =>
   Object.assign(new Error(`${code}: simulated, ${syscall} '${path}'`), { code, syscall, path });
@@ -84,7 +87,7 @@ describe('the claims lock', () => {
       writeFileSync(`${file}.lock`, `${stale}\n`);
       const c = new DemoTokenClaims({ file, dailyCap: 1 });
       c.lock();
-      expect(readFileSync(`${file}.lock`, 'utf8').trim()).toBe(String(process.pid));
+      expect(lockPid(file)).toBe(process.pid);
       c.unlock();
       expect(fs.existsSync(`${file}.lock`)).toBe(false);
     }
@@ -98,7 +101,7 @@ describe('the claims lock', () => {
     });
     const c = new DemoTokenClaims({ file, dailyCap: 1 });
     c.lock();
-    expect(readFileSync(`${file}.lock`, 'utf8').trim()).toBe(String(process.pid));
+    expect(lockPid(file)).toBe(process.pid);
     c.unlock();
   });
 
@@ -126,7 +129,7 @@ describe('the claims lock', () => {
     expect(fs.existsSync(`${file}.lock`)).toBe(false);
     c.unlock();
     c.lock();
-    expect(readFileSync(`${file}.lock`, 'utf8').trim()).toBe(String(process.pid));
+    expect(lockPid(file)).toBe(process.pid);
     c.unlock();
   });
 
@@ -186,5 +189,74 @@ describe('the claims lock', () => {
     expect(e).toMatchObject({ kind: 'filesystem', code: 'EACCES', path: file });
     expect(e.message).toContain('cannot read its claims file');
     expect(e.message).toContain(`The relay runs as ${ids}`);
+  });
+});
+
+// AA 00047 P10, audit round 2 R2-9 (F-A2-7.3): "a lock holding the relay's own pid is taken over as
+// stale, so two relay containers on one data volume (both pid 1) both open the store". The lock now
+// names its holder's pid, host and a token, and the live relay touches it (a heartbeat).
+describe('the claims lock across containers (R2-9)', () => {
+  it('a fresh lock of another host is held, even with the same pid (two containers on one volume)', () => {
+    const file = join(tmp(), 'claims.json');
+    const a = new DemoTokenClaims({ file, dailyCap: 1, hostname: 'container-a', heartbeatSeconds: 0 });
+    a.lock();
+    const b = new DemoTokenClaims({ file, dailyCap: 1, hostname: 'container-b', heartbeatSeconds: 0 });
+    const e = thrown(() => b.lock());
+    expect(e.kind).toBe('held');
+    expect(e.message).toContain(`holder ${process.pid} on host container-a`);
+    expect(a.open).toBe(true);
+    a.unlock();
+  });
+
+  it('the same host and pid with another token is a restarted relay: taken over at once', () => {
+    const file = join(tmp(), 'claims.json');
+    const before = new DemoTokenClaims({ file, dailyCap: 1, hostname: 'h1', heartbeatSeconds: 0 });
+    before.lock(); // ... and the process dies without unlocking
+    const after = new DemoTokenClaims({ file, dailyCap: 1, hostname: 'h1', heartbeatSeconds: 0 });
+    after.lock();
+    expect(lockPid(file)).toBe(process.pid);
+    after.unlock();
+  });
+
+  it('a lock untouched for staleSeconds is taken over; the old holder notices and stops writing', () => {
+    const file = join(tmp(), 'claims.json');
+    let lost = 0;
+    const a = new DemoTokenClaims({
+      file,
+      dailyCap: 5,
+      hostname: 'container-a',
+      heartbeatSeconds: 0,
+      onLockLost: () => lost++,
+    });
+    a.lock();
+    expect(a.heartbeat()).toBe(true);
+    // container-a froze: its lock is three minutes old.
+    const old = new Date(Date.now() - 180_000);
+    fs.utimesSync(`${file}.lock`, old, old);
+    const b = new DemoTokenClaims({ file, dailyCap: 5, hostname: 'container-b', heartbeatSeconds: 0 });
+    b.lock();
+    const r = b.reserve('01'.repeat(32), 'ab'.repeat(32));
+    expect(r.ok).toBe(true);
+    const fileBefore = readFileSync(file, 'utf8');
+    // container-a wakes up: its heartbeat sees another token; it writes nothing more.
+    expect(a.heartbeat()).toBe(false);
+    expect(lost).toBe(1);
+    expect(a.open).toBe(false);
+    expect(a.reserve('02'.repeat(32), 'ab'.repeat(32))).toMatchObject({ ok: false, code: 'store-unavailable' });
+    expect(readFileSync(file, 'utf8')).toBe(fileBefore);
+    a.unlock(); // does not remove b's lock
+    expect(JSON.parse(readFileSync(`${file}.lock`, 'utf8'))).toMatchObject({ host: 'container-b' });
+    b.unlock();
+  });
+
+  it('a write after the lock was taken over refuses instead of overwriting the other relay’s file', () => {
+    const file = join(tmp(), 'claims.json');
+    const a = new DemoTokenClaims({ file, dailyCap: 5, hostname: 'h', heartbeatSeconds: 0 });
+    a.lock();
+    const r = a.reserve('01'.repeat(32), 'ab'.repeat(32));
+    expect(r.ok).toBe(true);
+    writeFileSync(`${file}.lock`, JSON.stringify({ pid: process.ppid, host: 'other', token: 't' }));
+    if (r.ok) expect(() => r.confirm(['aa'.repeat(32)])).toThrow(/taken over/);
+    expect(a.open).toBe(false);
   });
 });

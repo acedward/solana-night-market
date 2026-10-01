@@ -1,5 +1,5 @@
 // The account executors (plan L-ACC): register, withdraw, withdraw-unshielded (AA 00047 B3),
-// append-inbox and cancel-offers (AA 00047 P9.I, questions Q30).
+// append-inbox, cancel-offers (AA 00047 P9.I, questions Q30) and restore-enc-key (AA 00047 P10, R2-3).
 //
 // Every one runs on the prover lane (one proof at a time), pays its DUST from the sponsor wallet,
 // keeps the call's private state (the coin a spend consumes) in a per-job in-memory store that is
@@ -12,6 +12,7 @@ import {
   type AppendInboxResult,
   type CancelOffersResult,
   type RegisterResult,
+  type RestoreEncKeyResult,
   type RelayActionScheme,
   type SignedRelayAction,
   type WithdrawResult,
@@ -399,8 +400,26 @@ async function appendInbox(deps: AccountActionDeps, raw: unknown, ctx: JobContex
  * the prover lane like every gated call; the failure budget applies (app.ts `budgeted`).
  */
 export function cancelOffersExecutor(deps: AccountActionDeps): JobExecutor {
+  return rotateEncKeyExecutor(deps, 'cancel-offers');
+}
+
+/**
+ * "Restore my encryption key" (AA 00047 P10, audit round 2 R2-3, questions Q36): the same circuit,
+ * `rotate_enc_key_with_ed25519`, with `newKey` = the key THIS BROWSER holds, for an account whose
+ * on-chain key a page changed (F-A2-3: a real key change passed off as something else locks the
+ * account out of the site, whose chain check needs the browser's key). The wallet reads "Rotate
+ * encryption key / New key <16 hex>"; the arm's check refuses the on-chain key itself (that is a
+ * cancel: `restoreChangesTheKey`), at admission and again here. Its own daily cap, never the
+ * cancels'; never refused by the failure budget (app.ts `guarded`).
+ */
+export function restoreEncKeyExecutor(deps: AccountActionDeps): JobExecutor {
+  return rotateEncKeyExecutor(deps, 'restore-enc-key');
+}
+
+/** The arm's `rotate_enc_key` for `cancel-offers` (the current key) or `restore-enc-key` (another). */
+function rotateEncKeyExecutor(deps: AccountActionDeps, action: 'cancel-offers' | 'restore-enc-key'): JobExecutor {
   return async (raw, ctx) => {
-    const { rt, check } = await recheck(deps, 'cancel-offers', raw, ctx);
+    const { rt, check } = await recheck(deps, action, raw, ctx);
     const p = check.payload;
     return runGated(deps, check.digestHex, () =>
       ctx.prove(() =>
@@ -417,7 +436,7 @@ export function cancelOffersExecutor(deps: AccountActionDeps): JobExecutor {
             ctx.stage('proving', { circuit: deps.arm.circuits.rotateEncKey });
             const out = await custody.rotateEncKeyWithAuth(unhex(p.newKey), check.auth);
             ctx.stage('submitted', { tx: String(out.txId) });
-            const result: CancelOffersResult = { txId: String(out.txId) };
+            const result: CancelOffersResult | RestoreEncKeyResult = { txId: String(out.txId) };
             return result as unknown as Record<string, unknown>;
           } finally {
             privateState.wipe();

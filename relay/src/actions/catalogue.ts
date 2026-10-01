@@ -5,9 +5,14 @@
 // what main.ts serves when no device arm can run (no key volume). `accountCatalogue`, `withTrade`
 // and `withDemoTokens` add the executors, which are arm-agnostic given a `DeviceArm`: register and
 // demo-tokens (authorised by a RelayAction envelope in the Solana scheme, which for registration is
-// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, cancel-offers, open-swap and take, each
-// authorised by the call's OWN Passport signature (`passport-call`, the F3 message the circuit
-// verifies), so every action is one wallet prompt.
+// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, cancel-offers, restore-enc-key,
+// open-swap and take, each authorised by the call's OWN Passport signature (`passport-call`, the F3
+// message the circuit verifies), so every action is one wallet prompt. `withRegistrationCaps` and
+// `withAccountCaps` add the admission caps (AA 00047 P9 C4; P10 R2-1).
+//
+// Lanes: every action proves on the one prover lane. `open-swap` runs on its ACCOUNT's lane and takes
+// the prover only while it proves (AA 00047 P10, R2-1): the exchange's listing wait (up to 90 s) no
+// longer holds the prover.
 
 import { z } from 'zod';
 
@@ -18,6 +23,7 @@ import {
   OpenSwapPayloadSchema,
   RELAY_ACTIONS,
   RegisterPayloadSchema,
+  RestoreEncKeyPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
@@ -26,7 +32,8 @@ import {
 } from '@nightmarket/core';
 
 import type { AuthKind } from '../auth/verifiers.js';
-import type { AdmissionCheck } from './admission.js';
+import { dailyAdmission, makeAdmission, type AccountCaps } from './account-caps.js';
+import { admitAll, type AdmissionCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
@@ -56,6 +63,7 @@ import {
   appendInboxExecutor,
   cancelOffersExecutor,
   registerExecutor,
+  restoreEncKeyExecutor,
   withdrawExecutor,
   withdrawUnshieldedExecutor,
   type AccountActionDeps,
@@ -93,7 +101,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('register', 'prover', 'B3', { requiresAccount: false, payload: RegisterPayloadSchema }),
     def('withdraw', 'prover', 'B3'),
     def('append-inbox', 'prover', 'B3'),
-    def('open-swap', 'prover', 'B3'),
+    // On its account's lane: it takes the prover only while it proves (AA 00047 P10, R2-1).
+    def('open-swap', 'account', 'B3'),
     def('take', 'prover', 'B3'),
     def('withdraw-unshielded', 'prover', 'B3'),
     def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
@@ -140,6 +149,16 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
     auth: 'passport-call',
     payload: CancelOffersPayloadSchema,
     executor: cancelOffersExecutor(deps),
+  });
+  // AA 00047 P10 (audit round 2 R2-3, questions Q36): "Restore my encryption key", the same circuit
+  // to the BROWSER's key (@nightmarket/core `RestoreEncKeyPayloadSchema`, `restoreEncKeyRequest`), for
+  // an account whose on-chain key a page changed. The arm's check refuses the on-chain key itself (that
+  // would be a cancel: relay/src/passport/ed25519-arm.ts `restoreChangesTheKey`); its own daily cap
+  // (`withAccountCaps`), never the cancels'; never refused by the failure budget.
+  set('restore-enc-key', {
+    auth: 'passport-call',
+    payload: RestoreEncKeyPayloadSchema,
+    executor: restoreEncKeyExecutor(deps),
   });
   set('append-inbox', {
     auth: 'passport-call',
@@ -204,5 +223,24 @@ export function withRegistrationCaps(
   caps: RegistrationCaps,
 ): Map<RelayActionName, ActionDefinition> {
   map.set('register', { ...map.get('register')!, admit: registrationAdmission(caps) });
+  return map;
+}
+
+/**
+ * The catalogue with the per-account caps (AA 00047 P10, audit round 2 R2-1: ./account-caps.ts): a
+ * make is admitted after its own checks (the signed expiry) only under the open-offer and daily-make
+ * caps; a cancel and a key restore each under their own daily cap.
+ */
+export function withAccountCaps(
+  map: Map<RelayActionName, ActionDefinition>,
+  caps: AccountCaps,
+): Map<RelayActionName, ActionDefinition> {
+  const add = (action: RelayActionName, check: AdmissionCheck) => {
+    const d = map.get(action)!;
+    map.set(action, { ...d, admit: d.admit ? admitAll(d.admit, check) : check });
+  };
+  add('open-swap', makeAdmission(caps));
+  add('cancel-offers', dailyAdmission(caps, 'cancels'));
+  add('restore-enc-key', dailyAdmission(caps, 'restores'));
   return map;
 }

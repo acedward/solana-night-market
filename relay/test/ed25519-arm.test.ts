@@ -20,6 +20,7 @@ import {
   type AppendInboxPayload,
   type CancelOffersPayload,
   type OpenSwapPayload,
+  type RestoreEncKeyPayload,
   type WithdrawPayload,
   type WithdrawUnshieldedPayload,
 } from '@nightmarket/core';
@@ -30,6 +31,7 @@ import {
   ed25519DeviceOf,
   openSwapArgs,
   passportAuthOf,
+  restoreEncKeyRequest,
   withdrawRequest,
   withdrawUnshieldedRequest,
 } from '@nightmarket/core/passport';
@@ -220,6 +222,8 @@ describe('B3: the relay authenticates an account call by its own F3 signature (o
     expect(r.account).toBe(a.account);
     expect(r.auth.arm).toBe('ed25519');
     const text = new TextDecoder().decode(r.auth.message);
+    // TODO(P10.I): after the re-pin to P10.C's F3 v3 (599327b) the first line is
+    // `Site: Night Market - stagenet` (Evidence row "P10.C client API"): /^Site: Night Market - stagenet *\n…/.
     expect(text).toMatch(/^Night Market - stagenet *\nWithdraw shielded\n/);
     // F3 v2 (AA 00047 P9.C/P9.I; questions Q25 B′, Q32): the relay renders what the circuit renders:
     // the enforced base units and full token id, the site's reading marked as its label.
@@ -532,6 +536,109 @@ describe('AA 00047 P9.I: cancel-offers (questions Q30) is rotate_enc_key with th
     // Without a runtime the executor says so (not "not-implemented").
     const ctx = { log: { info: () => {} } } as never;
     await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
+  });
+});
+
+describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key to the BROWSER’s key', () => {
+  const restore = (a: FakeAccount, newKey: string): RestoreEncKeyPayload => ({
+    newKey,
+    authNonce: String(a.authNonce),
+  });
+
+  it('accepts a restore the wallet signed as "Rotate encryption key / New key …" for the browser’s key', async () => {
+    const owner = wallet();
+    const a = accountOf(owner); // a page changed the on-chain key: it is not the browser's
+    const rt = runtimeOf(a);
+    const browserKey = hex(randomBytes(32));
+    const p = restore(a, browserKey);
+    const r = await arm.checkGatedCall(
+      rt,
+      'restore-enc-key',
+      a.account,
+      p,
+      await browserGated(owner, a, restoreEncKeyRequest(p)),
+    );
+    if (!r.ok) throw new Error(`refused: ${r.code} ${r.reason}`);
+    const lines = new TextDecoder().decode(r.auth.message).split('\n');
+    // TODO(P10.I): after the re-pin (F3 v3) line 0 reads `Site: Night Market - stagenet`; these
+    // lines (1: the operation, 2: the new key) do not change.
+    expect(lines[1]!.trimEnd()).toBe('Rotate encryption key'); // F3 v2 pads to a fixed length
+    expect(lines[2]).toMatch(new RegExp(`^New key ${browserKey.slice(0, 16)}`));
+    expect(r.signer).toBe(owner.deviceKey);
+  });
+
+  it('refuses the on-chain key itself (a cancel in disguise) and an all-zero key, before any signature work', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    for (const key of [a.encKey, '00'.repeat(32)]) {
+      const p = restore(a, key);
+      // Even a valid signature over it is refused.
+      const passportAuth = await browserGated(owner, a, restoreEncKeyRequest(p));
+      expect(await arm.checkGatedCall(rt, 'restore-enc-key', a.account, p, passportAuth)).toMatchObject({
+        ok: false,
+        code: 'malformed',
+      });
+    }
+  });
+
+  it('a cancel’s signature cannot pass as a restore, nor a restore’s as a cancel (other bytes)', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const rt = runtimeOf(a);
+    const browserKey = hex(randomBytes(32));
+    // The wallet signed a restore; the relay is asked to treat it as a cancel to the same key.
+    const restoreAuth = await browserGated(owner, a, restoreEncKeyRequest(restore(a, browserKey)));
+    expect(
+      await arm.checkGatedCall(
+        rt,
+        'cancel-offers',
+        a.account,
+        { newKey: browserKey, authNonce: String(a.authNonce) },
+        restoreAuth,
+      ),
+    ).toMatchObject({ ok: false, code: 'malformed' });
+    // A real cancel signature presented as a restore to another key.
+    const cancelAuth = await browserGated(
+      owner,
+      a,
+      cancelOffersRequest({ newKey: a.encKey, authNonce: String(a.authNonce) }),
+    );
+    expect(
+      await arm.checkGatedCall(rt, 'restore-enc-key', a.account, restore(a, browserKey), cancelAuth),
+    ).toMatchObject({ ok: false, code: 'bad-signature' });
+  });
+
+  it('the catalogue wires the executor as a passport call (no longer the not-implemented placeholder)', async () => {
+    const catalogue = accountCatalogue({
+      runtime: () => null,
+      arm,
+      sponsor: {} as never,
+      network: 'stagenet',
+      replay: new DigestReplayGuard(600),
+      entitlements: {} as never,
+      log: {} as never,
+    });
+    const def = catalogue.get('restore-enc-key')!;
+    expect(def.auth).toBe('passport-call');
+    expect(def.lane).toBe('prover');
+    const ctx = { log: { info: () => {} } } as never;
+    await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
+  });
+});
+
+describe('the market labels pass the F3 v3 label rule (P10.C, questions Q36)', () => {
+  // P10.C's circuit and client refuse a label with a leading space, a run of spaces before more text,
+  // or no visible character (`isRenderableLabel`, vendor/passport @ 599327b; TODO(P10.I): call it
+  // directly after the re-pin). The relay renders every message with these labels.
+  const renderable = (label: string) =>
+    label.length <= 24 && /^[\x20-\x7e]*$/.test(label) && /^[^ ]/.test(label) && !/ {2,}[^ ]/.test(label);
+
+  it('Night Market - stagenet and Night Market - local are renderable', async () => {
+    const { MARKET_LABELS } = await import('@nightmarket/core');
+    for (const label of Object.values(MARKET_LABELS)) expect([label, renderable(label)]).toEqual([label, true]);
+    for (const bad of [' Night Market', 'Night  Market', '', '   '])
+      expect([bad, renderable(bad)]).toEqual([bad, false]);
   });
 });
 

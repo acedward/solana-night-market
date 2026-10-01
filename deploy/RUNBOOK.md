@@ -369,10 +369,12 @@ This signature authorises nothing and moves no funds.
 ```
 
 The relay issues the nonce (`GET /v1/auth/nonce`), accepts it once, and forgets all nonces on a
-restart (the page asks for a new one). An unused nonce is never pushed out early by other clients'
-requests: each client address holds at most `AUTH_MAX_NONCES_PER_CLIENT` (30) unused nonces and is
-refused (`429`) past that, until they are used or expire. Ledger-backed Phantom accounts sign a
-different, wrapped message and are refused.
+restart (the page asks for a new one). Nonces are **stateless** (audit round 2 R2-8, questions
+Q40): a nonce carries its expiry and an HMAC under a key the relay draws at every start, so issuing
+one stores nothing and no flood of requests, from any number of addresses, can fill a store and
+lock other customers out. Issuance is bounded by the per-client rate limit (`RATE_LIMIT_NONCES_PER_MIN`,
+an IPv6 client counted per /64). Used nonces are remembered until they expire, so a replay is refused.
+Ledger-backed Phantom accounts sign a different, wrapped message and are refused.
 
 **Offers and takes expire when the wallet says** (audit C6). Every offer and take signs a real
 expiry (`validUntil`, Unix seconds, shown in the wallet's message), which the account's circuit
@@ -402,7 +404,16 @@ and retires the authority in the same second wave).
 CURRENT encryption key: it changes nothing but the account's auth nonce, so every approval signed
 before (its open offers included, wherever a copy is kept) can never be used again. The wallet reads
 "Cancel all open offers / Your key does not change". The relay refuses any other key (`401`,
-`malformed`), so the action can never change the account's key.
+`malformed`), so a cancel can never change the account's key.
+
+**Restore my encryption key** (`restore-enc-key`, audit round 2 R2-3, questions Q36): when a page
+got the wallet to sign a real key change, the account's on-chain key is no longer the one the
+customer's browser holds, and the site (which checks that key on the chain) refuses the account. The
+site then offers to put the browser's key back: the same circuit, to the BROWSER's key, one wallet
+approval that reads "Rotate encryption key / New key <fingerprint>". The relay refuses the on-chain
+key itself (that would only be a cancel) and an all-zero key; a restore has its own daily cap
+(`RESTORES_PER_ACCOUNT_PER_DAY`, 3), never uses up the cancels, and is never refused by the failure
+budget.
 
 **F-B6: a withdrawal's recipient encryption key.** A withdrawal to a Midnight wallet carries the
 wallet's encryption key (so the wallet can find the coin), which the signed message does not cover.
@@ -431,16 +442,33 @@ the one device entry at that counter. A claim is reserved before it is queued (t
 charge, kept whatever happens next), each token is recorded as it lands, and the claim is confirmed
 with its transaction ids when every token landed. When a delivery fails part-way, the claim stays as
 **partial**: the same key may claim again, to the same account, and gets only the tokens still
-missing, with no second daily charge (a token is minted twice only if it landed while the claims
-file could not be written; faucet tokens cost nothing). After `DEMO_TOKENS_MAX_ATTEMPTS` (3)
-failed deliveries the key is refused (`attempts-exhausted`). Only a claim refused before its job ran
-(a full queue) is undone.
+missing, with no second daily charge. After `DEMO_TOKENS_MAX_ATTEMPTS` (3) failed deliveries the key
+is refused (`attempts-exhausted`). Only a claim refused before its job ran (a full queue) is undone.
+
+**A token is never minted twice** (audit round 2 R2-7, questions Q39). Before a token's transaction is
+submitted, the claim records it as **pending** in the claims file, with the 192-byte inbox entry the
+transaction files into the account and the time after which it can no longer land (`direct`: its
+TTL, one hour; `via-sponsor`: `DEMO_TOKENS_PENDING_SETTLE_SECONDS`, 4 h). When the claim is resumed
+(after a failure, a lost response, or a relay that stopped mid-job), every pending token is first
+looked up in the account's on-chain inbox: there → delivered; not there and past its time (plus five
+minutes) → minted again; not there yet but it could still land → the claim stops with
+`demo-tokens-settling` (not counted as a failed delivery; try later) and nothing is minted. A pending
+token with nothing to look for (a `via-sponsor` mint to the sponsor wallet cut off before its deposit)
+is **quarantined**: the relay never mints it again, the claim completes with the rest, and the job's
+result lists it as `held`. An operator decides: check the sponsor wallet for a coin of that colour
+and deposit it to the account by hand, or remove the token from the record's `quarantined` (with the
+relay stopped) to let the key claim it again. The log says `a demo token was held back (quarantined)`.
 
 **The claims store** is `<RELAY_DATA_DIR>/demo-token-claims.json`, rewritten atomically on every
-change, next to a lock file that keeps a second relay off it: **one relay per data dir**. Only an
-existing lock held by a live process means "in use by another relay"; a lock left by a crash is
-taken over, and a data dir the relay cannot write is reported as that (section 3, "The relay's
-user"). It holds public values only (the Solana key, the account, times, transaction ids, the
+change, next to a lock file that keeps a second relay off it: **one relay per data dir**. The lock
+names its holder's pid, host name and a random token, and the live relay touches it every 30 s
+(audit round 2 R2-9, questions Q41). A lock is taken over when it is older than two minutes, or when
+it was written on the same host by a process that is gone or by this very process number with
+another token (a restarted container); a fresh lock of another host (a second container on the same
+volume, even as pid 1) means "in use by another relay". A relay whose lock was taken over stops
+writing claims at once (`503 store-unavailable`, and the log says so). A container recreated after a
+crash may wait up to two minutes for its old lock to go stale. A data dir the relay cannot write is
+reported as that (section 3, "The relay's user"). It holds public values only (the Solana key, the account, times, transaction ids, the
 tokens delivered so far). Back it up with the deployment; losing it lets every key claim once more.
 To let one key claim again, stop the relay, remove that key's record from the file, and start it.
 The relay reads the file only after it holds the lock, so a second relay refused the lock never
@@ -508,13 +536,14 @@ value; request bodies are never logged).
 
 | Limit | Value | Effect |
 |---|---|---|
-| Proofs | one at a time, market-wide | Every signed action holds the prover lane; others queue, and the page shows the position. A demo-token pack holds it for all its tokens (about 20 s per token on `direct`, 40 s on `via-sponsor`, measured locally). |
+| Proofs | one at a time, market-wide, taken in turns per account | Every signed action proves on the one prover lane; others queue, and the page shows the position. The lane is shared **round-robin across accounts**, and each account has at most `JOBS_PER_ACCOUNT` (1) job queued or running (`429 account-busy`, Retry-After 30), so a customer waits behind at most one job of each other account with work waiting. A make holds the prover only while it proves: it waits for the exchange to list it (up to 90 s) on its own account's lane. A demo-token pack holds the prover for all its tokens (about 20 s per token on `direct`, 40 s on `via-sponsor`, measured locally). |
 | Batcher | 1,000 requests per 24 hours per IP per target, and 1,000 for all clients together | Every take the relay settles is one request, so at most 1,000 takes a day. |
 | Kernel | 600 requests per minute per IP | Browsers read prices directly; the relay posts offers. |
-| Relay, per client address | reads 240/min, `/health` 60/min, nonces 30/min, actions 10/min; actions per Solana key 5/min | `RATE_LIMIT_*`. |
-| Unused nonces | 30 per client address (`AUTH_MAX_NONCES_PER_CLIENT`), 50,000 in all (`AUTH_MAX_NONCES`) | Never evicted early: past either cap new nonces are refused (`429` for the client, `503 busy` for all) until some are used or expire (10 minutes). |
+| Relay, per client address | reads 240/min, `/health` 60/min, nonces 30/min, actions 10/min; actions per Solana key 5/min | `RATE_LIMIT_*`. A client address is an IPv4 address (`CLIENT_IPV4_PREFIX` 32) or an IPv6 address's **/64** (`CLIENT_IPV6_PREFIX` 64): one customer line usually owns a whole /64, so every per-client cap (these, the nonces, the registration caps) counts it once. |
+| Nonces | stateless (nothing stored when issued); used ones remembered until they expire, at most `AUTH_MAX_USED_NONCES` (200,000, about 30 MB) | Section 6. Past the bound the oldest used nonce is forgotten (never a refusal); questions Q40. |
 | Opening accounts | 100 a day in all (`REGISTER_DAILY_CAP`), 3 a day per client address (`REGISTER_PER_CLIENT_DAILY_CAP`), 1 queued or running at once (`REGISTER_MAX_IN_FLIGHT`) | Rolling 24 hours, counted when admitted (a failed registration still spent its proofs). Past a cap: `429 registration-daily-cap` / `registration-client-cap`; while one is in flight: `503 registration-busy`, Retry-After 60. See the numbers below. |
-| Failed jobs | 5 per Solana key and 5 per account a day (`FAILURE_BUDGET_PER_OWNER_PER_DAY`, `FAILURE_BUDGET_PER_ACCOUNT_PER_DAY`) | A job that fails after it started proving counts (the market's own failures do not: no keys, the exchange unreachable or at its cap). Past the budget: `429 failure-budget` until the oldest failure is a day old. |
+| Failed jobs | 5 per Solana key and 5 per account a day (`FAILURE_BUDGET_PER_OWNER_PER_DAY`, `FAILURE_BUDGET_PER_ACCOUNT_PER_DAY`) | A job that fails after it started proving FOR A REASON THE REQUESTER CAUSED counts (a circuit refusal, the node refusing the transaction). Not counted: the market's own failures (no keys, the exchange unreachable or at its cap), a counterparty's (a take of an offer its maker cancelled or let expire: `exchange-error`, `take-refused`, `take-*`, `offer-gone`) and the infrastructure's (the proof server, the node or the indexer failed: the customer sees `market-unavailable`). Past the budget: `429 failure-budget` until the oldest failure is a day old. It is checked at admission, when the job reaches its lane and when it first reaches the prover; a job refused there proves nothing and gives back what its request claimed. **Withdrawals, unshielded withdrawals, cancels and key restores are never refused by it.** Questions Q38. |
+| Per account | 1 job queued or running (`JOBS_PER_ACCOUNT`); 3 offers that may still settle (`OFFERS_MAX_OPEN_PER_ACCOUNT`); 20 makes (`MAKES_PER_ACCOUNT_PER_DAY`), 5 cancels (`CANCELS_PER_ACCOUNT_PER_DAY`) and 3 key restores (`RESTORES_PER_ACCOUNT_PER_DAY`) in any rolling 24 hours | `429 account-busy`, `open-offers-cap`, `makes-daily-cap`, `cancels-daily-cap`, `restores-daily-cap`, with Retry-After. An offer stops counting at its signed expiry, when the account's nonce moves past it (a cancel, a withdrawal), when its job fails, or when the exchange says it was taken or ended. A daily charge is given back when the job failed before proving or not by the requester. See the numbers below; questions Q37. |
 | Offer and take expiry | a make at most 3,600 s ahead, a take 600 s, at least 60 s left | Section 6. |
 | Demo tokens | once per key; `DEMO_TOKENS_DAILY_CAP` a day; 3 failed deliveries | Section 7. |
 | Change re-filing (`append-inbox`) | only against the relay's single-use entitlement for that change, at most `APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY` (20) a day per account | The entitlement key derives from the sponsor seed: a new sponsor seed voids entitlements already issued. |
@@ -534,6 +563,23 @@ sponsor in under two days. With the defaults:
 
 Size the sponsor for the global cap: `REGISTER_DAILY_CAP` × 21 DUST a day, plus the actions. The
 counters live in memory: a relay restart resets them.
+
+**Why these per-account numbers** (audit round 2 R2-1, questions Q37). One registered account used to
+be able to hold the prover lane: a make held it for its proof and the exchange's listing wait (about
+54 s on stagenet), makes were unlimited, and a cancel is a free, sponsor-paid transaction. Auditor A's
+probe: five makes of one account queued ahead of a customer's withdrawal, which waited about 314 s.
+With the defaults:
+
+- a customer's job waits behind at most one job of each other account with work waiting (one job per
+  account, turns per account); the probe's withdrawal waits behind at most one of the looping
+  account's jobs (`relay/test/fairness.test.ts`);
+- a make no longer holds the prover while the exchange lists it, which roughly doubles the lane's
+  throughput on its own;
+- one account lists at most 3 offers at once (the page keeps one live offer: room for a taken offer
+  the exchange has not reported yet) and makes at most 20 a day (about 18 minutes of prover time);
+- the sponsor pays for at most 5 cancels and 3 key restores per account a day. Accounts accumulate
+  (at most 100 new ones a day, 3 per client address), so the worst case is (accounts) × 8 small
+  transactions a day: watch the sponsor's DUST (section 4.5) and lower the caps if a pattern shows.
 ## 10. What customers must know
 
 - **Phantom approves every action, and shows what it approves.** The message is readable: the
@@ -568,8 +614,10 @@ counters live in memory: a relay restart resets them.
 - The page reads its account from the public indexer, except which of its coins exist and which are
   spent: the relay decodes those events, and the page keeps only what the indexer's own events carry
   (section 16; questions Q31). A relay can still leave a coin out (hide it), never invent one.
-- The registration caps and the failure budget are counted in memory: a relay restart resets them
-  (section 9).
+- The registration caps, the per-account caps and the failure budget are counted in memory: a relay
+  restart resets them (section 9).
+- One request per account at a time: a second one is refused (`429 account-busy`) until the first
+  finishes (section 9).
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
 
 ## 12. Start, stop, upgrade and re-pin

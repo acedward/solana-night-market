@@ -6,6 +6,10 @@
 #   scripts/fetch-compactc.sh 0.34.0    the account's declared callees only (the ERC20 vault and the
 #                                       Signet singleton stay on 0.34.0, as upstream builds them)
 #
+#   scripts/fetch-compactc.sh --verify <dir> <version>
+#                                       verify an installed toolchain directory (a compiler named by
+#                                       COMPACTC_ACCOUNT / COMPACTC_CALLEES): exit 0, or 65 refused
+#
 # The release archive is verified against the SHA-256 pinned below before it is unpacked, and the
 # unpacked compiler's `--version` line must be the pinned one. The compactc-v0.35.0 release
 # publishes no checksum file: its digests are GitHub's per-asset sha256 values, each re-checked
@@ -14,9 +18,22 @@
 # archive you already have (it is verified the same way); otherwise the archive for this platform
 # is downloaded from the pinned release. COMPACTC_DIR overrides the install directory.
 #
+# A cached install is RE-VERIFIED on every run, never trusted by a stamp (AA 00047 P10, audit round 2
+# R2-9 / F-A2-7.2, the round-1 F-A7.2 pattern): the verified archive is kept beside the binaries
+# (`artifact.zip`, as the `compact` CLI and the passport's verify-compactc.sh keep it), its SHA-256
+# must be the pin, and EVERY file of the archive must be byte-identical on disk. A cached install
+# that fails is reinstalled from its kept archive when that archive is still the pinned one, and
+# downloaded again otherwise; an install that still fails is refused (exit 65).
+#
 # Prints the compactc path on stdout (everything else goes to stderr).
 set -euo pipefail
 
+MODE=install
+if [[ "${1:-}" == "--verify" ]]; then
+  MODE=verify
+  VERIFY_DIR="${2:?usage: fetch-compactc.sh --verify <dir> <version>}"
+  shift 2
+fi
 VERSION="${1:-0.35.0}"
 BASE_URL="https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v${VERSION}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,13 +80,72 @@ if [[ -z "$ASSET" ]]; then
   exit 64
 fi
 
-if [[ -x "$DEST/compactc" ]] && [[ "$("$DEST/compactc" --version 2>/dev/null)" == "$VERSION_LINE" ]] &&
-  [[ "$(cat "$DEST/.archive-sha256" 2>/dev/null)" == "$SHA" ]]; then
-  echo "$DEST/compactc"
-  exit 0
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+sha256_stdin() { if command -v sha256sum >/dev/null; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+# The archive's files (not its directories), and one file's SHA-256 inside it.
+zip_files() {
+  if command -v unzip >/dev/null; then
+    unzip -Z1 "$1" | grep -v '/$' || true
+  else
+    python3 -c 'import sys,zipfile; [print(n) for n in zipfile.ZipFile(sys.argv[1]).namelist() if not n.endswith("/")]' "$1"
+  fi
+}
+zip_file_sha() {
+  if command -v unzip >/dev/null; then
+    unzip -p "$1" "$2" | sha256_stdin
+  else
+    python3 -c 'import sys,zipfile,hashlib; print(hashlib.sha256(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2])).hexdigest())' "$1" "$2"
+  fi
+}
+
+# verify_dir <dir>: 0 when <dir> holds the pinned archive and every one of its files unchanged, and
+# its compactc prints the pinned version line; otherwise 1, saying why on stderr.
+verify_dir() {
+  local dir="$1" zip="$1/artifact.zip" got n=0 f
+  if [[ ! -f "$zip" ]]; then
+    echo "fetch-compactc: $dir has no verified archive (artifact.zip) to check its binaries against" >&2
+    return 1
+  fi
+  got="$(sha256 "$zip")"
+  if [[ "$got" != "$SHA" ]]; then
+    echo "fetch-compactc: $zip sha256 $got, expected $SHA ($PLATFORM)" >&2
+    return 1
+  fi
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    n=$((n + 1))
+    if [[ ! -f "$dir/$f" ]] || [[ "$(sha256 "$dir/$f")" != "$(zip_file_sha "$zip" "$f")" ]]; then
+      echo "fetch-compactc: $dir/$f is missing or differs from the verified archive's copy" >&2
+      return 1
+    fi
+  done < <(zip_files "$zip")
+  if [[ "$n" -eq 0 ]]; then
+    echo "fetch-compactc: $zip lists no files" >&2
+    return 1
+  fi
+  if [[ "$("$dir/compactc" --version 2>/dev/null)" != "$VERSION_LINE" ]]; then
+    echo "fetch-compactc: $dir/compactc --version is not '$VERSION_LINE'" >&2
+    return 1
+  fi
+}
+
+if [[ "$MODE" == verify ]]; then
+  if verify_dir "$VERIFY_DIR"; then
+    echo "fetch-compactc: compactc $VERSION in $VERIFY_DIR verified ($SHA; every file of the archive matches)" >&2
+    exit 0
+  fi
+  echo "fetch-compactc: compactc $VERSION in $VERIFY_DIR refused" >&2
+  exit 65
 fi
 
-sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+# A cached install is re-verified, never trusted by its stamp.
+if [[ -d "$DEST" ]]; then
+  if verify_dir "$DEST"; then
+    echo "$DEST/compactc"
+    exit 0
+  fi
+  echo "fetch-compactc: the cached compactc $VERSION in $DEST failed verification; reinstalling" >&2
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -77,6 +153,9 @@ zip="$tmp/$ASSET"
 local_zip_var="COMPACTC_ZIP_${VERSION//./_}"
 if [[ -n "${!local_zip_var:-}" ]]; then
   cp "${!local_zip_var}" "$zip"
+elif [[ -f "$DEST/artifact.zip" ]] && [[ "$(sha256 "$DEST/artifact.zip")" == "$SHA" ]]; then
+  # The kept archive is still the pinned one: reinstall from it (only a binary was changed).
+  cp "$DEST/artifact.zip" "$zip"
 else
   echo "fetch-compactc: downloading $ASSET" >&2
   curl -fsSL --retry 3 -o "$zip" "$BASE_URL/$ASSET"
@@ -94,9 +173,10 @@ else
   python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$DEST"
 fi
 chmod +x "$DEST"/compactc "$DEST"/compactc.bin "$DEST"/zkir "$DEST"/zkir-v3 2>/dev/null || true
-got_line="$("$DEST/compactc" --version)"
-if [[ "$got_line" != "$VERSION_LINE" ]]; then
-  echo "fetch-compactc: $DEST/compactc --version is '$got_line', expected '$VERSION_LINE'" >&2
+# Keep the verified archive beside the binaries: every later run re-verifies them against it.
+cp "$zip" "$DEST/artifact.zip"
+if ! verify_dir "$DEST"; then
+  echo "fetch-compactc: the fresh install of compactc $VERSION in $DEST did not verify" >&2
   exit 65
 fi
 # The verified archive's SHA-256, for build records (the key-volume job stamps it into its report).

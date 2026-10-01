@@ -34,7 +34,14 @@ import {
 } from '@nightmarket/core';
 
 import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
-import { accountCatalogue, withDemoTokens, withRegistrationCaps, withTrade } from '../src/actions/catalogue.js';
+import { AccountCaps } from '../src/actions/account-caps.js';
+import {
+  accountCatalogue,
+  withAccountCaps,
+  withDemoTokens,
+  withRegistrationCaps,
+  withTrade,
+} from '../src/actions/catalogue.js';
 import { FailureBudget } from '../src/actions/failure-budget.js';
 import { RegistrationCaps } from '../src/actions/registration-caps.js';
 import { demoTokens } from '../src/demo/action.js';
@@ -66,8 +73,8 @@ const KIND: Record<RelayActionName, Kind> = {
   'withdraw-unshielded': 'passport-call',
   'demo-tokens': 'relay-action',
   'cancel-offers': 'passport-call',
-  // AA 00047 P10.S: a placeholder until lane P10.R wires it as a passport call (its own signature).
-  'restore-enc-key': 'relay-action',
+  // AA 00047 P10.R: "Restore my encryption key", authorised by its own signature (R2-3).
+  'restore-enc-key': 'passport-call',
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -98,19 +105,17 @@ function productionRelay(
   } = {},
 ) {
   const device = newDevice();
-  const config = loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', ...opts.env }, () =>
-    JSON.stringify(LOCAL_TOKENS),
+  // These route tests send several calls for the one test account; the one-job-per-account rule
+  // (AA 00047 P10, R2-1) has its own tests (relay/test/fairness.test.ts).
+  const config = loadConfig(
+    { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', JOBS_PER_ACCOUNT: '100', ...opts.env },
+    () => JSON.stringify(LOCAL_TOKENS),
   ).config;
   const log = silentLog();
   const rt = fakeAccountRuntime(ACCOUNT, [device.calls.deviceKey], AUTH_NONCE);
   const sponsor = opts.sponsor ?? new CountingSponsor();
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
-  const nonces = new NonceStore(
-    config.limits.nonceTtlSeconds,
-    config.limits.maxNonces,
-    undefined,
-    config.limits.maxNoncesPerClient,
-  );
+  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
   const entitlements = testEntitlements({ maxPerAccountPerDay: opts.appendsPerDay ?? 20 });
   const catalogue = withTrade(
@@ -136,8 +141,10 @@ function productionRelay(
       log,
     },
   );
-  // As main.ts (AA 00047 P9, audit C4): registration caps and the failure budget.
+  // As main.ts (AA 00047 P9, audit C4): registration caps and the failure budget; (P10, R2-1) the
+  // per-account caps.
   withRegistrationCaps(catalogue, new RegistrationCaps(config.registration));
+  withAccountCaps(catalogue, new AccountCaps(config.accountCaps));
   const claims = new DemoTokenClaims({ file: null, dailyCap: 100 });
   withDemoTokens(
     catalogue,

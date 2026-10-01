@@ -27,6 +27,7 @@ import {
   CancelOffersPayloadSchema,
   OpenSwapPayloadSchema,
   PassportAuthSchema,
+  RestoreEncKeyPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
@@ -37,6 +38,7 @@ import {
   type PassportAuth,
   type RelayActionName,
   type RelayActionScheme,
+  type RestoreEncKeyPayload,
   type TakePayload,
   type TokenRegistry,
   type WithdrawPayload,
@@ -61,7 +63,9 @@ export const ARM_CIRCUITS = {
   /** Re-filing a change coin's inbox entry (Q13). */
   appendInbox: 'append_inbox_with_ed25519',
   /** "Cancel all open offers" (AA 00047 P9, questions Q30): the arm's rotate_enc_key with the
-   *  account's CURRENT key, which only moves the auth nonce (the relay action `cancel-offers`). */
+   *  account's CURRENT key, which only moves the auth nonce (the relay action `cancel-offers`); and
+   *  "Restore my encryption key" (AA 00047 P10, R2-3): the same circuit to the browser's key
+   *  (`restore-enc-key`). */
   rotateEncKey: 'rotate_enc_key_with_ed25519',
   /** Making and taking offers. */
   openSwap: 'open_swap_shielded_with_ed25519',
@@ -71,16 +75,18 @@ export const ARM_CIRCUITS = {
 
 export type GatedAction = Extract<
   RelayActionName,
-  'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'cancel-offers'
+  'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'cancel-offers' | 'restore-enc-key'
 >;
 
 /** Every action a gated call's own Passport signature authorises. `cancel-offers` (AA 00047 P9.S,
- *  questions Q30) is the arm's `rotate_enc_key` to the account's current key. */
+ *  questions Q30) is the arm's `rotate_enc_key` to the account's current key; `restore-enc-key`
+ *  (AA 00047 P10, R2-3) the same circuit to the browser's key. */
 export const GATED_ACTIONS: readonly GatedAction[] = [
   'withdraw',
   'withdraw-unshielded',
   'append-inbox',
   'cancel-offers',
+  'restore-enc-key',
 ];
 
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a);
@@ -91,13 +97,16 @@ export type GatedPayload<A extends GatedAction> = A extends 'withdraw'
     ? WithdrawUnshieldedPayload
     : A extends 'cancel-offers'
       ? CancelOffersPayload
-      : AppendInboxPayload;
+      : A extends 'restore-enc-key'
+        ? RestoreEncKeyPayload
+        : AppendInboxPayload;
 
 const GATED_SCHEMAS = {
   withdraw: WithdrawPayloadSchema,
   'withdraw-unshielded': WithdrawUnshieldedPayloadSchema,
   'append-inbox': AppendInboxPayloadSchema,
   'cancel-offers': CancelOffersPayloadSchema,
+  'restore-enc-key': RestoreEncKeyPayloadSchema,
 } as const;
 
 /** Parse a gated action's body; null when it is not the action's shape. */
@@ -184,7 +193,8 @@ export async function preflightCall<P extends { authNonce: string }>(
 export interface DeviceArm {
   readonly name: typeof DEVICE_ARM;
   readonly circuits: typeof ARM_CIRCUITS;
-  /** Check a gated account call (`withdraw`, `withdraw-unshielded`, `append-inbox`, `cancel-offers`) against the account's current state:
+  /** Check a gated account call (`withdraw`, `withdraw-unshielded`, `append-inbox`, `cancel-offers`,
+   *  `restore-enc-key`) against the account's current state:
    *  rebuild the message the device signed from the arguments, verify the signature, and check the
    *  device's rolling entry at the signed use counter is live. */
   checkGatedCall<A extends GatedAction>(

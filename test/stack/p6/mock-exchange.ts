@@ -165,8 +165,14 @@ createServer((req, res) => {
         say(`settlement submitted: ${id}`);
         json(res, { success: true, transactionHash: id });
       } catch (e) {
-        say(`settlement failed: ${String((e as Error)?.message ?? e)}`);
-        json(res, { success: false, error: String((e as Error)?.message ?? e).slice(0, 2000) }, 500);
+        // The node's own reason sits in the error's cause chain (the wallet SDK wraps it).
+        const chain: string[] = [];
+        for (let c: unknown = e, i = 0; c && i < 8; c = (c as { cause?: unknown }).cause, i++) {
+          chain.push(String((c as Error)?.message ?? c));
+        }
+        const why = chain.join(' <- ');
+        say(`settlement failed: ${why}`);
+        json(res, { success: false, error: why.slice(0, 2000) }, 500);
       }
     });
     return;

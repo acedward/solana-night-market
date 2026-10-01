@@ -1262,6 +1262,10 @@ async function p9Negatives() {
   for (const [name, until] of [
     ['make: validUntil 0 ("Expires never")', '0'],
     ['make: validUntil too far (now + 2 h)', String(now + 7200)],
+    // A fresh signature over an expiry already past (a replayed old approval is stopped earlier, by the
+    // replay guard, as `replayed`): the admission's own expiry rule.
+    ['make: validUntil already past (now − 30 s)', String(now - 30)],
+    ['make: validUntil too soon (now + 30 s, under the 60 s minimum)', String(now + 30)],
   ] as const) {
     const m = await signMake(0, until);
     outcome(

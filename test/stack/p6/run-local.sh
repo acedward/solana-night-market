@@ -67,6 +67,7 @@ teardown() {
   dc logs --no-color proof-server-rc8 2>&1 | tail -200 >"$OUT/proof-server-rc8.tail.log"
   dc logs --no-color proof-server 2>&1 | tail -100 >"$OUT/proof-server.tail.log"
   dc logs --no-color node 2>&1 | grep -i -E 'invalid|error|115' | tail -100 >"$OUT/node-errors.tail.log"
+  dc logs --no-color node 2>&1 | grep -E 'Rejected transaction|Transaction malformed|Invalid Transaction' >"$OUT/node-rejections.log"
   dc --profile relay down -v --remove-orphans >/dev/null 2>&1
   rm -rf "$RUN_DIR"
   echo "run-local: torn down $COMPOSE_PROJECT_NAME"

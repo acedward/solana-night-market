@@ -16,7 +16,7 @@ import { useRelayStatus } from '../relay/RelayStatus.js';
 import { claimDemoTokens, claimState, packText } from './operations.js';
 
 export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
-  const { account, hasSecret, relay, env, scope } = useAccountView(network, relayUrl);
+  const { account, hasSecret, relay, env, scope, check } = useAccountView(network, relayUrl);
   const { spendingPaused } = useRelayStatus();
   const activity = useActivity();
   const [info, setInfo] = useState<DemoTokensInfo | null | 'loading'>('loading');
@@ -97,6 +97,11 @@ export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; rel
         </p>
       )}
       {spendingPaused && <p className="small gap-top">Not now: {spendingPaused}</p>}
+      {check.status === 'failed' && (
+        <p className="small gap-top" data-testid="demo-account-refused">
+          Not to this account: it does not pass this site&apos;s checks on Midnight.
+        </p>
+      )}
       {message && (
         <Toast
           tone={message.kind === 'error' ? 'error' : 'success'}
@@ -116,7 +121,8 @@ export function DemoTokens({ network, relayUrl }: { network: NetworkProfile; rel
       <Button
         className="btn-block gap-top"
         data-testid="get-demo-tokens"
-        disabled={busy || !state?.ok || !!spendingPaused}
+        // A deposit only into an account the chain shows is the market's own and yours alone (P9.S).
+        disabled={busy || !state?.ok || !!spendingPaused || check.status !== 'ok'}
         onClick={() => void claim()}
       >
         {busy ? 'Getting demo tokens…' : 'Get demo tokens'}

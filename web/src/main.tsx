@@ -1,3 +1,6 @@
+// First: before any module that defines a zod schema (./no-eval.ts).
+import './no-eval.js';
+
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 

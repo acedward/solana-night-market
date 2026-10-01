@@ -28,6 +28,8 @@ import {
 import { useActivity } from '../activity/ActivityContext.js';
 import { stageWords, type ActivityKind } from '../activity/activity.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
+import { AccountCheckNotice } from '../chain/AccountCheckNotice.js';
+import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import { DemoTokens } from '../demo/DemoTokens.js';
 
 import {
@@ -447,6 +449,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
   const { spendingPaused } = useRelayStatus();
   const wallet = useWallet();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
+  const chain = useChain();
   const [job, setJob] = useState<JobView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -460,18 +463,26 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, revision],
   );
-  const hasSecret = !!(store && scope && account && readSecret(store, scope, account.address));
+  const secret = store && scope && account ? readSecret(store, scope, account.address) : null;
+  const hasSecret = !!secret;
   const coins = useMemo(
     () => (store && scope && account ? readCoins(store, scope, account.address) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, account, revision],
   );
+  // The market-account check on the chain (AA 00047 P9.S, audit C3).
+  const accountCheck = useAccountCheck(
+    account && hasSecret ? account.address : null,
+    owner,
+    secret?.encPublicKey ?? null,
+    revision,
+  );
   // The holdings and Send list show only the assets the filter shows (plan 00042); what needs the
   // customer's action (an unrecorded change coin, under Pending) shows whatever it is.
   const assets = useAssetFilter();
   const shownCoins = useMemo(() => coins.filter((c) => assets.showsColour(c.color)), [coins, assets]);
-  // The unshielded balances (public contract balances, read from the relay; AA 00047).
-  const unshieldedRead = useUnshieldedBalances(relay, account && hasSecret ? account.address : null, revision);
+  // The unshielded balances (public contract balances, read from the chain; AA 00047 P9.S).
+  const unshieldedRead = useUnshieldedBalances(chain, account && hasSecret ? account.address : null, revision);
   const unshielded = useMemo(
     () =>
       (unshieldedRead.view as UnshieldedBalancesView | null)?.balances
@@ -499,6 +510,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     if (!store || !scope || !wallet.signing) return null;
     return {
       relay,
+      chain,
       store,
       scope,
       signing: wallet.signing,
@@ -507,7 +519,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
         activity.job(j);
       },
     };
-  }, [store, scope, wallet.signing, relay, activity]);
+  }, [store, scope, wallet.signing, relay, chain, activity]);
   const dismiss = useCallback(() => setMessage(null), []);
 
   const sync = useCallback(async () => {
@@ -567,13 +579,23 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       if (!confirmCancelsOffer('withdraw')) return;
       const r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
       markLiveOffersCancelled(e, account.address);
-      setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}). Recording the change in your inbox…` });
+      if (r.changeMismatch) {
+        // Q28 A: the market reported another change coin than this withdrawal creates. The browser
+        // keeps the one it computed, and says so; the coin is still recorded below.
+        setMessage({
+          kind: 'error',
+          text: `Sent (tx ${short(r.txId)}), but the market reported a different change coin than this withdrawal creates. Night Market kept the correct one, computed in this browser. Tell the market's operator.`,
+        });
+      } else {
+        setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}). Recording the change in your inbox…` });
+      }
       await syncAccount(e, account.address);
       // Q13 default A: file the change's inbox entry right away (a second signature).
       if (r.change) {
         await secureChange(e, account.address, r.change);
         await syncAccount(e, account.address);
-        setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}); the change is recorded in your inbox.` });
+        if (!r.changeMismatch)
+          setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}); the change is recorded in your inbox.` });
       }
     });
 
@@ -680,6 +702,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                   <a href="#local">Your data</a>.
                 </Notice>
               )}
+              {hasSecret && <AccountCheckNotice check={accountCheck} />}
               <div data-testid="account" data-account={account.address}>
                 <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} />
                 {!unshieldedRead.served && (

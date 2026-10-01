@@ -25,12 +25,21 @@ import {
 import { openEntryPortable, sealEntryPortable } from '@nightmarket/core/passport';
 import { x25519 } from '@noble/curves/ed25519.js';
 
-import { syncAccount, type OperationEnv } from '../src/passport/operations.js';
+import { CANCEL_UNAVAILABLE, syncAccount, type OperationEnv } from '../src/passport/operations.js';
 import { readCoins, readRoster } from '../src/passport/records.js';
 import type { RelayClient } from '../src/relay/client.js';
 import { LocalStore } from '../src/store/store.js';
-import { confirmCancelsOffer, guardFor, makeOffer, reconcileOffers, takeOffer } from '../src/trade/operations.js';
+import {
+  cancelOffers,
+  confirmCancelsOffer,
+  guardFor,
+  makeOffer,
+  offerShown,
+  reconcileOffers,
+  takeOffer,
+} from '../src/trade/operations.js';
 import { liveOffer, readTrades } from '../src/trade/records.js';
+import { FakeChain } from './fake-chain.js';
 import { fakeCallMessage, fakeDeviceEntry, fakeSigning } from './fake-signing.js';
 import { expectImportRoundTrip } from './roundtrip.js';
 
@@ -46,6 +55,9 @@ class FakeRelay {
   submitted: Array<{ action: RelayActionName; request: ActionRequest }> = [];
   results: Record<string, Record<string, unknown>> = {};
   failNext: string | null = null;
+  failCode = 'x';
+  /** Side effects of a job on the chain, by action (the fake chain reads `state`). */
+  afterJob: Record<string, () => void> = {};
   state!: AccountStateView;
   entries: Array<string | null> = [];
   zswapActivity: ZswapActivity = { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 };
@@ -72,17 +84,19 @@ class FakeRelay {
     const action = this.submitted[Number(requestId) - 1]!.action;
     const job =
       this.failNext !== null
-        ? this.view(requestId, action, 'failed', { error: { code: 'x', message: this.failNext } })
+        ? this.view(requestId, action, 'failed', { error: { code: this.failCode, message: this.failNext } })
         : this.view(requestId, action, 'succeeded', { result: this.results[action] ?? {} });
+    if (job.state === 'succeeded') this.afterJob[action]?.();
     this.failNext = null;
     onUpdate(job);
     return job;
   }
-  async accountState() {
-    return this.state;
+  // Never read by the page since AA 00047 P9.S (Q26): the fake chain serves the account.
+  async accountState(): Promise<AccountStateView> {
+    throw new Error('the page must not read the account state from the relay');
   }
   async inbox(): Promise<InboxPage> {
-    return { account: ACCOUNT, from: 0, entries: this.entries, total: this.entries.length };
+    throw new Error('the page must not read the inbox from the relay');
   }
   async zswap() {
     return this.zswapActivity;
@@ -101,6 +115,7 @@ async function setup() {
   const { signing, calls: signed } = fakeSigning();
   const e: OperationEnv = {
     relay: relay as unknown as RelayClient,
+    chain: new FakeChain(relay),
     store: new LocalStore(storage),
     scope: { network: 'undeployed', owner: signing.deviceKey },
     signing,
@@ -163,7 +178,9 @@ describe('make an offer (L-TRD.1)', () => {
       bytes: 20000,
     };
     const legs = orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE));
+    const before = Math.floor(Date.now() / 1000);
     const rec = await makeOffer(e, ACCOUNT, legs, PAIR);
+    const after = Math.floor(Date.now() / 1000);
 
     expect(signed).toEqual(['authorise:open-swap']);
     const [sub] = relay.submitted;
@@ -174,9 +191,13 @@ describe('make an offer (L-TRD.1)', () => {
       giveAmount: '2000000',
       wantColor: QUOTE.midnightColour,
       wantAmount: '2100000',
-      validUntil: '0',
       authNonce: '4',
     });
+    // AA 00047 P9.S (audit C6): a REAL expiry is signed, now + one hour (Unix seconds), never "0".
+    expect(Number(p.validUntil)).toBeGreaterThanOrEqual(before + 3600);
+    expect(Number(p.validUntil)).toBeLessThanOrEqual(after + 3600);
+    expect(rec.validUntil).toBe(p.validUntil);
+    expect(rec.expiresAt).toBe(Number(p.validUntil) * 1000); // the signed expiry, not the relay's TTL
     expect(p.coin).toMatchObject({ nonce: '01'.repeat(32), value: '3000000' });
     // The device signed exactly this call (the payload the relay receives), at use counter 2.
     const pa = sub!.request.passportAuth as { owner: string; signature: string; useCounter: string };
@@ -283,6 +304,11 @@ describe('take an offer (L-TRD.2)', () => {
     expect(signed).toEqual(['authorise:take']);
     const [sub] = relay.submitted;
     expect(sub!.action).toBe('take');
+    // A take signs a SHORT expiry (five minutes): nobody can hold it as a free option (audit C6).
+    const nowS = Math.floor(Date.now() / 1000);
+    const until = Number((sub!.request.payload as { validUntil: string }).validUntil);
+    expect(until).toBeGreaterThan(nowS + 290);
+    expect(until).toBeLessThanOrEqual(nowS + 300);
     expect(sub!.request.payload).toMatchObject({
       offerId: 'e1'.repeat(32),
       giveColor: QUOTE.midnightColour,
@@ -403,16 +429,86 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
       kernel: { accepted: true, status: 'live', code: null, reason: null },
       legSegment: 0,
       proveSeconds: 1,
+      // The relay's transaction TTL says one second: the page does not go by it (audit C6).
       expiresAt: Date.now() + 1000,
       bytes: 1,
     };
-    await makeOffer(second.e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
-    const [x] = await reconcileOffers(
+    const rec = await makeOffer(
       second.e,
       ACCOUNT,
-      { offerStatus: async () => 'live' as const },
-      Date.now() + 5000,
+      orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)),
+      PAIR,
     );
-    expect(x).toMatchObject({ status: 'expired' });
+    const live = { offerStatus: async () => 'live' as const };
+    expect(await reconcileOffers(second.e, ACCOUNT, live, Date.now() + 5000)).toEqual([]); // still live
+    const [x] = await reconcileOffers(second.e, ACCOUNT, live, Number(rec.validUntil) * 1000);
+    expect(x).toMatchObject({ status: 'expired' }); // at the SIGNED expiry
+  });
+
+  it('shows a live offer the exchange has not listed as not listed, never "Listed" (P8.2 follow-up)', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = {
+      offerId: 'f2'.repeat(32),
+      kernel: { accepted: true, status: 'not_found', code: null, reason: null },
+      legSegment: 0,
+      proveSeconds: 1,
+      expiresAt: Date.now() + 3_600_000,
+      bytes: 1,
+    };
+    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    expect(rec.status).toBe('live'); // still a valid approval: it blocks a second offer and can be cancelled
+    expect(offerShown(rec)).toEqual({ state: 'unlisted', listed: false });
+    // Once the exchange lists it, it shows as listed.
+    await reconcileOffers(e, ACCOUNT, { offerStatus: async () => 'live' as const });
+    const [now] = readTrades(e.store, e.scope, ACCOUNT);
+    expect(offerShown(now!)).toEqual({ state: 'live', listed: true });
+    expect(offerShown({ role: 'take', status: 'filled', kernelStatus: 'consumed' })).toEqual({
+      state: 'filled',
+      listed: false,
+    });
+  });
+});
+
+describe('cancel an offer (audit C6, questions Q30)', () => {
+  it("re-affirms the account's CURRENT key with ONE signature, and cancels the offer once the chain shows the new nonce", async () => {
+    const { relay, e, signed } = await setup();
+    relay.results['open-swap'] = {
+      offerId: 'f3'.repeat(32),
+      kernel: { accepted: true, status: 'live', code: null, reason: null },
+      legSegment: 0,
+      proveSeconds: 1,
+      expiresAt: Date.now() + 3_600_000,
+      bytes: 1,
+    };
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    relay.results['cancel-offers'] = { txId: 'c0'.repeat(32) };
+    relay.afterJob['cancel-offers'] = () => {
+      relay.state.authNonce = '5';
+    };
+    const r = await cancelOffers(e, ACCOUNT);
+    expect(r).toEqual({ txId: 'c0'.repeat(32), cancelled: 1 });
+    expect(signed).toEqual(['authorise:open-swap', 'authorise:rotateEncKey']);
+    const sub = relay.submitted[1]!;
+    expect(sub.action).toBe('cancel-offers');
+    // The key it names is the CHAIN's key (unchanged), at the chain's nonce.
+    expect(sub.request.payload).toEqual({ newKey: relay.state.encKey, authNonce: '4' });
+    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('says plainly when the market cannot cancel yet, and leaves the offer as it is', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = {
+      offerId: 'f4'.repeat(32),
+      kernel: { accepted: true, status: 'live', code: null, reason: null },
+      legSegment: 0,
+      proveSeconds: 1,
+      expiresAt: Date.now() + 3_600_000,
+      bytes: 1,
+    };
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    relay.failNext = 'the cancel-offers operation is not available yet (plan lane P9.R)';
+    relay.failCode = 'not-implemented';
+    await expect(cancelOffers(e, ACCOUNT)).rejects.toThrow(CANCEL_UNAVAILABLE);
+    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'live' });
   });
 });

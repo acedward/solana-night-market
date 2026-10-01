@@ -12,6 +12,8 @@
 
 import { sha256 } from '@noble/hashes/sha2.js';
 
+import type { SignFacts } from './sign-facts.js';
+
 export interface SignPrompt {
   /** The wallet's name ("Phantom"). */
   wallet: string;
@@ -23,6 +25,8 @@ export interface SignPrompt {
   kind: 'account-call' | 'relay-envelope';
   /** Unix ms when the wallet was asked (for the "waiting" line). */
   since: number;
+  /** For an account call: what the contract enforces (base units, token ids, deadline; Q25 B′). */
+  facts: SignFacts | null;
 }
 
 const hexOf = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -45,6 +49,7 @@ export const messageKind = (text: string): SignPrompt['kind'] =>
 /** The one prompt open at a time, as an external store React subscribes to. */
 export class SignPromptStore {
   private current: SignPrompt | null = null;
+  private pendingFacts: SignFacts | null = null;
   private hidden = false;
   private readonly listeners = new Set<() => void>();
   private readonly signedListeners = new Set<() => void>();
@@ -57,9 +62,23 @@ export class SignPromptStore {
   /** The prompt to show, or null (none open, or the customer hid it). */
   readonly get = (): SignPrompt | null => (this.hidden ? null : this.current);
 
+  /** The facts of the account call about to be signed (the signing seam announces them just before
+   *  the wallet is asked, and clears them after); the next `open` shows them. */
+  setFacts(facts: SignFacts | null): void {
+    this.pendingFacts = facts;
+  }
+
   open(bytes: Uint8Array, wallet: string, now = Date.now()): SignPrompt {
     const text = messageText(bytes);
-    this.current = { wallet, text, fingerprint: messageFingerprint(bytes), kind: messageKind(text), since: now };
+    const kind = messageKind(text);
+    this.current = {
+      wallet,
+      text,
+      fingerprint: messageFingerprint(bytes),
+      kind,
+      since: now,
+      facts: kind === 'account-call' ? this.pendingFacts : null,
+    };
     this.hidden = false;
     this.emit();
     return this.current;

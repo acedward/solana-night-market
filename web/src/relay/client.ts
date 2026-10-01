@@ -1,28 +1,26 @@
 // The browser's client for the Night Market relay: nonces, the one action route, job polling (the
-// browser keeps the request id, so a job resumes after a reload, Q5), and the account's public
-// chain reads. Every response is validated against the shared schemas.
+// browser keeps the request id, so a job resumes after a reload, Q5), and the one chain read the
+// browser cannot do itself (the account's decoded Zswap events, questions Q31). Every response is
+// validated against the shared schemas.
+//
+// The account's state, inbox and public balances are NOT read here (AA 00047 P9.S, questions Q26:
+// the relay is trustless): the page reads them from the public indexer (../chain/indexer.ts). The
+// relay still serves those routes; this client deliberately has no method for them.
 
 import {
   API_PATHS,
-  AccountStateViewSchema,
   ApiErrorSchema,
   DemoTokensInfoSchema,
   HealthResponseSchema,
   type HealthResponse,
-  InboxPageSchema,
   JobViewSchema,
   NonceResponseSchema,
-  UnshieldedBalancesViewSchema,
   ZswapActivitySchema,
-  unshieldedBalancesPath,
-  type AccountStateView,
   type ActionRequest,
   type DemoTokensInfo,
-  type InboxPage,
   type JobView,
   type NonceResponse,
   type RelayActionName,
-  type UnshieldedBalancesView,
   type ZswapActivity,
 } from '@nightmarket/core';
 
@@ -116,19 +114,6 @@ export class RelayClient {
     }
   }
 
-  async accountState(account: string): Promise<AccountStateView | null> {
-    try {
-      return AccountStateViewSchema.parse(await this.call(API_PATHS.accountState(account)));
-    } catch (e) {
-      if (e instanceof RelayError && e.status === 404) return null;
-      throw e;
-    }
-  }
-
-  async inbox(account: string, from = 0, limit = 500): Promise<InboxPage> {
-    return InboxPageSchema.parse(await this.call(`${API_PATHS.accountInbox(account)}?from=${from}&limit=${limit}`));
-  }
-
   /** The market's health (FR-013): what is paused and why (plan P4-A error states). A down relay
    *  answers 503 with the same body. */
   async health(): Promise<HealthResponse> {
@@ -144,6 +129,8 @@ export class RelayClient {
     return h.data;
   }
 
+  /** The account's Zswap leaves and spends, as the relay decodes the ledger's events: the page keeps
+   *  only what the public indexer's own events carry (@nightmarket/core `checkZswapActivity`, Q31). */
   async zswap(account: string): Promise<ZswapActivity> {
     return ZswapActivitySchema.parse(await this.call(API_PATHS.accountZswap(account)));
   }
@@ -166,17 +153,6 @@ export class RelayClient {
     const path = owner ? `${API_PATHS.demoTokens}?owner=${encodeURIComponent(owner)}` : API_PATHS.demoTokens;
     try {
       return DemoTokensInfoSchema.parse(await this.call(path));
-    } catch (e) {
-      if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
-      throw e;
-    }
-  }
-
-  /** The account's unshielded balances (AA 00047, packages/core/src/unshielded.ts). Null when this
-   *  relay does not serve them. */
-  async unshieldedBalances(account: string): Promise<UnshieldedBalancesView | null> {
-    try {
-      return UnshieldedBalancesViewSchema.parse(await this.call(unshieldedBalancesPath(account)));
     } catch (e) {
       if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
       throw e;

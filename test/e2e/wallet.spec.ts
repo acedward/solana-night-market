@@ -158,6 +158,15 @@ test('a make the exchange has not listed yet says so, and that nothing is on-cha
   await page.getByTestId('make-sign').click();
   await expect(page.getByTestId('trade-message')).toContainText('The market has your offer, but it is not listed yet');
   await expect(page.getByTestId('trade-message')).toContainText('Nothing goes on-chain until someone takes your offer');
+  // AA 00047 P9.S (the P8.2 follow-up): its row and the banner never say "Listed" while the exchange
+  // has not listed it; the approval still blocks a second offer until its signed expiry.
+  const row = page.locator('[data-testid=my-trade][data-role=make]');
+  await expect(row).toHaveAttribute('data-state', 'live');
+  await expect(row).toHaveAttribute('data-shown', 'unlisted');
+  await expect(row.getByTestId('my-trade-state')).toContainText('Not listed yet');
+  await expect(row.getByTestId('my-trade-state')).not.toContainText('Listed');
+  await expect(page.getByTestId('live-offer-banner')).toHaveAttribute('data-listed', 'no');
+  await expect(page.getByTestId('live-offer-banner')).toContainText('not listed on the market (yet)');
   // The tokens stayed: the offer's coin is not spent.
   await expect(holding(page, 'twBTC')).toContainText('0.10');
 });

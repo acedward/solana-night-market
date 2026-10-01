@@ -14,6 +14,7 @@ import { registryFor, shortSolanaAddress, type NetworkProfile } from '@nightmark
 import { ActivityProvider } from './activity/ActivityContext.js';
 import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
+import { ChainProvider } from './chain/ChainContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
   Avatar,
@@ -346,7 +347,7 @@ function Shell({
         )}
         <main className="wrap app-main">
           {section === 'local' ? (
-            <LocalData network={network.name} relayUrl={config.relayUrl} />
+            <LocalData network={network.name} />
           ) : section === 'account' ? (
             <Accounts network={network} relayUrl={config.relayUrl} />
           ) : section === 'markets' ? (
@@ -420,15 +421,17 @@ export function App() {
     <StoreProvider>
       <WalletProvider adapter={adapter}>
         <RelayStatusProvider relayUrl={config.relayUrl}>
-          <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
-            <AssetFilterProvider site={config.assets}>
-              <ActivityProvider store={activity}>
-                <ToastProvider>
-                  <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
-                </ToastProvider>
-              </ActivityProvider>
-            </AssetFilterProvider>
-          </MarketProvider>
+          <ChainProvider network={config.network}>
+            <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
+              <AssetFilterProvider site={config.assets}>
+                <ActivityProvider store={activity}>
+                  <ToastProvider>
+                    <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                  </ToastProvider>
+                </ActivityProvider>
+              </AssetFilterProvider>
+            </MarketProvider>
+          </ChainProvider>
         </RelayStatusProvider>
       </WalletProvider>
     </StoreProvider>

@@ -7,8 +7,8 @@
 //
 // Two authorisations exist (relay/src/auth/verifiers.ts):
 //   relay-action   register, demo-tokens: a RelayAction envelope with a relay-issued nonce;
-//   passport-call  withdraw, withdraw-unshielded, append-inbox, open-swap, take: the call's own
-//                  Passport signature; its "nonce" is the account's on-chain auth nonce.
+//   passport-call  withdraw, withdraw-unshielded, append-inbox, cancel-offers, open-swap, take: the
+//                  call's own Passport signature; its "nonce" is the account's on-chain auth nonce.
 // The arm and the envelope scheme are the TEST ones (./fake-arm.ts, the core test scheme): the route
 // rules do not depend on them. The Ed25519 arm's own checks are relay/test/ed25519-arm.test.ts, the
 // Solana scheme's packages/core/test/solana-auth.test.ts.
@@ -23,6 +23,7 @@ import {
   RELAY_ACTIONS,
   buildRelayActionMessage,
   type AppendInboxPayload,
+  type CancelOffersPayload,
   type HealthResponse,
   type OpenSwapPayload,
   type RelayActionName,
@@ -63,6 +64,7 @@ const KIND: Record<RelayActionName, Kind> = {
   take: 'passport-call',
   'withdraw-unshielded': 'passport-call',
   'demo-tokens': 'relay-action',
+  'cancel-offers': 'passport-call',
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -209,6 +211,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
     case 'demo-tokens':
       // The device's live use counter (AA 00047 P9, audit C8 / F-B10): the fake account's is 0.
       return { useCounter: '0' };
+    case 'cancel-offers':
+      return { newKey: (0xe0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies CancelOffersPayload;
     case 'open-swap':
     case 'take': {
       const make: OpenSwapPayload = {

@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import {
   AppendInboxPayloadSchema,
+  CancelOffersPayloadSchema,
   DemoTokensPayloadSchema,
   OpenSwapPayloadSchema,
   RELAY_ACTIONS,
@@ -95,6 +96,8 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('take', 'prover', 'B3'),
     def('withdraw-unshielded', 'prover', 'B3'),
     def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
+    // AA 00047 P9.S (questions Q30): the site's "Cancel offer".
+    def('cancel-offers', 'prover', 'P9.R'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -125,6 +128,12 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
     payload: WithdrawUnshieldedPayloadSchema,
     executor: withdrawUnshieldedExecutor(deps),
   });
+  // AA 00047 P9.S (questions Q30): "Cancel offer" is the arm's `rotate_enc_key_with_ed25519` to the
+  // account's CURRENT key (@nightmarket/core `CancelOffersPayloadSchema`, `cancelOffersRequest`),
+  // authorised by its own F3 signature like the other gated calls (relay/src/passport/arm.ts). Its
+  // executor is still the placeholder (`not-implemented`): lane P9.R / P9.I add it, with the
+  // admission check "newKey is the on-chain enc_key" and the rotate prover key in the key volume.
+  set('cancel-offers', { auth: 'passport-call', payload: CancelOffersPayloadSchema });
   set('append-inbox', {
     auth: 'passport-call',
     payload: AppendInboxPayloadSchema,

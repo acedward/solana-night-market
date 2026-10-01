@@ -34,7 +34,14 @@ export interface RosterRecord {
 }
 
 export type JobAction =
-  'register' | 'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'open-swap' | 'take' | 'demo-tokens';
+  | 'register'
+  | 'withdraw'
+  | 'withdraw-unshielded'
+  | 'append-inbox'
+  | 'open-swap'
+  | 'take'
+  | 'demo-tokens'
+  | 'cancel-offers';
 
 export interface JobRecord {
   requestId: string;

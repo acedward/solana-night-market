@@ -59,7 +59,10 @@ export async function claimDemoTokens(
   let requestId = findJobs(env, account, 'demo-tokens')[0]?.requestId;
   if (!requestId) {
     // The device's current use counter (AA 00047 P9, audit C8 / F-B10): the relay checks the one
-    // device entry at this counter instead of scanning for it.
+    // device entry at this counter instead of scanning for it. `gatedContext` reads it from the CHAIN
+    // after the market-account check (AA 00047 P9.S, audit C3), so a deposit only ever goes into an
+    // account the chain shows is the market's own and this wallet's alone, checked before the wallet
+    // is asked for anything.
     const { counter } = await gatedContext(env, account);
     const payload = { useCounter: counter.toString(10) };
     const { nonce, maxTtlSeconds } = await env.relay.nonce();

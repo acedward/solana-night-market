@@ -106,7 +106,7 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
       const stopWatching = wallet.onChange(() => emit('account-changed'));
       return {
         address: wallet.address,
-        signing: ed25519ActionSigning(signer, opts.display),
+        signing: ed25519ActionSigning(signer, opts.display, undefined, (facts) => opts.prompts.setFacts(facts)),
         disconnect() {
           stopWatching();
           listeners.clear();

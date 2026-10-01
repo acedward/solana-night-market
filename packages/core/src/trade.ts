@@ -18,6 +18,7 @@ import { AmountError, type Ratio, formatUnits, parseUnits, priceRatio } from './
 import type { StoredCoin } from './coins.js';
 import { normaliseHex32 } from './hex.js';
 import type { BookEntry } from './market/prices.js';
+import { OFFER_LIFETIME_SECONDS, TAKE_LIFETIME_SECONDS } from './offer-expiry.js';
 import type { TokenEntry } from './tokens/registry.js';
 
 export class TradeError extends Error {
@@ -188,13 +189,32 @@ export function fundWithOneCoin(
 
 // ── Offers the account made, and the one-live-offer rule (Q9, L-TRD.1, L-TRD.3) ──────────
 
+// ── The signed expiry of a make or a take (AA 00047 P9.S, audit C6; the lifetimes and the relay's
+//    admission rule are ./offer-expiry.ts, shared with lane P9.R) ─────────────────────────────
+
+/** The `validUntil` (unix seconds, decimal) a make or a take signs, from `nowMs`: now +
+ *  OFFER_LIFETIME_SECONDS for a make, now + TAKE_LIFETIME_SECONDS for a take. The circuit refuses it
+ *  after that (`assert_offer_live`), whoever holds it. */
+export function signedValidUntil(kind: 'make' | 'take', nowMs: number): string {
+  const lifetime = kind === 'make' ? OFFER_LIFETIME_SECONDS : TAKE_LIFETIME_SECONDS;
+  return String(Math.floor(nowMs / 1000) + lifetime);
+}
+
+/** "2026-10-01 15:04:05 UTC": a signed deadline (unix seconds) as people read it, the way the F3 v2
+ *  wallet text renders it (P9.C `Expires YYYY-MM-DD hh:mm:ss UTC`). */
+export function deadlineText(validUntil: string | bigint | number): string {
+  const s = Number(validUntil);
+  if (!Number.isFinite(s) || s <= 0) return 'never';
+  return `${new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
+}
+
 /** The kernel's lifecycle words, plus what only the browser can know. */
 export type OfferState =
   /** On the book, and this account has not signed anything since. */
   | 'live'
   /** Settled by a taker: the account's coin was spent by the offer. */
   | 'filled'
-  /** The intent's TTL passed (at most 1 hour after proving). */
+  /** Its signed expiry (`validUntil`) passed: the circuit refuses it from then on. */
   | 'expired'
   /** Another signed action of the account moved its nonce, so the offer can never settle. */
   | 'cancelled'
@@ -206,7 +226,7 @@ export interface OfferRuleInput {
   status: OfferState;
   /** The auth nonce the offer's signature binds. */
   authNonce: string;
-  /** Unix ms after which the ledger refuses the offer's intent. */
+  /** Unix ms after which the offer can no longer settle: its signed `validUntil` (AA 00047 P9.S). */
   expiresAt: number;
 }
 
@@ -222,13 +242,14 @@ export function offerStillLive(o: OfferRuleInput, now: number, currentAuthNonce?
 }
 
 /** The signed actions an account can take. */
-export type SignedAction = 'withdraw' | 'append-inbox' | 'open-swap' | 'take';
+export type SignedAction = 'withdraw' | 'append-inbox' | 'open-swap' | 'take' | 'cancel-offers';
 
 const ACTION_TEXT: Record<SignedAction, string> = {
   withdraw: 'This withdrawal',
   'append-inbox': 'Recording this change',
   'open-swap': 'A second offer',
   take: 'Taking this offer',
+  'cancel-offers': 'Cancelling',
 };
 
 export type ActionGuard =
@@ -281,7 +302,9 @@ const decimal = z.string().regex(/^[0-9]{1,40}$/);
  * field is what the circuit and its signed challenge bind: the give
  * leg, the wanted coin (its nonce is the browser's fresh randomness), the two inbox entries the
  * browser sealed to the account's own key (the wanted coin, and the predicted change or 192 zero
- * bytes), the deadline (0: none but the intent's TTL), and the coin the give is paid from.
+ * bytes), the deadline `validUntil` (unix seconds; the site signs now + OFFER_LIFETIME_SECONDS for a
+ * make and now + TAKE_LIFETIME_SECONDS for a take, audit C6; 0 would mean "never" and the site no
+ * longer sends it), and the coin the give is paid from.
  */
 export const OpenSwapPayloadSchema = z
   .object({

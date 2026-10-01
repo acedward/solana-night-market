@@ -38,12 +38,12 @@ function Onboarding({ done }: { done: 0 | 1 }) {
 }
 
 export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
-  const { wallet, account, hasSecret, coins, relay } = useAccountView(network, relayUrl);
+  const { wallet, account, hasSecret, coins, chain } = useAccountView(network, relayUrl);
   const { revision } = useStore();
   const tokens = useTokenRegistry();
   const assets = useAssetFilter();
   const connect = useConnectPrompt();
-  const unshielded = useUnshieldedBalances(relay, account && hasSecret ? account.address : null, revision);
+  const unshielded = useUnshieldedBalances(chain, account && hasSecret ? account.address : null, revision);
 
   const rows = useMemo(() => {
     const order = (colour: string) => {

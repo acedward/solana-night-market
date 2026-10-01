@@ -37,6 +37,9 @@ export const RELAY_ACTIONS = [
   // and the demo-token pack from the mint-test-tokens faucets (./demo-tokens.ts).
   'withdraw-unshielded',
   'demo-tokens',
+  // AA 00047 P9.S (audit C6, questions Q30): end every open approval (open offers included) with the
+  // arm's `rotate_enc_key_with_ed25519` to the account's current key (./accounts.ts).
+  'cancel-offers',
 ] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 

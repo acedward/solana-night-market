@@ -15,6 +15,13 @@
 // (entries sealed to the account's own encryption key), its Zswap outputs and spends, and its
 // unshielded balances. Jobs succeed on their first poll, unless `holdNextJob()` keeps the next one
 // "proving" until the test releases it (the signing modal's progress view, AA 00047 P8.1).
+//
+// Since AA 00047 P9.S the page reads that state from the PUBLIC INDEXER (./mock-indexer.ts serves it
+// from here), never from the relay's own account routes; `lies` makes those routes misreport, to show
+// it. Like the real relay after P9.R, an offer or a take must sign a real expiry. A withdrawal's change
+// is the contract's (`predictWithdrawChange`), unless `misreportChange` fabricates one (Q28 A).
+// `cancel-offers` (questions Q30) re-affirms the account's key and moves its nonce, or answers
+// `not-implemented` (`cancelMode`).
 
 import { randomBytes } from 'node:crypto';
 
@@ -25,13 +32,16 @@ import { contractCoinCommitment, contractCoinNullifier } from '../../packages/co
 import { bytesToHex, hexToBytes } from '../../packages/core/src/hex.js';
 import {
   callContext,
+  cancelOffersRequest,
   ed25519DeviceForCheck,
   ed25519DeviceForKey,
+  networkSaltFor,
   withdrawRequest,
   appendInboxRequest,
   withdrawUnshieldedRequest,
   openSwapArgs,
   predictChangeCoin,
+  predictWithdrawChange,
 } from '../../packages/core/src/passport/index.js';
 import { sealEntryPortable } from '../../vendor/passport/contract/src/wallet/deposit.js';
 import { solanaRelayActionScheme } from '../../packages/core/src/solana-auth.js';
@@ -41,7 +51,6 @@ import { healthBody } from './errors-fixtures.js';
 
 export const RELAY = 'http://relay.test';
 export const ACCOUNT = '7e'.repeat(32);
-const SALT = '5a'.repeat(32);
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'content-type',
@@ -82,6 +91,8 @@ interface Submitted {
   verified: string;
   done: boolean;
   result?: Record<string, unknown>;
+  /** The job failed, with the relay's code and words. */
+  failed?: { code: string; message: string };
   stages: string[];
   /** Held at "proving" (or the stages given to `at`) until released (`holdNextJob`). */
   held?: Held;
@@ -107,6 +118,16 @@ export class MockRelay {
   deviceKey: string | null = null;
   encKey: string | null = null;
   registered = false;
+  /** The account's network salt: the stagenet one, as every market account on stagenet carries. */
+  readonly salt = networkSaltFor('stagenet');
+  /** The relay's own account routes (state, inbox, unshielded) misreport (the page must not care). */
+  lies = false;
+  /** Report a fabricated change coin for a withdrawal (Q28 A). */
+  misreportChange = false;
+  /** `cancel-offers`: done, or this relay cannot run it yet. */
+  cancelMode: 'ok' | 'not-implemented' = 'ok';
+  /** The `validUntil` of every make and take, as signed. */
+  readonly signedExpiries: string[] = [];
   authNonce = 3n;
   useCounter = 0n;
   entries: string[] = [];
@@ -194,12 +215,12 @@ export class MockRelay {
       authNonce: this.authNonce.toString(),
       inboxCount: String(this.entries.length),
       encKey: this.encKey ?? '00'.repeat(32),
-      networkSalt: SALT,
+      networkSalt: this.salt,
     };
   }
 
   private ctx() {
-    return callContext({ account: ACCOUNT, authNonce: this.authNonce, networkSalt: SALT });
+    return callContext({ account: ACCOUNT, authNonce: this.authNonce, networkSalt: this.salt });
   }
 
   /** The relay's check of one request (B3's rules). Resolves to 'ok' or the refusal detail. */
@@ -243,9 +264,15 @@ export class MockRelay {
         await device.sign(this.ctx(), appendInboxRequest(payload as never), this.useCounter);
       else if (action === 'withdraw-unshielded')
         await device.sign(this.ctx(), withdrawUnshieldedRequest(payload as never), this.useCounter);
-      else if (action === 'open-swap' || action === 'take') {
+      else if (action === 'cancel-offers') {
+        if (payload.newKey !== this.encKey) return 'wrong-key'; // a cancel never changes the key
+        await device.sign(this.ctx(), cancelOffersRequest(payload as never), this.useCounter);
+      } else if (action === 'open-swap' || action === 'take') {
+        // As the relay after P9.R (audit C6): a real, signed expiry or nothing is admitted.
+        if (BigInt(payload.validUntil ?? '0') === 0n) return 'no-expiry';
         const { call, coin } = openSwapArgs(payload as never);
         await device.signOffer(this.ctx(), call, coin, this.useCounter);
+        this.signedExpiries.push(String(payload.validUntil));
       } else return 'unknown-action';
     } catch {
       return 'bad-signature';
@@ -261,6 +288,9 @@ export class MockRelay {
       case 'register': {
         this.encKey = p.encPublicKey!;
         this.registered = true;
+        // A new account: its device at its first entry, nothing signed yet.
+        this.authNonce = 0n;
+        this.useCounter = 0n;
         s.stages = ['deploying', 'wave-1-submitted', 'wave-2-submitted', 'activating', 'activated'];
         s.result = {
           account: ACCOUNT,
@@ -292,17 +322,36 @@ export class MockRelay {
       case 'withdraw': {
         const coin = p.coin!;
         this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
-        const changeValue = BigInt(coin.value!) - BigInt(p.amount!);
-        const change = changeValue > 0n ? { nonce: 'c4'.repeat(32), color: coin.color!, value: changeValue } : null;
+        // The change the contract's sendShielded makes (what lands on chain).
+        const made = predictWithdrawChange(
+          { nonce: coin.nonce!, color: coin.color!, value: coin.value! },
+          BigInt(p.amount!),
+        );
+        const change = made ? { nonce: made.nonce, color: made.color, value: BigInt(made.value) } : null;
         if (change) this.output(change, tx);
+        const reported = change && this.misreportChange ? { ...change, nonce: 'c4'.repeat(32) } : change;
         this.authNonce += 1n;
         this.useCounter += 1n;
         s.stages = ['proving', 'submitted'];
         s.result = {
           txId: tx,
-          change: change ? { ...change, value: change.value.toString() } : null,
+          change: reported ? { ...reported, value: reported.value.toString() } : null,
           ...(change ? { changeEntitlement: `ae1.${ACCOUNT}.${'0e'.repeat(32)}.99999999999.${'ac'.repeat(32)}` } : {}),
         };
+        return;
+      }
+      case 'cancel-offers': {
+        if (this.cancelMode === 'not-implemented') {
+          s.failed = {
+            code: 'not-implemented',
+            message: 'the cancel-offers operation is not available yet (plan lane P9.R)',
+          };
+          return;
+        }
+        this.authNonce += 1n;
+        this.useCounter += 1n;
+        s.stages = ['proving', 'submitted'];
+        s.result = { txId: tx };
         return;
       }
       case 'append-inbox': {
@@ -392,6 +441,17 @@ export class MockRelay {
     }
     if (!s.done)
       return { ...base, state: 'queued', stage: 'queued', position: 1, stages: [{ stage: 'queued', at: 1 }] };
+    if (s.failed)
+      return {
+        ...base,
+        state: 'failed',
+        stage: 'failed',
+        stages: [
+          { stage: 'queued', at: 1 },
+          { stage: 'failed', at: 2 },
+        ],
+        error: s.failed,
+      };
     return {
       ...base,
       state: 'succeeded',
@@ -435,9 +495,22 @@ export class MockRelay {
     if (acct) {
       if (acct[1] !== ACCOUNT || !this.registered)
         return json(404, { error: { code: 'not-found', message: 'no such account' } });
-      if (acct[2] === 'state') return json(200, this.state());
+      // A lying relay (`lies`): another nonce and key, no inbox, other balances. The page reads the
+      // chain (./mock-indexer.ts) instead, so nothing it does may depend on these answers.
+      if (acct[2] === 'state')
+        return json(
+          200,
+          this.lies
+            ? { ...this.state(), authNonce: String(this.authNonce + 5n), encKey: 'e1'.repeat(32) }
+            : this.state(),
+        );
       if (acct[2] === 'inbox')
-        return json(200, { account: ACCOUNT, from: 0, entries: this.entries, total: this.entries.length });
+        return json(200, {
+          account: ACCOUNT,
+          from: 0,
+          entries: this.lies ? [] : this.entries,
+          total: this.lies ? 0 : this.entries.length,
+        });
       if (acct[2] === 'zswap')
         return json(200, {
           account: ACCOUNT,
@@ -450,7 +523,7 @@ export class MockRelay {
         account: ACCOUNT,
         balances: [...this.unshielded]
           .filter(([, v]) => v > 0n)
-          .map(([colour, v]) => ({ colour, amount: v.toString() })),
+          .map(([colour, v]) => ({ colour, amount: (this.lies ? v * 1000n : v).toString() })),
         blockHeight: 99,
       });
     }

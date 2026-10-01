@@ -138,6 +138,28 @@ export const AppendInboxPayloadSchema = z
   .strict();
 export type AppendInboxPayload = z.infer<typeof AppendInboxPayloadSchema>;
 
+/**
+ * `cancel-offers` (AA 00047 P9.S, audit C6, questions Q30): end EVERY open approval of the account at
+ * once, its open offers included, by landing the arm's cheapest nonce-bumping call,
+ * `rotate_enc_key_with_ed25519`, with `newKey` = the account's CURRENT encryption key (the state
+ * does not change apart from the auth nonce). Authorised by the call's own F3 signature (one prompt);
+ * the relay also checks `newKey` is the on-chain key (lane P9.R), so the call can never move the
+ * account to another key.
+ */
+export const CancelOffersPayloadSchema = z
+  .object({
+    /** The account's encryption public key as it is on chain (64 hex). */
+    newKey: hex32,
+    /** The auth nonce the signed challenge binds. */
+    authNonce: decimal,
+  })
+  .strict();
+export type CancelOffersPayload = z.infer<typeof CancelOffersPayloadSchema>;
+
+export interface CancelOffersResult {
+  txId: string;
+}
+
 // ── Results (the job's public outcome) ────────────────────────────────────────
 
 export interface RegisterResult {

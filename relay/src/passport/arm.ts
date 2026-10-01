@@ -24,12 +24,14 @@
 
 import {
   AppendInboxPayloadSchema,
+  CancelOffersPayloadSchema,
   OpenSwapPayloadSchema,
   PassportAuthSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
   type AppendInboxPayload,
+  type CancelOffersPayload,
   type NetworkName,
   type OpenSwapPayload,
   type PassportAuth,
@@ -64,10 +66,19 @@ export const ARM_CIRCUITS = {
 
 // ── The gated account calls (withdraw, withdraw-unshielded, append-inbox) ─────
 
-export type GatedAction = Extract<RelayActionName, 'withdraw' | 'withdraw-unshielded' | 'append-inbox'>;
+export type GatedAction = Extract<
+  RelayActionName,
+  'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'cancel-offers'
+>;
 
-/** Every action a gated call's own Passport signature authorises. */
-export const GATED_ACTIONS: readonly GatedAction[] = ['withdraw', 'withdraw-unshielded', 'append-inbox'];
+/** Every action a gated call's own Passport signature authorises. `cancel-offers` (AA 00047 P9.S,
+ *  questions Q30) is the arm's `rotate_enc_key` to the account's current key. */
+export const GATED_ACTIONS: readonly GatedAction[] = [
+  'withdraw',
+  'withdraw-unshielded',
+  'append-inbox',
+  'cancel-offers',
+];
 
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a);
 
@@ -75,12 +86,15 @@ export type GatedPayload<A extends GatedAction> = A extends 'withdraw'
   ? WithdrawPayload
   : A extends 'withdraw-unshielded'
     ? WithdrawUnshieldedPayload
-    : AppendInboxPayload;
+    : A extends 'cancel-offers'
+      ? CancelOffersPayload
+      : AppendInboxPayload;
 
 const GATED_SCHEMAS = {
   withdraw: WithdrawPayloadSchema,
   'withdraw-unshielded': WithdrawUnshieldedPayloadSchema,
   'append-inbox': AppendInboxPayloadSchema,
+  'cancel-offers': CancelOffersPayloadSchema,
 } as const;
 
 /** Parse a gated action's body; null when it is not the action's shape. */

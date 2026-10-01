@@ -28,6 +28,8 @@ import {
   type OrderLegs,
   type TokenEntry,
   type TradeSide,
+  TAKE_LIFETIME_SECONDS,
+  deadlineText,
   formatPrice,
   formatUnits,
   fundWithOneCoin,
@@ -41,6 +43,8 @@ import { useActivity } from '../activity/ActivityContext.js';
 import { OFFER_OFF_CHAIN, stageWords, type ActivityKind } from '../activity/activity.js';
 import { PortfolioDock, PortfolioToggle } from '../account/PortfolioDock.js';
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
+import { AccountCheckNotice } from '../chain/AccountCheckNotice.js';
+import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import {
   Button,
   ButtonLink,
@@ -78,8 +82,8 @@ import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import { OPEN_OFFERS_NOTE, madeOfferText, tookOfferText } from '../trade/messages.js';
-import { guardFor, makeOffer, reconcileOffers, takeOffer } from '../trade/operations.js';
-import { liveOffer, readTrades, type TradeRecord } from '../trade/records.js';
+import { cancelOffers, guardFor, makeOffer, offerShown, reconcileOffers, takeOffer } from '../trade/operations.js';
+import { liveOffer, readTrades } from '../trade/records.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet } from '../wallet/WalletContext.js';
 
@@ -95,17 +99,22 @@ const TAKE_STAGE_TEXT: Record<string, string> = {
 const stageText = (stage: string, action: string) =>
   (action === 'take' ? TAKE_STAGE_TEXT[stage] : undefined) ?? stageWords(stage, action);
 
-const STATE_TEXT: Record<TradeRecord['status'], string> = {
-  // A live offer is listed on the market, not on-chain (questions Q24).
+type ShownState = ReturnType<typeof offerShown>['state'];
+
+const STATE_TEXT: Record<ShownState, string> = {
+  // A live offer is listed on the market, not on-chain (questions Q24); one the exchange has not
+  // listed (yet) says so, never "Listed" (AA 00047 P9.S, the P8.2 follow-up).
   live: 'Listed',
+  unlisted: 'Not listed yet',
   filled: 'Filled',
   expired: 'Expired',
   cancelled: 'Cancelled',
   refused: 'Refused',
 };
 
-const STATE_PILL: Record<TradeRecord['status'], PillStatus> = {
+const STATE_PILL: Record<ShownState, PillStatus> = {
   live: 'live',
+  unlisted: 'progress',
   filled: 'filled',
   expired: 'idle',
   cancelled: 'cancelled',
@@ -247,6 +256,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const activity = useActivity();
   const relayStatus = useRelayStatus();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
+  const chain = useChain();
   const kernel = useMemo(() => new KernelClient({ baseUrl: network.zswap.kernelUrl }), [network]);
   const assets = useAssetFilter();
   const params = hashParams();
@@ -278,11 +288,19 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, revision],
   );
-  const hasSecret = !!(store && scope && account && readSecret(store, scope, account.address));
+  const secret = store && scope && account ? readSecret(store, scope, account.address) : null;
+  const hasSecret = !!secret;
   const coins = useMemo(
     () => (store && scope && account ? readCoins(store, scope, account.address) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, account, revision],
+  );
+  // The market-account check on the chain (AA 00047 P9.S, audit C3): no trade without it.
+  const accountCheck = useAccountCheck(
+    account && hasSecret ? account.address : null,
+    owner,
+    secret?.encPublicKey ?? null,
+    revision,
   );
   const trades = useMemo(
     () => (store && scope && account ? readTrades(store, scope, account.address) : []),
@@ -303,6 +321,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     if (!store || !scope || !wallet.signing) return null;
     return {
       relay,
+      chain,
       store,
       scope,
       signing: wallet.signing,
@@ -311,7 +330,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         activity.job(j);
       },
     };
-  }, [store, scope, wallet.signing, relay, activity]);
+  }, [store, scope, wallet.signing, relay, chain, activity]);
 
   // Reconcile My offers and the coins when the page opens, and every 30 s while an offer is live.
   const accountAddress = account?.address;
@@ -453,6 +472,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const paused = relayStatus.spendingPaused;
   const batcherDown = relayStatus.health ? !relayStatus.health.batcher.reachable : false;
   const exchangeDown = state.status === 'unavailable';
+  // The account failed the market-account check on the chain: nothing is signed for it (P9.S).
+  const refusedAccount = accountCheck.status === 'failed';
 
   const run = async (label: string, kind: ActivityKind, fn: (e: OperationEnv) => Promise<void>) => {
     const e = env();
@@ -469,9 +490,20 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     }
   };
 
+  // "Cancel offer" (audit C6, questions Q30): one approval, one transaction that moves the account's
+  // nonce, so the offer can never be taken; done when the chain shows it.
+  const doCancel = () =>
+    void run('cancel', 'cancel-offers', async (e) => {
+      const r = await cancelOffers(e, account.address);
+      setMessage({
+        kind: 'ok',
+        text: `Cancelled: your offer can no longer be taken by anyone (tx ${r.txId.slice(0, 8)}…${r.txId.slice(-6)}).`,
+      });
+    });
+
   const submitMake = (ev: FormEvent) => {
     ev.preventDefault();
-    if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused) return;
+    if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused || refusedAccount) return;
     const l = legs;
     void run('make', 'open-swap', async (e) => {
       const rec = await makeOffer(e, account.address, l, pair);
@@ -487,7 +519,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     const l = takeLegs(e, base, quote);
     return { legs: l, funding: fundWithOneCoin(coins, l.give, l.side === 'sell' ? base : quote) };
   };
-  const cannotTake = !!busy || !!paused || batcherDown || exchangeDown;
+  const cannotTake = !!busy || !!paused || batcherDown || exchangeDown || refusedAccount;
   const startTake = (e: BookEntry) => {
     setMessage(null);
     setConfirmTake(e);
@@ -640,7 +672,10 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             Back
           </Button>
         </ButtonRow>
-        <p className="xsmall muted gap-top">You approve once in Phantom; the market pays the network fees.</p>
+        <p className="xsmall muted gap-top" data-testid="take-validity">
+          You approve once in Phantom; the market pays the network fees. Your approval is valid for{' '}
+          {Math.round(TAKE_LIFETIME_SECONDS / 60)} minutes: if the market has not settled it by then, nobody can.
+        </p>
       </div>
     );
   })();
@@ -663,6 +698,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         </Notice>
       )}
       <RelayNotices place="trade" className="panel-intro" />
+      {accountCheck.status !== 'ok' && <AccountCheckNotice check={accountCheck} />}
       {paused && (
         <Notice tone="warning" className="panel-intro" data-testid="trade-paused">
           Not now: {paused}
@@ -674,10 +710,24 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           title="One live offer at a time."
           className="panel-intro"
           data-testid="live-offer-banner"
+          data-listed={offerShown(live).listed ? 'yes' : 'no'}
         >
-          Your offer is listed on the market: {live.summary}, until {clock(live.expiresAt)}. It is not on-chain: your
-          tokens stay in your account until someone takes it. Any other approval (a take or a withdrawal) cancels it; we
-          ask you first.
+          {offerShown(live).listed
+            ? `Your offer is listed on the market: ${live.summary}, until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)} (the expiry you approved).`
+            : `Your offer is not listed on the market (yet): ${live.summary}. It can still be taken until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)}, the expiry you approved.`}{' '}
+          It is not on-chain: your tokens stay in your account until someone takes it. Any other approval (a take or a
+          withdrawal) cancels it; we ask you first.
+          <ButtonRow className="gap-top">
+            <Button
+              variant="secondary"
+              size="small"
+              data-testid="cancel-offer"
+              disabled={!!busy || !!paused || refusedAccount}
+              onClick={doCancel}
+            >
+              {busy === 'cancel' ? 'Cancelling…' : 'Cancel offer'}
+            </Button>
+          </ButtonRow>
         </Notice>
       )}
 
@@ -868,14 +918,17 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               type="submit"
               className="btn-block"
               data-testid="make-sign"
-              disabled={!!busy || !!paused || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'}
+              disabled={
+                !!busy || !!paused || refusedAccount || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'
+              }
             >
               {busy === 'make' ? 'Preparing your offer…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
             </Button>
             <p className="xsmall muted gap-top" data-testid="make-off-chain">
               One approval in Phantom lists your offer on the market; it puts nothing on-chain. Your tokens stay in your
-              account until someone takes the whole offer (then it settles on Midnight in one transaction), for about an
-              hour. Approving anything else from this account before then cancels it.
+              account until someone takes the whole offer (then it settles on Midnight in one transaction), until it
+              expires one hour after you approve: the expiry is part of what you approve, so nobody can take it later.
+              Cancel it sooner with Cancel offer; approving anything else from this account cancels it too.
             </p>
           </Panel>
         </div>
@@ -921,7 +974,13 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             </tr>
           ) : (
             shownTrades.map((t) => (
-              <tr key={`${t.role}-${t.offerId}`} data-testid="my-trade" data-role={t.role} data-state={t.status}>
+              <tr
+                key={`${t.role}-${t.offerId}`}
+                data-testid="my-trade"
+                data-role={t.role}
+                data-state={t.status}
+                data-shown={offerShown(t).state}
+              >
                 <Cell block num>
                   {placed(t.createdAt)}
                 </Cell>
@@ -929,8 +988,17 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                 <Cell label="Kind">{t.role === 'make' ? 'Your offer' : 'You took'}</Cell>
                 <Cell label="Status" align="right" data-testid="my-trade-state">
                   <span className="num-wrap">
-                    <StatusPill status={STATE_PILL[t.status]}>{STATE_TEXT[t.status]}</StatusPill>
-                    {t.role === 'make' && t.status === 'live' && <Sub>until {clock(t.expiresAt)}</Sub>}
+                    <StatusPill status={STATE_PILL[offerShown(t).state]}>{STATE_TEXT[offerShown(t).state]}</StatusPill>
+                    {t.role === 'make' && t.status === 'live' && (
+                      // The signed expiry: its time here (the table stays narrow), the full date and
+                      // time on hover and in the banner (audit C6).
+                      <Sub
+                        data-testid="my-trade-expiry"
+                        title={`Expires ${t.validUntil ? deadlineText(t.validUntil) : clock(t.expiresAt)}`}
+                      >
+                        until {clock(t.expiresAt)}
+                      </Sub>
+                    )}
                   </span>
                 </Cell>
                 <Cell label="Offer" align="right">

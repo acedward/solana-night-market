@@ -19,6 +19,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
 import { connectPhantom, installMockPhantom } from './mock-phantom.js';
+import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
 import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
 import { setup } from './wallet-fixtures.js';
@@ -117,8 +118,12 @@ for (const vp of VIEWPORTS) {
       await serveExchange(page);
       const phantom = await installMockPhantom(page);
       const relay = new MockRelay();
+      const indexer = new MockIndexer(relay);
       await page.route(`${RELAY}/**`, (r) => relay.handle(r));
-      await page.route('**/config.json', (r) => r.fulfill({ json: { network: 'stagenet', relayUrl: RELAY } }));
+      await page.route(INDEXER, (r) => indexer.handle(r));
+      await page.route('**/config.json', (r) =>
+        r.fulfill({ json: { network: 'stagenet', relayUrl: RELAY, overrides: INDEXER_OVERRIDE } }),
+      );
       await page.goto('/#account');
       await page.getByTestId('connect').click();
       await page.getByTestId('wallet-option').click();

@@ -94,9 +94,11 @@ export function ed25519TokenResolver(registry: TokenRegistry): EdTokenResolver {
   return (colourHex: string) => {
     const t = registry.byColour(colourHex);
     if (!t) return undefined;
+    // The F3 v2 client's rule (P9.C `isRenderableTokenDisplay`: 1..8 printable characters, NO space;
+    // decimals 0..18). TODO(P9.I): call the client's own function once vendor/passport is re-pinned.
     const renderable =
       t.symbol.length <= ED25519_SYMBOL_BYTES &&
-      /^[\x20-\x7e]+$/.test(t.symbol) &&
+      /^[\x21-\x7e]+$/.test(t.symbol) &&
       Number.isInteger(t.decimals) &&
       t.decimals >= 0 &&
       t.decimals <= ED25519_MAX_DECIMALS;

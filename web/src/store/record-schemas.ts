@@ -55,6 +55,7 @@ const storedCoin = z
     spent: z.boolean(),
     spentTx: txId.optional(),
     appendEntitlement: entitlement.optional(),
+    changeOf: z.object({ spent: hex32, amount: decimal }).strict().optional(),
   })
   .strict();
 // No count bound of its own (security review F-B8): an account's list only grows (spent coins are
@@ -81,6 +82,7 @@ const offer = z
     wantNonce: hex32,
     createdAt: ms,
     expiresAt: ms,
+    validUntil: decimal.optional(),
     status: z.enum(['live', 'filled', 'expired', 'cancelled', 'refused']),
     kernelStatus: text(64).optional(),
     settledTx: txId.optional(),
@@ -91,7 +93,16 @@ const offer = z
 const job = z
   .object({
     requestId: z.string().regex(/^[0-9a-f]{32}$/),
-    action: z.enum(['register', 'withdraw', 'withdraw-unshielded', 'append-inbox', 'open-swap', 'take', 'demo-tokens']),
+    action: z.enum([
+      'register',
+      'withdraw',
+      'withdraw-unshielded',
+      'append-inbox',
+      'open-swap',
+      'take',
+      'demo-tokens',
+      'cancel-offers',
+    ]),
     startedAt: ms,
     state: z.enum(['queued', 'running', 'succeeded', 'failed']),
     stage: text(64),

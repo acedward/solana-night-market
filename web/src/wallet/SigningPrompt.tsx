@@ -25,6 +25,7 @@ import {
   type ActivityStore,
 } from '../activity/activity.js';
 import { Button, Dialog, Icon, ProgressBar, Spinner, Stepper } from '../design/index.js';
+import type { SignFacts } from './sign-facts.js';
 import type { SignPromptStore } from './sign-prompt.js';
 import { useWallet } from './WalletContext.js';
 
@@ -39,6 +40,56 @@ const LEDE = {
 const SETTLE_MS = 300;
 
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+
+/**
+ * What the contract enforces for this call (AA 00047 P9.S, questions Q25 B′): each amount as its exact
+ * base units and full token id, with this site's reading marked as the site's label; recipients and
+ * the deadline in full. The wallet's text binds the same facts.
+ */
+function SignFactsList({ facts }: { facts: SignFacts }) {
+  return (
+    <div className="sign-facts" data-testid="sign-facts">
+      <p className="sign-label">
+        What your account enforces: <span data-testid="sign-facts-title">{facts.title}</span>
+      </p>
+      <dl className="sign-facts-list">
+        {facts.facts.map((f, i) => (
+          <div key={`${f.label}-${i}`} data-testid="sign-fact" data-label={f.label} data-kind={f.kind}>
+            <dt>{f.label}</dt>
+            {f.kind === 'amount' ? (
+              <dd>
+                <span className="fact-line">
+                  Base units{' '}
+                  <span className="num" data-testid="sign-fact-base-units">
+                    {f.baseUnits}
+                  </span>
+                </span>
+                <span className="fact-line">
+                  Token{' '}
+                  <span className="mono break" data-testid="sign-fact-token-id">
+                    {f.tokenId}
+                  </span>
+                </span>
+                <span className="fact-line" data-testid="sign-fact-site-label">
+                  This site labels it: {f.siteLabel}
+                </span>
+                <span className="fact-line xsmall muted">
+                  {f.listed
+                    ? "The name and decimals are this site's label; the contract checks the base units and the token."
+                    : 'This site does not list this token: check its id.'}
+                </span>
+              </dd>
+            ) : (
+              <dd className={f.mono ? 'mono break' : undefined} data-testid="sign-fact-value">
+                {f.value}
+              </dd>
+            )}
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
 
 export function SigningPrompt({
   prompts,
@@ -100,6 +151,7 @@ export function SigningPrompt({
             Approving lists your offer on the market. {OFFER_OFF_CHAIN}
           </p>
         )}
+        {prompt.facts && <SignFactsList facts={prompt.facts} />}
         <p className="sign-label">What {prompt.wallet} shows</p>
         <pre className="sign-text mono" data-testid="sign-prompt-text">
           {prompt.text}

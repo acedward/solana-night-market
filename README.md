@@ -47,7 +47,10 @@ to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a si
   storage, and computes balances and prices in the browser.
 - **Relay**: a stateless service. It proves each transaction and pays the Midnight fees from a
   sponsor wallet. It stores nothing about individual customers except which Solana keys have
-  received their demo tokens (a small claims file, `deploy/RUNBOOK.md` section 7).
+  received their demo tokens (a small claims file, `deploy/RUNBOOK.md` section 7). It is not
+  trusted for state: the web app reads each account from Midnight's public indexer itself and
+  refuses one that is not the market's own or has any device besides the connected wallet
+  (`deploy/RUNBOOK.md` section 16).
 - **Network**: Midnight stagenet, a test network.
 
 ## How this branch works

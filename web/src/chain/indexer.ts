@@ -114,6 +114,18 @@ export class ChainReader {
   async account(account: string): Promise<AccountOnChain | null> {
     const address = account.replace(/^0x/, '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(address)) throw new ChainReadError('That is not an account address.');
+    // Several parts of a page ask at once (the check on the page, the side panel, the demo card):
+    // reads already on their way are shared, never cached past their answer.
+    const pending = this.inflight.get(address);
+    if (pending) return pending;
+    const read = this.readAccount(address).finally(() => this.inflight.delete(address));
+    this.inflight.set(address, read);
+    return read;
+  }
+
+  private readonly inflight = new Map<string, Promise<AccountOnChain | null>>();
+
+  private async readAccount(address: string): Promise<AccountOnChain | null> {
     const data = await this.graphql<{ contract: { state: string } | null; block: { height: number } | null }>(
       STATE_QUERY,
       { address },

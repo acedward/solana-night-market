@@ -9,7 +9,9 @@
 // public chain data written by scripts/pin-account-keys.ts), and the bytes are `ContractState.serialize()`.
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   ChargedState,
@@ -32,10 +34,21 @@ import { bytesToHex, hexToBytes } from '../../src/hex.js';
 import { ed25519DeviceForKey } from '../../src/passport/ed25519.js';
 
 /** The pinned key set's verifier keys (hex), by circuit. */
+const FIXTURE = 'test/fixtures/account-verifier-keys.json';
+
+/** The fixture's path: next to this module when it runs from a file URL (Node, Playwright), else the
+ *  nearest ancestor of the working directory that holds it (a browser-like test environment). */
+function fixturePath(): string {
+  const here = new URL(import.meta.url);
+  if (here.protocol === 'file:') return join(dirname(fileURLToPath(here)), '../../../..', FIXTURE);
+  for (let dir = process.cwd(); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, FIXTURE))) return join(dir, FIXTURE);
+    if (dirname(dir) === dir) throw new Error(`account-state fixture: ${FIXTURE} not found`);
+  }
+}
+
 export const FIXTURE_VERIFIER_KEYS: Readonly<Record<string, string>> = (
-  JSON.parse(
-    readFileSync(new URL('../../../../test/fixtures/account-verifier-keys.json', import.meta.url), 'utf8'),
-  ) as { circuits: Record<string, string> }
+  JSON.parse(readFileSync(fixturePath(), 'utf8')) as { circuits: Record<string, string> }
 ).circuits;
 
 export interface AccountStateSpec {

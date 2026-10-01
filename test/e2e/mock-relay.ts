@@ -142,6 +142,10 @@ export class MockRelay {
   settleOnCancel = false;
   /** Someone deposits a real one-unit coin into the new account right after its deploy (R2-6, Q42). */
   depositAfterDeploy = false;
+  /** Refuse the next action request as P10.R's relay does (HTTP status, code, Retry-After). */
+  refuseNext: { status: number; code: string; message: string; retryAfter?: number } | null = null;
+  /** Fail the next job with this public error (P10.R's job codes, e.g. `market-unavailable`). */
+  failNextJob: { code: string; message: string } | null = null;
   /** The `validUntil` of every make and take, as signed. */
   readonly signedExpiries: string[] = [];
   authNonce = 3n;
@@ -320,6 +324,11 @@ export class MockRelay {
   /** The job's side effects and public result, applied once (the job's first poll). */
   private async complete(s: Submitted) {
     const p = (s.body.payload ?? {}) as Record<string, string> & { coin?: Record<string, string> };
+    if (this.failNextJob) {
+      s.failed = this.failNextJob;
+      this.failNextJob = null;
+      return;
+    }
     if (this.fakeSuccess.has(s.action)) {
       // Reported done; nothing landed (R2-4).
       s.stages = ['proving', 'submitted'];
@@ -626,6 +635,22 @@ export class MockRelay {
       });
     }
     const action = /^\/v1\/actions\/([a-z-]+)$/.exec(path)?.[1];
+    if (action && req.method() === 'POST' && this.refuseNext) {
+      const r = this.refuseNext;
+      this.refuseNext = null;
+      this.refused.push(`${action}: ${r.code}`);
+      return route.fulfill({
+        status: r.status,
+        // Cross-origin here (a deployment serves the relay same-origin): expose Retry-After.
+        headers: {
+          ...CORS,
+          'access-control-expose-headers': 'retry-after',
+          ...(r.retryAfter ? { 'retry-after': String(r.retryAfter) } : {}),
+        },
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: r.code, message: r.message } }),
+      });
+    }
     if (action && req.method() === 'POST') {
       const body = JSON.parse(req.postData() ?? '{}') as Record<string, unknown>;
       if (action === 'demo-tokens' && this.deviceKey && this.demo.claimed.has(this.deviceKey)) {

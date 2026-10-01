@@ -11,6 +11,14 @@ export function sentence(text: string): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
 
+/** "12 s", "5 minutes", "about 3 hours": a Retry-After in the customer's words. */
+export function waitText(seconds: number | null | undefined, otherwise = 'a while'): string {
+  if (!seconds || seconds <= 0) return otherwise;
+  if (seconds < 90) return `${Math.ceil(seconds)} s`;
+  if (seconds < 90 * 60) return `${Math.ceil(seconds / 60)} minutes`;
+  return `about ${Math.round(seconds / 3600)} hours`;
+}
+
 /**
  * The customer's words for a refused request (an HTTP error from the relay). `retryAfterSeconds`
  * comes from the Retry-After header of a 429.
@@ -42,6 +50,26 @@ export function relayErrorText(e: {
       return 'Your account has more history than this version of Night Market can read (500 or more actions on Midnight), so its balances can no longer be refreshed: they show the last refresh, and new coins will not appear. Nothing is lost: your coins stay on Midnight and your Export keeps the key to them. Keep your Export and ask the market; a later version reads the account again.';
     case 'payload-too-large':
       return 'The request was too large for the market to accept.';
+    // AA 00047 P10 (audit round 2, R2-1/R2-2; relay lane P10.R): one request at a time per account,
+    // per-account caps, and the failure budget. Each refuses BEFORE anything runs.
+    case 'account-busy':
+      return `Your account already has a request in progress at the market. Wait for it to finish (about ${waitText(e.retryAfterSeconds, 'a minute')}), then try again; nothing was sent.`;
+    case 'open-offers-cap':
+      return 'Your account already has as many open offers as the market lists at once. Cancel them, or wait until one is taken or expires; nothing was sent.';
+    case 'makes-daily-cap':
+      return `Your account has made as many offers in the last 24 hours as the market allows. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
+    case 'cancels-daily-cap':
+      return `Your account has cancelled as many times in the last 24 hours as the market pays for. Your open offers still stop working at the expiry you approved; you can cancel again in ${waitText(e.retryAfterSeconds)}. Nothing was sent.`;
+    case 'restores-daily-cap':
+      return `Your account's encryption key was restored as many times in the last 24 hours as the market pays for. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
+    case 'failure-budget':
+      return `Several recent requests from this wallet or account failed, so the market is pausing new ones for ${waitText(e.retryAfterSeconds)}. Withdrawals, cancels and key restores still work; nothing was sent.`;
+    case 'registration-daily-cap':
+      return 'The market has opened as many accounts today as it can. Try again tomorrow (UTC); nothing was sent.';
+    case 'registration-client-cap':
+      return 'This connection has opened as many accounts today as the market allows. Try again tomorrow (UTC); nothing was sent.';
+    case 'registration-busy':
+      return `The market is opening other accounts right now. Try again in ${waitText(e.retryAfterSeconds, 'a minute')}; nothing was sent.`;
     // The demo-token claim (AA 00047, packages/core/src/demo-tokens.ts).
     case 'demo-disabled':
       return 'This market is not handing out demo tokens right now. Nothing was sent.';
@@ -87,6 +115,13 @@ export function jobErrorText(error: { code: string; message: string } | undefine
     case 'exchange-unavailable':
     case 'take-refused':
       return sentence(error.message);
+    // AA 00047 P10 (relay lane P10.R): failures that are the market's, never the customer's.
+    case 'market-unavailable':
+      return "The market's prover or its connection to Midnight failed while working on this. It does not count against you: try again shortly. Your balances always come from Midnight.";
+    case 'failure-budget':
+      return 'The market paused this request because several recent requests from this wallet or account failed. Nothing ran; you can send it again later. Withdrawals, cancels and key restores are never paused.';
+    case 'demo-tokens-settling':
+      return 'An earlier delivery of your demo tokens may still land on Midnight, so the market is not minting them again yet. Refresh in a few minutes; it does not count against you.';
     default:
       return sentence(error.message);
   }

@@ -189,6 +189,39 @@ test.describe('R2-6: the chain view survives seeded state, fake notes and a long
   });
 });
 
+test.describe('P10.R’s new refusals and failures reach the customer in plain words', () => {
+  test('an account with a request in progress, the open-offers cap, and a market-side failure', async ({ page }) => {
+    const { relay } = await setup(page, { seeded: true });
+    await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+    await connectPhantom(page);
+    await expect(holding(page, 'twBTC')).toContainText('0.10');
+    await page.getByTestId('side-sell').click();
+    await page.getByTestId('make-quantity').fill('0.05');
+    await page.getByTestId('make-price').fill('60000');
+    relay.refuseNext = {
+      status: 429,
+      code: 'open-offers-cap',
+      message: 'this account has 3 open offers, the most the market lists at once',
+      retryAfter: 900,
+    };
+    await page.getByTestId('make-sign').click();
+    await expect(page.getByTestId('trade-message')).toContainText(
+      'Your account already has as many open offers as the market lists at once',
+    );
+    relay.refuseNext = { status: 429, code: 'account-busy', message: 'busy', retryAfter: 40 };
+    await page.getByTestId('make-sign').click();
+    await expect(page.getByTestId('trade-message')).toContainText(
+      'Your account already has a request in progress at the market. Wait for it to finish (about 40 s)',
+    );
+    relay.failNextJob = { code: 'market-unavailable', message: 'the prover failed' };
+    await page.getByTestId('make-sign').click();
+    await expect(page.getByTestId('trade-message')).toContainText(
+      "The market's prover or its connection to Midnight failed while working on this. It does not count against you",
+    );
+    expect(relay.refused).toEqual(['open-swap: open-offers-cap', 'open-swap: account-busy']);
+  });
+});
+
 test.describe('R2-3: "Restore my encryption key" instead of a dead end', () => {
   test('the wallet signs the key back, and the account is usable again once the chain shows it', async ({ page }) => {
     const { relay, phantom } = await setup(page, { seeded: true });

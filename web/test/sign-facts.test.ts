@@ -9,6 +9,7 @@ import { bytesToHex, registryFor, type DeviceSigner, type OpenSwapPayload } from
 import {
   cancelOffersRequest,
   restoreEncKeyRequest,
+  siteLine,
   withdrawRequest,
   withdrawUnshieldedRequest,
 } from '@nightmarket/core/passport';
@@ -312,6 +313,27 @@ describe('AA 00047 P10 (audit round 2): the lines in ORDER (R2-9), and the key r
     expect(missingFromSignedText(g, `Withdraw unshielded\nSite\nBase units 1\n${tail}`)).toContain(
       'Withdraw unshielded',
     );
+  });
+
+  // P10.C's F3 v3 (questions Q36) puts "Site: " before the label: the gate requires that exact first
+  // line, so a LABEL equal to a title ("Cancel all open offers") can never stand in for anything.
+  it('R2-9 / Q36: the first line must be exactly the site line ("Site: <label>" in F3 v3)', () => {
+    const c = signFacts(
+      { kind: 'gated', request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }) },
+      tokens,
+    )!;
+    const site = 'Site: Night Market - stagenet';
+    const body = 'Cancel all open offers\nYour key does not change\nAccount c0c0c0c0c0c0c0c0 nonce 5\n';
+    expect(missingFromSignedText(c, `${site}                 \n${body}`, site)).toEqual([]);
+    expect(missingFromSignedText(c, `Cancel all open offers\n${body}`, site)).toEqual([site]);
+    expect(missingFromSignedText(c, `Night Market - stagenet\n${body}`, site)).toEqual([site]);
+    // The gate in the page passes the pinned client's site line (the bare label until P10.I re-pins).
+    const { signer } = walletOf();
+    const text = ed25519ActionSigning(signer, { network: 'stagenet', tokens }).preview(ctx, {
+      kind: 'gated',
+      request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }),
+    }).text;
+    expect(missingFromSignedText(c, text, siteLine('stagenet'))).toEqual([]);
   });
 
   it('R2-3: the restore facts are lines of the real wallet text ("Rotate encryption key / New key …"), in order', async () => {

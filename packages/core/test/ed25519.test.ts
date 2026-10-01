@@ -14,12 +14,16 @@ import { describe, expect, it } from 'vitest';
 
 import { bytesToHex, hexToBytes } from '../src/hex.js';
 import { NETWORK_NAMES } from '../src/network.js';
+import { LABEL_RULE } from '../src/market-label.js';
 import { registryFor } from '../src/tokens/registry.js';
 import type { OpenSwapPayload } from '../src/trade.js';
 import {
   ED25519_LABEL_BYTES,
   ED25519_MESSAGE_BYTES,
+  ED25519_MESSAGE_FORMAT,
   MARKET_LABELS,
+  SITE_LINE_PREFIX,
+  siteLine,
   PASSPORT_CLIENT_COMMIT,
   assertDeviceKeyDecodes,
   assertSafeEd25519Message,
@@ -64,6 +68,19 @@ describe('what the browser and the relay agree on', () => {
     expect(marketLabel('stagenet')).toBe('Night Market - stagenet');
   });
 
+  // AA 00047 P10 (questions Q36; P10.C's F3 v3, passport `599327b`): the circuit puts a fixed
+  // "Site: " in front of the label and refuses a label with a leading space, a run of spaces, or no
+  // text; the market's labels follow that rule, and the signing gate requires the exact site line.
+  it('the label is words with single spaces, and the site line is the client’s prefix + the label (Q36)', () => {
+    for (const n of NETWORK_NAMES) expect(marketLabel(n)).toMatch(LABEL_RULE);
+    for (const bad of ['', ' Night Market', 'Night  Market', 'Night Market ', 'Night\tMarket'])
+      expect(LABEL_RULE.test(bad)).toBe(false);
+    expect(siteLine('stagenet')).toBe(`${SITE_LINE_PREFIX}Night Market - stagenet`);
+    // TODO(P10.I): pinned at F3 v2 (`b2f1847`) the prefix is empty; at the re-pin (F3 v3, `599327b`)
+    // it is the client's `ED25519_SITE_PREFIX`, and this reads "Site: Night Market - stagenet".
+    expect(SITE_LINE_PREFIX).toBe((ED25519_MESSAGE_FORMAT as string) === 'F3 v3' ? 'Site: ' : '');
+  });
+
   it('the token display: symbol and decimals from the registry; an unrenderable symbol shows as unknown', () => {
     const resolve = ed25519TokenResolver(tokens);
     expect(resolve(twUSDC)).toEqual({ symbol: 'twUSDC', decimals: 6 });
@@ -106,8 +123,10 @@ describe('a gated call: the wallet signs the readable message, the relay re-chec
     const text = new TextDecoder().decode(asked[0]);
     // F3 v2 (questions Q25 B′, Q32): the enforced base units and the full token id, then the site's
     // name and decimals marked as the site's label.
+    // TODO(P10.I): F3 v3 (P10.C, Q36) puts "Site: " before the label; the client's prefix is used here
+    // (empty while pinned at F3 v2).
     expect(text.split('\n').slice(0, 7)).toEqual([
-      'Night Market - stagenet ',
+      `${SITE_LINE_PREFIX}Night Market - stagenet `,
       'Withdraw shielded',
       `Base units ${'10000000'.padEnd(24)}`,
       `Token ${twUSDC}`,

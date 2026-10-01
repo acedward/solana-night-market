@@ -34,6 +34,7 @@ import {
   findUseCounter,
   openSwapArgs,
   passportAuthOf,
+  siteLine,
   type AuthRequest,
   type Ed25519Display,
   type GatedContext,
@@ -116,7 +117,7 @@ export function ed25519ActionSigning(
           address: signer.address,
           signMessage: async (message: Uint8Array) => {
             if (facts) {
-              const missing = missingFromSignedText(facts, String.fromCharCode(...message));
+              const missing = missingFromSignedText(facts, String.fromCharCode(...message), siteLine(display.network));
               if (missing.length > 0) throw new SignFactsMismatchError(missing);
             }
             announce?.(facts);

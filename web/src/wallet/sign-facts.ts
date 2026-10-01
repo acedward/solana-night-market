@@ -257,11 +257,15 @@ export function signFacts(call: CallToAuthorise, tokens: TokenRegistry, ctx?: { 
 export const OPERATION_LINE = 1;
 
 /** The lines `facts` stands for that are not, verbatim and IN ORDER, lines of `text` (the wallet's
- *  text, trailing spaces trimmed): the operation line exactly at `OPERATION_LINE`, then every fact's
- *  lines after it in the panel's order (R2-9). Empty when the text carries every fact as shown. */
-export function missingFromSignedText(facts: SignFacts, text: string): string[] {
+ *  text, trailing spaces trimmed): `site` (the first line the pinned renderer makes, @nightmarket/core
+ *  `siteLine`: "Site: Night Market - stagenet" from F3 v3 on, questions Q36) exactly at line 1, the
+ *  operation line exactly at `OPERATION_LINE`, then every fact's lines after it in the panel's order
+ *  (R2-9). So a label equal to a title or a fact ("Cancel all open offers") never stands in for it.
+ *  Empty when the text carries every fact as shown. */
+export function missingFromSignedText(facts: SignFacts, text: string, site?: string): string[] {
   const lines = text.split('\n').map((l) => l.trimEnd());
   const missing: string[] = [];
+  if (site !== undefined && lines[0] !== site) missing.push(site);
   if (lines[OPERATION_LINE] !== facts.signedTitle) missing.push(facts.signedTitle);
   let from = OPERATION_LINE + 1;
   for (const want of facts.facts.flatMap((f) => f.signed)) {

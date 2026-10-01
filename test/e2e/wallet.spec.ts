@@ -20,6 +20,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { formatUnshieldedAddress } from '../../packages/core/src/unshielded.js';
+import { SITE_LINE_PREFIX } from '../../packages/core/src/passport/ed25519.js';
 import { shortSolanaAddress } from '../../packages/core/src/signing.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { connectPhantom, type MockPhantom } from './mock-phantom.js';
@@ -114,9 +115,10 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('my-offers-off-chain')).toContainText('listed on the market, not on-chain');
   expect(phantom.requests).toHaveLength(1);
   const make = lines(phantom.requests[0]!.text);
-  // TODO(P10.I): with P10.C's F3 v3 (questions Q36) the circuit puts a fixed marker in front of the
-  // label ("Site: Night Market - stagenet ", per its "P10.C client API" Evidence row): update at the re-pin.
-  expect(make[0]).toBe('Night Market - stagenet '); // the arm's 24-character label field
+  // The arm's 24-character label field, after the client's fixed "Site: " from F3 v3 on (P10.C,
+  // questions Q36): "Site: Night Market - stagenet ". TODO(P10.I): pinned at F3 v2 the prefix is still
+  // empty; the re-pin makes it "Site: ".
+  expect(make[0]).toBe(`${SITE_LINE_PREFIX}Night Market - stagenet `);
   expect(make[1]).toBe('Swap offer');
   // F3 v2 (questions Q25 B′, Q32): the enforced base units and full token ids, the site's reading as
   // its label (trailing spaces pad each field to a fixed width).

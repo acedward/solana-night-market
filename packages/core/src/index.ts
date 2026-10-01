@@ -14,6 +14,7 @@ export * from './hex.js';
 export * from './market/index.js';
 export * from './market-label.js';
 export * from './network.js';
+export * from './offer-expiry.js';
 export * from './shielded-address.js';
 export * from './signing.js';
 export * from './tokens/pairs.js';

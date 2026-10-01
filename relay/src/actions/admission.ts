@@ -8,8 +8,10 @@ export interface AdmissionRequest {
   account?: string;
   /** The action's arguments, as validated by its payload schema. */
   payload: Record<string, unknown>;
-  /** The verified signer's EVM address. */
+  /** The verified signer's device key (the Solana wallet's Ed25519 key, 64 hex). */
   signer: string;
+  /** The caller's address (the rate limits' key), for per-client caps (registration, AA 00047 P9). */
+  client?: string;
 }
 
 export type AdmissionOutcome =
@@ -19,15 +21,20 @@ export type AdmissionOutcome =
        *  allowance) when the route refuses the request after all (a full queue), so the customer
        *  can send it again and is charged nothing (security review F-B7). Idempotent. */
       release?: () => void;
+      /** Told when the admitted job ends, whatever its outcome (a registration's in-flight slot,
+       *  AA 00047 P9 audit C4). Not called when `release` is. */
+      finished?: () => void;
     }
   | {
       ok: false;
-      status: 401 | 403 | 429 | 503;
+      status: 400 | 401 | 403 | 429 | 503;
       /** The error code the route answers with (`unauthorised` for a signer refusal). */
       code: string;
       reason: string;
       /** The machine-readable detail (e.g. `wrong-signer`), as auth refusals carry. */
       detail?: string;
+      /** Seconds until the refusal lifts, when the check knows (a daily cap): `Retry-After`. */
+      retryAfterSeconds?: number;
     };
 
 export type AdmissionCheck = (request: AdmissionRequest) => Promise<AdmissionOutcome>;

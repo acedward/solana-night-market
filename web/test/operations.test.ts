@@ -413,14 +413,16 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(calls).toEqual(['relayAction']);
     const sub = relay.submitted[0]!;
     expect(sub.action).toBe('demo-tokens');
-    expect(sub.request).toMatchObject({ account: ACCOUNT, payload: {} });
+    // The body names the device's live use counter (AA 00047 P9, audit C8 / F-B10): 1 here, the
+    // counter the live device set says, not the stale roster hint 0.
+    expect(sub.request).toMatchObject({ account: ACCOUNT, payload: { useCounter: '1' } });
     const auth = sub.request.auth as SignedRelayAction;
     expect(auth.message).toMatchObject({
       action: 'demo-tokens',
       network: 'undeployed',
       account: `0x${ACCOUNT}`,
       owner: signing.deviceKey,
-      payloadHash: payloadHash({}),
+      payloadHash: payloadHash({ useCounter: '1' }),
     });
     expect(testScheme.verify(auth.message, unhex(auth.signature))).toBe(true);
     // The deposit's inbox entries were read after the job (nothing was synced before the claim).
@@ -448,6 +450,8 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(claimState({ ...base, enabled: false })).toMatchObject({ ok: false, code: 'disabled' });
     expect(claimState({ ...base, claimed: true })).toMatchObject({ ok: false, code: 'claimed' });
     expect(claimState({ ...base, remainingToday: 0 })).toMatchObject({ ok: false, code: 'cap' });
+    // A pack that failed part-way is finished whatever the day's count (AA 00047 P9, audit C8 / F-B7).
+    expect(claimState({ ...base, remainingToday: 0, resumable: true })).toEqual({ ok: true });
   });
 
   it("re-files the change in the inbox, sealed to the account's key, with ONE signature (Q13)", async () => {

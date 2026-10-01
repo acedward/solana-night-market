@@ -180,6 +180,10 @@ export const PublicConfigSchema = z.object({
   limits: z.object({
     authMaxTtlSeconds: z.number().int(),
     jobTtlSeconds: z.number().int(),
+    /** AA 00047 P9 (audit C6, ./offer-expiry.ts): the furthest ahead a make's / a take's signed
+     *  `validUntil` may be, in seconds. Optional so a page tolerates an older relay. */
+    offerMaxLifetimeSeconds: z.number().int().optional(),
+    takeMaxLifetimeSeconds: z.number().int().optional(),
   }),
   /** Security review F-B6 (AA 00047 questions Q13): true when the relay requires a SECOND signature
    *  (a Solana envelope over the whole body) for a shielded withdrawal that names a recipient

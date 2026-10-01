@@ -19,6 +19,7 @@ import {
   OperationError,
   dropJob,
   findJobs,
+  gatedContext,
   putJob,
   syncAccount,
   updateJob,
@@ -40,7 +41,8 @@ export function claimState(
   if (!info.enabled) return { ok: false, code: 'disabled', reason: 'Demo tokens are paused on this market.' };
   if (info.claimed)
     return { ok: false, code: 'claimed', reason: 'This wallet has had its demo tokens (one pack per wallet).' };
-  if (info.remainingToday <= 0)
+  // A pack that failed part-way can be finished whatever the day's count (it was counted already).
+  if (info.remainingToday <= 0 && !info.resumable)
     return { ok: false, code: 'cap', reason: 'Today’s demo tokens are all given out. Try again tomorrow (UTC).' };
   return { ok: true };
 }
@@ -56,7 +58,10 @@ export async function claimDemoTokens(
 ): Promise<DemoTokensResult> {
   let requestId = findJobs(env, account, 'demo-tokens')[0]?.requestId;
   if (!requestId) {
-    const payload = {};
+    // The device's current use counter (AA 00047 P9, audit C8 / F-B10): the relay checks the one
+    // device entry at this counter instead of scanning for it.
+    const { counter } = await gatedContext(env, account);
+    const payload = { useCounter: counter.toString(10) };
     const { nonce, maxTtlSeconds } = await env.relay.nonce();
     const message = buildRelayActionMessage({
       action: 'demo-tokens',

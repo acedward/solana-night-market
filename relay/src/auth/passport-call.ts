@@ -10,6 +10,13 @@ import { isGatedAction, isTradeAction, type DeviceArm } from '../passport/arm.js
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { DigestReplayGuard, VerifyOutcome } from './verifiers.js';
 
+/** A trade call's signed `validUntil` (Unix seconds), when it has one that fits a number. */
+function signedExpiry(payload: unknown): number | undefined {
+  const v = (payload as { validUntil?: unknown } | null)?.validUntil;
+  if (typeof v !== 'string' || !/^[0-9]{1,15}$/.test(v)) return undefined;
+  return Number(v);
+}
+
 export function passportCallAuthoriser(
   runtime: () => PassportRuntime | null,
   arm: DeviceArm,
@@ -26,7 +33,9 @@ export function passportCallAuthoriser(
       ? await arm.checkTradeCall(rt, action, request.account, request.payload, request.passportAuth)
       : await arm.checkGatedCall(rt, action, request.account, request.payload, request.passportAuth);
     if (!r.ok) return r;
-    if (!replay.claim(r.digestHex))
+    // An offer's or a take's signed expiry (audit C6): its digest is remembered at least until then.
+    const until = isTradeAction(action) ? signedExpiry(r.payload) : undefined;
+    if (!replay.claim(r.digestHex, until))
       return { ok: false, code: 'replayed', reason: 'this authorisation was already used' };
     return {
       ok: true,

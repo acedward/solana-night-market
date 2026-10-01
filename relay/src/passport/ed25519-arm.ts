@@ -26,6 +26,19 @@
 //
 // Track A's client loads the compiled account module (in a deployment, the key volume's), so it is
 // imported here at run time only: a relay without a key volume still starts and serves reads.
+//
+// TODO(P9.I): AA 00047 P9 re-pins vendor/passport to the P9.C head (F3 v2, questions Q25 B′: every
+// amount shows its base units and full token id, the site's name and decimals marked as the site's
+// label; deadlines as a UTC date and time). The rebuild above goes through core's
+// `ed25519DeviceForCheck`, so the relay renders whatever the pinned client renders; at the re-pin:
+//   - packages/core/src/passport/ed25519.ts `ed25519TokenResolver` must apply the client's
+//     `isRenderableTokenDisplay` (a symbol of 1..8 printable characters WITHOUT a space), or the page
+//     and the circuit disagree on a symbol with a space;
+//   - relay/test/ed25519-arm.test.ts's expected texts follow F3 v2;
+//   - the `cancel-offers` action (P9.S, questions Q30: `rotate_enc_key_with_ed25519` with the current
+//     key) needs a check here (`{ op: 'rotateEncKey', newKey }`, `newKey` equal to the on-chain
+//     `enc_key`, which the F3 v2 client also takes as `CallContext.encKey` to render "Cancel all open
+//     offers") and an executor (`rotateEncKeyWithAuth`) in ../actions/account-actions.ts.
 
 import { createHash } from 'node:crypto';
 

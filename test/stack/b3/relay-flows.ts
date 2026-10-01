@@ -177,10 +177,12 @@ async function main() {
   step('2. demo tokens (one Phantom prompt)');
   const info0 = (await http(`${API_PATHS.demoTokens}?owner=${signer.deviceKey}`)).body;
   say(`GET /v1/demo-tokens → ${JSON.stringify(info0)}`);
-  const demoEnv = await envelope('demo-tokens', account, {});
+  // The claim names the device's use counter (AA 00047 P9, audit C8 / F-B10): 0 on a new account.
+  const demoBody = { useCounter: '0' };
+  const demoEnv = await envelope('demo-tokens', account, demoBody);
   const r2 = await post('demo-tokens', {
     account,
-    payload: {},
+    payload: demoBody,
     auth: { message: demoEnv.message, signature: demoEnv.signature },
   });
   if (r2.status !== 202 || !r2.body.job)
@@ -189,10 +191,10 @@ async function main() {
   record.demoTokens = { state: demoJob.state, result: demoJob.result, error: demoJob.error };
   save();
   if (demoJob.state !== 'succeeded') throw new Error(`demo-tokens failed: ${JSON.stringify(demoJob.error)}`);
-  const again = await envelope('demo-tokens', account, {});
+  const again = await envelope('demo-tokens', account, demoBody);
   const r2b = await post('demo-tokens', {
     account,
-    payload: {},
+    payload: demoBody,
     auth: { message: again.message, signature: again.signature },
   });
   record.demoTokensAgain = { status: r2b.status, code: r2b.body.error?.code };

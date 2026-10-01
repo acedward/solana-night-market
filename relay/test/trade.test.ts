@@ -82,7 +82,8 @@ const make: OpenSwapPayload = {
   wantNonce: '11'.repeat(32),
   wantEntry: '22'.repeat(192),
   changeEntry: '00'.repeat(192),
-  validUntil: '0',
+  // A real signed expiry (AA 00047 P9, audit C6): ten minutes ahead suits a make and a take.
+  validUntil: String(Math.floor(Date.now() / 1000) + 600),
   coin: { nonce: '33'.repeat(32), color: BASE, value: '3000000', mtIndex: '9' },
   authNonce: '2',
 };

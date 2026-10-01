@@ -80,12 +80,17 @@ export class DigestReplayGuard {
     this.seen.delete(digestHex);
   }
 
-  /** True if the digest was new (and is now remembered). */
-  claim(digestHex: string): boolean {
+  /**
+   * True if the digest was new (and is now remembered). `untilSeconds`: an approval with a signed
+   * expiry (an offer's or a take's `validUntil`, Unix seconds) is remembered at least until then
+   * (AA 00047 P9, audit C6 / F-B4): after it the ledger refuses the call, so no TTL shorter than the
+   * signed expiry can let the same approval be queued twice.
+   */
+  claim(digestHex: string, untilSeconds?: number): boolean {
     const now = this.now();
     for (const [d, exp] of this.seen) if (exp <= now) this.seen.delete(d);
     if (this.seen.has(digestHex)) return false;
-    this.seen.set(digestHex, now + this.ttlSeconds);
+    this.seen.set(digestHex, Math.max(now + this.ttlSeconds, untilSeconds ?? 0));
     return true;
   }
 }

@@ -14,16 +14,31 @@ export interface AdmissionRequest {
   client?: string;
 }
 
+/** How an admitted job ended (AA 00047 P10): what an admission's daily charge depends on. */
+export interface JobEnd {
+  /** The job succeeded. */
+  ok: boolean;
+  /** It started proving (ctx.prove) before it ended. */
+  proved: boolean;
+  /** It failed for a reason the requester caused (../actions/failure-budget.ts `countsAgainstBudget`):
+   *  not the market's own failure, not a counterparty's, not an infrastructure crash. */
+  requesterFault: boolean;
+  /** The job's public result, when it succeeded. */
+  result?: Record<string, unknown>;
+}
+
 export type AdmissionOutcome =
   | {
       ok: true;
       /** Undo everything the check claimed (a single-use entitlement, and the day's append
-       *  allowance) when the route refuses the request after all (a full queue), so the customer
-       *  can send it again and is charged nothing (security review F-B7). Idempotent. */
+       *  allowance) when the route refuses the request after all (a full queue, or the failure
+       *  budget when the job reaches the lane), so the customer can send it again and is charged
+       *  nothing (security review F-B7). Idempotent. */
       release?: () => void;
       /** Told when the admitted job ends, whatever its outcome (a registration's in-flight slot,
-       *  AA 00047 P9 audit C4). Not called when `release` is. */
-      finished?: () => void;
+       *  AA 00047 P9 audit C4; an offer's open slot and a daily charge given back for a failure the
+       *  requester did not cause, P10). Not called when `release` is. */
+      finished?: (end: JobEnd) => void;
     }
   | {
       ok: false;
@@ -38,3 +53,39 @@ export type AdmissionOutcome =
     };
 
 export type AdmissionCheck = (request: AdmissionRequest) => Promise<AdmissionOutcome>;
+
+/**
+ * Several checks in order: the first refusal wins, and everything the earlier checks claimed is given
+ * back; when all pass, `release` and `finished` reach every one of them.
+ */
+export function admitAll(...checks: AdmissionCheck[]): AdmissionCheck {
+  return async (request) => {
+    const passed: Extract<AdmissionOutcome, { ok: true }>[] = [];
+    const undo = () => {
+      for (const p of passed.reverse()) p.release?.();
+    };
+    for (const check of checks) {
+      let out: AdmissionOutcome;
+      try {
+        out = await check(request);
+      } catch (e) {
+        undo();
+        throw e;
+      }
+      if (!out.ok) {
+        undo();
+        return out;
+      }
+      passed.push(out);
+    }
+    return {
+      ok: true,
+      release: () => {
+        for (const p of passed) p.release?.();
+      },
+      finished: (end) => {
+        for (const p of passed) p.finished?.(end);
+      },
+    };
+  };
+}

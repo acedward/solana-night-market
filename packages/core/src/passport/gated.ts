@@ -11,7 +11,7 @@
 // The coin a spend consumes is part of the signed challenge (AUTH-10), `mt_index` included, so
 // the browser resolves the coin's exact position BEFORE it builds the call (../coins.ts).
 
-import type { AppendInboxPayload, CancelOffersPayload, WithdrawPayload } from '../accounts.js';
+import type { AppendInboxPayload, CancelOffersPayload, RestoreEncKeyPayload, WithdrawPayload } from '../accounts.js';
 import { hexToBytes, normaliseHex32 } from '../hex.js';
 import type { AuthRequest, CallContext } from '../../../../vendor/passport/contract/src/wallet/signer.js';
 
@@ -65,6 +65,12 @@ export function appendInboxRequest(p: AppendInboxPayload): AuthRequest {
 /** The AuthRequest of a `cancel-offers` action body: re-affirm the account's encryption key (the
  *  arm's `rotate_enc_key`, questions Q30), which only bumps the auth nonce. */
 export function cancelOffersRequest(p: CancelOffersPayload): AuthRequest {
+  return { op: 'rotateEncKey', newKey: hexToBytes(normaliseHex32(p.newKey), 32) };
+}
+
+/** The AuthRequest of a `restore-enc-key` action body (AA 00047 P10, R2-3): the same circuit, to this
+ *  browser's key, which differs from the on-chain one ("Rotate encryption key / New key …"). */
+export function restoreEncKeyRequest(p: RestoreEncKeyPayload): AuthRequest {
   return { op: 'rotateEncKey', newKey: hexToBytes(normaliseHex32(p.newKey), 32) };
 }
 

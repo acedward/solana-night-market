@@ -35,14 +35,18 @@
 // renders exactly what the browser and the circuit render.
 //
 // `cancel-offers` (questions Q30) is the arm's `rotate_enc_key` with `newKey` = the account's
-// CURRENT `enc_key`: the check refuses any other key (the market never changes a key), and the call
-// context carries that key (`CallContext.encKey`), so the rebuilt message reads "Cancel all open
-// offers / Your key does not change". A wallet that signed "Rotate encryption key" signed other
-// bytes, and is refused like any other mismatch.
+// CURRENT `enc_key`: the check refuses any other key, and the call context carries that key
+// (`CallContext.encKey`), so the rebuilt message reads "Cancel all open offers / Your key does not
+// change". A wallet that signed "Rotate encryption key" signed other bytes, and is refused like any
+// other mismatch. `restore-enc-key` (AA 00047 P10, audit round 2 R2-3) is the same circuit to ANOTHER
+// key, the one the customer's browser holds: the check refuses the on-chain key itself (a cancel in
+// disguise, which must not escape the cancels' daily cap), and the rebuilt message reads "Rotate
+// encryption key / New key <16 hex>". The first line's text is the vendored client's (TODO(P10.I):
+// P10.C's Q36 site prefix arrives with the re-pin; nothing here renders it).
 
 import { createHash } from 'node:crypto';
 
-import type { CancelOffersPayload, NetworkName, TokenRegistry } from '@nightmarket/core';
+import type { CancelOffersPayload, NetworkName, RestoreEncKeyPayload, TokenRegistry } from '@nightmarket/core';
 
 import type * as CorePassport from '@nightmarket/core/passport';
 
@@ -185,10 +189,16 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
                 ? core.withdrawUnshieldedRequest(p as never)
                 : action === 'cancel-offers'
                   ? core.cancelOffersRequest(p as never)
-                  : core.appendInboxRequest(p as never);
+                  : action === 'restore-enc-key'
+                    ? core.restoreEncKeyRequest(p as never)
+                    : core.appendInboxRequest(p as never);
           return (device, ctx, counter) => device.sign(ctx, request, counter);
         },
-        action === 'cancel-offers' ? (p, ledger) => cancelKeepsTheKey(p as CancelOffersPayload, ledger) : undefined,
+        action === 'cancel-offers'
+          ? (p, ledger) => cancelKeepsTheKey(p as CancelOffersPayload, ledger)
+          : action === 'restore-enc-key'
+            ? (p, ledger) => restoreChangesTheKey(p as RestoreEncKeyPayload, ledger)
+            : undefined,
       ) as never;
     },
     checkTradeCall<A extends TradeAction>(
@@ -225,6 +235,23 @@ export function cancelKeepsTheKey(payload: CancelOffersPayload, ledger: AccountL
     ok: false,
     code: 'malformed',
     reason: "a cancel re-affirms the account's current encryption key; this key is not the one on chain",
+  };
+}
+
+/** `restore-enc-key` puts ANOTHER key on the account (AA 00047 P10, R2-3): the on-chain key itself
+ *  would only move the nonce, a cancel, which has its own action and daily cap; an all-zero key is
+ *  no encryption key. Refused before any signature work (at admission, and again when the job runs). */
+export function restoreChangesTheKey(payload: RestoreEncKeyPayload, ledger: AccountLedger): GatedCheckFail | null {
+  const onChain = hex(Uint8Array.from(ledger.enc_key));
+  const next = payload.newKey.replace(/^0x/, '').toLowerCase();
+  if (/^0+$/.test(next))
+    return { ok: false, code: 'malformed', reason: 'a restore needs an encryption key, not an all-zero value' };
+  if (next !== onChain) return null;
+  return {
+    ok: false,
+    code: 'malformed',
+    reason:
+      "this key is already the account's encryption key: there is nothing to restore (to end open offers, use Cancel offer)",
   };
 }
 

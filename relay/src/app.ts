@@ -31,16 +31,23 @@ import {
   type RelayActionScheme,
 } from '@nightmarket/core';
 
-import type { AdmissionOutcome } from './actions/admission.js';
+import { AccountGate } from './actions/account-gate.js';
+import type { AdmissionOutcome, JobEnd } from './actions/admission.js';
 import type { ActionDefinition } from './actions/catalogue.js';
-import { countsAgainstBudget, type FailureBudget } from './actions/failure-budget.js';
+import {
+  BUDGET_EXEMPT_ACTIONS,
+  countsAgainstBudget,
+  isInfrastructureFailure,
+  type FailureBudget,
+} from './actions/failure-budget.js';
 import type { NonceStore } from './auth/nonces.js';
 import { verifyRelayActionRequest, type VerifyOutcome } from './auth/verifiers.js';
 import { AccountHistoryTooLongError } from './chain/indexer.js';
 import { ChainReadNotImplementedError, type ChainReader } from './chain/reader.js';
+import { clientKey } from './client-key.js';
 import type { RelayConfig } from './config.js';
 import type { Logger } from './log.js';
-import type { JobExecutor, JobQueue } from './queue/jobs.js';
+import { PublicError, type JobExecutor, type JobQueue } from './queue/jobs.js';
 import { RateLimiter } from './ratelimit.js';
 import type { SponsorSession } from './sponsor/session.js';
 
@@ -65,7 +72,11 @@ export interface AppDeps {
   /** The failure budget per owner and per account (AA 00047 P9, audit C4: ./actions/failure-budget.ts);
    *  absent: none. */
   failures?: FailureBudget;
-  /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop). */
+  /** One queued-or-running job per account (AA 00047 P10, R2-1: ./actions/account-gate.ts); default:
+   *  a gate of `config.limits.jobsPerAccount`. */
+  accountGate?: AccountGate;
+  /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop).
+   *  Every per-client cap keys it by `clientKey` (an IPv6 client by its /64: AA 00047 P10, R2-1/R2-8). */
   clientAddress?: (c: Context) => string;
   now?: () => number;
 }
@@ -97,8 +108,11 @@ function defaultClientAddress(trustProxy: boolean): (c: Context) => string {
 
 export function createApp(deps: AppDeps): Hono {
   const { config, log } = deps;
-  const clientAddress = deps.clientAddress ?? defaultClientAddress(config.trustProxy);
+  const address = deps.clientAddress ?? defaultClientAddress(config.trustProxy);
+  // Every per-client cap (rate limits, nonces, registration) keys an IPv6 client by its /64.
+  const clientAddress = (c: Context) => clientKey(address(c), config.clientPrefixes);
   const limits = config.limits;
+  const gate = deps.accountGate ?? new AccountGate(limits.jobsPerAccount);
   const readLimiter = new RateLimiter(limits.readsPerMinute);
   const healthLimiter = new RateLimiter(limits.healthPerMinute);
   const nonceLimiter = new RateLimiter(limits.noncesPerMinute);
@@ -368,9 +382,11 @@ export function createApp(deps: AppDeps): Hono {
         return ownerRefused;
       }
 
-      // The failure budget (AA 00047 P9, audit C4): an owner or account whose jobs keep failing
-      // after they started proving waits, so a failing call is not free to repeat.
-      const budget = deps.failures?.check(signer, account);
+      // The failure budget (AA 00047 P9, audit C4; P10, R2-2): an owner or account whose jobs keep
+      // failing for reasons they caused waits, so a failing call is not free to repeat. Withdrawals,
+      // cancels and key restores are never refused by it (./actions/failure-budget.ts).
+      const exempt = BUDGET_EXEMPT_ACTIONS.has(def.action);
+      const budget = exempt ? undefined : deps.failures?.check(signer, account);
       if (budget && !budget.ok) {
         outcome.release?.();
         c.header('Retry-After', String(budget.retryAfterSeconds));
@@ -378,24 +394,49 @@ export function createApp(deps: AppDeps): Hono {
         return apiError(c, 429, 'failure-budget', budget.reason);
       }
 
+      // One queued-or-running job per account (AA 00047 P10, R2-1): taken before the admission check,
+      // so a second request of a busy account claims nothing.
+      const slot = account ? gate.take(account) : () => {};
+      if (!slot) {
+        outcome.release?.();
+        c.header('Retry-After', String(ACCOUNT_BUSY_RETRY_SECONDS));
+        log.info('action refused', { action: def.action, code: 'account-busy' });
+        return apiError(
+          c,
+          429,
+          'account-busy',
+          'this account already has a request in progress; wait for it to finish, then try again',
+        );
+      }
+
       // The action's own admission check (security review F-B2, F-B3; AA 00047 P9: registration caps,
-      // offer expiry), before any queue slot.
+      // offer expiry; P10: the per-account caps), before any queue slot.
       let admitted: AdmissionOutcome = { ok: true };
       if (def.admit) {
         try {
           admitted = await def.admit({ account, payload: payload.data, signer: outcome.signer, client });
         } catch (e) {
           outcome.release?.();
+          slot();
           log.warn('admission check failed', { action: def.action, error: e });
           return apiError(c, 503, 'chain-unavailable', 'the account could not be checked right now; try again shortly');
         }
         if (!admitted.ok) {
           outcome.release?.();
+          slot();
           log.info('action refused', { action: def.action, code: admitted.detail ?? admitted.code });
           if (admitted.retryAfterSeconds !== undefined) c.header('Retry-After', String(admitted.retryAfterSeconds));
           return apiError(c, admitted.status, admitted.code, admitted.reason, admitted.detail);
         }
       }
+      const ok = admitted;
+      // Give back everything the request claimed: the authorisation and whatever the admission
+      // charged (an entitlement and the day's append allowance, security review F-B7; a registration
+      // slot; an offer slot and a daily charge, P10).
+      const giveBack = () => {
+        outcome.release?.();
+        ok.release?.();
+      };
 
       let job: ReturnType<JobQueue['submit']> = null;
       try {
@@ -410,22 +451,24 @@ export function createApp(deps: AppDeps): Hono {
             ...(account ? { account } : {}),
             signer: outcome.signer,
           },
-          executor: deps.failures ? budgeted(def.executor, deps.failures, signer, account) : def.executor,
+          executor: guarded(def.executor, {
+            action: def.action,
+            owner: signer,
+            account,
+            ...(deps.failures ? { failures: deps.failures } : {}),
+            refuse: giveBack,
+            ...(ok.finished ? { finished: ok.finished } : {}),
+          }),
         });
       } finally {
         if (!job) {
-          // Refused after admission (a full queue, or an error): nothing was queued, so give back
-          // everything the request claimed, the authorisation and whatever the admission charged
-          // (an entitlement and the day's append allowance, security review F-B7).
-          outcome.release?.();
-          if (admitted.ok) admitted.release?.();
+          // Refused after admission (a full queue, or an error): nothing was queued.
+          giveBack();
+          slot();
         }
       }
       if (!job) return apiError(c, 503, 'busy', 'the relay is at capacity; try again later');
-      if (admitted.ok && admitted.finished) {
-        const finished = admitted.finished;
-        void deps.queue.settled(job.requestId).finally(finished);
-      }
+      void deps.queue.settled(job.requestId).finally(slot);
       log.info('action queued', { action: def.action, requestId: job.requestId });
       return c.json({ job }, 202);
     },
@@ -440,27 +483,97 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
+/** Seconds a busy account is told to wait (`429 account-busy`): about one proof. */
+export const ACCOUNT_BUSY_RETRY_SECONDS = 30;
+
 /**
- * `executor`, recording a failure against `owner` and `account` when the job fails after it started
- * proving (AA 00047 P9, audit C4: ./actions/failure-budget.ts).
+ * `executor`, as the route queues it (AA 00047 P9 audit C4; P10 audit round 2 R2-2):
+ *   - when the job reaches its lane, and again when it first reaches the PROVER (an account-lane job
+ *     such as a make waits for the prover inside ctx.prove), the failure budget is checked AGAIN
+ *     (F-B2-3: jobs queued before the owner's or account's last allowed failure must not prove after
+ *     it); a refused job proves nothing, gives back everything its request claimed (`refuse`) and
+ *     fails with `failure-budget`, so the same signature can be sent again later. Exempt actions
+ *     (withdrawals, cancels, key restores) are never refused;
+ *   - a failure the requester caused after proving started counts against `owner` and `account`;
+ *   - an infrastructure failure (the proof server, the node, the indexer) is reported to the
+ *     customer as `market-unavailable`, not as an internal error, and is never charged;
+ *   - `finished` hears how the job ended (the admission's open-offer slot and daily charges).
  */
-export function budgeted(executor: JobExecutor, failures: FailureBudget, owner: string, account?: string): JobExecutor {
+export function guarded(
+  executor: JobExecutor,
+  o: {
+    action: RelayActionName;
+    owner: string;
+    account?: string;
+    failures?: FailureBudget;
+    refuse?: () => void;
+    finished?: (end: JobEnd) => void;
+  },
+): JobExecutor {
   return async (payload, ctx) => {
+    let refused = false;
+    /** The budget, again: throws (and gives the request's claims back) when it ran out meanwhile. */
+    const recheck = () => {
+      if (!o.failures || BUDGET_EXEMPT_ACTIONS.has(o.action)) return;
+      const budget = o.failures.check(o.owner, o.account);
+      if (budget.ok) return;
+      refused = true;
+      o.refuse?.();
+      ctx.log.info('job refused at its lane: failure budget', { action: o.action });
+      throw new PublicError('failure-budget', budget.reason);
+    };
+    recheck();
     let proved = false;
+    /** Whether the job's failure counted (decided once): a failure inside a proof is recorded BEFORE
+     *  the prover lane passes to the next job, whose own check must see it. */
+    let charged: boolean | null = null;
+    const charge = (e: unknown, inProof: boolean): boolean => {
+      if (charged === null) {
+        charged = countsAgainstBudget(e, inProof);
+        if (charged) o.failures?.record(o.owner, o.account);
+      }
+      return charged;
+    };
     const watched = {
       ...ctx,
       prove: <T>(fn: () => Promise<T>): Promise<T> => {
+        const first = !proved;
         proved = true;
-        return ctx.prove(fn);
+        return ctx.prove(async () => {
+          if (first) recheck(); // now holding the prover, before any proving time is spent
+          try {
+            return await fn();
+          } catch (e) {
+            if (!refused) charge(e, true);
+            throw e;
+          }
+        });
       },
     };
+    let result: Record<string, unknown>;
     try {
-      return await executor(payload, watched);
+      result = await executor(payload, watched);
     } catch (e) {
-      if (countsAgainstBudget(e, proved)) failures.record(owner, account);
+      if (refused) throw e; // nothing proved; the claims were given back
+      const counted = charge(e, proved);
+      o.finished?.({ ok: false, proved, requesterFault: counted });
+      if (!(e instanceof PublicError) && isInfrastructureFailure(e)) {
+        ctx.log.warn('job failed on the market side (infrastructure)', { error: e });
+        throw new PublicError(
+          'market-unavailable',
+          "the market's prover or its connection to Midnight failed while working on this request. It does not count against you; try again shortly",
+        );
+      }
       throw e;
     }
+    o.finished?.({ ok: true, proved, requesterFault: false, result });
+    return result;
   };
+}
+
+/** `executor` with the failure budget alone (AA 00047 P9): `guarded` without an action's exemption. */
+export function budgeted(executor: JobExecutor, failures: FailureBudget, owner: string, account?: string): JobExecutor {
+  return guarded(executor, { action: 'take', owner, ...(account ? { account } : {}), failures });
 }
 
 /** The routes that change state, for the auth test to enumerate (every one must refuse

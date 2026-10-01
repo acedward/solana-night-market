@@ -20,6 +20,7 @@ import {
   resolveNetwork,
 } from '@nightmarket/core';
 
+import type { ClientPrefixes } from './client-key.js';
 import { LOG_LEVELS, type LogLevel } from './log.js';
 
 export class ConfigError extends Error {
@@ -33,6 +34,9 @@ export interface RelayConfig {
   port: number;
   /** Trust the last X-Forwarded-For entry (set by our own reverse proxy) for rate limiting. */
   trustProxy: boolean;
+  /** The prefix every per-client cap keys a client address by (AA 00047 P10, R2-1/R2-8: an IPv6
+   *  client by its /64; ./client-key.ts). */
+  clientPrefixes: ClientPrefixes;
   /** Origins allowed to call the relay from a browser (exact match). Empty: no CORS headers. */
   corsOrigins: string[];
   /**
@@ -70,14 +74,16 @@ export interface RelayConfig {
     /** GET /health per client address (security review F-B1); monitors poll about once a minute. */
     healthPerMinute: number;
     noncesPerMinute: number;
-    /** Outstanding (issued, unused, unexpired) nonces one client address may hold (audit C9). */
-    maxNoncesPerClient: number;
+    /** Used nonces remembered until their expiry (AA 00047 P10, R2-8: nonces are stateless, so only
+     *  used ones are stored; ./auth/nonces.ts). */
+    maxUsedNonces: number;
     actionsPerMinute: number;
     actionsPerOwnerPerMinute: number;
     authMaxTtlSeconds: number;
     nonceTtlSeconds: number;
-    maxNonces: number;
     jobTtlSeconds: number;
+    /** Jobs one account may have queued or running at once (AA 00047 P10, R2-1). */
+    jobsPerAccount: number;
     maxJobs: number;
     maxBodyBytes: number;
     /** How long a change's append entitlement stays valid (security review F-B3). */
@@ -97,6 +103,9 @@ export interface RelayConfig {
   /** Failed jobs (after proving started) allowed per owner and per account in any rolling 24 hours
    *  (AA 00047 P9, audit C4; ./actions/failure-budget.ts). */
   failureBudget: { perOwner: number; perAccount: number };
+  /** Per-account caps on offers, cancels and key restores (AA 00047 P10, R2-1;
+   *  ./actions/account-caps.ts). */
+  accountCaps: { maxOpenOffers: number; makesPerDay: number; cancelsPerDay: number; restoresPerDay: number };
   /** The limits on an offer's or a take's signed expiry (AA 00047 P9, audit C6; ./trade/expiry.ts). */
   expiry: ExpiryLimits;
   /** Security review F-B6 (questions Q13): require a second signature (a Solana envelope over the
@@ -120,6 +129,9 @@ export interface DemoTokensConfig {
   dailyCap: number;
   /** Failed deliveries after which a key's partial claim is not resumed (AA 00047 P9, audit C8). */
   maxAttempts: number;
+  /** How long after a token's submission its outcome may still be uncertain when the relay cannot
+   *  read the transaction's own TTL (AA 00047 P10, R2-7: `via-sponsor`; ./demo/claims.ts). */
+  pendingSettleSeconds: number;
   /** How the pack reaches the account (packages/core/src/demo-tokens.ts). */
   path: DemoTokenPath;
   /** The claims store: `<RELAY_DATA_DIR>/demo-token-claims.json`. */
@@ -324,6 +336,10 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     host: str(env.RELAY_HOST) ?? '0.0.0.0',
     port: int(env.RELAY_PORT, 8080, 'RELAY_PORT', 1, 65535),
     trustProxy: bool(env.RELAY_TRUST_PROXY, false, 'RELAY_TRUST_PROXY'),
+    clientPrefixes: {
+      ipv6: int(env.CLIENT_IPV6_PREFIX, 64, 'CLIENT_IPV6_PREFIX', 16, 128),
+      ipv4: int(env.CLIENT_IPV4_PREFIX, 32, 'CLIENT_IPV4_PREFIX', 8, 32),
+    },
     corsOrigins: (str(env.RELAY_CORS_ORIGINS) ?? '')
       .split(',')
       .map((s) => s.trim())
@@ -355,9 +371,9 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       ),
       authMaxTtlSeconds: int(env.AUTH_MAX_TTL_SECONDS, 600, 'AUTH_MAX_TTL_SECONDS', 30, 3600),
       nonceTtlSeconds: int(env.AUTH_NONCE_TTL_SECONDS, 600, 'AUTH_NONCE_TTL_SECONDS', 30, 3600),
-      maxNonces: int(env.AUTH_MAX_NONCES, 50_000, 'AUTH_MAX_NONCES', 100),
-      maxNoncesPerClient: int(env.AUTH_MAX_NONCES_PER_CLIENT, 30, 'AUTH_MAX_NONCES_PER_CLIENT', 1),
+      maxUsedNonces: int(env.AUTH_MAX_USED_NONCES, 200_000, 'AUTH_MAX_USED_NONCES', 1000, 10_000_000),
       jobTtlSeconds: int(env.JOB_TTL_SECONDS, 86_400, 'JOB_TTL_SECONDS', 60),
+      jobsPerAccount: int(env.JOBS_PER_ACCOUNT, 1, 'JOBS_PER_ACCOUNT', 1, 100),
       maxJobs: int(env.JOB_MAX, 10_000, 'JOB_MAX', 10),
       maxBodyBytes: int(env.RELAY_MAX_BODY_BYTES, 1_048_576, 'RELAY_MAX_BODY_BYTES', 1024),
       appendEntitlementTtlSeconds: int(
@@ -382,6 +398,12 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     failureBudget: {
       perOwner: int(env.FAILURE_BUDGET_PER_OWNER_PER_DAY, 5, 'FAILURE_BUDGET_PER_OWNER_PER_DAY', 1, 1_000_000),
       perAccount: int(env.FAILURE_BUDGET_PER_ACCOUNT_PER_DAY, 5, 'FAILURE_BUDGET_PER_ACCOUNT_PER_DAY', 1, 1_000_000),
+    },
+    accountCaps: {
+      maxOpenOffers: int(env.OFFERS_MAX_OPEN_PER_ACCOUNT, 3, 'OFFERS_MAX_OPEN_PER_ACCOUNT', 1, 1000),
+      makesPerDay: int(env.MAKES_PER_ACCOUNT_PER_DAY, 20, 'MAKES_PER_ACCOUNT_PER_DAY', 1, 100_000),
+      cancelsPerDay: int(env.CANCELS_PER_ACCOUNT_PER_DAY, 5, 'CANCELS_PER_ACCOUNT_PER_DAY', 1, 100_000),
+      restoresPerDay: int(env.RESTORES_PER_ACCOUNT_PER_DAY, 3, 'RESTORES_PER_ACCOUNT_PER_DAY', 1, 100_000),
     },
     expiry: {
       offerMaxLifetimeSeconds: int(
@@ -420,6 +442,13 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       pack: parseDemoPack(str(env.DEMO_TOKENS_PACK) ?? DEFAULT_DEMO_PACK),
       dailyCap: int(env.DEMO_TOKENS_DAILY_CAP, 100, 'DEMO_TOKENS_DAILY_CAP', 1, 1_000_000),
       maxAttempts: int(env.DEMO_TOKENS_MAX_ATTEMPTS, 3, 'DEMO_TOKENS_MAX_ATTEMPTS', 1, 100),
+      pendingSettleSeconds: int(
+        env.DEMO_TOKENS_PENDING_SETTLE_SECONDS,
+        4 * 3600,
+        'DEMO_TOKENS_PENDING_SETTLE_SECONDS',
+        600,
+        7 * 86_400,
+      ),
       path: demoPath,
       claimsFile: dataDir ? `${dataDir.replace(/\/+$/, '')}/demo-token-claims.json` : null,
     },

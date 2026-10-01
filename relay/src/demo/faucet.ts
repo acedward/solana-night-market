@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { Logger } from '../log.js';
+import type { BeforeSubmit } from './action.js';
 import type { PassportProviders, PassportRuntime } from '../passport/runtime.js';
 import type { RelayWalletProvider, SponsorWalletHandle } from '../passport/wallet-provider.js';
 import { verifierDigests } from '../prover/key-volume.js';
@@ -140,6 +141,8 @@ export class DemoFaucets {
     wallet: SponsorWalletHandle;
     item: ResolvedPackItem;
     stage?: (name: string, detail?: Record<string, string>) => void;
+    /** Told just before the mint is submitted (AA 00047 P10, R2-7: the claim's pending state). */
+    beforeSubmit?: BeforeSubmit;
   }): Promise<string> {
     const { compiled, zk } = await this.load();
     await this.checkFaucet(o.item.faucet);
@@ -148,6 +151,8 @@ export class DemoFaucets {
     const base = await this.rt.providers(o.wallet);
     const wp = base.walletProvider as RelayWalletProvider;
     const before = await shieldedBalance(o.wallet, o.item.colour);
+    // No inbox entry to find it by: an interrupted mint to the sponsor is quarantined, not minted again.
+    o.beforeSubmit?.({ stage: 'mint' });
     const minted = (await (submitCallTx as unknown as (p: unknown, opts: unknown) => Promise<unknown>)(
       this.providersFor(base, zk),
       {
@@ -170,6 +175,7 @@ export class DemoFaucets {
     encKey: Uint8Array;
     item: ResolvedPackItem;
     stage: (name: string, detail?: Record<string, string>) => void;
+    beforeSubmit?: BeforeSubmit;
   }): Promise<MintOutcome> {
     const mintTx = await this.mintToSponsor(o);
     const amount = BigInt(o.item.amount);
@@ -190,6 +196,8 @@ export class DemoFaucets {
     ).CustodyAccount.connect(base, this.rt.compiledAccount(), o.account)) as {
       depositShielded(c: unknown, e: Uint8Array): Promise<{ txId: string }>;
     };
+    // The deposit files `entry` into the account's inbox: how an interrupted deposit is found (R2-7).
+    o.beforeSubmit?.({ stage: 'deposit', entry });
     const dep = await custody.depositShielded(coin, entry);
     o.stage('deposited', { symbol: o.item.symbol, tx: dep.txId });
     return { mint: mintTx, deposit: dep.txId };
@@ -203,6 +211,7 @@ export class DemoFaucets {
     item: ResolvedPackItem;
     networkId: string;
     stage: (name: string, detail?: Record<string, string>) => void;
+    beforeSubmit?: BeforeSubmit;
   }): Promise<MintOutcome> {
     const { compiled, zk } = await this.load();
     await this.checkFaucet(o.item.faucet);
@@ -258,6 +267,9 @@ export class DemoFaucets {
     const tx = ledger.Transaction.fromPartsRandomized(o.networkId, receiverTx.guaranteedOffer, fallible[0], intent);
 
     const routing = await routingZkConfig(zk, this.rt.zkConfigProvider);
+    // AA 00047 P10, R2-7: the claim records this token as pending (the entry the transaction files,
+    // and its TTL) BEFORE it is submitted.
+    o.beforeSubmit?.({ stage: 'mint-and-deposit', entry, notAfter: Math.floor(ttl.getTime() / 1000) });
     const submitted = await contracts.submitTx(
       { ...faucetProviders, zkConfigProvider: routing },
       { unprovenTx: tx, circuitId: [FAUCET_MINT_CIRCUIT, 'deposit_shielded'] },

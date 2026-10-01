@@ -15,6 +15,21 @@
 //   negatives           refusals by the live relay: another key, another account, another network,
 //                       S+L, a flipped signature bit, R = identity, identity/small-order owner keys,
 //                       and replays (no transaction is ever sent for these)
+// AA 00047 P9.I (the security fix pass: F3 v2, C2, C6, Q30) adds:
+//   make                signs `validUntil` = now + MAKE_LIFETIME (default one hour); the relay caps the
+//                       intent's TTL at it, and the run records the proven offer's TTL against it
+//   withdraw-unshielded A withdraws part of its UNSHIELDED balance (fund-unshielded.ts deposits it)
+//                       to a fresh user address (one wallet prompt); the transaction's unshielded
+//                       output to that address is checked
+//   cancel              A makes a second offer, then "Cancel all open offers" (one wallet prompt:
+//                       rotate_enc_key with its CURRENT key): the nonce moves, the key does not, and
+//                       B's take of the cancelled offer cannot settle
+//   expired             A makes an offer that expires in EXPIRE_SECONDS (75 s); after it: the same
+//                       make again is refused (approval-expired) and B's take of it cannot settle
+//   p9-negatives        refusals by the live relay, no transaction: validUntil 0 (no-expiry), too far
+//                       (expiry-too-far), a B′ display mismatch (another site label for the same call),
+//                       a C2 colour mismatch (a valid signature over a withdrawal naming twBTC, paid
+//                       from a twUSDC coin), and a cancel for a key that is not the account's
 //
 // State that must survive between runs (the two device seeds, the accounts' inbox keys, the
 // withdrawal recipient's seed) lives in $STATE_DIR/state.json (mode 600, never printed). Public
@@ -36,6 +51,7 @@ import {
   buildRelayActionMessage,
   bytesToHex,
   hexToBytes,
+  unshieldedBalancesPath,
   reconcileCoins,
   registryFor,
   type AccountStateView,
@@ -47,7 +63,10 @@ import {
 } from '@nightmarket/core';
 import {
   callContext,
+  cancelOffersRequest,
+  decodeEd25519Point,
   ed25519DeviceOf,
+  ed25519TokenResolver,
   findUseCounter,
   freshWantNonce,
   generateEncKeyPairPortable,
@@ -55,8 +74,12 @@ import {
   openEntryPortable,
   openSwapArgs,
   passportAuthOf,
+  marketLabel,
   predictChangeCoin,
+  pureCircuits,
+  renderEd25519Message,
   withdrawRequest,
+  withdrawUnshieldedRequest,
 } from '@nightmarket/core/passport';
 import { solanaEnvelopeMessage, solanaEnvelopeText } from '@nightmarket/core/solana-auth';
 import nacl from 'tweetnacl';
@@ -78,6 +101,13 @@ const WANT_SYMBOL = process.env.WANT_SYMBOL ?? 'twUSDC';
 /** Base units: 0.01 twBTC for 10 twUSDC by default (1,000 twUSDC per twBTC). */
 const GIVE_AMOUNT = BigInt(process.env.GIVE_AMOUNT ?? '1000000');
 const WANT_AMOUNT = BigInt(process.env.WANT_AMOUNT ?? '10000000');
+/** The make's signed lifetime (seconds): the relay caps the intent's TTL at it (audit C6). */
+const MAKE_LIFETIME = Number(process.env.MAKE_LIFETIME ?? String(OFFER_LIFETIME_SECONDS));
+/** The `expired` step's offer lifetime: just above the relay's 60 s minimum. */
+const EXPIRE_SECONDS = Number(process.env.EXPIRE_SECONDS ?? '75');
+/** The unshielded colour the `withdraw-unshielded` step pays out (NIGHT, the all-zero colour). */
+const UNSHIELDED_COLOUR = (process.env.UNSHIELDED_COLOUR ?? '00'.repeat(32)).toLowerCase();
+const UNSHIELDED_AMOUNT = BigInt(process.env.UNSHIELDED_AMOUNT ?? '1500000');
 
 const tokens = registryFor(
   NETWORK,
@@ -108,8 +138,23 @@ interface State {
     wantColor: string;
     wantAmount: string;
     makerCoin: string;
+    validUntil?: string;
   };
+  /** P9.I: the offers the cancel and the expiry steps make (public values only). */
+  cancelledOffer?: OfferRec;
+  expiredOffer?: OfferRec;
   wantCoinOfA?: { nonce: string; color: string; value: string };
+  /** P9.I: the coin c2-live.ts pays a C2-mismatched withdrawal from (A's, unspent at the time). */
+  c2Coin?: { nonce: string; color: string; value: string; mtIndex: string };
+}
+interface OfferRec {
+  offerId: string;
+  giveColor: string;
+  giveAmount: string;
+  wantColor: string;
+  wantAmount: string;
+  makerCoin: string;
+  validUntil?: string;
 }
 const statePath = join(STATE_DIR, 'state.json');
 function newParty(): Party {
@@ -275,7 +320,12 @@ function useCounter(who: 'A' | 'B', s: AccountStateView): bigint {
   return k;
 }
 const ctxOf = (s: AccountStateView, salt?: string) =>
-  callContext({ account: s.account, authNonce: BigInt(s.authNonce), networkSalt: salt ?? s.networkSalt });
+  callContext({
+    account: s.account,
+    authNonce: BigInt(s.authNonce),
+    networkSalt: salt ?? s.networkSalt,
+    encKey: s.encKey,
+  });
 
 async function indexerTx(id: string): Promise<Record<string, unknown> | null> {
   // A relay job reports a transaction identifier (33 bytes, 0x00-prefixed); the batcher reports the
@@ -405,8 +455,9 @@ async function demo(who: 'A' | 'B') {
   put(`demo${who}`, out);
 }
 
-async function make() {
-  step(`make: A gives ${GIVE_AMOUNT} ${GIVE_SYMBOL} base units for ${WANT_AMOUNT} ${WANT_SYMBOL} (one wallet prompt)`);
+/** A signs one make: GIVE_AMOUNT of its GIVE token for WANT_AMOUNT of WANT, valid `lifetime` seconds
+ *  (or exactly `validUntil`), paid from one coin (one wallet prompt). Nothing is sent. */
+async function signMake(lifetime: number, validUntil?: string) {
   const { s, coins } = await settledCoins('A');
   const held = coins.find(
     (c) => !c.spent && c.mtIndex !== null && c.color === giveToken!.midnightColour && BigInt(c.value) >= GIVE_AMOUNT,
@@ -432,40 +483,89 @@ async function make() {
     wantNonce: bytesToHex(want.nonce),
     wantEntry: bytesToHex(entries.wantEntry),
     changeEntry: bytesToHex(entries.changeEntry),
-    // A real signed expiry (AA 00047 P9, audit C6): the make lives an hour.
-    validUntil: String(Math.floor(Date.now() / 1000) + OFFER_LIFETIME_SECONDS),
+    // A real signed expiry (AA 00047 P9, audit C6).
+    validUntil: validUntil ?? String(Math.floor(Date.now() / 1000) + lifetime),
     coin: { nonce: held.nonce, color: held.color, value: held.value, mtIndex: held.mtIndex! },
     authNonce: s.authNonce,
   };
   const { call, coin } = openSwapArgs(payload);
   const auth = await W.A.device.signOffer(ctxOf(s), call, coin, useCounter('A', s));
-  say(`the wallet shows:\n      ${indent(auth.text)}`);
-  const r = await post('open-swap', { account: s.account, payload, passportAuth: passportAuthOf(auth) });
+  return { s, coins, held, payload, auth };
+}
+
+/** Post A's signed make and wait for it; returns the job and the listed offer. */
+async function postMake(label: string, m: Awaited<ReturnType<typeof signMake>>) {
+  say(`the wallet shows:\n      ${indent(m.auth.text)}`);
+  const body = { account: m.s.account, payload: m.payload, passportAuth: passportAuthOf(m.auth) };
+  const r = await post('open-swap', body);
   if (r.status !== 202 || !r.body.job) throw new Error(`open-swap refused: ${r.status} ${JSON.stringify(r.body)}`);
-  const t = await waitJob(r.body.job, 'open-swap A');
+  const t = await waitJob(r.body.job, label);
+  if (t.job.state !== 'succeeded') return { t, body, offer: null };
+  const offer: OfferRec = {
+    offerId: String((t.job.result as { offerId: string }).offerId),
+    giveColor: m.payload.giveColor,
+    giveAmount: m.payload.giveAmount,
+    wantColor: m.payload.wantColor,
+    wantAmount: m.payload.wantAmount,
+    makerCoin: m.held.nonce,
+    validUntil: m.payload.validUntil,
+  };
+  return { t, body, offer };
+}
+
+/** The proven offer's intent TTL as the exchange serves it, against its signed `validUntil` (the
+ *  relay caps every intent's TTL at it: audit C6, P9.R; P9.I checks it on the stack). */
+async function offerTtl(offerId: string, validUntil: string): Promise<Record<string, unknown>> {
+  try {
+    const { fetchOfferBytes } = await import('../../../relay/src/trade/publish.js');
+    const { intentTtl } = await import('../../../relay/src/trade/account-offer.js');
+    const got = await fetchOfferBytes(offerId, { kernelUrl: KERNEL_URL });
+    if (!got) return { checked: false, reason: 'the exchange has no such offer' };
+    const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
+      Transaction: { deserialize(s: string, p: string, b: string, raw: Uint8Array): unknown };
+    };
+    const tx = ledger.Transaction.deserialize('signature', 'proof', 'binding', got.bytes);
+    const ttl = intentTtl(tx);
+    const until = Number(validUntil) * 1000;
+    return {
+      checked: true,
+      validUntilUtc: new Date(until).toISOString(),
+      intentTtlUtc: ttl === null ? null : new Date(ttl).toISOString(),
+      // midnight-js gives a call's intent one hour from when it is built; the relay caps it.
+      cappedAtValidUntil: ttl !== null && ttl <= until,
+      ttlEqualsValidUntil: ttl === until,
+      status: got.status ?? null,
+    };
+  } catch (e) {
+    return { checked: false, error: String(e).slice(0, 400) };
+  }
+}
+
+async function make() {
+  step(
+    `make: A gives ${GIVE_AMOUNT} ${GIVE_SYMBOL} base units for ${WANT_AMOUNT} ${WANT_SYMBOL}, valid ${MAKE_LIFETIME} s (one wallet prompt)`,
+  );
+  const m = await signMake(MAKE_LIFETIME);
+  const { t, offer } = await postMake('open-swap A', m);
   const out: Record<string, unknown> = {
     state: t.job.state,
     seconds: t.seconds,
     stages: t.stages,
     result: t.job.result,
     error: t.job.error,
-    walletText: auth.text,
-    balancesBefore: balances(coins),
+    walletText: m.auth.text,
+    validUntil: m.payload.validUntil,
+    lifetimeSeconds: MAKE_LIFETIME,
+    balancesBefore: balances(m.coins),
   };
   put('make', out);
-  if (t.job.state !== 'succeeded') throw new Error(`open-swap failed: ${JSON.stringify(t.job.error)}`);
-  const offerId = String((t.job.result as { offerId: string }).offerId);
-  state.offer = {
-    offerId,
-    giveColor: payload.giveColor,
-    giveAmount: payload.giveAmount,
-    wantColor: payload.wantColor,
-    wantAmount: payload.wantAmount,
-    makerCoin: held.nonce,
-  };
+  if (!offer) throw new Error(`open-swap failed: ${JSON.stringify(t.job.error)}`);
+  state.offer = offer;
   saveState();
-  out.kernel = await kernelView(offerId, payload.giveColor);
+  out.kernel = await kernelView(offer.offerId, offer.giveColor);
+  out.ttl = await offerTtl(offer.offerId, m.payload.validUntil);
   say(`the exchange: ${json(out.kernel)}`);
+  say(`the offer's intent TTL: ${json(out.ttl)}`);
   put('make', out);
 }
 
@@ -520,13 +620,10 @@ async function book() {
   put('book', view);
 }
 
-async function take() {
-  const o = state.offer;
-  if (!o) throw new Error('no offer of A recorded (run make first)');
-  step(`take: B takes A's offer ${o.offerId} (one wallet prompt)`);
+/** B signs a take of exactly offer `o` (B gives what A wants, wants what A gives; one prompt). */
+async function signTake(o: OfferRec) {
   const before = { A: await settledCoins('A'), B: await settledCoins('B') };
   const { s, coins } = before.B;
-  // B gives what A wants, and wants what A gives.
   const giveColor = o.wantColor;
   const giveAmount = BigInt(o.wantAmount);
   const held = coins.find(
@@ -560,8 +657,41 @@ async function take() {
   };
   const { call, coin } = openSwapArgs(payload);
   const auth = await W.B.device.signOffer(ctxOf(s), call, coin, useCounter('B', s));
-  say(`the wallet shows:\n      ${indent(auth.text)}`);
   const body = { account: s.account, payload: { ...payload, offerId: o.offerId }, passportAuth: passportAuthOf(auth) };
+  return { before, auth, body };
+}
+
+/** A take that must NOT settle (the offer was cancelled or has expired): B signs it, the relay may
+ *  admit and prove it, but nothing lands and nobody's coins move. */
+async function takeMustFail(o: OfferRec, label: string): Promise<Record<string, unknown>> {
+  const { before, auth, body } = await signTake(o);
+  const r = await post('take', body);
+  const out: Record<string, unknown> = {
+    walletText: auth.text,
+    admission: { status: r.status, code: r.body.error?.code },
+  };
+  if (r.status === 202 && r.body.job) {
+    const t = await waitJob(r.body.job, label);
+    Object.assign(out, { state: t.job.state, seconds: t.seconds, stages: t.stages, error: t.job.error });
+    if (t.job.state === 'succeeded') throw new Error(`${label}: the take SETTLED (${JSON.stringify(t.job.result)})`);
+  }
+  // Nothing moved: A's offered coin is unspent, and both balances are as before.
+  const after = { A: await settledCoins('A'), B: await settledCoins('B') };
+  out.makerCoinUnspent = after.A.coins.some((c) => c.nonce === o.makerCoin && !c.spent);
+  out.balancesUnchanged =
+    json(balances(after.A.coins)) === json(balances(before.A.coins)) &&
+    json(balances(after.B.coins)) === json(balances(before.B.coins));
+  out.nonces = { A: after.A.s.authNonce, B: after.B.s.authNonce };
+  if (!out.makerCoinUnspent || !out.balancesUnchanged) throw new Error(`${label}: coins moved: ${json(out)}`);
+  return out;
+}
+
+async function take() {
+  const o = state.offer;
+  if (!o) throw new Error('no offer of A recorded (run make first)');
+  step(`take: B takes A's offer ${o.offerId} (one wallet prompt)`);
+  const { before, auth, body } = await signTake(o);
+  say(`the wallet shows:\n      ${indent(auth.text)}`);
   const r = await post('take', body);
   if (r.status !== 202 || !r.body.job) throw new Error(`take refused: ${r.status} ${JSON.stringify(r.body)}`);
   const t = await waitJob(r.body.job, 'take B');
@@ -820,7 +950,12 @@ async function negatives() {
   );
   // An old nonce: signed over authNonce − 1 (a replayed approval of an earlier call).
   if (BigInt(s.authNonce) > 0n) {
-    const oldCtx = callContext({ account: s.account, authNonce: BigInt(s.authNonce) - 1n, networkSalt: s.networkSalt });
+    const oldCtx = callContext({
+      account: s.account,
+      authNonce: BigInt(s.authNonce) - 1n,
+      networkSalt: s.networkSalt,
+      encKey: s.encKey,
+    });
     await tryIt(
       'old nonce (replay)',
       s.account,
@@ -898,6 +1033,341 @@ async function negatives() {
   put('negatives', cases);
 }
 
+// ── AA 00047 P9.I: the fix pass on the stack ─────────────────────────────────
+
+/** The account's unshielded balance of `colour` as the relay's chain read reports it (base units). */
+async function unshieldedOf(account: string, colour: string): Promise<bigint> {
+  const r = await http<{ balances?: { colour: string; amount: string }[] }>(unshieldedBalancesPath(account));
+  return BigInt(r.body.balances?.find((b) => b.colour === colour)?.amount ?? '0');
+}
+
+/** The unshielded outputs of a transaction (owner, token type, value), from its raw bytes. */
+async function unshieldedOutputs(txId: string): Promise<Record<string, unknown>> {
+  const query = `{ transactions(offset: {identifier: "${txId}"}) { raw } }`;
+  for (let i = 0; i < 10; i++) {
+    try {
+      const res = await fetch(INDEXER_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      const raw = ((await res.json()) as { data?: { transactions?: { raw: string }[] } }).data?.transactions?.[0]?.raw;
+      if (raw) {
+        const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
+          Transaction: { deserialize(s: string, p: string, b: string, raw: Uint8Array): unknown };
+        };
+        const tx = ledger.Transaction.deserialize(
+          'signature',
+          'proof',
+          'binding',
+          hexToBytes(raw.replace(/^0x/, ''), raw.length / 2),
+        ) as {
+          intents?: Map<
+            number,
+            {
+              guaranteedUnshieldedOffer?: { outputs: { owner: unknown; type: unknown; value: bigint }[] };
+              fallibleUnshieldedOffer?: { outputs: { owner: unknown; type: unknown; value: bigint }[] };
+            }
+          >;
+        };
+        const h = (v: unknown) =>
+          (typeof v === 'string' ? v : v instanceof Uint8Array ? bytesToHex(v) : String(v)).replace(/^0x/, '');
+        const outputs = [];
+        for (const intent of tx.intents?.values() ?? [])
+          for (const o of [
+            ...(intent.guaranteedUnshieldedOffer?.outputs ?? []),
+            ...(intent.fallibleUnshieldedOffer?.outputs ?? []),
+          ])
+            outputs.push({ owner: h(o.owner), type: h(o.type), value: String(o.value) });
+        return { checked: true, outputs };
+      }
+    } catch (e) {
+      if (i === 9) return { checked: false, error: String(e).slice(0, 300) };
+    }
+    await new Promise((r) => setTimeout(r, 3_000));
+  }
+  return { checked: false, reason: 'the indexer has no raw bytes for the transaction' };
+}
+
+async function withdrawUnshielded() {
+  step(
+    `withdraw-unshielded: A pays ${UNSHIELDED_AMOUNT} of its unshielded ${UNSHIELDED_COLOUR.slice(0, 8)}… to a fresh address`,
+  );
+  const { s } = await coinsOf('A');
+  const before = await unshieldedOf(s.account, UNSHIELDED_COLOUR);
+  if (before < UNSHIELDED_AMOUNT) throw new Error(`A holds ${before} unshielded (fund-unshielded.ts first)`);
+  const recipient = bytesToHex(new Uint8Array(randomBytes(32)));
+  const payload = {
+    recipient,
+    color: UNSHIELDED_COLOUR,
+    amount: UNSHIELDED_AMOUNT.toString(10),
+    authNonce: s.authNonce,
+  };
+  const auth = await W.A.device.sign(ctxOf(s), withdrawUnshieldedRequest(payload), useCounter('A', s));
+  say(`the wallet shows:\n      ${indent(auth.text)}`);
+  const passportAuth = passportAuthOf(auth);
+  const r = await post('withdraw-unshielded', { account: s.account, payload, passportAuth });
+  if (r.status !== 202 || !r.body.job)
+    throw new Error(`withdraw-unshielded refused: ${r.status} ${JSON.stringify(r.body)}`);
+  const t = await waitJob(r.body.job, 'withdraw-unshielded A');
+  const out: Record<string, unknown> = {
+    state: t.job.state,
+    seconds: t.seconds,
+    stages: t.stages,
+    result: t.job.result,
+    error: t.job.error,
+    walletText: auth.text,
+    colour: UNSHIELDED_COLOUR,
+    amount: UNSHIELDED_AMOUNT.toString(10),
+    recipient,
+    accountUnshieldedBefore: before.toString(10),
+  };
+  put('withdrawUnshielded', out);
+  if (t.job.state !== 'succeeded') throw new Error(`withdraw-unshielded failed: ${JSON.stringify(t.job.error)}`);
+  const txId = String((t.job.result as { txId: string }).txId);
+  out.txs = await landed([txId]);
+  out.outputs = await unshieldedOutputs(txId);
+  const outs = (out.outputs as { outputs?: { owner: string; type: string; value: string }[] }).outputs ?? [];
+  out.arrived = outs.some(
+    (o) => o.owner === recipient && o.type === UNSHIELDED_COLOUR && BigInt(o.value) === UNSHIELDED_AMOUNT,
+  );
+  let after = before;
+  for (let i = 0; i < 20 && after === before; i++) {
+    await new Promise((res) => setTimeout(res, 3_000));
+    after = await unshieldedOf(s.account, UNSHIELDED_COLOUR);
+  }
+  out.accountUnshieldedAfter = after.toString(10);
+  out.accountPaidExactly = before - after === UNSHIELDED_AMOUNT;
+  const late = await post('withdraw-unshielded', { account: s.account, payload, passportAuth });
+  out.replayAfterLanding = { status: late.status, code: late.body.error?.code, detail: late.body.error?.detail };
+  say(
+    `arrived ${String(out.arrived)}; the account paid exactly ${String(out.accountPaidExactly)} (${before} → ${after})`,
+  );
+  put('withdrawUnshielded', out);
+  if (!out.accountPaidExactly) throw new Error('the account did not pay exactly the amount');
+}
+
+/** "Cancel all open offers" for `who` (one prompt); returns the job and the account before/after. */
+async function cancelAll(who: 'A' | 'B') {
+  const { s } = await coinsOf(who);
+  const payload = { newKey: s.encKey, authNonce: s.authNonce };
+  const auth = await W[who].device.sign(ctxOf(s), cancelOffersRequest(payload), useCounter(who, s));
+  say(`the wallet shows:\n      ${indent(auth.text)}`);
+  const passportAuth = passportAuthOf(auth);
+  const r = await post('cancel-offers', { account: s.account, payload, passportAuth });
+  if (r.status !== 202 || !r.body.job) throw new Error(`cancel-offers refused: ${r.status} ${JSON.stringify(r.body)}`);
+  const t = await waitJob(r.body.job, `cancel-offers ${who}`);
+  if (t.job.state !== 'succeeded') throw new Error(`cancel-offers failed: ${JSON.stringify(t.job.error)}`);
+  const txId = String((t.job.result as { txId: string }).txId);
+  let s2 = (await readState(s.account)).s;
+  for (let i = 0; i < 20 && BigInt(s2.authNonce) === BigInt(s.authNonce); i++) {
+    await new Promise((res) => setTimeout(res, 3_000));
+    s2 = (await readState(s.account)).s;
+  }
+  const late = await post('cancel-offers', { account: s.account, payload, passportAuth });
+  return {
+    state: t.job.state,
+    seconds: t.seconds,
+    stages: t.stages,
+    walletText: auth.text,
+    txs: await landed([txId]),
+    authNonce: { before: s.authNonce, after: s2.authNonce },
+    encKeyUnchanged: s2.encKey === s.encKey,
+    replayAfterLanding: { status: late.status, code: late.body.error?.code, detail: late.body.error?.detail },
+  };
+}
+
+async function cancel() {
+  step('cancel: A makes a second offer, then cancels all its open offers (one prompt); B cannot take it');
+  const m = await signMake(OFFER_LIFETIME_SECONDS);
+  const { t, offer } = await postMake('open-swap A (to cancel)', m);
+  if (!offer) throw new Error(`the second make failed: ${JSON.stringify(t.job.error)}`);
+  state.cancelledOffer = offer;
+  saveState();
+  const out: Record<string, unknown> = {
+    offer,
+    make: { state: t.job.state, seconds: t.seconds, walletText: m.auth.text },
+    kernelBefore: await kernelView(offer.offerId, offer.giveColor),
+  };
+  put('cancel', out);
+  out.cancel = await cancelAll('A');
+  const c = out.cancel as {
+    walletText: string;
+    authNonce: { before: string; after: string };
+    encKeyUnchanged: boolean;
+  };
+  const lines = c.walletText.split('\n');
+  out.walletSaysCancel = lines[1] === 'Cancel all open offers' && lines[2] === 'Your key does not change';
+  put('cancel', out);
+  if (!out.walletSaysCancel) throw new Error('the cancel did not read "Cancel all open offers"');
+  if (BigInt(c.authNonce.after) !== BigInt(c.authNonce.before) + 1n || !c.encKeyUnchanged)
+    throw new Error(`the cancel did not move the nonce by one with the key kept: ${json(c)}`);
+  say(`cancelled: A's nonce ${c.authNonce.before} → ${c.authNonce.after}, key unchanged`);
+  // The cancelled offer is still on the (mock) book, but its approval is dead: B's take cannot settle.
+  out.takeOfCancelled = await takeMustFail(offer, 'take B (cancelled offer)');
+  say(`B's take of the cancelled offer: ${json(out.takeOfCancelled)}`);
+  put('cancel', out);
+}
+
+async function expired() {
+  step(`expired: A makes an offer valid ${EXPIRE_SECONDS} s; after it, the same make and B's take are refused`);
+  const m = await signMake(EXPIRE_SECONDS);
+  const { t, body, offer } = await postMake('open-swap A (short)', m);
+  if (!offer) throw new Error(`the short make failed: ${JSON.stringify(t.job.error)}`);
+  state.expiredOffer = offer;
+  saveState();
+  const out: Record<string, unknown> = {
+    offer,
+    make: { state: t.job.state, seconds: t.seconds, walletText: m.auth.text },
+    ttl: await offerTtl(offer.offerId, m.payload.validUntil),
+  };
+  put('expired', out);
+  const wait = Number(m.payload.validUntil) * 1000 - Date.now() + 12_000;
+  say(
+    `waiting ${Math.round(wait / 1000)} s for the signed expiry (${new Date(Number(m.payload.validUntil) * 1000).toISOString()})`,
+  );
+  if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  const again = await post('open-swap', body);
+  out.makeReplayed = { status: again.status, code: again.body.error?.code, detail: again.body.error?.detail };
+  say(`the same make after its expiry → ${again.status} ${again.body.error?.code}`);
+  if (again.status === 202) throw new Error('an expired make was admitted again');
+  out.takeOfExpired = await takeMustFail(offer, 'take B (expired offer)');
+  say(`B's take of the expired offer: ${json(out.takeOfExpired)}`);
+  put('expired', out);
+}
+
+async function p9Negatives() {
+  step('p9-negatives: refusals by the live relay (no transaction): expiry, B′ label, C2 colour, cancel key');
+  const cases: Record<string, unknown> = {};
+  const outcome = (name: string, r: { status: number; body: Answer }) => {
+    cases[name] = {
+      status: r.status,
+      code: r.body.error?.code,
+      detail: r.body.error?.detail,
+      message: r.body.error?.message,
+    };
+    say(`${name} → ${r.status} ${r.body.error?.code} ${r.body.error?.detail ?? ''}`);
+    if (r.status === 202) throw new Error(`NEGATIVE ACCEPTED: ${name}`);
+  };
+  // C6: an offer signed with no expiry, and one too far ahead (the signatures are valid).
+  const now = Math.floor(Date.now() / 1000);
+  for (const [name, until] of [
+    ['make: validUntil 0 ("Expires never")', '0'],
+    ['make: validUntil too far (now + 2 h)', String(now + 7200)],
+  ] as const) {
+    const m = await signMake(0, until);
+    outcome(
+      name,
+      await post('open-swap', { account: m.s.account, payload: m.payload, passportAuth: passportAuthOf(m.auth) }),
+    );
+  }
+  // B′: the same withdrawal signed under another site label (the page says twUSDC has 2 decimals).
+  const { s, coins } = await settledCoins('A');
+  const usdc = coins.find((c) => !c.spent && c.mtIndex !== null && c.color === wantToken!.midnightColour);
+  const btcColour = giveToken!.midnightColour;
+  if (!usdc) throw new Error('A holds no spendable twUSDC coin for the negatives');
+  const r0 = await recipientKeys();
+  const wd = {
+    recipient: r0.coinPublicKey,
+    recipientEncryptionKey: r0.encryptionPublicKey,
+    color: usdc.color,
+    amount: '1000000',
+    coin: { nonce: usdc.nonce, color: usdc.color, value: usdc.value, mtIndex: usdc.mtIndex! },
+    authNonce: s.authNonce,
+  };
+  const lying = {
+    ...tokens,
+    byColour: (c: string) => {
+      const t = tokens.byColour(c);
+      return t && c === usdc.color ? { ...t, decimals: 2 } : t;
+    },
+  } as typeof tokens;
+  const liar = ed25519DeviceOf(W.A.signer, { network: NETWORK, tokens: lying });
+  const lied = await liar.sign(ctxOf(s), withdrawRequest(wd), useCounter('A', s));
+  cases.bPrimeWalletText = lied.text;
+  outcome(
+    'B′: another site label for the same withdrawal',
+    await post('withdraw', {
+      account: s.account,
+      payload: wd,
+      passportAuth: passportAuthOf(lied),
+    }),
+  );
+  // C2: a withdrawal NAMING twBTC paid from the twUSDC coin. The honest client refuses to sign it;
+  // a signature made anyway over the text the arm renders for it is refused by the relay.
+  const c2 = { ...wd, color: btcColour, amount: '1000' };
+  try {
+    await W.A.device.sign(ctxOf(s), withdrawRequest(c2), useCounter('A', s));
+    cases.c2ClientRefusal = null;
+  } catch (e) {
+    cases.c2ClientRefusal = String((e as Error).message).slice(0, 200);
+  }
+  if (!cases.c2ClientRefusal) throw new Error('the client signed a C2-mismatched withdrawal');
+  const crafted = c2Signature('A', s, c2);
+  cases.c2WalletText = crafted.text;
+  outcome(
+    'C2: a withdrawal naming twBTC paid from a twUSDC coin',
+    await post('withdraw', {
+      account: s.account,
+      payload: c2,
+      passportAuth: crafted.passportAuth,
+    }),
+  );
+  // Keep the coin for c2-live.ts (the circuit's refusal, with the relay stopped).
+  state.c2Coin = { nonce: usdc.nonce, color: usdc.color, value: usdc.value, mtIndex: usdc.mtIndex! };
+  saveState();
+  // Q30: a "cancel" naming another key is a key change, which the market never asks for.
+  const other = bytesToHex(new Uint8Array(randomBytes(32)));
+  const otherCancel = { newKey: other, authNonce: s.authNonce };
+  const rotated = await W.A.device.sign(ctxOf(s), cancelOffersRequest(otherCancel), useCounter('A', s));
+  cases.otherKeyWalletTitle = rotated.text.split('\n')[1];
+  outcome(
+    'cancel: a key that is not the account’s',
+    await post('cancel-offers', {
+      account: s.account,
+      payload: otherCancel,
+      passportAuth: passportAuthOf(rotated),
+    }),
+  );
+  put('p9Negatives', cases);
+}
+
+/** A signature over the F3 text the arm renders for a C2-mismatched withdrawal (declared colour ≠
+ *  the coin's), made WITHOUT the client's refusal: the challenge from the contract's own pure
+ *  circuit, the message from the TypeScript renderer, signed with the wallet's key. */
+function c2Signature(who: 'A' | 'B', s: AccountStateView, p: Parameters<typeof withdrawRequest>[0]) {
+  const ctx = ctxOf(s);
+  const req = withdrawRequest(p) as Extract<ReturnType<typeof withdrawRequest>, { op: 'withdrawShielded' }>;
+  const pk = decodeEd25519Point(hexToBytes(W[who].signer.deviceKey, 32));
+  const counter = useCounter(who, s);
+  const challenge = (pureCircuits as unknown as Record<string, (...a: unknown[]) => Uint8Array>)
+    .challenge_withdraw_shielded_with_ed25519!(
+    { bytes: ctx.contractAddress },
+    pk,
+    ctx.evmDomainSalt,
+    { bytes: req.recipient },
+    req.color,
+    req.amount,
+    req.coin,
+    ctx.authNonce,
+  );
+  const m = renderEd25519Message(
+    {
+      contractAddress: ctx.contractAddress,
+      authNonce: ctx.authNonce,
+      challenge,
+      label: marketLabel(NETWORK),
+      tokens: ed25519TokenResolver(tokens),
+    },
+    { op: 'withdrawShielded', recipient: req.recipient, color: req.color, amount: req.amount },
+  );
+  const sig = nacl.sign.detached(m.bytes, W[who].secretKey);
+  return {
+    text: m.text,
+    passportAuth: { owner: W[who].signer.deviceKey, signature: bytesToHex(sig), useCounter: counter.toString(10) },
+  };
+}
+
 async function main() {
   const health = (await http('/health')).body;
   run.healthBefore = health;
@@ -931,6 +1401,18 @@ async function main() {
         break;
       case 'negatives':
         await negatives();
+        break;
+      case 'withdraw-unshielded':
+        await withdrawUnshielded();
+        break;
+      case 'cancel':
+        await cancel();
+        break;
+      case 'expired':
+        await expired();
+        break;
+      case 'p9-negatives':
+        await p9Negatives();
         break;
       default:
         throw new Error(`unknown step ${st}`);

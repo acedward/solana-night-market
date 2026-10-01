@@ -5,6 +5,12 @@
 # withdraws, the relay's refusals), then stops the relay and runs test/stack/p6/tamper-live.ts (a
 # tampered proof must be refused by the node). Tears everything down at the end, whatever happens.
 #
+# AA 00047 P9.I extends it (the security fix pass): the make signs MAKE_LIFETIME (default 900 s here,
+# so the relay's TTL cap is visible), then fund-unshielded.ts deposits NIGHT into A with a THIRD dev
+# seed (FUND_KEYS_DIR must hold account/keys/deposit_unshielded.prover, which the relay's key volume
+# prunes), then STEPS2 (an unshielded withdrawal, cancel, an expired offer, the P9 refusals, the P6
+# refusals), and with the relay stopped c2-live.ts (audit C2 at the circuit) after tamper-live.ts.
+#
 #   KEYS_DIR=~/.cache/aa-00047/b3-keys RELAY_IMAGE=aa00047-p6/relay:<sha> APP_VOLUME=<check volume> \
 #   OUT=<dir> PS_PARAMS=<dir> PS8_PARAMS=<dir> RELAY_KEYS_FINGERPRINT=<pin> test/stack/p6/run-local.sh
 #
@@ -25,7 +31,10 @@ export PS8_PARAMS="${PS8_PARAMS:?writable proof-server params dir (rc.8)}"
 export INDEXER_IMAGE="${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc.3}"
 export RELAY_KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-}"
 export DEMO_TOKENS_PATH="${DEMO_TOKENS_PATH:-direct}"
-STEPS="${STEPS:-open-a,open-b,demo-a,demo-b,make,take,withdraw,negatives}"
+STEPS="${STEPS:-open-a,open-b,demo-a,demo-b,make,take,withdraw}"
+STEPS2="${STEPS2:-withdraw-unshielded,cancel,expired,p9-negatives,negatives}"
+export MAKE_LIFETIME="${MAKE_LIFETIME:-900}"
+FUND_KEYS_DIR="${FUND_KEYS_DIR:-$KEYS_DIR}"
 
 free_port() {
   local p
@@ -40,10 +49,11 @@ STATE_DIR="$RUN_DIR/state"
 mkdir -p "$STATE_DIR" "$OUT" && chmod 700 "$STATE_DIR"
 export RUN_DIR
 # The localnet's development seeds (public): 1 = genesis (faucet deployer + the relay's sponsor),
-# 2 = the mock batcher's wallet.
+# 2 = the mock batcher's wallet, 3 = the unshielded funder (P9.I).
 printf '%064x\n' 1 >"$RUN_DIR/sponsor.seed"
 printf '%064x\n' 2 >"$RUN_DIR/batcher.seed"
-chmod 600 "$RUN_DIR/sponsor.seed" "$RUN_DIR/batcher.seed"
+printf '%064x\n' 3 >"$RUN_DIR/funder.seed"
+chmod 600 "$RUN_DIR/sponsor.seed" "$RUN_DIR/batcher.seed" "$RUN_DIR/funder.seed"
 
 dc() { docker compose -f "$HERE/compose.yml" "$@"; }
 teardown() {
@@ -88,14 +98,41 @@ curl -s "http://127.0.0.1:$RELAY_PORT/health" >"$OUT/health.json" || true
 echo "run-local: relay up (DEMO_TOKENS_PATH=$DEMO_TOKENS_PATH)"
 
 status=0
-if bun_run -v "$RUN_DIR:/run/nm:ro" -v "$STATE_DIR:/state" -v "$OUT:/out" -e RELAY_URL=http://relay:8080 \
-  -e NETWORK=undeployed -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out \
-  -e KERNEL_URL=http://kernel:9999 -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS="$STEPS" \
-  "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee "$OUT/market-flows.log"; then
-  echo "run-local: market flows PASS"
+flows() { # <steps>
+  bun_run -v "$RUN_DIR:/run/nm:ro" -v "$STATE_DIR:/state" -v "$OUT:/out" -e RELAY_URL=http://relay:8080 \
+    -e NETWORK=undeployed -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out \
+    -e KERNEL_URL=http://kernel:9999 -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS="$1" \
+    -e MAKE_LIFETIME="$MAKE_LIFETIME" "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
+}
+if flows "$STEPS"; then
+  echo "run-local: market flows PASS ($STEPS)"
 else
-  echo "run-local: market flows FAILED"
+  echo "run-local: market flows FAILED ($STEPS)"
   status=1
+fi
+
+# P9.I: an unshielded balance for A (the demo pack is shielded only), from a THIRD dev wallet.
+if [[ "$status" == 0 && -n "$STEPS2" ]]; then
+  ACCOUNT_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["A"].get("account",""))' "$STATE_DIR/state.json")"
+  if [[ "${FUND_UNSHIELDED:-1}" == 1 && -n "$ACCOUNT_A" ]]; then
+    if docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" -v "$APP_VOLUME:/app:ro" \
+      -v "$FUND_KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN_DIR:/run/nm:ro" -w /app \
+      -e FUNDER_SEED_FILE=/run/nm/funder.seed -e FUND_ACCOUNT="$ACCOUNT_A" -e FUND_AMOUNT="${FUND_UNSHIELDED_AMOUNT:-5000000}" \
+      "$BUN_IMAGE" bun test/stack/p6/fund-unshielded.ts 2>&1 | tee "$OUT/fund-unshielded.log"; then
+      echo "run-local: A funded (unshielded)"
+    else
+      echo "run-local: unshielded funding FAILED"
+      status=1
+    fi
+  fi
+  if [[ "$status" == 0 ]]; then
+    if flows "$STEPS2"; then
+      echo "run-local: market flows PASS ($STEPS2)"
+    else
+      echo "run-local: market flows FAILED ($STEPS2)"
+      status=1
+    fi
+  fi
 fi
 
 # The tampered proof: the relay must be stopped first (the script opens the sponsor wallet itself).
@@ -113,6 +150,22 @@ if [[ "${SKIP_TAMPER:-0}" != 1 ]]; then
   else
     echo "run-local: tampered proof FAILED"
     status=1
+  fi
+  # P9.I, audit C2 at the circuit: a valid signature over a withdrawal naming another token than the
+  # coin's must be refused by the account's circuit (the relay is still stopped).
+  if [[ "${SKIP_C2:-0}" != 1 ]] && python3 -c 'import json,sys; sys.exit(0 if "c2Coin" in json.load(open(sys.argv[1])) else 1)' "$STATE_DIR/state.json"; then
+    if bun_run -v "$RUN_DIR:/run/nm:ro" -v "$STATE_DIR:/state:ro" -v "$OUT:/out" -e NETWORK=undeployed \
+      -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out \
+      -e SPONSOR_SEED_FILE=/run/nm/sponsor.seed -e SPONSOR_FEE_BLOCKS_MARGIN=20 \
+      -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
+      -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 \
+      -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server:6300 \
+      "$BUN_IMAGE" bun test/stack/p6/c2-live.ts 2>&1 | tee "$OUT/c2-live.log"; then
+      echo "run-local: C2 refused by the circuit (PASS)"
+    else
+      echo "run-local: C2 at the circuit FAILED"
+      status=1
+    fi
   fi
 fi
 exit $status

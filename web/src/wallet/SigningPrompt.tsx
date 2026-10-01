@@ -70,10 +70,13 @@ function SignFactsList({ facts }: { facts: SignFacts }) {
                     {f.tokenId}
                   </span>
                 </span>
-                <span className="fact-line xsmall muted" data-testid="sign-fact-site-label">
-                  {f.siteLabel
-                    ? `This site labels it: ${f.siteLabel} (the site's name and decimals; the contract does not check them).`
-                    : 'This site does not list this token.'}
+                <span className="fact-line" data-testid="sign-fact-site-label">
+                  This site labels it: {f.siteLabel}
+                </span>
+                <span className="fact-line xsmall muted">
+                  {f.listed
+                    ? "The name and decimals are this site's label; the contract checks the base units and the token."
+                    : 'This site does not list this token: check its id.'}
                 </span>
               </dd>
             ) : (

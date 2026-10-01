@@ -37,8 +37,23 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
     const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap() }, tokens)!;
     expect(f.title).toBe('Make an offer');
     expect(f.facts).toEqual([
-      { kind: 'amount', label: 'You give', baseUnits: '1000000', tokenId: twBTC, siteLabel: '0.01 twBTC' },
-      { kind: 'amount', label: 'You get', baseUnits: '10000000', tokenId: twUSDC, siteLabel: '10.00 twUSDC' },
+      // The site label as the F3 v2 wallet line shows it (P9.C `renderSiteLabel`): every decimal.
+      {
+        kind: 'amount',
+        label: 'Give',
+        baseUnits: '1000000',
+        tokenId: twBTC,
+        siteLabel: '0.01000000 twBTC',
+        listed: true,
+      },
+      {
+        kind: 'amount',
+        label: 'Get',
+        baseUnits: '10000000',
+        tokenId: twUSDC,
+        siteLabel: '10.000000 twUSDC',
+        listed: true,
+      },
       { kind: 'text', label: 'Expires', value: '2026-10-01 15:25:12 UTC' },
       { kind: 'text', label: 'Paid from one coin of', value: '10000000 base units', mono: true },
     ]);
@@ -49,10 +64,11 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
     expect(f.title).toBe('Take an offer');
     expect(f.facts[1]).toEqual({
       kind: 'amount',
-      label: 'You get',
+      label: 'Get',
       baseUnits: '10000000',
       tokenId: UNKNOWN,
-      siteLabel: null,
+      siteLabel: '10000000 ?',
+      listed: false,
     });
   });
 
@@ -76,7 +92,14 @@ describe('signFacts (Q25 B′: base units and token ids; the name is the site’
       tokens,
     )!;
     expect(w.facts.slice(0, 2)).toEqual([
-      { kind: 'amount', label: 'You send', baseUnits: '1500000', tokenId: twUSDC, siteLabel: '1.50 twUSDC' },
+      {
+        kind: 'amount',
+        label: 'Amount',
+        baseUnits: '1500000',
+        tokenId: twUSDC,
+        siteLabel: '1.500000 twUSDC',
+        listed: true,
+      },
       { kind: 'text', label: 'To (coin key)', value: '22'.repeat(32), mono: true },
     ]);
     const u = signFacts(

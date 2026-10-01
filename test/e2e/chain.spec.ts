@@ -257,11 +257,11 @@ test('the signing panel lists what the contract enforces: base units and full to
   const facts = page.getByTestId('sign-facts');
   await expect(facts).toBeVisible();
   await expect(page.getByTestId('sign-facts-title')).toHaveText('Make an offer');
-  const give = facts.locator('[data-testid=sign-fact][data-label="You give"]');
+  const give = facts.locator('[data-testid=sign-fact][data-label="Give"]');
   await expect(give.getByTestId('sign-fact-base-units')).toHaveText('5000000');
   await expect(give.getByTestId('sign-fact-token-id')).toHaveText(COLOUR.twBTC);
-  await expect(give.getByTestId('sign-fact-site-label')).toContainText('This site labels it: 0.05 twBTC');
-  const get = facts.locator('[data-testid=sign-fact][data-label="You get"]');
+  await expect(give.getByTestId('sign-fact-site-label')).toHaveText('This site labels it: 0.05000000 twBTC');
+  const get = facts.locator('[data-testid=sign-fact][data-label="Get"]');
   await expect(get.getByTestId('sign-fact-base-units')).toHaveText('3000000000');
   await expect(get.getByTestId('sign-fact-token-id')).toHaveText(COLOUR.twUSDC);
   await expect(facts.locator('[data-testid=sign-fact][data-label="Expires"]')).toContainText(

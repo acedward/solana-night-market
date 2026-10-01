@@ -122,8 +122,9 @@ export const ACCOUNT = '11'.repeat(32);
 
 export function samplePayload(action: RelayActionName): Record<string, unknown> {
   if (action === 'register') return { encPublicKey: 'ab'.repeat(32) };
-  // The demo-token claim's body is empty (the account is the request's `account`).
-  if (action === 'demo-tokens') return {};
+  // The demo-token claim's body names the device's use counter (the account is the request's
+  // `account`; AA 00047 P9, audit C8 / F-B10).
+  if (action === 'demo-tokens') return { useCounter: '0' };
   return { amount: '1000000', colour: 'bb'.repeat(32) };
 }
 

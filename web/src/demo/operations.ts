@@ -19,6 +19,7 @@ import {
   OperationError,
   dropJob,
   findJobs,
+  gatedContext,
   putJob,
   syncAccount,
   updateJob,
@@ -56,7 +57,10 @@ export async function claimDemoTokens(
 ): Promise<DemoTokensResult> {
   let requestId = findJobs(env, account, 'demo-tokens')[0]?.requestId;
   if (!requestId) {
-    const payload = {};
+    // The device's current use counter (AA 00047 P9, audit C8 / F-B10): the relay checks the one
+    // device entry at this counter instead of scanning for it.
+    const { counter } = await gatedContext(env, account);
+    const payload = { useCounter: counter.toString(10) };
     const { nonce, maxTtlSeconds } = await env.relay.nonce();
     const message = buildRelayActionMessage({
       action: 'demo-tokens',

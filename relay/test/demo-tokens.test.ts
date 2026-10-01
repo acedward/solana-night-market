@@ -72,6 +72,7 @@ describe('the claims store', () => {
 
   it('is safe under concurrent requests: many racing claims, exactly the cap and one per key pass', async () => {
     const c = new DemoTokenClaims({ file: join(tmp(), 'claims.json'), dailyCap: 5 });
+    c.lock();
     const outcomes = await Promise.all(
       Array.from({ length: 40 }, (_, i) => Promise.resolve().then(() => c.reserve(key(1 + (i % 10)), ACCOUNT))),
     );
@@ -80,9 +81,10 @@ describe('the claims store', () => {
     expect(outcomes.filter((o) => !o.ok && o.code === 'already-claimed').length).toBeGreaterThan(0);
   });
 
-  it('persists claims across restarts, and releases a reservation a stopped relay left behind', () => {
+  it('persists claims across restarts, and keeps a reservation a stopped relay left behind (charged, resumable)', () => {
     const file = join(tmp(), 'claims.json');
     const a = new DemoTokenClaims({ file, dailyCap: 10 });
+    a.lock();
     const done = a.reserve(key(1), ACCOUNT);
     if (done.ok) done.confirm(['t1', 't2']);
     a.reserve(key(2), ACCOUNT); // left reserved: the relay "stopped mid-job"
@@ -91,11 +93,17 @@ describe('the claims store', () => {
     expect(onDisk.claims).toHaveLength(2);
     let recovered = 0;
     const b = new DemoTokenClaims({ file, dailyCap: 10, onRecovered: (n) => (recovered = n) });
+    b.lock();
     expect(recovered).toBe(1);
     expect(b.hasClaimed(key(1))).toBe(true);
+    // Not erased (AA 00047 P9, audit C8 / F-B7): kept as partial, still charged today, resumable.
+    expect(b.record(key(2))).toMatchObject({ state: 'partial' });
+    expect(b.claimedToday()).toBe(2);
     expect(b.hasClaimed(key(2))).toBe(false);
     expect(b.reserve(key(1), ACCOUNT)).toMatchObject({ ok: false, code: 'already-claimed' });
-    expect(b.reserve(key(2), ACCOUNT).ok).toBe(true);
+    expect(b.reserve(key(2), ACCOUNT)).toMatchObject({ ok: true, resumed: true });
+    expect(b.claimedToday()).toBe(2);
+    b.unlock();
   });
 
   it('refuses a claims file in use by another live relay, and takes over a stale lock', () => {
@@ -216,21 +224,24 @@ function relay(opts: { dailyCap?: number; devices?: string[]; mint?: DemoMint } 
     demoTokens: demoTokensInfo({ claims, pack, enabled: true, dailyCap: opts.dailyCap ?? 100 }),
     clientAddress: () => '198.51.100.9',
   });
-  const claim = async (d: (typeof devices)[number], account = ACCOUNT) => {
+  const claim = async (d: (typeof devices)[number], account = ACCOUNT, useCounter = '0') => {
     const { nonce } = (await (await app.request(API_PATHS.nonce)).json()) as { nonce: string };
+    // The body names the device's use counter (AA 00047 P9, audit C8 / F-B10); the fake account's
+    // devices are live at counter 0.
+    const payload = { useCounter };
     const message = buildRelayActionMessage({
       action: 'demo-tokens',
       network: config.network.name,
       owner: d.deviceKey,
       account,
-      payload: {},
+      payload,
       nonce,
       expiry: Math.floor(Date.now() / 1000) + 120,
     });
     return app.request(API_PATHS.action('demo-tokens'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ account, payload: {}, auth: { message, signature: d.signEnvelope(message) } }),
+      body: JSON.stringify({ account, payload, auth: { message, signature: d.signEnvelope(message) } }),
     });
   };
   return { app, devices, claim, queue, claims, minted, sponsor };
@@ -292,7 +303,7 @@ describe('POST /v1/actions/demo-tokens', () => {
     expect(statuses).toEqual([202, 429, 429, 429, 429, 429]);
   });
 
-  it('releases the claim when the pack fails, so the key can claim again', async () => {
+  it('keeps the claim resumable when the pack fails, so the key can claim again', async () => {
     let fail = true;
     const r = relay({
       mint: async () => {

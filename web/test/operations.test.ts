@@ -413,14 +413,16 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(calls).toEqual(['relayAction']);
     const sub = relay.submitted[0]!;
     expect(sub.action).toBe('demo-tokens');
-    expect(sub.request).toMatchObject({ account: ACCOUNT, payload: {} });
+    // The body names the device's live use counter (AA 00047 P9, audit C8 / F-B10): 1 here, the
+    // counter the live device set says, not the stale roster hint 0.
+    expect(sub.request).toMatchObject({ account: ACCOUNT, payload: { useCounter: '1' } });
     const auth = sub.request.auth as SignedRelayAction;
     expect(auth.message).toMatchObject({
       action: 'demo-tokens',
       network: 'undeployed',
       account: `0x${ACCOUNT}`,
       owner: signing.deviceKey,
-      payloadHash: payloadHash({}),
+      payloadHash: payloadHash({ useCounter: '1' }),
     });
     expect(testScheme.verify(auth.message, unhex(auth.signature))).toBe(true);
     // The deposit's inbox entries were read after the job (nothing was synced before the claim).

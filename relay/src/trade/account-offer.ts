@@ -13,6 +13,12 @@
 // asserts the legs are exactly +give / −want in ONE segment), bind it (the kernel's wire form, as
 // midnight-2-offers' `aa-offer.ts` does; the imbalances must not change), and require that segment
 // to be 0. The result is encoded as `swapoffer1…` and never balanced, signed or submitted here.
+//
+// The transaction's TTL follows the SIGNED expiry (AA 00047 P9, audit C6 / F-B4): midnight-js gives a
+// call's intent one hour, so before proving every intent's TTL is capped at the call's `validUntil`
+// (`withProofDeadline`), and the reported `expiresAt` is the earlier of the two. The ledger refuses
+// the intent after its TTL, and the circuit's `blockTimeLt(validUntil)` refuses the call after the
+// signed expiry whatever any TTL says.
 
 import { encodeOffer, offerIdOf } from '@nightmarket/core';
 
@@ -64,8 +70,39 @@ export interface ProvenAccountOffer {
   structure: TxStructure;
   /** The parameters the partitioner was handed (picoseconds), for the evidence. */
   steering: { fromPs: string; toPs: string } | null;
-  /** Unix ms: the intent's TTL (midnight-js builds calls with one hour). */
+  /** Unix ms: the intent's TTL (midnight-js builds calls with one hour), capped at the call's signed
+   *  `validUntil` (audit C6). */
   expiresAt: number;
+}
+
+/**
+ * Cap the TTL of every intent of an UNPROVEN transaction at `deadline` (audit C6). Writing the intents
+ * back is what applies it: ledger-v9 hands out copies, and re-computes the binding of an unproven,
+ * unbound transaction when its intents are written. A TTL already earlier is left alone. Returns the
+ * same transaction.
+ */
+export function capIntentTtls<T>(tx: T, deadline: Date): T {
+  const t = tx as unknown as { intents?: Map<number, { ttl: Date }> };
+  const intents = t.intents;
+  if (!intents || intents.size === 0) return tx;
+  let changed = false;
+  for (const intent of intents.values()) {
+    if (intent.ttl.getTime() > deadline.getTime()) {
+      intent.ttl = deadline;
+      changed = true;
+    }
+  }
+  if (changed) t.intents = intents;
+  return tx;
+}
+
+/** `providers` whose proof provider caps every intent's TTL at `deadline` before it proves. */
+export function withProofDeadline(providers: PassportProviders, deadline: Date): PassportProviders {
+  const pp = providers.proofProvider as { proveTx(tx: unknown, config?: unknown): Promise<unknown> };
+  const capped = Object.assign(Object.create(pp) as object, {
+    proveTx: (tx: unknown, config?: unknown) => pp.proveTx(capIntentTtls(tx, deadline), config),
+  });
+  return { ...providers, proofProvider: capped };
 }
 
 /**
@@ -87,6 +124,12 @@ export function guaranteedProviders(
   };
 }
 
+/** Upstream's `buildOpenSwapOffer` (vendor/passport offer.ts): build and prove the call, unbalanced. */
+export type OfferBuilder = (spec: Record<string, unknown>) => Promise<{
+  proven: ProvenAccountOffer['tx'] & { bind?: () => ProvenAccountOffer['tx'] };
+  proveMs: number;
+}>;
+
 /** Prove, bind and encode one account offer, legs in segment 0. */
 export async function proveGuaranteedOffer(o: {
   rt: PassportRuntime;
@@ -95,20 +138,22 @@ export async function proveGuaranteedOffer(o: {
   offer: AccountOfferCall;
   /** The device arm's swap circuit (`ARM_CIRCUITS.openSwap`). */
   circuitId: string;
+  /** For tests: upstream's `buildOpenSwapOffer` (default: the pinned client's offer.ts). */
+  buildOffer?: OfferBuilder;
 }): Promise<ProvenAccountOffer> {
+  // The call's signed expiry (Unix seconds; 0: none) caps the transaction's TTL (audit C6).
+  const deadline = o.offer.call.validUntil > 0n ? new Date(Number(o.offer.call.validUntil) * 1000) : null;
   const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
     LedgerParameters: { deserialize(b: Uint8Array): never };
   };
-  const offerMod = (await import(`${VENDOR}/src/wallet/offer.js`)) as {
-    buildOpenSwapOffer(spec: Record<string, unknown>): Promise<{
-      proven: ProvenAccountOffer['tx'] & { bind?: () => ProvenAccountOffer['tx'] };
-      proveMs: number;
-    }>;
-  };
+  const offerMod: { buildOpenSwapOffer: OfferBuilder } = o.buildOffer
+    ? { buildOpenSwapOffer: o.buildOffer }
+    : ((await import(`${VENDOR}/src/wallet/offer.js`)) as { buildOpenSwapOffer: OfferBuilder });
   let steering: ProvenAccountOffer['steering'] = null;
-  const providers = guaranteedProviders(o.providers, ledger, (s) => {
+  const steered = guaranteedProviders(o.providers, ledger, (s) => {
     steering = { fromPs: s.fromPs.toString(), toPs: s.toPs.toString() };
   });
+  const providers = deadline ? withProofDeadline(steered, deadline) : steered;
   const { account: accountMod, witnesses } = o.rt.client as unknown as {
     account: {
       CustodyAccount: { connect(p: unknown, c: unknown, a: string, s: unknown): Promise<{ privateStateId: string }> };
@@ -159,8 +204,13 @@ export async function proveGuaranteedOffer(o: {
     proveMs: built.proveMs,
     structure,
     steering,
-    expiresAt: intentTtl(bound) ?? startedAt + 60 * 60 * 1000,
+    expiresAt: offerExpiry(intentTtl(bound) ?? startedAt + 60 * 60 * 1000, deadline),
   };
+}
+
+/** The offer's end: its intent TTL (unix ms), or the signed deadline when that is earlier. */
+export function offerExpiry(ttlMs: number, deadline: Date | null): number {
+  return deadline ? Math.min(ttlMs, deadline.getTime()) : ttlMs;
 }
 
 /**

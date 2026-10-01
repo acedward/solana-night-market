@@ -363,8 +363,25 @@ This signature authorises nothing and moves no funds.
 ```
 
 The relay issues the nonce (`GET /v1/auth/nonce`), accepts it once, and forgets all nonces on a
-restart (the page asks for a new one). Ledger-backed Phantom accounts sign a different, wrapped
-message and are refused.
+restart (the page asks for a new one). An unused nonce is never pushed out early by other clients'
+requests: each client address holds at most `AUTH_MAX_NONCES_PER_CLIENT` (30) unused nonces and is
+refused (`429`) past that, until they are used or expire. Ledger-backed Phantom accounts sign a
+different, wrapped message and are refused.
+
+**Offers and takes expire when the wallet says** (audit C6). Every offer and take signs a real
+expiry (`validUntil`, Unix seconds, shown in the wallet's message), which the account's circuit
+enforces on chain (`blockTimeLt`). The relay follows it everywhere:
+
+- it refuses a call with no expiry, with less than `EXPIRY_MIN_REMAINING_SECONDS` (60 s) left, or
+  further ahead than `OFFER_MAX_LIFETIME_SECONDS` (3,600 s, a make) or `TAKE_MAX_LIFETIME_SECONDS`
+  (600 s, a take) plus `EXPIRY_CLOCK_SKEW_SECONDS` (120 s): `400 no-expiry`, `approval-expired`,
+  `expiry-too-far`. It checks again when the job starts, before any proof;
+- the transaction's TTL is capped at the expiry (midnight-js gives a call one hour), so the
+  exchange's listing ends with it;
+- an approval it accepted is remembered at least until its expiry, so it is never queued twice.
+
+After the expiry nobody (this relay, another relay, or someone holding the request) can settle the
+offer: the chain refuses it.
 
 **Accounts must be market accounts (spec FR-005).** Before any work on an account, the relay reads
 its on-chain state: every operation must carry exactly the verifier key of the pinned set for the
@@ -395,19 +412,28 @@ account. The faucets are permissionless and the tokens cost nothing; the sponsor
 | `RELAY_DATA_DIR` | `/var/lib/night-market` (compose) | Where the claims file lives. |
 
 **Limits.** Once per Solana key, ever (whatever the account), within the daily cap, and the
-relay's rate limits. The claim is admitted only for a live device of an active market account.
-A claim is reserved before it is queued, confirmed with its transaction ids when every token
-landed, and released when anything failed, so a failed pack can be claimed again (a token that had
-landed before the failure is then received twice; faucet tokens cost nothing).
+relay's rate limits. The claim is admitted only for a live device of an active market account: the
+claim names the device's current use counter (the page reads it from the chain), and the relay checks
+the one device entry at that counter. A claim is reserved before it is queued (that is the day's
+charge, kept whatever happens next), each token is recorded as it lands, and the claim is confirmed
+with its transaction ids when every token landed. When a delivery fails part-way, the claim stays as
+**partial**: the same key may claim again, to the same account, and gets only the tokens still
+missing (no token is minted twice, and no second daily charge). After `DEMO_TOKENS_MAX_ATTEMPTS` (3)
+failed deliveries the key is refused (`attempts-exhausted`). Only a claim refused before its job ran
+(a full queue) is undone.
 
 **The claims store** is `<RELAY_DATA_DIR>/demo-token-claims.json`, rewritten atomically on every
 change, next to a lock file that keeps a second relay off it: **one relay per data dir**. Only an
 existing lock held by a live process means "in use by another relay"; a lock left by a crash is
 taken over, and a data dir the relay cannot write is reported as that (section 3, "The relay's
-user"). It holds public values only (the Solana key, the account, times, transaction ids). Back it
-up with the deployment; losing it lets every key claim once more. To let one key claim again, stop
-the relay, remove that key's record from the file, and start it. A reservation found at start (the
-relay stopped mid-job) is released, with a warning in the log.
+user"). It holds public values only (the Solana key, the account, times, transaction ids, the
+tokens delivered so far). Back it up with the deployment; losing it lets every key claim once more.
+To let one key claim again, stop the relay, remove that key's record from the file, and start it.
+The relay reads the file only after it holds the lock, so a second relay refused the lock never
+touches it. Every change is written to the file before the relay acts on it; if the file cannot be
+written, the claim is refused (`503 store-unavailable`) and the log says why. A reservation found at
+start (the relay stopped mid-job) is kept as a partial claim (charged, resumable), with a warning in
+the log.
 
 **The two paths.** `direct` (the default): each token is ONE transaction, the faucet's `mint` to the
 account's contract address composed with the account's `deposit_shielded` that receives it, as two
@@ -472,10 +498,28 @@ value; request bodies are never logged).
 | Batcher | 1,000 requests per 24 hours per IP per target, and 1,000 for all clients together | Every take the relay settles is one request, so at most 1,000 takes a day. |
 | Kernel | 600 requests per minute per IP | Browsers read prices directly; the relay posts offers. |
 | Relay, per client address | reads 240/min, `/health` 60/min, nonces 30/min, actions 10/min; actions per Solana key 5/min | `RATE_LIMIT_*`. |
-| Demo tokens | once per key; `DEMO_TOKENS_DAILY_CAP` a day | Section 7. |
+| Unused nonces | 30 per client address (`AUTH_MAX_NONCES_PER_CLIENT`), 50,000 in all (`AUTH_MAX_NONCES`) | Never evicted early: past either cap new nonces are refused (`429` for the client, `503 busy` for all) until some are used or expire (10 minutes). |
+| Opening accounts | 100 a day in all (`REGISTER_DAILY_CAP`), 3 a day per client address (`REGISTER_PER_CLIENT_DAILY_CAP`), 1 queued or running at once (`REGISTER_MAX_IN_FLIGHT`) | Rolling 24 hours, counted when admitted (a failed registration still spent its proofs). Past a cap: `429 registration-daily-cap` / `registration-client-cap`; while one is in flight: `503 registration-busy`, Retry-After 60. See the numbers below. |
+| Failed jobs | 5 per Solana key and 5 per account a day (`FAILURE_BUDGET_PER_OWNER_PER_DAY`, `FAILURE_BUDGET_PER_ACCOUNT_PER_DAY`) | A job that fails after it started proving counts (the market's own failures do not: no keys, the exchange unreachable or at its cap). Past the budget: `429 failure-budget` until the oldest failure is a day old. |
+| Offer and take expiry | a make at most 3,600 s ahead, a take 600 s, at least 60 s left | Section 6. |
+| Demo tokens | once per key; `DEMO_TOKENS_DAILY_CAP` a day; 3 failed deliveries | Section 7. |
 | Change re-filing (`append-inbox`) | only against the relay's single-use entitlement for that change, at most `APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY` (20) a day per account | The entitlement key derives from the sponsor seed: a new sponsor seed voids entitlements already issued. |
 | Jobs | kept `JOB_TTL_SECONDS` (24 h), at most `JOB_MAX` (10,000), in memory | A relay restart forgets running jobs. |
 
+**Why these registration numbers** (audit C4). One registration deploys two waves and activates the
+device: it held the prover lane about 60 s on stagenet and cost the sponsor about 21 DUST (plan P6:
+22 DUST for an account plus its demo pack, the pack about 1 DUST). Without caps one client opening
+accounts with fresh Solana keys (they cost nothing) could stall every customer's action and drain the
+sponsor in under two days. With the defaults:
+
+- at most 100 accounts a day: about 2,100 DUST and 100 minutes of prover time a day, at worst;
+- one client address opens at most 3 a day, so reaching the global cap takes 34 addresses;
+- registrations never queue behind each other: any other action waits behind at most one (about a
+  minute);
+- a key or account whose calls keep failing at proving time is stopped after 5 failures a day.
+
+Size the sponsor for the global cap: `REGISTER_DAILY_CAP` × 21 DUST a day, plus the actions. The
+counters live in memory: a relay restart resets them.
 ## 10. What customers must know
 
 - **Phantom approves every action, and shows what it approves.** The message is readable: the
@@ -500,6 +544,8 @@ value; request bodies are never logged).
 - An account with 500 or more contract actions cannot be reconciled until the relay pages
   through the indexer (`/v1/accounts/<account>/zswap` answers `501 history-too-long`).
 - A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6).
+- The registration caps and the failure budget are counted in memory: a relay restart resets them
+  (section 9).
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
 
 ## 12. Start, stop, upgrade and re-pin

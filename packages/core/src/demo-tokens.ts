@@ -2,21 +2,24 @@
 // from the mint-test-tokens faucets into the caller's account, once per Solana key, under a daily
 // cap. The sponsor pays the DUST; faucet tokens cost nothing to mint.
 //
-//   POST /v1/actions/demo-tokens   { account, payload: {}, auth: <RelayAction envelope> }
+//   POST /v1/actions/demo-tokens   { account, payload: { useCounter }, auth: <RelayAction envelope> }
 //   GET  /v1/demo-tokens[?owner=<device key>]   the pack, the limits, and whether that key claimed
 //
 // The claim is a RelayAction envelope (action `demo-tokens`, the account, the owner key) signed in
 // the Solana scheme (./solana-auth.ts, Q14): one wallet prompt. The relay admits it only when the
 // owner key is a live device of the account and the account is a market account (its on-chain
-// verifier keys are the relay's pinned set).
+// verifier keys are the relay's pinned set). The body names the device's CURRENT use counter
+// (AA 00047 P9, audit C8 / F-B10), so the relay checks the one rolling entry it derives at that
+// counter instead of scanning counters (a scan has to stop somewhere: it stopped at 255).
 
 import { z } from 'zod';
 
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/);
 const decimal = z.string().regex(/^[0-9]{1,40}$/);
 
-/** The claim's body: nothing beyond the account the request names. */
-export const DemoTokensPayloadSchema = z.object({}).strict();
+/** The claim's body: the signing device's current use counter (decimal); the account is the
+ *  request's own `account`. The envelope's body hash signs it. */
+export const DemoTokensPayloadSchema = z.object({ useCounter: decimal }).strict();
 export type DemoTokensPayload = z.infer<typeof DemoTokensPayloadSchema>;
 
 /** How the pack reaches the account (plan B3; the evidence decides the default):

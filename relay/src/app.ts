@@ -33,13 +33,14 @@ import {
 
 import type { AdmissionOutcome } from './actions/admission.js';
 import type { ActionDefinition } from './actions/catalogue.js';
+import { countsAgainstBudget, type FailureBudget } from './actions/failure-budget.js';
 import type { NonceStore } from './auth/nonces.js';
 import { verifyRelayActionRequest, type VerifyOutcome } from './auth/verifiers.js';
 import { AccountHistoryTooLongError } from './chain/indexer.js';
 import { ChainReadNotImplementedError, type ChainReader } from './chain/reader.js';
 import type { RelayConfig } from './config.js';
 import type { Logger } from './log.js';
-import type { JobQueue } from './queue/jobs.js';
+import type { JobExecutor, JobQueue } from './queue/jobs.js';
 import { RateLimiter } from './ratelimit.js';
 import type { SponsorSession } from './sponsor/session.js';
 
@@ -61,6 +62,9 @@ export interface AppDeps {
   passportCall?: (def: ActionDefinition, request: ActionRequest) => Promise<VerifyOutcome>;
   /** The demo-token pack and limits (GET /v1/demo-tokens, B3); absent: the endpoint is off. */
   demoTokens?: (owner?: string) => DemoTokensInfo;
+  /** The failure budget per owner and per account (AA 00047 P9, audit C4: ./actions/failure-budget.ts);
+   *  absent: none. */
+  failures?: FailureBudget;
   /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop). */
   clientAddress?: (c: Context) => string;
   now?: () => number;
@@ -148,18 +152,36 @@ export function createApp(deps: AppDeps): Hono {
     const body: PublicConfig = {
       network: config.network.name,
       relayVersion: deps.version,
-      limits: { authMaxTtlSeconds: limits.authMaxTtlSeconds, jobTtlSeconds: limits.jobTtlSeconds },
+      limits: {
+        authMaxTtlSeconds: limits.authMaxTtlSeconds,
+        jobTtlSeconds: limits.jobTtlSeconds,
+        offerMaxLifetimeSeconds: config.expiry.offerMaxLifetimeSeconds,
+        takeMaxLifetimeSeconds: config.expiry.takeMaxLifetimeSeconds,
+      },
       withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
     };
     return c.json(body);
   });
 
   app.get(API_PATHS.nonce, (c) => {
-    const refused = limited(nonceLimiter, clientAddress(c), c);
+    const client = clientAddress(c);
+    const refused = limited(nonceLimiter, client, c);
     if (refused) return refused;
-    const { nonce, expiresAt } = deps.nonces.issue();
-    const body: NonceResponse = { nonce, expiresAt, maxTtlSeconds: limits.authMaxTtlSeconds };
+    // Outstanding nonces are never evicted (audit C9 / F-A7.3): a client at its own cap, or a full
+    // store, is refused until its nonces are used or expire.
+    const issued = deps.nonces.issue(client);
     c.header('Cache-Control', 'no-store');
+    if (!issued.ok) {
+      c.header('Retry-After', String(issued.retryAfterSeconds));
+      return issued.refused === 'client-cap'
+        ? apiError(c, 429, 'rate-limited', 'too many unused authorisation nonces from this address; use them or wait')
+        : apiError(c, 503, 'busy', 'the relay is handing out too many authorisation nonces; try again shortly');
+    }
+    const body: NonceResponse = {
+      nonce: issued.nonce,
+      expiresAt: issued.expiresAt,
+      maxTtlSeconds: limits.authMaxTtlSeconds,
+    };
     return c.json(body);
   });
 
@@ -253,7 +275,8 @@ export function createApp(deps: AppDeps): Hono {
       onError: (c) => apiError(c, 413, 'payload-too-large', 'the request body is too large'),
     }),
     async (c) => {
-      const refused = limited(actionLimiter, clientAddress(c), c);
+      const client = clientAddress(c);
+      const refused = limited(actionLimiter, client, c);
       if (refused) return refused;
       const name = c.req.param('action') as RelayActionName;
       const def = (RELAY_ACTIONS as readonly string[]).includes(name) ? deps.catalogue.get(name) : undefined;
@@ -337,18 +360,30 @@ export function createApp(deps: AppDeps): Hono {
         }
       }
 
-      const ownerRefused = limited(ownerLimiter, outcome.signer.toLowerCase(), c);
+      const signer = outcome.signer.toLowerCase();
+      const ownerRefused = limited(ownerLimiter, signer, c);
       if (ownerRefused) {
         // Refused after the authorisation was accepted: let the same signature be sent again later.
         outcome.release?.();
         return ownerRefused;
       }
 
-      // The action's own admission check (security review F-B2, F-B3), before any queue slot.
+      // The failure budget (AA 00047 P9, audit C4): an owner or account whose jobs keep failing
+      // after they started proving waits, so a failing call is not free to repeat.
+      const budget = deps.failures?.check(signer, account);
+      if (budget && !budget.ok) {
+        outcome.release?.();
+        c.header('Retry-After', String(budget.retryAfterSeconds));
+        log.info('action refused', { action: def.action, code: 'failure-budget' });
+        return apiError(c, 429, 'failure-budget', budget.reason);
+      }
+
+      // The action's own admission check (security review F-B2, F-B3; AA 00047 P9: registration caps,
+      // offer expiry), before any queue slot.
       let admitted: AdmissionOutcome = { ok: true };
       if (def.admit) {
         try {
-          admitted = await def.admit({ account, payload: payload.data, signer: outcome.signer });
+          admitted = await def.admit({ account, payload: payload.data, signer: outcome.signer, client });
         } catch (e) {
           outcome.release?.();
           log.warn('admission check failed', { action: def.action, error: e });
@@ -357,6 +392,7 @@ export function createApp(deps: AppDeps): Hono {
         if (!admitted.ok) {
           outcome.release?.();
           log.info('action refused', { action: def.action, code: admitted.detail ?? admitted.code });
+          if (admitted.retryAfterSeconds !== undefined) c.header('Retry-After', String(admitted.retryAfterSeconds));
           return apiError(c, admitted.status, admitted.code, admitted.reason, admitted.detail);
         }
       }
@@ -374,7 +410,7 @@ export function createApp(deps: AppDeps): Hono {
             ...(account ? { account } : {}),
             signer: outcome.signer,
           },
-          executor: def.executor,
+          executor: deps.failures ? budgeted(def.executor, deps.failures, signer, account) : def.executor,
         });
       } finally {
         if (!job) {
@@ -386,6 +422,10 @@ export function createApp(deps: AppDeps): Hono {
         }
       }
       if (!job) return apiError(c, 503, 'busy', 'the relay is at capacity; try again later');
+      if (admitted.ok && admitted.finished) {
+        const finished = admitted.finished;
+        void deps.queue.settled(job.requestId).finally(finished);
+      }
       log.info('action queued', { action: def.action, requestId: job.requestId });
       return c.json({ job }, 202);
     },
@@ -398,6 +438,29 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   return app;
+}
+
+/**
+ * `executor`, recording a failure against `owner` and `account` when the job fails after it started
+ * proving (AA 00047 P9, audit C4: ./actions/failure-budget.ts).
+ */
+export function budgeted(executor: JobExecutor, failures: FailureBudget, owner: string, account?: string): JobExecutor {
+  return async (payload, ctx) => {
+    let proved = false;
+    const watched = {
+      ...ctx,
+      prove: <T>(fn: () => Promise<T>): Promise<T> => {
+        proved = true;
+        return ctx.prove(fn);
+      },
+    };
+    try {
+      return await executor(payload, watched);
+    } catch (e) {
+      if (countsAgainstBudget(e, proved)) failures.record(owner, account);
+      throw e;
+    }
+  };
 }
 
 /** The routes that change state, for the auth test to enumerate (every one must refuse

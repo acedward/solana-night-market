@@ -181,7 +181,8 @@ describe('the claims lock', () => {
     vi.mocked(fs.readFileSync).mockImplementationOnce(() => {
       throw errno('EACCES', 'open', file);
     });
-    const e = thrown(() => new DemoTokenClaims({ file, dailyCap: 1 }));
+    // The file is read once the lock is held (AA 00047 P9, audit C8 / F-B8): `lock()` reports it.
+    const e = thrown(() => new DemoTokenClaims({ file, dailyCap: 1 }).lock());
     expect(e).toMatchObject({ kind: 'filesystem', code: 'EACCES', path: file });
     expect(e.message).toContain('cannot read its claims file');
     expect(e.message).toContain(`The relay runs as ${ids}`);

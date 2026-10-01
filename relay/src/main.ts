@@ -6,8 +6,16 @@
 
 import { readFileSync } from 'node:fs';
 
-import { accountCatalogue, defaultCatalogue, withDemoTokens, withTrade } from './actions/catalogue.js';
+import {
+  accountCatalogue,
+  defaultCatalogue,
+  withDemoTokens,
+  withRegistrationCaps,
+  withTrade,
+} from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
+import { FailureBudget } from './actions/failure-budget.js';
+import { RegistrationCaps } from './actions/registration-caps.js';
 import { createApp } from './app.js';
 import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
@@ -191,9 +199,16 @@ async function main(): Promise<void> {
       claims = new DemoTokenClaims({
         file: config.demoTokens.claimsFile,
         dailyCap: config.demoTokens.dailyCap,
+        maxAttempts: config.demoTokens.maxAttempts,
         onRecovered: (n) =>
-          log.warn('released demo-token reservations left by a previous run (it stopped mid-job)', { count: n }),
+          log.warn(
+            'demo-token reservations left by a previous run (it stopped mid-job) are kept as partial claims: charged, resumable',
+            { count: n },
+          ),
+        onWriteFailed: (what, error) =>
+          log.error('the demo-token claims file could not be written', { during: what, error }),
       });
+      // Takes the lock FIRST, then reads and recovers the file (audit C8 / F-B8).
       claims.lock();
     } catch (e) {
       // A ClaimsStoreError says what is wrong (another relay holds the lock, or the data dir cannot
@@ -220,7 +235,15 @@ async function main(): Promise<void> {
     ttlSeconds: config.limits.appendEntitlementTtlSeconds,
     maxPerAccountPerDay: config.limits.appendsPerAccountPerDay,
   });
-  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxNonces);
+  const nonces = new NonceStore(
+    config.limits.nonceTtlSeconds,
+    config.limits.maxNonces,
+    undefined,
+    config.limits.maxNoncesPerClient,
+  );
+  // Audit C4 (AA 00047 P9): registration caps and the failure budget (RUNBOOK section 9).
+  const registrationCaps = new RegistrationCaps(config.registration);
+  const failures = new FailureBudget(config.failureBudget);
   const queue = new JobQueue({
     ttlSeconds: config.limits.jobTtlSeconds,
     maxJobs: config.limits.maxJobs,
@@ -267,6 +290,7 @@ async function main(): Promise<void> {
           batcherUrl: config.network.zswap.batcherUrl,
           batcherTarget: config.network.zswap.batcherTarget,
           replay,
+          expiry: config.expiry,
           log: log.child({ component: 'trade' }),
           onBatcherRefusal: (httpStatus) => {
             batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
@@ -294,6 +318,7 @@ async function main(): Promise<void> {
       }),
     );
   }
+  catalogue = withRegistrationCaps(catalogue, registrationCaps);
   const app = createApp({
     config,
     version: RELAY_VERSION,
@@ -301,6 +326,7 @@ async function main(): Promise<void> {
     nonces,
     queue,
     catalogue,
+    failures,
     sponsor,
     health,
     chain,

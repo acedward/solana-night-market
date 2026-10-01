@@ -8,8 +8,10 @@
 import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
 import {
+  DEFAULT_EXPIRY_LIMITS,
   DEMO_TOKEN_PATHS,
   type DemoTokenPath,
+  type ExpiryLimits,
   type NetworkOverrides,
   type NetworkProfile,
   type TokenRegistry,
@@ -68,6 +70,8 @@ export interface RelayConfig {
     /** GET /health per client address (security review F-B1); monitors poll about once a minute. */
     healthPerMinute: number;
     noncesPerMinute: number;
+    /** Outstanding (issued, unused, unexpired) nonces one client address may hold (audit C9). */
+    maxNoncesPerClient: number;
     actionsPerMinute: number;
     actionsPerOwnerPerMinute: number;
     authMaxTtlSeconds: number;
@@ -81,6 +85,20 @@ export interface RelayConfig {
     /** The most inbox appends the market pays for per account in any rolling 24 h (F-B3 backstop). */
     appendsPerAccountPerDay: number;
   };
+  /** Opening accounts (AA 00047 P9, audit C4; ./actions/registration-caps.ts, RUNBOOK section 9). */
+  registration: {
+    /** Registrations admitted in any rolling 24 hours, across all clients. */
+    dailyCap: number;
+    /** Registrations admitted in any rolling 24 hours from one client address. */
+    perClientDailyCap: number;
+    /** Registrations queued or running at once (their share of the one prover lane). */
+    maxInFlight: number;
+  };
+  /** Failed jobs (after proving started) allowed per owner and per account in any rolling 24 hours
+   *  (AA 00047 P9, audit C4; ./actions/failure-budget.ts). */
+  failureBudget: { perOwner: number; perAccount: number };
+  /** The limits on an offer's or a take's signed expiry (AA 00047 P9, audit C6; ./trade/expiry.ts). */
+  expiry: ExpiryLimits;
   /** Security review F-B6 (questions Q13): require a second signature (a Solana envelope over the
    *  whole body) for a withdrawal that names a recipient encryption key. Off by default: one wallet
    *  prompt per action, the encryption key rides the request unsigned (RUNBOOK §F-B6). */
@@ -100,6 +118,8 @@ export interface DemoTokensConfig {
   pack: { symbol: string; amount: string }[];
   /** Claims admitted in any rolling 24 hours, across all keys. */
   dailyCap: number;
+  /** Failed deliveries after which a key's partial claim is not resumed (AA 00047 P9, audit C8). */
+  maxAttempts: number;
   /** How the pack reaches the account (packages/core/src/demo-tokens.ts). */
   path: DemoTokenPath;
   /** The claims store: `<RELAY_DATA_DIR>/demo-token-claims.json`. */
@@ -336,6 +356,7 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       authMaxTtlSeconds: int(env.AUTH_MAX_TTL_SECONDS, 600, 'AUTH_MAX_TTL_SECONDS', 30, 3600),
       nonceTtlSeconds: int(env.AUTH_NONCE_TTL_SECONDS, 600, 'AUTH_NONCE_TTL_SECONDS', 30, 3600),
       maxNonces: int(env.AUTH_MAX_NONCES, 50_000, 'AUTH_MAX_NONCES', 100),
+      maxNoncesPerClient: int(env.AUTH_MAX_NONCES_PER_CLIENT, 30, 'AUTH_MAX_NONCES_PER_CLIENT', 1),
       jobTtlSeconds: int(env.JOB_TTL_SECONDS, 86_400, 'JOB_TTL_SECONDS', 60),
       maxJobs: int(env.JOB_MAX, 10_000, 'JOB_MAX', 10),
       maxBodyBytes: int(env.RELAY_MAX_BODY_BYTES, 1_048_576, 'RELAY_MAX_BODY_BYTES', 1024),
@@ -353,12 +374,52 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         1,
       ),
     },
+    registration: {
+      dailyCap: int(env.REGISTER_DAILY_CAP, 100, 'REGISTER_DAILY_CAP', 1, 1_000_000),
+      perClientDailyCap: int(env.REGISTER_PER_CLIENT_DAILY_CAP, 3, 'REGISTER_PER_CLIENT_DAILY_CAP', 1, 1_000_000),
+      maxInFlight: int(env.REGISTER_MAX_IN_FLIGHT, 1, 'REGISTER_MAX_IN_FLIGHT', 1, 100),
+    },
+    failureBudget: {
+      perOwner: int(env.FAILURE_BUDGET_PER_OWNER_PER_DAY, 5, 'FAILURE_BUDGET_PER_OWNER_PER_DAY', 1, 1_000_000),
+      perAccount: int(env.FAILURE_BUDGET_PER_ACCOUNT_PER_DAY, 5, 'FAILURE_BUDGET_PER_ACCOUNT_PER_DAY', 1, 1_000_000),
+    },
+    expiry: {
+      offerMaxLifetimeSeconds: int(
+        env.OFFER_MAX_LIFETIME_SECONDS,
+        DEFAULT_EXPIRY_LIMITS.offerMaxLifetimeSeconds,
+        'OFFER_MAX_LIFETIME_SECONDS',
+        60,
+        30 * 86_400,
+      ),
+      takeMaxLifetimeSeconds: int(
+        env.TAKE_MAX_LIFETIME_SECONDS,
+        DEFAULT_EXPIRY_LIMITS.takeMaxLifetimeSeconds,
+        'TAKE_MAX_LIFETIME_SECONDS',
+        60,
+        86_400,
+      ),
+      minRemainingSeconds: int(
+        env.EXPIRY_MIN_REMAINING_SECONDS,
+        DEFAULT_EXPIRY_LIMITS.minRemainingSeconds,
+        'EXPIRY_MIN_REMAINING_SECONDS',
+        0,
+        3600,
+      ),
+      clockSkewSeconds: int(
+        env.EXPIRY_CLOCK_SKEW_SECONDS,
+        DEFAULT_EXPIRY_LIMITS.clockSkewSeconds,
+        'EXPIRY_CLOCK_SKEW_SECONDS',
+        0,
+        3600,
+      ),
+    },
     withdrawRecipientEnvelope: bool(env.RELAY_WITHDRAW_RECIPIENT_ENVELOPE, false, 'RELAY_WITHDRAW_RECIPIENT_ENVELOPE'),
     dataDir,
     demoTokens: {
       enabled: demoEnabled,
       pack: parseDemoPack(str(env.DEMO_TOKENS_PACK) ?? DEFAULT_DEMO_PACK),
       dailyCap: int(env.DEMO_TOKENS_DAILY_CAP, 100, 'DEMO_TOKENS_DAILY_CAP', 1, 1_000_000),
+      maxAttempts: int(env.DEMO_TOKENS_MAX_ATTEMPTS, 3, 'DEMO_TOKENS_MAX_ATTEMPTS', 1, 100),
       path: demoPath,
       claimsFile: dataDir ? `${dataDir.replace(/\/+$/, '')}/demo-token-claims.json` : null,
     },

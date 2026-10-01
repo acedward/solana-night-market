@@ -91,8 +91,11 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
       const swapped = { ...body, payload: { encPublicKey: 'cd'.repeat(32) } };
       await expect401(await post(h, action, swapped), 'payload-mismatch');
     } else if (action === 'demo-tokens') {
-      // the claim's body is strictly empty: anything added is refused before the signature is checked
+      // the claim's body is strict (the use counter only): anything added is refused before the
+      // signature is checked; another counter than the one signed is the signature's business
       expect((await post(h, action, tampered)).status).toBe(400);
+      const swapped = { ...body, payload: { useCounter: '7' } };
+      await expect401(await post(h, action, swapped), 'payload-mismatch');
     } else {
       await expect401(await post(h, action, tampered), 'payload-mismatch');
     }

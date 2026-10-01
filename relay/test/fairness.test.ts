@@ -181,6 +181,8 @@ describe('the R2-1 fairness probe: one account looping makes and cancels vs anot
     })();
     await sleep(80); // the attacker is busy looping
     const queuedAt = r.proofs.length;
+    // A job already holding the prover when the withdrawal arrives is one it waits for too.
+    const holding = r.h.queue.stats().lanes.prover.running;
     const t0 = Date.now();
     const w = await r.post('withdraw', CUSTOMER_ACCOUNT, { n: 1 }, CUSTOMER);
     expect(w.status).toBe(202);
@@ -190,7 +192,7 @@ describe('the R2-1 fairness probe: one account looping makes and cancels vs anot
     await attacker;
     const ahead = r.proofs.slice(queuedAt, r.proofs.indexOf('customer-withdraw'));
     expect(ahead.every((p) => p.startsWith('attacker'))).toBe(true);
-    expect(ahead.length).toBeLessThanOrEqual(1);
+    expect(holding + ahead.length).toBeLessThanOrEqual(1);
     // At stagenet scale: about one proof (≈30 s) plus the withdrawal itself; generous for slow CI
     // (without the fix the loop queued dozens of 54 ms jobs ahead of it).
     expect(waitedMs).toBeLessThan(400);

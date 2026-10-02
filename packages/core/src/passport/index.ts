@@ -43,6 +43,7 @@ export {
 } from '../../../../vendor/passport/contract/src/wallet/contract.js';
 
 export * from './account-chain.js';
+export * from './account-provenance.js';
 export * from './ed25519.js';
 export * from './gated.js';
 export * from './gated-unshielded.js';

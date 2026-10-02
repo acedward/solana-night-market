@@ -65,6 +65,7 @@ export class FakeChain implements AccountChain {
       inbox: [...this.source.entries],
       unshielded: this.source.unshielded ?? [],
       credited: this.source.credited ?? [],
+      round: '0',
       blockHeight: 9,
     };
   }

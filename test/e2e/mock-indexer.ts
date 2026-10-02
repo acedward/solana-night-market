@@ -10,11 +10,17 @@
 //   - `contract(address) { actions { transaction { … zswapLedgerEvents } } }`: the account's
 //     transactions, with raw events that carry the account's address and each coin's commitment or
 //     nullifier, for the page's check of the relay's Zswap report.
+//   - the account's ORIGIN (AA 00047 P11, R3-1 / R3-10; packages/core/src/passport/
+//     account-provenance.ts): its deploy and the state it created, its one retiring maintenance
+//     update, and the blocks between (../../packages/core/test/fixtures/account-origin.ts). P10's reads
+//     (the deploy's block, the state at that block) are still answered, so the specs also run against
+//     the page before P11 (fail-before).
 // A test can make the chain differ from what an honest market would deploy (`tamper`), or from what
 // the relay reports (`hideFromEvents`).
 
 import type { Route } from '@playwright/test';
 
+import { originIndexer, type OriginSpec } from '../../packages/core/test/fixtures/account-origin.js';
 import { accountStateHex, FIXTURE_VERIFIER_KEYS } from '../../packages/core/test/fixtures/account-state.js';
 import { networkSaltFor } from '../../packages/core/src/passport/account-chain.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
@@ -48,6 +54,17 @@ export interface Tamper {
   seededInbox?: boolean;
   /** AA 00047 P10 (R2-6): a credited balance near 2^128 already there when it was deployed. */
   seededCredit?: boolean;
+  /** AA 00047 P11 (R3-1, auditor A's probe): deployed with `round` at 2^64 - 4 (2^64 - 3 once
+   *  activated): it freezes, funds included, a few calls later. */
+  roundBomb?: boolean;
+  /** AA 00047 P11 (R3-1): a call of the account between its deploy and its authority's retirement
+   *  (a write under a temporary verifier key). */
+  maintenanceWrite?: boolean;
+  /** AA 00047 P11 (R3-10): the indexer has no deploy record (the deploy transaction is still
+   *  readable by its hash or identifier). */
+  noDeployRecord?: boolean;
+  /** AA 00047 P11 (R3-10): the indexer shows no deploy at all yet (no record, no transaction). */
+  originUnknown?: boolean;
 }
 
 export class MockIndexer {
@@ -78,6 +95,7 @@ export class MockIndexer {
       deviceKey: r.deviceKey,
       encKey: t.otherEncKey ? 'e1'.repeat(32) : r.encKey,
       salt: t.otherSalt ? networkSaltFor('undeployed') : r.salt,
+      ...(t.roundBomb ? { round: (1n << 64n) - 3n } : {}),
       authNonce: r.authNonce,
       useCounter: r.useCounter,
       inbox: t.seededInbox ? ['ab'.repeat(192), ...r.entries] : r.entries,
@@ -103,7 +121,33 @@ export class MockIndexer {
       booted: false,
       inbox: t.seededInbox ? ['ab'.repeat(192)] : [],
       ...(t.seededCredit ? { credited: [[COLOUR.twUSDC, (1n << 128n) - 1n] as const] } : {}),
+      ...(t.roundBomb ? { round: (1n << 64n) - 4n } : {}),
     });
+  }
+
+  /** The account's origin as the indexer shows it (AA 00047 P11): the deploy the relay made, with what
+   *  the deployer (`tamper`) chose, its retiring update, and the blocks between. */
+  private async origin() {
+    const r = this.relay;
+    if (!r.registered || !r.deviceKey || !r.encKey) return null;
+    const t = this.tamper;
+    const spec: OriginSpec = {
+      account: ACCOUNT,
+      deviceKey: r.deviceKey,
+      encKey: r.deployEncKey ?? r.encKey,
+      salt: r.salt,
+      deploy: {
+        ...(t.seededInbox ? { inbox: ['ab'.repeat(192)] } : {}),
+        ...(t.seededCredit ? { credited: [[COLOUR.twUSDC, (1n << 128n) - 1n] as const] } : {}),
+        ...(t.roundBomb ? { round: (1n << 64n) - 4n } : {}),
+      },
+      ...(t.maintenanceWrite ? { windowExtra: [{ kind: 'call' as const, entryPoint: 'deposit_unshielded' }] } : {}),
+      ...(t.noDeployRecord || t.originUnknown ? { noDeployRecord: true } : {}),
+      // The mock relay's transaction ids are 64 hex: the page reads them as hashes.
+      ...(r.registerTxs && !t.originUnknown ? { deployTxHash: r.registerTxs.waveOne } : {}),
+      ...(t.originUnknown ? { deployTxIdentifier: 'ff'.repeat(33), deployTxHash: 'fe'.repeat(32) } : {}),
+    };
+    return originIndexer(spec);
   }
 
   private actions() {
@@ -147,10 +191,28 @@ export class MockIndexer {
     const address = String(body.variables?.address ?? '').toLowerCase();
     const query = body.query ?? '';
     const ours = address === ACCOUNT;
+    // The account's origin (AA 00047 P11): its deploy, its update, the blocks between.
+    const origin = await this.origin();
+    const fromOrigin = origin?.answer(query, body.variables ?? {});
+    if (fromOrigin !== undefined) {
+      this.queries.push(
+        // The deploy-transaction and window reads name no address: `deploytx` and `window`.
+        query.includes('AccountOrigin($')
+          ? `origin:${address}`
+          : query.includes('AccountDeployTx(')
+            ? 'deploytx'
+            : 'window',
+      );
+      return json(200, { data: fromOrigin });
+    }
+    if (!origin && /AccountOrigin\(\$|AccountDeployTx\(|AccountOriginWindow\(/.test(query)) {
+      this.queries.push(`origin:${address}`);
+      return json(200, { data: query.includes('AccountOrigin($') ? { contract: null } : { transactions: [] } });
+    }
     if (query.includes('type: DEPLOY')) {
       // The deploy's block (AA 00047 P10, R2-6).
       this.queries.push(`deploy:${address}`);
-      const deployed = ours && this.relay.registered;
+      const deployed = ours && this.relay.registered && !this.tamper.noDeployRecord && !this.tamper.originUnknown;
       return json(200, {
         data: { contract: deployed ? { actions: [{ transaction: { block: { height: 1 } } }] } : null },
       });

@@ -16,7 +16,10 @@
 // `checkMarketAccount` is the check a browser runs before it deposits to, trades from or seals an
 // entry for an account (audit C3, F-A2/F-B5): exactly the market's circuits with the verifier keys
 // pinned in this build, the authority retired, ONE device and it is this wallet's, the encryption
-// key this browser holds, and this network's salt.
+// key this browser holds, this network's salt, the counters far from overflowing, every credited
+// balance backed by a real holding (AA 00047 P11, R3-1), and the account's ORIGIN: its deploy-time
+// state is the honest constructor's and nothing but the market's own steps wrote before its
+// authority retired (./account-provenance.ts).
 
 import { ContractState } from '@midnight-ntwrk/compact-runtime-0.20';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -25,6 +28,7 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { AccountStateView } from '../accounts.js';
 import { bytesToHex, hexToBytes, normaliseHex32 } from '../hex.js';
 import { ledger } from '../../../../vendor/passport/contract/src/wallet/contract.js';
+import type { OriginVerdict } from './account-provenance.js';
 import { ed25519DeviceForKey } from './ed25519.js';
 import { findUseCounter } from './gated.js';
 
@@ -52,6 +56,9 @@ export interface AccountChainState {
    *  A fresh account has none (AA 00047 P10, R2-6): a deployer that seeds it near 2^128 makes every
    *  later deposit of that colour overflow. */
   credited: Array<{ colour: string; amount: string }>;
+  /** The account's `round` counter (decimal), which every state-changing circuit moves by one with a
+   *  checked cast: near 2^64 it freezes the account (AA 00047 P11, R3-1). */
+  round: string;
 }
 
 const hex = (b: Uint8Array) => bytesToHex(b);
@@ -109,6 +116,7 @@ export function decodeAccountState(account: string, state: string | Uint8Array):
     inbox,
     unshielded,
     credited,
+    round: l.round.toString(10),
   };
 }
 
@@ -128,7 +136,14 @@ export type AccountCheckCode =
   | 'network-salt'
   | 'not-fresh'
   /** AA 00047 P10 (R2-6): a just-opened account that is not empty (inbox, balances). */
-  | 'not-empty';
+  | 'not-empty'
+  /** AA 00047 P11 (R3-1): a counter near its overflow, or a credited balance no holding backs. */
+  | 'counters'
+  /** AA 00047 P11 (R3-1): not created the way the market creates accounts (./account-provenance.ts). */
+  | 'provenance'
+  /** AA 00047 P11 (R3-10): the indexer does not show the account's deploy yet (temporary: retried,
+   *  never kept). */
+  | 'provenance-unknown';
 
 export interface AccountCheckProblem {
   code: AccountCheckCode;
@@ -147,10 +162,9 @@ export interface MarketAccountExpectation {
   networkSalt: string;
   /** The verifier-key digests pinned in this build: circuit → SHA-256 (./pinned-account-keys.ts). */
   verifierKeys: Readonly<Record<string, string>>;
-  /** Just registered: the device must be at its first entry (counter 0, epoch 0), nothing may have
-   *  been signed yet (auth nonce 0), and the account must start EMPTY: no inbox entry and no public
-   *  or credited balance (AA 00047 P10, audit round 2 R2-6: a deploy carries its initial state, so a
-   *  relay could otherwise seed fake notes or an overflowing balance into a "new" account). */
+  /** Just registered: the device must be at its first entry (counter 0, epoch 0) and nothing may have
+   *  been signed yet (auth nonce 0). That the account started EMPTY (AA 00047 P10, R2-6) is part of
+   *  its origin (`checkMarketAccount`'s `origin`, judged on every check since P11). */
   fresh?: boolean;
   /** The use counter this browser last used (its roster), tried after the account's nonce. */
   counterHint?: bigint;
@@ -168,6 +182,13 @@ export interface AccountCheck {
  *  account has ONE device since its activation, and every call it signs moves its counter and the
  *  account's nonce together, so its counter IS the nonce; the scan is only a fallback. */
 export const DEVICE_SCAN_LIMIT = 256n;
+
+/** The highest a 64-bit counter (`round`, the auth nonce, the inbox count) may be on any check: far
+ *  above any real use (2^48 calls), far below the 2^64 where its checked increment fails and freezes
+ *  the account (AA 00047 P11, R3-1). */
+export const COUNTER_BOUND = 1n << 48n;
+/** The highest the device epoch may be: nothing in the market's account ever moves it from 0. */
+export const EPOCH_BOUND = 1n << 16n;
 
 /** Compare the deployed operations with the pinned set: every pinned circuit present with the same
  *  digest, and nothing else. */
@@ -191,16 +212,16 @@ export function compareVerifierKeys(
  * Is this the account this site's market deploys, controlled by this wallet alone? Every rule is
  * checked (the page shows them all, not only the first that fails).
  *
- * `deployed` is the account's state as it was DEPLOYED (the indexer's state at the deploy's block):
- * with `fresh`, the "starts empty" rule (R2-6) is judged on it, because that is what the deployer
- * alone controlled; a note or a balance anyone added since (a permissionless deposit right after the
- * deploy) is not the deployer's, and must not get a new account refused (questions Q42). Without it
- * the current state is judged (stricter).
+ * `origin` is the verdict on the account's origin (./account-provenance.ts `checkAccountOrigin`, from
+ * the indexer's deploy transaction and the actions before the retirement): its problems are the
+ * account's. It also carries R2-6's "starts empty" rule, judged on the state the DEPLOY created (what
+ * the deployer alone controlled; a deposit anyone made since changes nothing, questions Q42), and
+ * never on the current state (R3-10). Without an origin it is not judged.
  */
 export function checkMarketAccount(
   s: AccountChainState,
   e: MarketAccountExpectation,
-  deployed?: Pick<AccountChainState, 'view' | 'inbox' | 'unshielded' | 'credited'>,
+  origin?: OriginVerdict,
 ): AccountCheck {
   const problems: AccountCheckProblem[] = [];
   const v = s.view;
@@ -276,24 +297,42 @@ export function checkMarketAccount(
       message: 'It has already been used, although it was just opened.',
       detail: `auth nonce ${v.authNonce}, device epoch ${v.deviceEpoch}`,
     });
-  // R2-6: a new account starts empty. Anything in it as deployed came with the deploy (the relay's
-  // choice, free of charge: fake notes, a credited balance near 2^128), so none of it is trusted.
-  if (e.fresh) {
-    const d = deployed ?? s;
-    const filed = d.inbox.filter((x) => x !== null).length;
-    if (BigInt(d.view.inboxCount) !== 0n || d.inbox.length !== 0 || filed !== 0)
-      problems.push({
-        code: 'not-empty',
-        message: 'It was deployed with notes already in its inbox, which this site did not put there.',
-        detail: `inbox count ${d.view.inboxCount}, entries ${filed}`,
-      });
-    if (d.unshielded.length !== 0 || d.credited.length !== 0)
-      problems.push({
-        code: 'not-empty',
-        message: 'It was deployed with balances already in it, which this site did not put there.',
-        detail: `public balances ${d.unshielded.length}, credited ${d.credited.map((c) => `${c.colour}:${c.amount}`).join(',')}`,
-      });
+  // R3-1, on EVERY check: no counter near its overflow (a checked `+ 1` past 2^64 - 1 fails every
+  // call, withdrawals included), and every credited unshielded balance backed by the contract's real
+  // holding of that token (the contract keeps the two equal; a credit near 2^128 overflows deposits).
+  const high: string[] = [];
+  const counters: Array<[string, string, bigint]> = [
+    ['round', s.round, COUNTER_BOUND],
+    ['auth nonce', v.authNonce, COUNTER_BOUND],
+    ['inbox count', v.inboxCount, COUNTER_BOUND],
+    ['device epoch', v.deviceEpoch, EPOCH_BOUND],
+  ];
+  for (const [name, value, bound] of counters) {
+    let n: bigint;
+    try {
+      n = BigInt(value);
+    } catch {
+      n = bound;
+    }
+    if (n < 0n || n >= bound) high.push(`${name} ${value}`);
   }
+  if (high.length > 0)
+    problems.push({
+      code: 'counters',
+      message: 'Its counters are set so high that it would stop working after a few actions, freezing your tokens.',
+      detail: high.join(', '),
+    });
+  const holding = new Map(s.unshielded.map((u) => [u.colour.toLowerCase(), BigInt(u.amount)]));
+  const unbacked = s.credited.filter((c) => BigInt(c.amount) > (holding.get(c.colour.toLowerCase()) ?? 0n));
+  if (unbacked.length > 0)
+    problems.push({
+      code: 'counters',
+      message: 'It records more public tokens than it holds, which would make deposits of them fail.',
+      detail: unbacked.map((c) => `${c.colour}: credited ${c.amount}, held ${holding.get(c.colour) ?? 0n}`).join('; '),
+    });
+
+  // R3-1 / R3-10: where the account came from (including R2-6's "starts empty", as deployed).
+  if (origin) problems.push(...origin.problems);
 
   return { ok: problems.length === 0, problems, useCounter: problems.length === 0 ? useCounter : null };
 }

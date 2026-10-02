@@ -3,6 +3,8 @@
 // become one clear sentence each, saying what happened and what the customer can do. Anything the
 // relay words itself is kept, as a sentence.
 
+import { WHOLE_COIN_EXIT, WITHDRAWS_DAILY_CAP_CODE } from '@nightmarket/core';
+
 /** "the market is low …" → "The market is low ….": the relay's messages start lower-case. */
 export function sentence(text: string): string {
   const t = text.trim();
@@ -10,6 +12,10 @@ export function sentence(text: string): string {
   const s = t.charAt(0).toUpperCase() + t.slice(1);
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
+
+/** The coin a request pays with was already spent on Midnight (AA 00047 P11, `coin-spent`). */
+const COIN_SPENT =
+  'The coin this pays with was already spent on Midnight, so nothing was proven or sent. Refresh your balances and try again: this browser then picks another coin.';
 
 /** "12 s", "5 minutes", "about 3 hours": a Retry-After in the customer's words. */
 export function waitText(seconds: number | null | undefined, otherwise = 'a while'): string {
@@ -46,8 +52,9 @@ export function relayErrorText(e: {
     case 'chain-unavailable':
       return 'The market cannot read Midnight right now. Try again shortly; your records in this browser are safe.';
     case 'history-too-long':
-      // A known limit of this version (RUNBOOK §12, plan question Q27): retrying does not help.
-      return 'Your account has more history than this version of Night Market can read (500 or more actions on Midnight), so its balances can no longer be refreshed: they show the last refresh, and new coins will not appear. Nothing is lost: your coins stay on Midnight and your Export keeps the key to them. Keep your Export and ask the market; a later version reads the account again.';
+      // A known limit of this version: retrying does not help. Since AA 00047 P11 (R3-5) the relay reads
+      // past the indexer's newest page and refuses only a history past its bound (100,000 actions).
+      return 'Your account has more history than this version of Night Market can read (more than 100,000 actions on Midnight), so its balances can no longer be refreshed: they show the last refresh, and new coins will not appear. Nothing is lost: your coins stay on Midnight and your Export keeps the key to them. Keep your Export and ask the market; a later version reads the account again.';
     case 'payload-too-large':
       return 'The request was too large for the market to accept.';
     // AA 00047 P10 (audit round 2, R2-1/R2-2; relay lane P10.R): one request at a time per account,
@@ -60,6 +67,19 @@ export function relayErrorText(e: {
       return `Your account has made as many offers in the last 24 hours as the market allows. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
     case 'cancels-daily-cap':
       return `Your account has cancelled as many times in the last 24 hours as the market pays for. Your open offers still stop working at the expiry you approved; you can cancel again in ${waitText(e.retryAfterSeconds)}. Nothing was sent.`;
+    // AA 00047 P11 (owner decision Q46 A; relay lane P11.R, @nightmarket/core `withdraw-allowance`):
+    // the daily allowance of withdrawals the market pays for. Said only once the market refuses one
+    // for it; `detail` says whether this token's one whole-coin withdrawal of the day is still open.
+    case WITHDRAWS_DAILY_CAP_CODE:
+      return e.detail === WHOLE_COIN_EXIT.open
+        ? `The market pays the network fee for a limited number of withdrawals per account each day, and your account has used today's. Nothing was sent, and your tokens are safe in your account. You can still withdraw one whole coin of this token today (all of it, so nothing is left over), or withdraw as usual again in ${waitText(e.retryAfterSeconds)}.`
+        : `The market pays the network fee for a limited number of withdrawals per account each day. Your account has used today's, and its one extra withdrawal of this token today as well. Nothing was sent, and your tokens are safe in your account. You can withdraw again in ${waitText(e.retryAfterSeconds)}.`;
+    // AA 00047 P11 (relay lane P11.R, R3-7): takes the exchange refused for a reason the market could
+    // not pin on the taker are capped per account and day.
+    case 'takes-unsettled-cap':
+      return `Several of your takes in the last 24 hours could not be settled by the exchange, so the market is pausing new takes from your account. Try again in ${waitText(e.retryAfterSeconds, 'a day')}; your other actions still work, and nothing was sent.`;
+    case 'coin-spent':
+      return COIN_SPENT;
     case 'restores-daily-cap':
       return `Your account's encryption key was restored as many times in the last 24 hours as the market pays for. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
     case 'failure-budget':
@@ -120,6 +140,9 @@ export function jobErrorText(error: { code: string; message: string } | undefine
       return "The market's prover or its connection to Midnight failed while working on this. It does not count against you: try again shortly. Your balances always come from Midnight.";
     case 'failure-budget':
       return 'The market paused this request because several recent requests from this wallet or account failed. Nothing ran; you can send it again later. Withdrawals, cancels and key restores are never paused.';
+    // AA 00047 P11 (relay lane P11.R, R3-7): the coin was spent before anything was proven.
+    case 'coin-spent':
+      return COIN_SPENT;
     case 'demo-tokens-settling':
       return 'An earlier delivery of your demo tokens may still land on Midnight, so the market is not minting them again yet. Refresh in a few minutes; it does not count against you.';
     default:

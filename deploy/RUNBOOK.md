@@ -65,14 +65,21 @@ and `curl`. A TLS reverse proxy (Caddy, nginx, a tunnel) for the public site.
 
 | What | Memory |
 |---|---|
-| Contract prover (rc.8), during a k=18 proof (withdrawals, inbox appends, offers) | peaks near 9.4 GiB; limit `CONTRACT_PROOF_SERVER_MEM_LIMIT=12g` |
+| Contract prover (rc.8), during a k=18 proof (withdrawals, inbox appends, offers) | one proof peaks near 9.4 GiB, but its memory **grows across proofs** (below); limit `CONTRACT_PROOF_SERVER_MEM_LIMIT=14g`, and restart it periodically (section 12.1) |
 | DUST prover (rc.6) | small; limit `DUST_PROOF_SERVER_MEM_LIMIT=4g` |
 | Relay | 1 to 2 GB idle; a proof adds about 0.15 GB (it streams the prover key); limit `RELAY_MEM_LIMIT=8g` |
 | Web | under 50 MB; limit 256 MB |
 | Key job, once | an import needs little; a full compile of the account's 40 circuits up to `KEYS_JOB_MEM_LIMIT=12g` |
 
-Plan for about **20 GB of RAM**. The relay proves one call at a time, so the contract prover never
-needs more than one k=18 proof's memory.
+Plan for about **22 GB of RAM**. The relay proves one call at a time, but rc.8 does not give all of a
+proof's memory back (AA 00047 plan risk R7): on a localnet it reached **11.94 GiB of a 12 GiB cap
+within four proofs of a restart** (P10.I), and a 14 GB cap was hit after about 25 proofs (P9.I). A
+P11.I's run of record reached the 12 GiB cap twice (during the fairness and the caps phases, each a
+dozen proofs after a restart), held there by the kernel's reclaim without a kill. A proof the kernel
+kills fails its job as `market-unavailable` (never charged to the customer, who can
+retry), and Docker restarts the prover. So: **14g, plus a periodic restart when no proof runs**
+(section 12.1). A busy production relay should watch the prover's memory (`docker stats`) for its
+first days and restart more often if it climbs past 12 GiB.
 
 **Disk**: about 20 GB free before the first start. The key volume is 2.2 GB; a full compile needs
 about 12 GB more while it runs (an import of a set built elsewhere, section 5.4, about 2.3 GB).
@@ -179,6 +186,12 @@ Do not give the relay the `.stagenet` seed itself:
   wallet's shielded coins to be its own.
 - **A smaller blast radius**, and **clear accounting**: the dedicated wallet's balance is exactly
   what the market has spent.
+
+**For the production server**, create a NEW wallet for it (section 4.2): not the `.stagenet` wallet,
+and not a wallet a test run or another deployment has used. Size its NIGHT for the DUST section 4.3
+describes and the sponsor's worst case in section 9 (with Q46's allowance, about 125 DUST per account
+per day at margin 20; market-wide the prover lane bounds it to about 1,700 DUST a day), and keep its
+seed file only on that server (mode 600, backed up offline).
 
 ### 4.2 Create it
 
@@ -684,10 +697,21 @@ All commands take `-f deploy/compose.yml`; add `--env-file` if your settings are
 | Status | `docker compose -f deploy/compose.yml ps` |
 | Logs | `docker compose -f deploy/compose.yml logs -f relay` (or `web`, `proof-server-contracts`, `proof-server-dust`, `keys`) |
 | Restart the relay | `docker compose -f deploy/compose.yml restart relay` (the sponsor wallet re-syncs) |
+| Restart the contract prover (periodically, R7) | when `/health` shows no lane running a job: `docker compose -f deploy/compose.yml restart proof-server-contracts` |
 | Stop (keeps volumes) | `docker compose -f deploy/compose.yml stop` |
 | Remove everything, keys and claims included | `docker compose -f deploy/compose.yml down -v` |
 
 **Back up** the sponsor seed file and the `relay-data` volume. The key volume can be rebuilt.
+
+**Restart the contract prover periodically** (plan risk R7: rc.8's memory grows across proofs). Do it
+at a quiet hour, for example every 6 hours from cron, and only when the relay is idle (in `/health`,
+every lane under `queue.lanes` has `running` 0), so no customer's proof is cut off; a cut-off proof fails its job as
+`market-unavailable`, which the failure budget never charges, and the customer can try again:
+
+```sh
+# /etc/cron.d/nightmarket-prover: every 6 h, when the relay runs no job
+0 */6 * * * root cd /srv/nightmarket/app && [ "$(curl -fs http://127.0.0.1:18080/health | grep -o '"running":0' | wc -l)" -eq 3 ] && docker compose -f deploy/compose.yml restart proof-server-contracts
+```
 
 ### 12.2 Upgrade to a new version of this repository
 
@@ -701,6 +725,20 @@ The `keys` job re-verifies. If the new version changed a key input (the Passport
 compiler, the faucet source, the kept keys), it builds again first: stop the relay before, keep the
 disk free (section 2), and run `up keys` attached. Rebuild and restart the web and the relay
 **together** when the token list or the message format changes.
+
+**Round 3 (AA 00047 P11): no rekey; one BREAKING change for a deployment with a
+Content-Security-Policy.** The key set (`21493588…5c5e`), `vendor/passport` (`599327b`) and the web
+build's pinned keys are unchanged, so existing accounts keep working. Deploy together:
+- **BREAKING if you set `WEB_CONTENT_SECURITY_POLICY`**: its `connect-src` must now also name the
+  indexer's **`wss://`** origin (section 16). The page reads an account's history past 500 actions
+  over the indexer's WebSocket; a policy with only the `https://` origin makes such an account's
+  history incomplete (the page says so and counts only what it could confirm). `script-src` keeps
+  `'wasm-unsafe-eval'`.
+- the new relay settings (section 9; `deploy/.env.example`): `WITHDRAWS_DAILY_CAP=100` (owner
+  decision Q46) and `TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY=10`; the relay also reads histories past
+  500 actions over `MIDNIGHT_INDEXER_WS_URL` (the profile's by default: no change unless you moved
+  the indexer);
+- `CONTRACT_PROOF_SERVER_MEM_LIMIT=14g` and the periodic prover restart (section 12.1).
 
 **BREAKING: the round-2 security fix pass** (AA 00047 P10; `vendor/passport` `b2f1847` → `599327b`).
 Every account message's first line is now `Site: <label>` (message format F3 v3, questions Q36), so
@@ -748,7 +786,7 @@ curl -s -H 'content-type: application/json' \
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `proofServer.reachable: false`, `proof-server-contracts` restarting | Out of memory during a k=18 proof | Raise `CONTRACT_PROOF_SERVER_MEM_LIMIT` (at least 12g). |
+| `proofServer.reachable: false`, `proof-server-contracts` restarting | Out of memory during a k=18 proof (rc.8's memory grows across proofs, plan R7) | `CONTRACT_PROOF_SERVER_MEM_LIMIT` at least 14g, and restart the prover periodically (section 12.1). |
 | A job fails with "unrecognised discriminant" | A contract proof went to rc.6 | Check `MIDNIGHT_CONTRACT_PROOF_SERVER_URL` (compose sets it to the rc.8 service). |
 | Fees refused after a stagenet upgrade | The ledger or DUST version moved | Section 12.3. |
 

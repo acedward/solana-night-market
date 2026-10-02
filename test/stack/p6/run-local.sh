@@ -23,6 +23,17 @@
 # every phase (rc.8's memory grows across proofs, plan R7); c2-live.ts adds Q36 at the circuit. Every
 # container has a memory cap (*_MEM_LIMIT, compose.yml); $OUT/mem.log samples the stack's use.
 #
+# AA 00047 P11.I extends it (the round-3 fix pass): every coin, balance and approval the flows check is
+# the PAGE's own (test/stack/p6/page.ts: web/src/passport/operations.ts `syncAccount` decoding the
+# account's whole history in the page); phase 1 adds `origin` and `history` (P11.A's origin reads and
+# the indexer's contractActions subscription, page and relay readers); phase 2 is split in two (2a:
+# `make-x`, `coin-spent`, `plant`, `cancel`, `bomb`; 2b: the refusals, `restore` with Q50, `omitted-spend`)
+# with a fresh contract prover between; phase 4 runs the relay with WITHDRAWS_DAILY_CAP=1
+# (CAP_WITHDRAWS_PER_DAY) for `withdraw-cap`; phase 6 (`large-history`) times a third party's deposits.
+# A THIRD PARTY (test/stack/p6/third-party.ts) uses the localnet's development seed 3 (funded at
+# genesis; neither the sponsor's 1 nor the mock batcher's 2), so the relay keeps running meanwhile.
+# The flows' own container is capped too (FLOWS_MEM_LIMIT, default 4g).
+#
 #   KEYS_DIR=~/.cache/aa-00047/b3-keys RELAY_IMAGE=aa00047-p6/relay:<sha> APP_VOLUME=<check volume> \
 #   OUT=<dir> PS_PARAMS=<dir> PS8_PARAMS=<dir> RELAY_KEYS_FINGERPRINT=<pin> test/stack/p6/run-local.sh
 #
@@ -43,12 +54,16 @@ export PS8_PARAMS="${PS8_PARAMS:?writable proof-server params dir (rc.8)}"
 export INDEXER_IMAGE="${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc.3}"
 export RELAY_KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-}"
 export DEMO_TOKENS_PATH="${DEMO_TOKENS_PATH:-direct}"
-STEPS="${STEPS:-open-a,open-b,demo-a,demo-b,make,take,withdraw}"
-STEPS2="${STEPS2:-withdraw-unshielded,cancel,p10-negatives,restore,expired,p9-negatives,negatives}"
+STEPS="${STEPS:-open-a,open-b,origin,history,demo-a,demo-b,make,take,withdraw}"
+STEPS2="${STEPS2:-withdraw-unshielded,make-x,coin-spent,plant,cancel,bomb}"
+STEPS2B="${STEPS2B-p10-negatives,restore,omitted-spend,expired,p9-negatives,negatives,history}"
 STEPS3="${STEPS3-fairness}"
-STEPS4="${STEPS4-caps}"
+STEPS4="${STEPS4-caps,withdraw-cap}"
 STEPS5="${STEPS5-caps-restore}"
+STEPS6="${STEPS6-large-history}"
 CAPS="${CAPS:-2,3,2,1}"
+# P11.I: the relay's sponsored-withdrawal allowance in the caps phase (Q46; the default is 100).
+CAP_WITHDRAWS_PER_DAY_LOW="${CAP_WITHDRAWS_PER_DAY_LOW:-1}"
 export MAKE_LIFETIME="${MAKE_LIFETIME:-900}"
 FUND_KEYS_DIR="${FUND_KEYS_DIR:-$KEYS_DIR}"
 
@@ -69,7 +84,9 @@ export RUN_DIR
 printf '%064x\n' 1 >"$RUN_DIR/sponsor.seed"
 printf '%064x\n' 2 >"$RUN_DIR/batcher.seed"
 printf '%064x\n' "${FUNDER_SEED_N:-1}" >"$RUN_DIR/funder.seed"
-chmod 600 "$RUN_DIR/sponsor.seed" "$RUN_DIR/batcher.seed" "$RUN_DIR/funder.seed"
+# P11.I: the third party's wallet (development seed 3: funded at genesis, used by nobody else here).
+printf '%064x\n' "${THIRD_PARTY_SEED_N:-3}" >"$RUN_DIR/third.seed"
+chmod 600 "$RUN_DIR/sponsor.seed" "$RUN_DIR/batcher.seed" "$RUN_DIR/funder.seed" "$RUN_DIR/third.seed"
 
 dc() { docker compose -f "$HERE/compose.yml" "$@"; }
 MEM_PID=""
@@ -104,7 +121,7 @@ done
 echo "run-local: stack up"
 
 bun_run() { # <extra docker args...> -- <script>
-  docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" \
+  docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" --memory "${FLOWS_MEM_LIMIT:-4g}" \
     -v "$APP_VOLUME:/app:ro" -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" \
     -w /app "$@"
 }
@@ -117,7 +134,7 @@ bun_run -v "$RUN_DIR:/run/nm" -e FUNDER_SEED_FILE=/run/nm/sponsor.seed "$BUN_IMA
 UCOLOUR="" UFAUCET_ADDR=""
 if [[ -n "${UFAUCET_DIR:-}" ]]; then
   # The mountpoint, created once in the (scratch) app volume: a read-only /app cannot take a new one.
-  docker run --rm -v "$APP_VOLUME:/app" "$BUN_IMAGE" mkdir -p /app/.ufaucet
+  docker run --rm --memory 512m -v "$APP_VOLUME:/app" "$BUN_IMAGE" mkdir -p /app/.ufaucet
   bun_run -v "$RUN_DIR:/run/nm" -v "$UFAUCET_DIR:/app/.ufaucet:ro" -e FUNDER_SEED_FILE=/run/nm/sponsor.seed \
     -e FAUCET_BUNDLE=/app/.ufaucet -e PRIVACY=unshielded -e FAUCETS=utwUSDC:6 "$BUN_IMAGE" \
     bun test/stack/b3/deploy-faucets.ts >"$RUN_DIR/utokens.json" 2>"$OUT/deploy-ufaucet.log"
@@ -156,7 +173,7 @@ fresh_prover() {
   dc logs --no-color proof-server-rc8 2>&1 | tail -100 >"$OUT/proof-server-rc8.before-restart-$1.log"
   dc restart proof-server-rc8 >/dev/null
   for i in $(seq 1 30); do
-    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" "$BUN_IMAGE" bun -e \
+    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" --memory 512m "$BUN_IMAGE" bun -e \
       "const r = await fetch('http://proof-server-rc8:6300/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" \
       >/dev/null 2>&1 && break
     sleep 2
@@ -177,6 +194,9 @@ flows() { # <steps>
     -e NETWORK=undeployed -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out \
     -e KERNEL_URL=http://kernel:9999 -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS="$1" \
     -e MAKE_LIFETIME="$MAKE_LIFETIME" -e CAPS="$CAPS" ${UNSHIELDED_COLOUR:+-e UNSHIELDED_COLOUR="$UNSHIELDED_COLOUR"} \
+    -e THIRD_PARTY_SEED_FILE=/run/nm/third.seed -e CAP_WITHDRAWS_PER_DAY="${CAP_WITHDRAWS_PER_DAY:-100}" \
+    ${LARGE_HISTORY_N:+-e LARGE_HISTORY_N="$LARGE_HISTORY_N"} ${LARGE_HISTORY_BUDGET_S:+-e LARGE_HISTORY_BUDGET_S="$LARGE_HISTORY_BUDGET_S"} \
+    ${LARGE_HISTORY_TARGET:+-e LARGE_HISTORY_TARGET="$LARGE_HISTORY_TARGET"} \
     "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
 }
 if flows "$STEPS"; then
@@ -192,7 +212,7 @@ if [[ "$status" == 0 && -n "$STEPS2" ]]; then
   if [[ "${FUND_UNSHIELDED:-1}" == 1 && -n "$ACCOUNT_A" ]]; then
     # The genesis seed is the relay's sponsor: stop the relay while another process opens it.
     [[ "${FUNDER_SEED_N:-1}" == 1 ]] && dc --profile relay stop relay >/dev/null
-    if docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" -v "$APP_VOLUME:/app:ro" \
+    if docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" --memory "${FLOWS_MEM_LIMIT:-4g}" -v "$APP_VOLUME:/app:ro" \
       -v "$FUND_KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN_DIR:/run/nm:ro" -w /app \
       -e FUNDER_SEED_FILE=/run/nm/funder.seed -e FUND_ACCOUNT="$ACCOUNT_A" -e FUND_AMOUNT="${FUND_UNSHIELDED_AMOUNT:-5000000}" \
       ${UFAUCET_DIR:+-v "$UFAUCET_DIR:/app/.ufaucet:ro" -e MINT_BUNDLE=/app/.ufaucet -e MINT_FAUCET="$UFAUCET_ADDR"} \
@@ -224,6 +244,20 @@ if [[ "$status" == 0 && -n "$STEPS2" ]]; then
   fi
 fi
 
+# P11.I: phase 2b on a fresh contract prover (rc.8's memory grows across proofs, plan R7).
+if [[ "$status" == 0 && -n "$STEPS2B" ]]; then
+  dc --profile relay stop relay >/dev/null
+  fresh_prover phase2b
+  dc --profile relay start relay >/dev/null
+  relay_ready
+  if flows "$STEPS2B"; then
+    echo "run-local: market flows PASS ($STEPS2B)"
+  else
+    echo "run-local: market flows FAILED ($STEPS2B)"
+    status=1
+  fi
+fi
+
 # P10.I, R2-1 on the real relay: the fairness probe on a fresh prover.
 if [[ "$status" == 0 && -n "$STEPS3" ]]; then
   dc --profile relay stop relay >/dev/null
@@ -245,10 +279,11 @@ if [[ "$status" == 0 && -n "$STEPS4" ]]; then
   dc --profile relay stop relay >/dev/null
   fresh_prover phase4
   CAP_OFFERS_MAX_OPEN=$CAP_OFFERS_MAX_OPEN CAP_MAKES_PER_DAY=$CAP_MAKES_PER_DAY \
-    CAP_CANCELS_PER_DAY=$CAP_CANCELS_PER_DAY CAP_RESTORES_PER_DAY=$CAP_RESTORES_PER_DAY relay_recreate phase3
+    CAP_CANCELS_PER_DAY=$CAP_CANCELS_PER_DAY CAP_RESTORES_PER_DAY=$CAP_RESTORES_PER_DAY \
+    CAP_WITHDRAWS_PER_DAY=$CAP_WITHDRAWS_PER_DAY_LOW relay_recreate phase3
   docker inspect "$(dc --profile relay ps -q relay)" --format '{{range .Config.Env}}{{println .}}{{end}}' |
-    grep -E '^(OFFERS_MAX_OPEN|MAKES|CANCELS|RESTORES)_PER' >"$OUT/caps-env.txt" || true
-  if flows "$STEPS4"; then
+    grep -E '^(OFFERS_MAX_OPEN|MAKES|CANCELS|RESTORES|WITHDRAWS)_(PER|DAILY)' >"$OUT/caps-env.txt" || true
+  if CAP_WITHDRAWS_PER_DAY=$CAP_WITHDRAWS_PER_DAY_LOW flows "$STEPS4"; then
     echo "run-local: market flows PASS ($STEPS4)"
   else
     echo "run-local: market flows FAILED ($STEPS4)"
@@ -266,6 +301,20 @@ if [[ "$status" == 0 && -n "$STEPS4" ]]; then
   fi
 fi
 
+# P11.I, R3-5: the large-history phase on a fresh contract prover (a third party's deposits into B).
+if [[ "$status" == 0 && -n "$STEPS6" ]]; then
+  dc --profile relay stop relay >/dev/null
+  fresh_prover phase6
+  dc --profile relay start relay >/dev/null
+  relay_ready
+  if flows "$STEPS6"; then
+    echo "run-local: market flows PASS ($STEPS6)"
+  else
+    echo "run-local: market flows FAILED ($STEPS6)"
+    status=1
+  fi
+fi
+
 # The tampered proof: the relay must be stopped first (the script opens the sponsor wallet itself).
 if [[ "${SKIP_TAMPER:-0}" != 1 ]]; then
   dc --profile relay logs --no-color relay >"$OUT/relay.log" 2>&1 || true
@@ -275,7 +324,7 @@ if [[ "${SKIP_TAMPER:-0}" != 1 ]]; then
   dc logs --no-color proof-server-rc8 2>&1 | tail -400 >"$OUT/proof-server-rc8.before-restart.log"
   dc restart proof-server-rc8 >/dev/null
   for i in $(seq 1 30); do
-    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" "$BUN_IMAGE" bun -e \
+    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" --memory 512m "$BUN_IMAGE" bun -e \
       "const r = await fetch('http://proof-server-rc8:6300/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" \
       >/dev/null 2>&1 && break
     sleep 2

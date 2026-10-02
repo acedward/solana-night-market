@@ -87,7 +87,10 @@ services:
       MIDNIGHT_PP: /proof-params
     volumes:
       - contract-proof-params:/proof-params
-    mem_limit: ${CONTRACT_PROOF_SERVER_MEM_LIMIT:-12g}
+    # 14g (AA 00047 P11.I, plan risk R7): rc.8's memory GROWS across proofs. One k=18 proof peaks
+    # near 9.4 GiB, but after a few proofs it reached 11.94 GiB of a 12 GiB cap (local run, P10.I) and
+    # was killed at 14 GB after about 25 (P9.I). Also restart it periodically (RUNBOOK section 12.1).
+    mem_limit: ${CONTRACT_PROOF_SERVER_MEM_LIMIT:-14g}
     restart: unless-stopped
 
   proof-server-dust:

@@ -26,8 +26,27 @@ unpacks under `/nix/store`):
 
 | Unit | Image | Port | `MIDNIGHT_PP` | `MemoryMax` |
 |---|---|---|---|---|
-| `nightmarket-proof-contracts` | `midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf` | 6300 | `/var/lib/nightmarket/proof-params-rc8` | `12G` (a k=18 Ed25519 proof peaks near 9.4 GiB) |
+| `nightmarket-proof-contracts` | `midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf` | 6300 | `/var/lib/nightmarket/proof-params-rc8` | `14G` (a k=18 Ed25519 proof peaks near 9.4 GiB, and rc.8's memory grows across proofs: below) |
 | `nightmarket-proof-dust` | `midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b` | 6301 | `/var/lib/nightmarket/proof-params-rc6` | `4G` |
+
+**The contract prover's memory grows across proofs** (AA 00047 plan risk R7: 11.94 GiB of a 12 GiB
+cap within four proofs of a restart on a localnet; killed at 14 GB after about 25). Give its unit
+`MemoryMax=14G` and `Restart=always`, and restart it periodically when the relay is idle, with a
+timer (a proof cut off fails its job as `market-unavailable`, never charged to the customer):
+
+```ini
+# /etc/systemd/system/nightmarket-prover-restart.service
+[Service]
+Type=oneshot
+# idle: each of the relay's three lanes (prover, account, relay) reports "running":0 in /health
+ExecStart=/bin/sh -c '[ "$(curl -fs http://127.0.0.1:8080/health | grep -o "\"running\":0" | wc -l)" -eq 3 ] && systemctl restart nightmarket-proof-contracts || true'
+
+# /etc/systemd/system/nightmarket-prover-restart.timer
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+[Install]
+WantedBy=timers.target
+```
 
 The two Nix trees have different store paths; link each binary under its own name
 (`/usr/local/bin/midnight-proof-server-rc8`, `…-rc6`). Neither has a bind option: **firewall 6300
@@ -126,9 +145,26 @@ Exit 78 also covers the demo-token claims store:
 The web build compiles the account's JavaScript with BOTH compilers (the script fetches and checks
 them): `bash scripts/compile-contracts.sh`, then `bun run build:web`. Write `config.json` with the
 network, the relay URL and, for a partner domain, `assets` and `pairs`
-(`{"network":"stagenet","relayUrl":"/relay"}`). The nginx site is unchanged apart from the names.
+(`{"network":"stagenet","relayUrl":"/relay"}`). The nginx site is unchanged apart from the names and
+the **Content-Security-Policy**, which the Docker web image writes from `WEB_CONTENT_SECURITY_POLICY`
+and a native nginx must carry itself (`deploy/RUNBOOK.md` section 16). Its `connect-src` names the
+public indexer with BOTH its `https://` and its `wss://` origin (since AA 00047 P11 the page reads an
+account's history past 500 actions over the indexer's WebSocket), and `script-src` allows
+`'wasm-unsafe-eval'` (the contract runtime and ledger-v9 run as WebAssembly in the page). The tested
+value for stagenet with the same-origin `/relay`:
+
+```nginx
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+```
+
+A relay on another origin and an indexer moved by `config.json` must be added to `connect-src` (the
+indexer with both origins).
 
 ## 7. The sponsor wallet
 
-As in MN Bank's guide (`nightmarket-tool register-dust` with the relay stopped); the DUST it needs
-is in `deploy/RUNBOOK.md` section 4.3.
+A wallet DEDICATED to this server (`deploy/RUNBOOK.md` section 4.1): create a new one for production
+(section 4.2), never the shared `.stagenet` wallet or one a test run used; its seed lives only in
+`/srv/nightmarket/secrets/sponsor.seed` (mode 600, owned by the relay's user, backed up offline).
+Register it for DUST as in MN Bank's guide (`nightmarket-tool register-dust` with the relay stopped);
+the DUST it needs, and the sponsor's worst case per day with Q46's allowance, are in
+`deploy/RUNBOOK.md` sections 4.3 and 9.

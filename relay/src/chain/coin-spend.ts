@@ -14,8 +14,15 @@
 // refused for now (`chain-unavailable`, never charged; it is tried again later), but a WITHDRAWAL goes
 // ahead without the check (`withdrawSpendCheck`): the ledger refuses a double spend anyway, and a
 // customer's funds must always be able to leave.
+//
+// A take is also refused before its proof when the coin it asks to be PAID already exists in the account's
+// history (AA 00047 P11.F2, audit round 4b R4b-1 / F-A4b-1: `want-reused`). The ledger never inserts the
+// same coin commitment twice, so such a take can never settle; P11.F's reconcile even judged its refusal
+// "settled" by the old transaction. No honest page sends one (it draws a fresh want nonce for every
+// signature), so it is the requester's fault, charged to the failure budget although nothing was proven
+// (../actions/failure-budget.ts `PRE_PROOF_REQUESTER_FAULTS`; questions Q63).
 
-import { contractCoinNullifier, type CoinInfo } from '@nightmarket/core';
+import { contractCoinCommitment, contractCoinNullifier, type CoinInfo } from '@nightmarket/core';
 
 import type { AccountTxView } from './indexer.js';
 import { PublicError } from '../queue/jobs.js';
@@ -41,6 +48,13 @@ const coinSpentError = () =>
     'the coin this request spends was already spent on Midnight. Refresh your balances and choose another coin; nothing was proven or sent',
   );
 
+/** A take that asks to be paid a coin the account was already paid once (R4b-1): it can never settle. */
+export const wantReusedError = () =>
+  new PublicError(
+    'want-reused',
+    'this take asks to be paid a coin your account has already received once, so it could never settle. Nothing was proven or sent; take again from the market page, which asks for a new coin every time',
+  );
+
 const chainUnavailable = (e: unknown) =>
   new PublicError(
     'chain-unavailable',
@@ -64,12 +78,17 @@ export async function assertCoinUnspent(reader: SpendReader, account: string, co
 /**
  * `assertCoinUnspent` for a take (AA 00047 P11.F, R4-2), from ONE read of the decoded history when the
  * reader gives it: returns the chain tip that read covers (null when the reader gives no history), so
- * that a refusal at settlement can be judged by the transactions that landed AFTER it.
+ * that a refusal at settlement can be judged by the transactions that landed AFTER it. With `want` (the
+ * coin the take asks to be paid), the same read also refuses a wanted coin the account already received
+ * (`want-reused`, AA 00047 P11.F2, R4b-1), after the spent-coin check (an honest re-send of a take that
+ * landed has its coin spent: `coin-spent`, never `want-reused`). A reader that gives no history checks
+ * the coin only; the refusal is then never judged "settled" either (../trade/executors.ts).
  */
 export async function assertCoinUnspentAt(
   reader: SpendReader,
   account: string,
   coin: CoinInfo,
+  want?: CoinInfo,
 ): Promise<number | null> {
   if (!reader.accountTxs) {
     await assertCoinUnspent(reader, account, coin);
@@ -84,6 +103,10 @@ export async function assertCoinUnspentAt(
   if (!found) return null;
   const nullifier = contractCoinNullifier(coin, account);
   if (found.txs.some((t) => t.inputs.includes(nullifier))) throw coinSpentError();
+  if (want) {
+    const wanted = contractCoinCommitment(want, account);
+    if (found.txs.some((t) => t.outputs.includes(wanted))) throw wantReusedError();
+  }
   return found.tip;
 }
 

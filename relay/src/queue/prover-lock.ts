@@ -25,7 +25,10 @@
 // current waiters, adding each one's expected hold (an average of that action's recent holds, seeded
 // with `defaultHoldSeconds`) after what is left of the holder's. The route refuses a take whose signed
 // deadline the queue cannot reach, before it costs anything (../app.ts, `prover-busy`), and the job
-// view's `position` is the place in that same order.
+// view's `position` is the place in that same order. An expected hold never drops below
+// `holdFloorSeconds` (AA 00047 P11.F2, audit round 4b R4b-3 / F-A4b-3, questions Q64): a few very short
+// holds (a take refused before its proof holds the lane for a moment) would otherwise pull the average
+// down, so that a crowd of takes looked short and a take was admitted only to expire in the queue.
 //
 // The keys are the jobs' fair keys (`account:<address>`, or `action:<name>` without an account,
 // ./jobs.ts). With the route's one-job-per-account rule (../actions/account-gate.ts) a key has at most
@@ -58,6 +61,9 @@ export interface ProverLockOptions {
   burst?: number;
   /** The expected hold of an action never seen yet (seconds; default 60). */
   defaultHoldSeconds?: number;
+  /** The least expected hold of any action, whatever its recent holds (seconds; default
+   *  `DEFAULT_HOLD_FLOOR_SECONDS`, 45: a stagenet take or withdrawal; R4b-3). */
+  holdFloorSeconds?: number;
   /** Keys whose use is remembered (least recently granted forgotten first; default 100,000). */
   maxKeys?: number;
 }
@@ -95,11 +101,16 @@ interface Board {
 
 const EWMA_WEIGHT = 0.3;
 
+/** The default floor under every expected hold (seconds): a take or a withdrawal on stagenet holds the
+ *  lane about 44–45 s (AA 00047 P11.F2, R4b-3; RUNBOOK section 9 `PROVER_JOB_ESTIMATE_FLOOR_SECONDS`). */
+export const DEFAULT_HOLD_FLOOR_SECONDS = 45;
+
 export class ProverLock {
   private readonly nowMs: () => number;
   private readonly windowMs: number;
   private readonly burst: number;
   private readonly defaultHoldMs: number;
+  private readonly holdFloorMs: number;
   private readonly maxKeys: number;
   private holder: { id: string; key: string; action: string; since: number } | null = null;
   private readonly board: Board = {
@@ -121,6 +132,7 @@ export class ProverLock {
     this.windowMs = (options.usageWindowSeconds ?? 3600) * 1000;
     this.burst = Math.max(1, options.burst ?? 4);
     this.defaultHoldMs = (options.defaultHoldSeconds ?? 60) * 1000;
+    this.holdFloorMs = Math.max(0, options.holdFloorSeconds ?? DEFAULT_HOLD_FLOOR_SECONDS) * 1000;
     this.maxKeys = options.maxKeys ?? 100_000;
   }
 
@@ -191,9 +203,10 @@ export class ProverLock {
     }
   }
 
-  /** The expected hold of `action` (ms). */
+  /** The expected hold of `action` (ms): its moving average (the seed until measured), never below the
+   *  floor (R4b-3). */
   expectedHoldMs(action: string): number {
-    return this.holds.get(action) ?? this.defaultHoldMs;
+    return Math.max(this.holdFloorMs, this.holds.get(action) ?? this.defaultHoldMs);
   }
 
   /** Grants of `key` in the usage window (for operators and tests). */

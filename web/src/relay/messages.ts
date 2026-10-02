@@ -148,6 +148,10 @@ export function jobErrorText(error: { code: string; message: string } | undefine
     // AA 00047 P11 (relay lane P11.R, R3-7): the coin was spent before anything was proven.
     case 'coin-spent':
       return COIN_SPENT;
+    // AA 00047 P11.F2 (audit round 4b R4b-1): a take that asks to be paid a coin the account already
+    // received can never settle. This page never sends one (a new coin every time).
+    case 'want-reused':
+      return 'This take asked to be paid a coin your account has already received once, so it could never settle. Nothing was proven or sent, and it counts as a failed request. Take again from this page: it asks for a new coin every time.';
     // AA 00047 P11.F (R4-2): the account's own offer was taken while this take was settling.
     case 'take-raced':
       return 'One of your own offers was taken at the same moment, so this take could no longer settle. It does not count against you: refresh your balances and take again.';

@@ -24,6 +24,8 @@ import {
   type StoredCoin,
   type TokenRegistry,
   type UnshieldedBalancesView,
+  WHOLE_COIN_EXIT,
+  WITHDRAWS_DAILY_CAP_CODE,
 } from '@nightmarket/core';
 import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
@@ -601,7 +603,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       try {
         r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
       } catch (err) {
-        if (err instanceof RelayError && err.code === 'withdraws-daily-cap' && err.detail === 'whole-coin-exit')
+        if (err instanceof RelayError && err.code === WITHDRAWS_DAILY_CAP_CODE && err.detail === WHOLE_COIN_EXIT.open)
           setExitOffer({ color, recipient });
         throw err;
       }

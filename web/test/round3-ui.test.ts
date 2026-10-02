@@ -7,7 +7,7 @@
 //   - R3-10: a check that fails only because the indexer does not show the deploy yet is a read error
 //     (actions wait, it is read again), never a refusal.
 
-import { registryFor, type StoredCoin } from '@nightmarket/core';
+import { WHOLE_COIN_EXIT, WITHDRAWS_DAILY_CAP_CODE, registryFor, type StoredCoin } from '@nightmarket/core';
 import { restoreEncKeyRequest } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
@@ -18,6 +18,11 @@ import { relayErrorText } from '../src/relay/messages.js';
 import { signFacts } from '../src/wallet/sign-facts.js';
 
 describe('Q46: the allowance in plain words, only from the relay’s refusal', () => {
+  it('uses the relay’s wire contract (P11.R, @nightmarket/core withdraw-allowance)', () => {
+    expect(WITHDRAWS_DAILY_CAP_CODE).toBe('withdraws-daily-cap');
+    expect(WHOLE_COIN_EXIT).toEqual({ open: 'whole-coin-exit', used: 'whole-coin-exit-used' });
+  });
+
   const refusal = (detail: string | undefined, retryAfterSeconds: number | null) =>
     relayErrorText({
       status: 429,

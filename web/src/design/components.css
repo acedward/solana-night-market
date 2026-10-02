@@ -1887,6 +1887,38 @@
   box-shadow: inset 0 0 0 1px rgb(139 92 246 / 40%);
 }
 
+/* The About page's known limitations (AA 00047 P11.D): a plain list, each item a bold lead-in. */
+.about-limits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.about-limits li {
+  position: relative;
+  padding: 10px 0 10px 20px;
+  border-top: 1px solid var(--border);
+  color: var(--slate);
+  font-size: var(--text-md);
+  max-width: 90ch;
+}
+.about-limits li:first-child {
+  border-top: 0;
+}
+.about-limits li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: calc(10px + 0.55em);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--violet);
+}
+.about-limits li strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 /* ── Trade ─────────────────────────────────────────────────────────── */
 .pair-bar {
   display: flex;

@@ -1,6 +1,7 @@
 // The frame every page sits in (AA 00047 P8.1, spec FR-006b): a wallet-first header (the Night
 // Market mark and name, the network, the sections, and the wallet on the right), and a short
-// testnet footer. On a phone the sections move to a tab bar at the bottom of the screen.
+// testnet footer, which links the About page (#about, AA 00047 P11.D). On a phone the sections move
+// to a tab bar at the bottom of the screen.
 //
 //   <Masthead network={<span className="net-pill">Midnight stagenet</span>}
 //             nav={<TabNav items={SECTIONS} current="markets" />}>
@@ -86,6 +87,11 @@ export function SiteFooter({ networkName = 'Midnight stagenet' }) {
         <p>
           The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night Market
           never sends a Solana transaction, and never asks for your seed phrase or private key.
+        </p>
+        <p>
+          <a href="#about" data-testid="about-link">
+            About Night Market and its known limitations
+          </a>
         </p>
       </div>
     </footer>

@@ -16,12 +16,16 @@
 // keeps only the prover keys the relay uses, so run-local.sh passes a cloned key dir with the
 // account's `deposit_unshielded` prover key added from the full keyed build. Only public values are
 // printed.
+//
+// AA 00047 P11.I K.7: FUND_NETWORK=stagenet (default undeployed) takes the network id and the node and
+// indexer URLs from the stagenet profile (each still overridable), and FUND_FEE_BLOCKS_MARGIN (default
+// 20) sets the funder wallet's fee margin (the stagenet relay's is 5).
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { parseUnshieldedAddress } from '@nightmarket/core';
+import { PROFILES, parseUnshieldedAddress, type NetworkName } from '@nightmarket/core';
 
 import { parseSponsorSeed } from '../../../relay/src/config.js';
 import { createLogger } from '../../../relay/src/log.js';
@@ -41,13 +45,18 @@ const log = createLogger({ level: 'warn' }, { service: 'fund-unshielded' });
 const account = env('FUND_ACCOUNT').replace(/^0x/, '').toLowerCase();
 const colour = env('FUND_COLOUR', '00'.repeat(32)).replace(/^0x/, '').toLowerCase();
 const amount = BigInt(env('FUND_AMOUNT', '5000000'));
-const indexerUrl = env('MIDNIGHT_INDEXER_URL', 'http://indexer:8088/api/v4/graphql');
-const indexerWsUrl = env('MIDNIGHT_INDEXER_WS_URL', 'ws://indexer:8088/api/v4/graphql/ws');
+const network = env('FUND_NETWORK', 'undeployed') as NetworkName;
+const profile = PROFILES[network];
+if (!profile) throw new Error(`unknown FUND_NETWORK ${network}`);
+const networkId = profile.midnightNetworkId;
+const feeBlocksMargin = Number(env('FUND_FEE_BLOCKS_MARGIN', '20'));
+const indexerUrl = env('MIDNIGHT_INDEXER_URL', profile.midnight.indexerUrl);
+const indexerWsUrl = env('MIDNIGHT_INDEXER_WS_URL', profile.midnight.indexerWsUrl);
 
 const seedHex = parseSponsorSeed(readFileSync(env('FUNDER_SEED_FILE'), 'utf8'));
 const runtime = await PassportRuntime.load({
   managedPath: env('MIDNIGHT_MANAGED_PATH', '/app/vendor/passport/contract/contracts/managed'),
-  networkId: 'undeployed',
+  networkId,
   indexerUrl,
   indexerWsUrl,
   contractProofServerUrl: env('MIDNIGHT_CONTRACT_PROOF_SERVER_URL', 'http://proof-server-rc8:6300'),
@@ -56,13 +65,13 @@ const runtime = await PassportRuntime.load({
 const opened = await openFacadeWallet(
   seedHex,
   {
-    networkId: 'undeployed',
+    networkId,
     indexerUrl,
     indexerWsUrl,
-    nodeWsUrl: env('MIDNIGHT_NODE_WS_URL', 'ws://node:9944'),
+    nodeWsUrl: env('MIDNIGHT_NODE_WS_URL', profile.midnight.nodeWsUrl),
     dustProofServerUrl: env('MIDNIGHT_DUST_PROOF_SERVER_URL', 'http://proof-server:6300'),
   },
-  { feeBlocksMargin: 20 },
+  { feeBlocksMargin },
 );
 const handle = opened.handle as Parameters<typeof syncedKeys>[0];
 await syncedKeys(handle);
@@ -124,7 +133,7 @@ try {
     )) as { callTx: { mint(r: unknown, a: bigint): Promise<{ public: { txId: string } }> } };
     const ks = (opened.handle as unknown as { unshieldedKeystore: { getBech32Address(): { asString(): string } } })
       .unshieldedKeystore;
-    const me = parseUnshieldedAddress(ks.getBech32Address().asString(), 'undeployed');
+    const me = parseUnshieldedAddress(ks.getBech32Address().asString(), network);
     const tm = Date.now();
     const m = await faucet.callTx.mint(
       { is_left: false, left: { bytes: new Uint8Array(32) }, right: { bytes: unhex(me) } },

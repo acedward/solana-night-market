@@ -76,6 +76,10 @@
 //   omitted-spend       R3-4 through the page's own withdrawal: the relay reports the landed withdrawal
 //                       failed, a read that leaves its spend out keeps the change record, the chain
 //                       confirms it
+//   restore-refusals    (P11.I K.7, stagenet) the restore's refusals only, no transaction: a restore to a
+//                       key that is not the opening key, and one to the key already on chain, are refused
+//                       before any proof; the site still accepts A (the full `restore` needs a third party
+//                       that proves and pays the hostile key change itself)
 //   withdraw-cap        Q46 through the page's own withdrawal (relay with WITHDRAWS_DAILY_CAP=1): 429
 //                       `withdraws-daily-cap` + `whole-coin-exit`, the whole-coin exit of the SAME coin
 //                       lands and the refused one's record drops, then `whole-coin-exit-used`
@@ -1888,6 +1892,45 @@ async function restoreStep() {
   if (!out.balancesUnchanged) throw new Error('the balances changed across the key restore');
 }
 
+/** AA 00047 P11.I K.7 (stagenet): the restore's two refusals, no transaction. A restore to a key that is
+ *  not the account's opening key (Q50) and a restore to the key already on chain (a cancel in disguise)
+ *  are both refused before any proof; the key, the nonce and the site's verdict are unchanged. */
+async function restoreRefusals() {
+  step('restore-refusals (Q50): restores to a non-opening key and to the on-chain key are refused; nothing is sent');
+  const account = state.A.account!;
+  const out: Record<string, unknown> = { checkBefore: await siteCheck('A') };
+  put('restoreRefusals', out);
+  if (!(out.checkBefore as { ok: boolean }).ok)
+    throw new Error('the site does not accept A before the restore refusals');
+  const before = (await siteChain.accountState(account))!;
+  const away = bytesToHex(generateEncKeyPairPortable().publicKey);
+  out.notTheOpeningKey = await restoreTo('A', away, 'a restore to a key that is not the opening key');
+  const n = out.notTheOpeningKey as { admission: Reply; walletSaysRotate: boolean };
+  out.notTheOpeningKeyRefused =
+    n.admission.status === 401 && (n.admission.code === 'malformed' || n.admission.detail === 'malformed');
+  const view = (await siteChain.accountState(account))!;
+  const same = { newKey: view.encKey, authNonce: view.authNonce };
+  const sameAuth = await W.A.device.sign(ctxOf(view), restoreEncKeyRequest(same), useCounter('A', view));
+  out.restoreToTheSameKey = reply(
+    await post('restore-enc-key', { account, payload: same, passportAuth: passportAuthOf(sameAuth) }),
+  );
+  await sleepMs(6_000);
+  const after = (await siteChain.accountState(account))!;
+  out.unchanged = {
+    encKey: after.encKey === before.encKey && after.encKey === state.A.encPublic,
+    authNonce: after.authNonce === before.authNonce,
+  };
+  out.checkAfter = await siteCheck('A');
+  say(`restore refusals: ${json(out)}`);
+  put('restoreRefusals', out);
+  if (!out.notTheOpeningKeyRefused || !n.walletSaysRotate)
+    throw new Error(`a restore to a non-opening key was not refused: ${json(n)}`);
+  if ((out.restoreToTheSameKey as Reply).status === 202) throw new Error('a restore to the on-chain key was admitted');
+  const u = out.unchanged as { encKey: boolean; authNonce: boolean };
+  if (!u.encKey || !u.authNonce || !(out.checkAfter as { ok: boolean }).ok)
+    throw new Error(`the account changed across refused restores: ${json(out)}`);
+}
+
 /** A valid signature by `who` over `bytes` (the wallet signs whatever it is shown). */
 function signBytes(who: 'A' | 'B', bytes: Uint8Array, counter: bigint) {
   const kp = nacl.sign.keyPair.fromSeed(hexToBytes(state[who].seed, 32));
@@ -3032,6 +3075,9 @@ async function main() {
         break;
       case 'restore':
         await restoreStep();
+        break;
+      case 'restore-refusals':
+        await restoreRefusals();
         break;
       case 'p10-negatives':
         await p10Negatives();

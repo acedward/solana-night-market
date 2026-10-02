@@ -47,7 +47,7 @@ describe('the relay’s refusals, in words', () => {
     expect(t('busy', { status: 503 })).toMatch(/at capacity/);
     // Q27: a known limit, not an outage; it does not say "try again shortly".
     const history = t('history-too-long', { status: 501 });
-    expect(history).toMatch(/more history than this version of Night Market can read \(500 or more actions/);
+    expect(history).toMatch(/more history than this version of Night Market can read \(more than 100,000 actions/);
     expect(history).toMatch(/Nothing is lost/);
     expect(history).not.toMatch(/try again shortly/i);
     expect(history).not.toBe(t('chain-unavailable', { status: 503 }));

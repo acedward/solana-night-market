@@ -9,6 +9,7 @@ import { bytesToHex } from '@nightmarket/core';
 import { networkSaltFor } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
+import { originIndexer } from '../../packages/core/test/fixtures/account-origin.js';
 import { accountStateHex } from '../../packages/core/test/fixtures/account-state.js';
 import { zswapInputEventHex, zswapOutputEventHex } from '../../packages/core/test/fixtures/ledger-events.js';
 import { ChainReadError, ChainReader, indexerWsUrlFor, indexerWsUrlOf } from '../src/chain/indexer.js';
@@ -41,7 +42,17 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
       authNonce: 2n,
       useCounter: 2n,
     });
-    const { calls, fetchImpl } = stubIndexer(() => ({ data: { contract: { state }, block: { height: 77 } } }));
+    // Its origin (AA 00047 P11, R3-1): an honest deploy and retirement, as the market's relay does.
+    const origin = await originIndexer({
+      account: ACCOUNT,
+      deviceKey: DEVICE,
+      encKey: ENC,
+      salt: networkSaltFor('stagenet'),
+    });
+    const { calls, fetchImpl } = stubIndexer((b) => {
+      const o = origin.answer(b.query, b.variables);
+      return o !== undefined ? { data: o } : { data: { contract: { state }, block: { height: 77 } } };
+    });
     const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
     const { state: s, check } = await chain.checkAccount(`0x${ACCOUNT.toUpperCase()}`, {
       deviceKey: DEVICE,
@@ -49,43 +60,43 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
     });
     expect(check).toEqual({ ok: true, problems: [], useCounter: 2n });
     expect(s?.blockHeight).toBe(77);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(3); // the state, then the origin: its deploy and update, its window
     expect(calls[0]!.url).toBe(URL_);
     expect(calls[0]!.body.query).toMatch(/contract\(address: \$address\) \{ state \}/);
     expect(calls[0]!.body.variables).toEqual({ address: ACCOUNT });
-    // Another network's page refuses the same account.
+    // Another network's page refuses the same account: its salt, and an origin it did not create.
     const other = new ChainReader({ indexerUrl: URL_, networkId: 'undeployed', fetchImpl });
     const r = await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC });
-    expect(r.check.problems.map((p) => p.code)).toEqual(['network-salt']);
+    expect(r.check.problems.map((p) => p.code)).toEqual(['network-salt', 'provenance']);
   });
 
   // AA 00047 P10 (R2-6, questions Q42): a just-opened account must start empty AS DEPLOYED: the page
-  // reads its state at the deploy's block, so a deposit by anyone since does not get it refused.
-  it('checks a fresh account’s emptiness on its deploy-time state, read once', async () => {
+  // judges the state its deploy TRANSACTION created (AA 00047 P11: part of its origin, read once per
+  // page, on every check), so a deposit by anyone since does not get it refused.
+  it('checks an account’s emptiness on its deploy-time state, read once per page', async () => {
     const base = { account: ACCOUNT, deviceKey: DEVICE, encKey: ENC, salt: networkSaltFor('stagenet') };
     const now = await accountStateHex({ ...base, inbox: ['ab'.repeat(192)] }); // someone deposited since
-    let asDeployed = await accountStateHex({ ...base, noDevice: true, booted: false });
+    let origin = await originIndexer(base);
     const { calls, fetchImpl } = stubIndexer((b) => {
-      if (b.query.includes('type: DEPLOY'))
-        return { data: { contract: { actions: [{ transaction: { block: { height: 41 } } }] } } };
-      if (b.query.includes('offset: { height')) return { data: { contract: { state: asDeployed } } };
-      return { data: { contract: { state: now }, block: { height: 77 } } };
+      const o = origin.answer(b.query, b.variables);
+      return o !== undefined ? { data: o } : { data: { contract: { state: now }, block: { height: 77 } } };
     });
     const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
     const ok = await chain.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
     expect(ok.check).toEqual({ ok: true, problems: [], useCounter: 0n });
-    expect(calls.map((c) => c.body.variables)).toContainEqual({ address: ACCOUNT, height: 41 });
-    // Not fresh: the deploy is not read.
-    const n = calls.length;
+    const originReads = () => calls.filter((c) => c.body.query.includes('AccountOrigin(')).length;
+    expect(originReads()).toBe(1);
+    // Not fresh, again: the origin is known, not read again.
     await chain.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC });
-    expect(calls).toHaveLength(n + 1);
-    // Seeded at the deploy (the relay's doing): refused. (Another reader: the deploy state is kept.)
-    asDeployed = await accountStateHex({ ...base, noDevice: true, booted: false, inbox: ['cd'.repeat(192)] });
+    expect(originReads()).toBe(1);
+    // Seeded at the deploy (the relay's doing): refused, fresh or not. (Another reader.)
+    origin = await originIndexer({ ...base, deploy: { inbox: ['cd'.repeat(192)] } });
     const other = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
     const seeded = await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
     expect(seeded.check.problems.map((p) => p.code)).toEqual(['not-empty']);
-    await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC, fresh: true });
-    expect(calls.filter((c) => c.body.query.includes('type: DEPLOY'))).toHaveLength(2); // once per reader
+    const later = await other.checkAccount(ACCOUNT, { deviceKey: DEVICE, encPublicKey: ENC });
+    expect(later.check.problems.map((p) => p.code)).toEqual(['not-empty']);
+    expect(originReads()).toBe(2); // once per reader
   });
 
   it('shares reads already on their way, and reads again after', async () => {

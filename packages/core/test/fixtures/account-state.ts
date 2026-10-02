@@ -78,6 +78,10 @@ export interface AccountStateSpec {
   operations?: Readonly<Record<string, string>>;
   /** The maintenance authority; default retired (no committee, threshold 1). */
   authority?: { committee: number; threshold: number };
+  /** The `round` counter (AA 00047 P11, R3-1: what a deployer could set near 2^64); default 0. */
+  round?: bigint;
+  /** The constructor's boot commitment (64 hex); default a fixed test value. */
+  boot?: string;
 }
 
 const witnesses = new Proxy(
@@ -115,7 +119,7 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
     }
   ).initialState(
     createConstructorContext({}, COIN_PK),
-    det('boot'),
+    spec.boot ? hexToBytes(spec.boot, 32) : det('boot'),
     hexToBytes(spec.encKey, 32),
     hexToBytes(spec.salt, 32),
     { bytes: new Uint8Array(32) },
@@ -154,6 +158,7 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
   set(8, StateValue.newCell(uintLike(base[8]!.asCell(), BigInt(devices.length))));
   set(9, StateValue.newCell(uintLike(base[9]!.asCell(), spec.authNonce ?? 0n)));
   set(11, StateValue.newCell(aligned(CompactTypeBoolean, spec.booted ?? !spec.noDevice)));
+  if (spec.round !== undefined) set(0, StateValue.newCell(aligned(u64, spec.round)));
   let data = StateValue.newArray();
   for (const c of cells) data = data.arrayPush(c);
 
@@ -175,6 +180,7 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
   // Read it back through the compiled account's own ledger(): the layout above must be the module's.
   const l = ledger(cs.data);
   const back = {
+    round: l.round,
     booted: l.booted,
     auth_nonce: l.auth_nonce,
     device_count: l.device_count,
@@ -185,6 +191,7 @@ export async function accountContractState(spec: AccountStateSpec): Promise<Cont
     devices: [...l.devices].map((d) => bytesToHex(d)).sort(),
   };
   const want = {
+    round: spec.round ?? 0n,
     booted: spec.booted ?? !spec.noDevice,
     auth_nonce: spec.authNonce ?? 0n,
     device_count: BigInt(devices.length),

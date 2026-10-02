@@ -309,6 +309,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     secret?.encPublicKey ?? null,
     revision,
     (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
+    account?.txs?.waveOne ?? null,
   );
   const trades = useMemo(
     () => (store && scope && account ? readTrades(store, scope, account.address) : []),

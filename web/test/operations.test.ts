@@ -233,7 +233,7 @@ describe('openAccount (L-ACC.1)', () => {
     const rec = await openAccount(e);
     const secret = readSecret(e.store, e.scope, ACCOUNT)!;
     expect(chain.expectations).toEqual([
-      { deviceKey: signing.deviceKey, encPublicKey: secret.encPublicKey, fresh: true },
+      { deviceKey: signing.deviceKey, encPublicKey: secret.encPublicKey, fresh: true, deployTx: null },
     ]);
     expect(chain.reads).toContain(`state:${ACCOUNT}`);
     // The record names THIS wallet as the device, whatever the relay reported.

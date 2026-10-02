@@ -131,6 +131,11 @@ export class MockRelay {
   readonly refused: string[] = [];
   deviceKey: string | null = null;
   encKey: string | null = null;
+  /** The encryption key the account was CREATED with (its deploy-time state; AA 00047 P11, R3-1):
+   *  a later key change (`encKey`) never changes it. */
+  deployEncKey: string | null = null;
+  /** The registration's transactions, as reported to the page (`txs.waveOne` is the deploy). */
+  registerTxs: { waveOne: string; waveTwo: string; activation: string } | null = null;
   registered = false;
   /** The account's network salt: the stagenet one, as every market account on stagenet carries. */
   readonly salt = networkSaltFor('stagenet');
@@ -150,8 +155,9 @@ export class MockRelay {
   settleOnCancel = false;
   /** Someone deposits a real one-unit coin into the new account right after its deploy (R2-6, Q42). */
   depositAfterDeploy = false;
-  /** Refuse the next action request as P10.R's relay does (HTTP status, code, Retry-After). */
-  refuseNext: { status: number; code: string; message: string; retryAfter?: number } | null = null;
+  /** Refuse the next action request as P10.R's relay does (HTTP status, code, Retry-After; P11.R's
+   *  `withdraws-daily-cap` also carries a `detail`). */
+  refuseNext: { status: number; code: string; message: string; retryAfter?: number; detail?: string } | null = null;
   /** Fail the next job with this public error (P10.R's job codes, e.g. `market-unavailable`). */
   failNextJob: { code: string; message: string } | null = null;
   /** The `validUntil` of every make and take, as signed. */
@@ -207,6 +213,7 @@ export class MockRelay {
   existing(deviceKey: string, encKey: string) {
     this.deviceKey = deviceKey;
     this.encKey = encKey;
+    this.deployEncKey = encKey;
     this.registered = true;
     return this;
   }
@@ -450,6 +457,7 @@ export class MockRelay {
     switch (s.action) {
       case 'register': {
         this.encKey = p.encPublicKey!;
+        this.deployEncKey = p.encPublicKey!;
         this.registered = true;
         if (this.depositAfterDeploy)
           await this.deposit([{ nonce: '5d'.repeat(32), color: COLOUR.twUSDC, value: 1n }], this.nextTx());
@@ -457,10 +465,11 @@ export class MockRelay {
         this.authNonce = 0n;
         this.useCounter = 0n;
         s.stages = ['deploying', 'wave-1-submitted', 'wave-2-submitted', 'activating', 'activated'];
+        this.registerTxs = { waveOne: this.nextTx(), waveTwo: this.nextTx(), activation: tx };
         s.result = {
           account: ACCOUNT,
           device: this.deviceKey,
-          txs: { waveOne: this.nextTx(), waveTwo: this.nextTx(), activation: tx },
+          txs: this.registerTxs,
           seconds: { waveOne: 20, waveTwo: 18, activation: 15, total: 53 },
         };
         return;
@@ -759,7 +768,9 @@ export class MockRelay {
           ...(r.retryAfter ? { 'retry-after': String(r.retryAfter) } : {}),
         },
         contentType: 'application/json',
-        body: JSON.stringify({ error: { code: r.code, message: r.message } }),
+        body: JSON.stringify({
+          error: { code: r.code, message: r.message, ...(r.detail ? { detail: r.detail } : {}) },
+        }),
       });
     }
     if (action && req.method() === 'POST') {

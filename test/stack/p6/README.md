@@ -69,3 +69,17 @@ Key set `21493588…`, passport `599327b` (message format F3 v3: the first line 
 - **R2-1 caps** (`CAPS=2,3,2,1`): `account-busy`, `open-offers-cap`, `makes-daily-cap`, `cancels-daily-cap` and `restores-daily-cap`, each exactly one request past its cap; a relay restart resets them.
 - **SC-002**: a tampered proof gets `InvalidProof`; C2 is refused by the circuit; every P9 and P6 refusal holds.
 - The contract prover peaked at 11.94 GiB under a 12 GiB cap (one-minute samples), with no OOM.
+
+## Results after the round-3 fix pass (P11.I, 2026-10-02)
+
+Key set `21493588…` and passport `599327b` unchanged (no rekey); the relay image built from the integration branch. One local run, every phase, exit 0. Every coin, balance, pending record and approval state below is the PAGE's own (`page.ts`: the web build's `syncAccount` and `reconcileOffers` decoding the account's history with ledger-v9); the relay's coin report is never read.
+
+- **Flows**: two new accounts pass the page's opening check (now with the account's origin: the deploy's state equals the constructor's run in the page, nothing written before the authority retired). The localnet indexer serves the origin reads and the `contractActions` subscription (the page's and the relay's readers, pages forced to 2 actions, equal the HTTP read). A make taken through the mock exchange shows **Filled on both accounts from the decoded swap transaction**; withdrawals, cancel, expired offer as before.
+- **R3-1**: auditor A's `round` time bomb, deployed for real through the client's wave deploy and activated by a third party, is refused by the page with `counters` and `provenance`.
+- **R3-2 / Q46** (relay at `WITHDRAWS_DAILY_CAP=1`): the page's own withdrawals get `429 withdraws-daily-cap` with `whole-coin-exit`, the whole-coin exit of the same coin lands, the refused withdrawal's pending change drops, and the next try gets `whole-coin-exit-used`.
+- **R3-3 / R3-6**: a counterfeit note on a 1-unit deposit claiming an offer's wanted coin counts in no balance; the offer's REAL wanted coin deposited by someone else counts exactly once and never makes the offer Filled; after the cancel the page says Cancelled.
+- **R3-4**: a withdrawal the relay landed and reported failed keeps its pending change record, also through a read that leaves its spend out, until the chain confirms it.
+- **R3-7**: a take paid from an already-spent coin fails `coin-spent` before any proof.
+- **R3-9 / Q50**: a restore to a key that is not the opening key is refused (401 `malformed`); after a hostile page's own key change, "Restore my encryption key" lands the opening key.
+- **R3-5**: 20 third-party deposits took 21.9 s each, so a live history past 500 actions would take about 3 hours; the subscription path ran live with small pages, and the lanes' fixtures cover 600 to 1,800 actions.
+- Every P10, P9 and P6 refusal holds; a tampered proof gets `InvalidProof`; C2 and Q36 are refused by the circuit. The contract prover reached its 12 GiB cap twice without an OOM kill (deploy: 14g and a periodic restart).

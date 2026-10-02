@@ -74,7 +74,9 @@ and `curl`. A TLS reverse proxy (Caddy, nginx, a tunnel) for the public site.
 Plan for about **22 GB of RAM**. The relay proves one call at a time, but rc.8 does not give all of a
 proof's memory back (AA 00047 plan risk R7): on a localnet it reached **11.94 GiB of a 12 GiB cap
 within four proofs of a restart** (P10.I), and a 14 GB cap was hit after about 25 proofs (P9.I). A
-proof the kernel kills fails its job as `market-unavailable` (never charged to the customer, who can
+P11.I's run of record reached the 12 GiB cap twice (during the fairness and the caps phases, each a
+dozen proofs after a restart), held there by the kernel's reclaim without a kill. A proof the kernel
+kills fails its job as `market-unavailable` (never charged to the customer, who can
 retry), and Docker restarts the prover. So: **14g, plus a periodic restart when no proof runs**
 (section 12.1). A busy production relay should watch the prover's memory (`docker stats`) for its
 first days and restart more often if it climbs past 12 GiB.

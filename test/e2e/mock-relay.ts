@@ -724,7 +724,10 @@ export class MockRelay {
         this.zswapReads += 1;
         if (this.zswapHistoryTooLong)
           return json(501, {
-            error: { code: 'history-too-long', message: 'the account has 500 or more actions; paging is not implemented' },
+            error: {
+              code: 'history-too-long',
+              message: 'the account has 500 or more actions; paging is not implemented',
+            },
           });
         return json(200, {
           account: ACCOUNT,

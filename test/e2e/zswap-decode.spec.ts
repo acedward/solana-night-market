@@ -297,6 +297,51 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     expect(relay.zswapReads).toBe(0);
   });
 
+  // Reported by P11.A (coordinator, 2026-10-02): a withdrawal refused for Q46's allowance left its
+  // pending change; the whole-coin exit then spent the same coin; the change stayed "pending" for ever.
+  test('R3-4: after a refused withdrawal, the whole-coin exit of the same coin leaves no change pending for ever', async ({
+    page,
+  }) => {
+    const { relay } = await setup(page, { seeded: true });
+    await page.goto('/#account');
+    await connectPhantom(page);
+    await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
+    await page.getByTestId('withdraw-kind-shielded').click();
+    await page.getByTestId('send-token').selectOption(COLOUR.twUSDC);
+    await page.getByTestId('send-amount').fill('100');
+    await page
+      .getByTestId('send-recipient')
+      .fill(
+        formatShieldedAddress({ coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) }, 'stagenet'),
+      );
+    relay.refuseNext = {
+      status: 429,
+      code: 'withdraws-daily-cap',
+      message: 'this account has used its 100 sponsored withdrawals in the last 24 hours',
+      detail: 'whole-coin-exit',
+      retryAfter: 7200,
+    };
+    await page.getByTestId('send-submit').click();
+    await page.getByTestId('whole-coin-exit').getByTestId('whole-coin-exit-coin').click();
+    await expect(page.getByTestId('accounts-message')).toContainText('Sent');
+    await page.reload();
+    await connectPhantom(page);
+    // Once the page has walked the account (the twBTC row is its), the 1,000 coin is spent (decoded) and
+    // the refused withdrawal's 900 of change is no longer pending, nor kept anywhere.
+    await expect(portfolioRow(page, 'twBTC')).toContainText('0.10');
+    await expect(portfolioRow(page, 'twUSDC')).toHaveCount(0);
+    await expect(page.getByTestId('pending-box')).toBeVisible();
+    await expect(page.getByTestId('pending-change')).toHaveCount(0);
+    const stored = await page.evaluate(() =>
+      Object.entries(localStorage)
+        .filter(([k]) => k.includes('coins'))
+        .map(([, v]) => v)
+        .join(''),
+    );
+    expect(stored).toContain('"value":"1000000000"'); // the walk wrote the list
+    expect(stored).not.toContain('"pending"');
+  });
+
   test('R3-6: a real coin someone deposits with the offer’s wanted nonce never makes the cancelled offer Filled', async ({
     page,
   }) => {

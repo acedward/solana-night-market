@@ -56,7 +56,7 @@ import {
 } from '../src/passport/operations.js';
 import { claimDemoTokens, claimState, packText } from '../src/demo/operations.js';
 import { readCoins, readRoster, readSecret } from '../src/passport/records.js';
-import type { RelayClient } from '../src/relay/client.js';
+import { RelayError, type RelayClient } from '../src/relay/client.js';
 import { MAX_IMPORT_READ_BYTES, recordKey } from '../src/store/schema.js';
 import { LocalStore } from '../src/store/store.js';
 import { FakeChain } from './fake-chain.js';
@@ -941,6 +941,48 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const r = await syncAccount(e, ACCOUNT);
     expect(r.coins.some((c) => c.commitment === out.change!.commitment)).toBe(false);
     expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: true, spentTx: 'other' });
+  });
+
+  // Reported by P11.A (coordinator, 2026-10-02): a withdrawal the relay refuses with 429 (Q46's
+  // `withdraws-daily-cap`) leaves its pending change record; the whole-coin exit then spends the SAME
+  // coin with no change. The record must not stay pending for ever: the decoded spend resolves it.
+  it('R3-4: a refused (429) withdrawal’s record is dropped once the whole-coin exit spends the same coin', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    const submit = relay.submit.bind(relay);
+    relay.submit = async () => {
+      relay.submit = submit;
+      throw new RelayError(429, 'withdraws-daily-cap', 'The daily withdrawal allowance is used up.');
+    };
+    await expect(
+      withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) }),
+    ).rejects.toBeInstanceOf(RelayError);
+    const forty = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    const stale = predictWithdrawChange(forty, 30_000_000n)!;
+    const staleCommitment = contractCoinCommitment(stale, ACCOUNT);
+    // Written before the request: pending, and the 40 is not set aside (nothing was sent).
+    expect(readCoins(e.store, e.scope, ACCOUNT).find((c) => c.commitment === staleCommitment)?.pending).toMatchObject({
+      authNonce: '7',
+    });
+    expect(readCoins(e.store, e.scope, ACCOUNT).find((c) => c.value === '40000000')).toMatchObject({ spent: false });
+    // The whole-coin exit: the same 40, all of it, no change (a wallet's coin, not the account's).
+    relay.results.withdraw = { txId: 'exit', change: null };
+    relay.afterJob.withdraw = () => {
+      relay.zswapActivity.inputs.push({
+        nullifier: contractCoinNullifier(forty, ACCOUNT),
+        txHash: 'exit',
+        blockHeight: 8,
+      });
+      relay.state!.authNonce = '8';
+    };
+    const exit = await withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 40_000_000n, recipient: '44'.repeat(32) });
+    expect(exit.change).toBeNull();
+    // Even with the rest of the history NOT complete, the decoded spend is positive evidence on its own.
+    (e.chain as FakeChain).complete = false;
+    const r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.some((c) => c.commitment === staleCommitment)).toBe(false); // not pending for ever
+    expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: true, spentTx: 'exit' });
+    expect(holdingsByColour(r.coins)[0]).toMatchObject({ total: 60_000_000n });
   });
 
   // R3-3 / F-B3-2 (confirmed by auditor A's probe `audit-a3-probe-coins`): a note with the same colour

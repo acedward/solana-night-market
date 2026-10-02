@@ -48,8 +48,12 @@ Go through it before the market goes on a production server; each item names its
   registrations 100 a day, 3 per client address, 1 at a time; per account 1 job at a time, 3 open
   offers, 20 makes, 5 cancels, 3 key restores, 100 withdrawals (then one whole-coin exit per
   token), 20 change re-filings and 10 unsettled takes a day; 5 failures a day per key and per
-  account; 100 demo-token claims a day; fee margin 20; low DUST at 10. They live in memory: a relay
-  restart resets them. Copy any setting a newer release adds to `.env.example`.
+  account; 100 demo-token claims a day; fee margin 20; low DUST at 10; the prover lane's order
+  (takes, then makes, then the rest: `PROVER_PRIORITY_BURST` 4, `PROVER_USAGE_WINDOW_SECONDS` 3600,
+  `PROVER_JOB_ESTIMATE_SECONDS` 60) and the 5-minute pause after the exchange's 429
+  (`BATCHER_BUSY_COOLDOWN_SECONDS` 300); `TAKE_MAX_LIFETIME_SECONDS` 600 (the page signs takes for
+  600 s: never lower it). They live in memory: a relay restart resets them. Copy any setting a newer
+  release adds to `.env.example`.
 - [ ] **Backups** (7, 12.1): the sponsor seed file, and the `relay-data` volume (the demo-token
   claims). The key volume can be rebuilt. With the relay idle:
 

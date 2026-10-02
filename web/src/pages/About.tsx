@@ -47,6 +47,11 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: 'To stay open for everyone, the market limits the actions it pays for, per account and per day. If you reach a limit, the page says when you can try again. The counts start over when the market restarts.',
   },
   {
+    id: 'busy-prover',
+    title: 'One prover for the whole market.',
+    text: "Every action waits its turn on the market's one prover. Trades go first, and a trade that could not start before the expiry you approved is refused at once, so you can approve it again. When many accounts keep the prover busy, a withdrawal or a cancel can wait a few minutes; when the exchange stops taking settlements for the day, trades pause for a few minutes.",
+  },
+  {
     id: 'restarts',
     title: 'Restarts.',
     text: "The market's prover is restarted from time to time. An action caught by a restart fails without counting against you, and you can try again.",

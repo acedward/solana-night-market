@@ -19,6 +19,7 @@ const LIMITS = [
   'long-history',
   'sign-in',
   'fees',
+  'busy-prover',
   'restarts',
   'demo-tokens',
   'one-offer',

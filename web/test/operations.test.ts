@@ -140,7 +140,10 @@ class FakeRelay {
   async inbox(): Promise<InboxPage> {
     throw new Error('the page must not read the inbox from the relay');
   }
+  /** How often the page asked for the relay's Zswap report (AA 00047 P11.B: never). */
+  zswapReads = 0;
   async zswap() {
+    this.zswapReads += 1;
     return this.zswapActivity;
   }
 }
@@ -492,7 +495,8 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const chain = e.chain as FakeChain;
     // The relay's own account reads throw (FakeRelay above): the walk and the call still work.
     await syncAccount(e, ACCOUNT);
-    expect(chain.reads).toEqual([`state:${ACCOUNT}`, `txs:${ACCOUNT}`]);
+    expect(chain.reads).toEqual([`state:${ACCOUNT}`, `history:${ACCOUNT}`]);
+    expect(relay.zswapReads).toBe(0); // the relay's Zswap report is not read (AA 00047 P11.B)
     relay.results['withdraw-unshielded'] = { txId: 'wu9' };
     await withdrawUnshieldedToWallet(e, ACCOUNT, {
       color: COLOUR,
@@ -508,27 +512,17 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(chain.expectations.every((x) => x.encPublicKey === secret.encPublicKey && !x.fresh)).toBe(true);
   });
 
-  it('drops coin facts the relay reports but the indexer does not carry (Q31)', async () => {
-    const { e } = await fundedAccount();
+  it('takes every position from the chain’s own history, never from the relay (Q47 A, superseding Q31)', async () => {
+    const { relay, e } = await fundedAccount();
     const chain = e.chain as FakeChain;
-    // The indexer shows only the first output's transaction: the second coin's position is unsupported.
-    chain.txs = [
-      {
-        hash: 'd1',
-        blockHeight: 1,
-        events: [
-          {
-            id: 1,
-            raw: `00${ACCOUNT}${contractCoinCommitment({ nonce: '01'.repeat(32), color: COLOUR, value: '60000000' }, ACCOUNT)}`,
-          },
-        ],
-      },
-    ];
+    // The chain's history does not carry the second coin's leaf (whatever the relay would report).
+    chain.hidden.add(contractCoinCommitment({ nonce: '02'.repeat(32), color: COLOUR, value: '40000000' }, ACCOUNT));
     const r = await syncAccount(e, ACCOUNT);
-    expect(r.unsupported).toBe(1);
+    expect(r.unsupported).toBe(0);
+    expect(relay.zswapReads).toBe(0);
     expect(readCoins(e.store, e.scope, ACCOUNT).map((c) => [c.value, c.mtIndex])).toEqual([
       ['60000000', '100'],
-      ['40000000', null], // not positioned: not spendable until an honest report positions it
+      ['40000000', null], // not positioned: not spendable until the chain shows its leaf
     ]);
   });
 
@@ -708,7 +702,7 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
   // Security review F-B8: the coin list only grows (spent coins are kept), and Import refused a
   // list of more than 5,000, so a long-used account's own export could not be restored.
   it('restores an export with more than 5,000 coins, and its unsecured coins survive Import and the next walk (F-B8)', async () => {
-    const { e } = await fundedAccount();
+    const { relay, e } = await fundedAccount();
     await syncAccount(e, ACCOUNT); // the two inbox coins, positioned
     const { localCoin } = await import('@nightmarket/core');
     const hex = (n: number, width = 64) => n.toString(16).padStart(width, '0');
@@ -733,6 +727,13 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
       ...(i === 0 ? { mtIndex: '400' } : {}),
       appendEntitlement: `ae1.${ACCOUNT}.${hex(0xe0 + i)}.99999999999.${'ac'.repeat(32)}`,
     }));
+    // AA 00047 P11.B (R3-3): a position comes only from the chain's own leaf; the chain shows the first.
+    relay.zswapActivity.outputs.push({
+      commitment: unsecured[0]!.commitment,
+      mtIndex: '400',
+      txHash: 'wd0',
+      blockHeight: 4,
+    });
     e.store.put(e.scope, 'coins', [...readCoins(e.store, e.scope, ACCOUNT), ...unsecured, ...history], {
       account: ACCOUNT,
     });
@@ -754,7 +755,11 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     expect(after).toHaveLength(5_104);
     const kept = unsecuredCoins(after);
     expect(kept.map((c) => c.nonce).sort()).toEqual(unsecured.map((c) => c.nonce).sort());
-    for (const c of unsecured) expect(kept.find((k) => k.nonce === c.nonce)).toEqual(c);
+    // The one the chain shows keeps its position; the other has none until the chain shows its leaf
+    // (AA 00047 P11.B, R3-3: a stored position is never taken on trust).
+    expect(kept.find((k) => k.nonce === unsecured[0]!.nonce)).toEqual(unsecured[0]);
+    const { createdTx: _c, ...second } = unsecured[1]!;
+    expect(kept.find((k) => k.nonce === unsecured[1]!.nonce)).toEqual({ ...second, mtIndex: null });
   });
 
   // ── AA 00047 P10, the site lane of the round-2 fix pass (spec FR-004b "Round 2") ──────────────
@@ -856,12 +861,103 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     ]);
   });
 
-  it('R2-6: asks the chain for the transactions the relay names for its own coins (read past the newest page)', async () => {
+  // ── AA 00047 P11.B, the browser decodes the account itself (Q47 A; audit round 3) ──────────────
+
+  // R3-4 / F-A3-2 / F-B3-3: a relay that left the input's spend out of its report made the page
+  // delete the pending change record (the change has no note) and offer the spent coin again.
+  it('R3-4: a withdrawal the relay landed but reported failed, with its spend left out of the relay’s report, is confirmed from the chain', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    relay.failNext = 'the prover crashed';
+    relay.failCode = 'proof-failed';
+    await expect(
+      withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) }),
+    ).rejects.toBeInstanceOf(JobFailedError);
+    const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    const change = predictWithdrawChange(paidFrom, 30_000_000n)!;
+    const changeCommitment = contractCoinCommitment(change, ACCOUNT);
+    // It landed, and the account moved on (nonce 8). The chain carries the spend and the change's leaf.
+    relay.state!.authNonce = '8';
+    relay.zswapActivity.outputs.push({ commitment: changeCommitment, mtIndex: '300', txHash: 'wd9', blockHeight: 5 });
+    relay.zswapActivity.inputs.push({
+      nullifier: contractCoinNullifier(paidFrom, ACCOUNT),
+      txHash: 'wd9',
+      blockHeight: 5,
+    });
+    const r = await syncAccount(e, ACCOUNT);
+    const kept = r.coins.find((c) => c.commitment === changeCommitment)!;
+    expect(kept).toMatchObject({ mtIndex: '300', value: '10000000' });
+    expect(kept.pending).toBeUndefined();
+    expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: true, spentTx: 'wd9' });
+    expect(relay.zswapReads).toBe(0);
+  });
+
+  it('R3-4: an INCOMPLETE history never drops a pending change record, even after the nonce moved', async () => {
     const { relay, e } = await fundedAccount();
     const chain = e.chain as FakeChain;
-    relay.zswapActivity.outputs.push({ commitment: 'ee'.repeat(32), mtIndex: '9', txHash: 'not-ours', blockHeight: 9 });
     await syncAccount(e, ACCOUNT);
-    expect(chain.needs.at(-1)).toEqual(['d1', 'd2']); // the two coins' transactions, not the stranger's
+    relay.results.withdraw = { txId: 'wd1', change: null };
+    const out = await withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) });
+    relay.state!.authNonce = '8';
+    chain.complete = false; // e.g. the stream was refused: absence proves nothing
+    let r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.find((c) => c.commitment === out.change!.commitment)?.pending).toMatchObject({ authNonce: '7' });
+    expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: true }); // still set aside
+    // A history that ends BEFORE the height the nonce was read at proves nothing either.
+    chain.complete = true;
+    chain.throughHeight = 8; // the state was read at 9
+    r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.some((c) => c.commitment === out.change!.commitment)).toBe(true);
+    // Complete through the state's height: the 40 was never spent, so this withdrawal never lands.
+    chain.throughHeight = 9;
+    r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.some((c) => c.commitment === out.change!.commitment)).toBe(false);
+    expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: false });
+  });
+
+  it('R3-4: a record whose input another transaction spent (without this change) goes; one whose leaf is on chain stays', async () => {
+    const { relay, e } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    relay.results.withdraw = { txId: 'wd1', change: null };
+    const out = await withdrawToWallet(e, ACCOUNT, { color: COLOUR, amount: 30_000_000n, recipient: '44'.repeat(32) });
+    const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
+    // The input is spent on chain, by a transaction that created another change (another record of
+    // the same coin landed): this one can never land, even with the nonce unmoved.
+    relay.zswapActivity.inputs.push({
+      nullifier: contractCoinNullifier(paidFrom, ACCOUNT),
+      txHash: 'other',
+      blockHeight: 6,
+    });
+    relay.zswapActivity.outputs.push({ commitment: 'c7'.repeat(32), mtIndex: '301', txHash: 'other', blockHeight: 6 });
+    const r = await syncAccount(e, ACCOUNT);
+    expect(r.coins.some((c) => c.commitment === out.change!.commitment)).toBe(false);
+    expect(r.coins.find((c) => c.value === '40000000')).toMatchObject({ spent: true, spentTx: 'other' });
+  });
+
+  // R3-3 / F-B3-2 (confirmed by auditor A's probe `audit-a3-probe-coins`): a note with the same colour
+  // and nonce as a real coin, but another value, took over the real coin's position and confirmation.
+  it('R3-3: a counterfeit note with a real coin’s colour and nonce never inherits its position, and never replaces it', async () => {
+    const { relay, e, pk } = await fundedAccount();
+    await syncAccount(e, ACCOUNT);
+    const real = readCoins(e.store, e.scope, ACCOUNT).find((c) => c.value === '60000000')!;
+    expect(real.mtIndex).toBe('100');
+    relay.entries.push(
+      bytesToHex(
+        await sealEntryPortable(pk, {
+          nonce: hexToBytes(real.nonce),
+          color: hexToBytes(real.color),
+          value: 1_000_000_000_000n,
+        }),
+      ),
+    );
+    const r = await syncAccount(e, ACCOUNT);
+    const sameKey = r.coins.filter((c) => c.nonce === real.nonce && c.color === real.color);
+    expect(sameKey.map((c) => [c.value, c.mtIndex]).sort()).toEqual([
+      ['1000000000000', null],
+      ['60000000', '100'],
+    ]);
+    expect(holdingsByColour(r.coins)[0]).toMatchObject({ total: 100_000_000n, largest: 60_000_000n });
+    expect(r.unconfirmed).toBe(1);
   });
 
   it('R2-6: a new account that was not empty is refused at opening AND afterwards (the refusal is kept)', async () => {

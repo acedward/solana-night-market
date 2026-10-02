@@ -185,7 +185,10 @@ test.describe('R2-6: the chain view survives seeded state, fake notes and a long
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twBTC')).toContainText('0.10');
     await expect(portfolioRow(page, 'twBTC').getByTestId('passport-largest')).toHaveAttribute('data-raw', '10000000');
-    expect(indexer.byHash.length).toBeGreaterThan(0); // the older ones were read by hash
+    // AA 00047 P11.B (Q52): the older ones are streamed from the indexer (from the deploy's block),
+    // never read by the hashes a relay names.
+    expect(indexer.streams).toEqual([1]);
+    expect(indexer.byHash).toEqual([]);
   });
 });
 

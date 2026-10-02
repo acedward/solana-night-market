@@ -218,6 +218,9 @@ export type OfferState =
   | 'expired'
   /** Another signed action of the account moved its nonce, so the offer can never settle. */
   | 'cancelled'
+  /** The account's nonce moved, so it can never execute, but the browser has not read the account's
+   *  history in full, so whether it was filled or cancelled is not known yet (AA 00047 P11.B). */
+  | 'ended'
   /** Proven but the exchange refused it, or never answered. */
   | 'refused';
 

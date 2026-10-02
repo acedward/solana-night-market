@@ -95,9 +95,10 @@ const offer = z
     createdAt: ms,
     expiresAt: ms,
     validUntil: decimal.optional(),
-    status: z.enum(['live', 'filled', 'expired', 'cancelled', 'refused']),
+    status: z.enum(['live', 'filled', 'expired', 'cancelled', 'ended', 'refused']),
     kernelStatus: text(64).optional(),
     settledTx: txId.optional(),
+    fillVerified: z.literal(true).optional(),
     checkedAt: ms.optional(),
   })
   .strict();

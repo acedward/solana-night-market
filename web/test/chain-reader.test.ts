@@ -10,7 +10,10 @@ import { networkSaltFor } from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
 import { accountStateHex } from '../../packages/core/test/fixtures/account-state.js';
-import { ChainReadError, ChainReader, TX_PAGE } from '../src/chain/indexer.js';
+import { zswapInputEventHex, zswapOutputEventHex } from '../../packages/core/test/fixtures/ledger-events.js';
+import { ChainReadError, ChainReader, indexerWsUrlFor, indexerWsUrlOf } from '../src/chain/indexer.js';
+import accountA from '../../test/fixtures/stagenet-p11b/account-a-history.json';
+import take4464 from '../../test/fixtures/stagenet-p11b/tx-4464f3f4.json';
 
 const ACCOUNT = '7e'.repeat(32);
 const DEVICE = bytesToHex(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(4)).publicKey);
@@ -119,76 +122,226 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
     await expect(chain.account('nope')).rejects.toThrow(/not an account address/);
   });
 
-  it('reads the account’s transactions with their raw events', async () => {
-    const tx = (hash: string, height: number) => ({
-      transaction: { hash, block: { height }, zswapLedgerEvents: [{ id: height, raw: `${hash}00` }] },
-    });
-    const { calls, fetchImpl } = stubIndexer(() => ({
-      data: { contract: { actions: [tx('bb', 2), tx('aa', 1), tx('bb', 2)] } },
-    }));
-    const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl, maxActions: 10 });
-    expect((await chain.accountTransactions(ACCOUNT)).map((t) => [t.hash, t.blockHeight])).toEqual([
-      ['aa', 1],
-      ['bb', 2],
-    ]);
+  // ── AA 00047 P11.B (questions Q47 A, Q52): the account's COMPLETE history, decoded in the page ──
+
+  it('reads a short history over HTTP, decodes its ledger events itself, and calls it complete', async () => {
+    const A = accountA.account;
+    const { calls, fetchImpl } = stubIndexer(() => ({ data: accountA.data }));
+    const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
+    const h = await chain.accountHistory(`0x${A.toUpperCase()}`);
+    expect(h).toMatchObject({ account: A, complete: true, throughHeight: accountA.data.block.height });
+    expect(h.txs.map((t) => t.blockHeight)).toEqual([685597, 685600, 685604, 685608, 685612, 685773, 685786]);
+    expect(h.txs.flatMap((t) => t.outputs.map((o) => o.mtIndex))).toEqual(['5179', '5180', '5184', '5186']);
+    expect(h.txs.find((t) => t.hash.startsWith('4464f3f4'))!.entryPoints).toEqual(['open_swap_shielded_with_ed25519']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body.query).toMatch(/actions\(limit: \$limit\)/);
     expect(calls[0]!.body.query).toMatch(/zswapLedgerEvents \{ id raw \}/);
-    expect(calls[0]!.body.variables).toEqual({ address: ACCOUNT, limit: 10 });
-    // A page that is not full is the whole history: nothing is read by hash.
-    const more = await chain.accountTransactions(ACCOUNT, ['ee'.repeat(32)]);
-    expect(more.map((t) => t.hash)).toEqual(['aa', 'bb']);
-    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.variables).toEqual({ address: A, limit: 500 });
   });
 
-  // AA 00047 P10 (audit round 2, R2-6 / F-A2-4): from 500 actions on, every sync used to throw, so new
-  // coins never got a position. A griefer could force it with ~500 one-unit deposits. The indexer
-  // serves only the newest 500 (no offset): the page reads the older transactions it needs by hash.
-  it('reads past a full page by transaction hash, keeping only the account’s own transactions', async () => {
-    const h = (n: number) => n.toString(16).padStart(64, '0');
-    const OTHER = '3c'.repeat(32);
-    // The newest page: 500 recent actions (the griefer's), none of them the ones the report needs.
-    const page = Array.from({ length: 500 }, (_, i) => ({
-      transaction: { hash: h(10_000 + i), block: { height: 10_000 + i }, zswapLedgerEvents: [] },
-    }));
-    // Older transactions, served by hash: 120 of the account's, one that is NOT the account's.
-    const older = new Map<string, unknown>();
-    for (let i = 0; i < 120; i++)
-      older.set(h(i), {
-        hash: h(i),
-        block: { height: i },
-        contractActions: [{ address: ACCOUNT }],
-        zswapLedgerEvents: [{ id: i, raw: `${ACCOUNT}${h(i)}` }],
-      });
-    older.set(h(999), {
-      hash: h(999),
-      block: { height: 999 },
-      contractActions: [{ address: OTHER }],
-      zswapLedgerEvents: [],
-    });
-    const { calls, fetchImpl } = stubIndexer((b) => {
-      if (b.query.includes('contract(address')) return { data: { contract: { actions: page } } };
-      const data: Record<string, unknown[]> = {};
-      for (const [k, v] of Object.entries(b.variables)) {
-        const t = older.get(String(v));
-        data[k.replace(/^h/, 't')] = t ? [t] : [];
-      }
-      return { data };
-    });
+  it('decodes a swap transaction’s calls from its raw bytes, by hash, and refuses bytes of another transaction', async () => {
+    const take = take4464.data.transactions[0]!;
+    let served = take.hash;
+    const { calls, fetchImpl } = stubIndexer(() => ({ data: { transactions: [{ hash: served, raw: take.raw }] } }));
     const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
-    const need = [...Array.from({ length: 120 }, (_, i) => h(i)), h(999), h(10_001), 'nonsense', h(5)];
-    const txs = await chain.accountTransactions(`0x${ACCOUNT}`, need);
-    expect(txs).toHaveLength(620); // the page, plus the 120 older ones; never the other contract's
-    expect(txs[0]!.hash).toBe(h(0)); // oldest first
-    expect(txs.some((t) => t.hash === h(999))).toBe(false);
-    expect(txs.find((t) => t.hash === h(7))!.events).toEqual([{ id: 7, raw: `${ACCOUNT}${h(7)}` }]);
-    // One page read, then the by-hash pages: 121 hashes (deduplicated, valid, not on the page).
-    const byHash = calls.slice(1);
-    expect(byHash).toHaveLength(Math.ceil(121 / TX_PAGE));
-    expect(byHash[0]!.body.query).toMatch(
-      /t0: transactions\(offset: \{ hash: \$h0 \}\) \{ hash block \{ height \} contractActions \{ address \}/,
+    const decoded = await chain.transactionCalls(take.hash);
+    expect(decoded!.map((c) => c.entryPoint)).toEqual([
+      'open_swap_shielded_with_ed25519',
+      'open_swap_shielded_with_ed25519',
+    ]);
+    expect(calls[0]!.body.query).toMatch(
+      /transactions\(offset: \{ hash: \$hash \}\) \{ hash \.\.\. on RegularTransaction \{ raw \} \}/,
     );
-    expect(Object.keys(byHash[0]!.body.variables)).toHaveLength(TX_PAGE);
-    // Final transactions are not read twice.
-    await chain.accountTransactions(ACCOUNT, need);
-    expect(calls).toHaveLength(1 + byHash.length + 1);
+    expect(await chain.transactionCalls(take.hash)).toBe(decoded); // final: kept
+    expect(calls).toHaveLength(1);
+    // The indexer serves the take's bytes under another transaction's hash: refused.
+    served = 'ab'.repeat(32);
+    await expect(chain.transactionCalls('ab'.repeat(32))).rejects.toThrow(/another transaction/);
+  });
+
+  it('derives the indexer’s WebSocket endpoint from a moved HTTP one, and keeps the profile’s otherwise', () => {
+    expect(indexerWsUrlFor('https://indexer.example/api/v4/graphql')).toBe('wss://indexer.example/api/v4/graphql/ws');
+    expect(indexerWsUrlFor('http://indexer.test/api/v4/graphql/')).toBe('ws://indexer.test/api/v4/graphql/ws');
+    expect(
+      indexerWsUrlOf({
+        indexerUrl: 'https://indexer.stagenet.shielded.tools/api/v4/graphql',
+        indexerWsUrl: 'wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws',
+      }),
+    ).toBe('wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws');
+    expect(
+      indexerWsUrlOf({
+        indexerUrl: 'http://indexer.test/api/v4/graphql',
+        indexerWsUrl: 'wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws',
+      }),
+    ).toBe('ws://indexer.test/api/v4/graphql/ws');
+  });
+
+  // R3-5 (browser side) and Q52: an account with more than 500 actions (an active one, or a griefer's
+  // 600 one-unit deposits) is read in FULL from the indexer, never by the hashes the relay names.
+  describe('a history longer than the indexer’s newest page', () => {
+    const h = (n: number) => n.toString(16).padStart(64, '0');
+    const leaf = (tx: string, mtIndex: number, commitment = h(0xc000 + mtIndex)) => ({
+      id: mtIndex,
+      raw: zswapOutputEventHex({ txHash: tx, contract: ACCOUNT, commitment, mtIndex }),
+    });
+    /** One action of the account at `height`, with one leaf. */
+    const action = (n: number, height: number) => ({
+      __typename: 'ContractCall',
+      entryPoint: 'deposit_shielded',
+      transaction: {
+        hash: h(n),
+        id: n,
+        block: { height },
+        zswapStartIndex: n,
+        zswapEndIndex: n + 1,
+        transactionResult: { status: 'SUCCESS' },
+        zswapLedgerEvents: [leaf(h(n), n)],
+      },
+    });
+    // The account's 120 own transactions (heights 10..129), then 600 newer one-unit deposits.
+    const own = Array.from({ length: 120 }, (_, i) => action(i + 1, 10 + i));
+    const pad = Array.from({ length: 600 }, (_, i) => action(1_000 + i, 1_000 + i));
+    const all = [...own, ...pad];
+    const spendTx = own[7]!.transaction;
+    spendTx.zswapLedgerEvents.push({
+      id: 99_999,
+      raw: zswapInputEventHex({ txHash: spendTx.hash, contract: ACCOUNT, nullifier: 'ee'.repeat(32) }),
+    });
+
+    /** The indexer's WebSocket (graphql-transport-ws): every action from the offset, oldest first, then
+     *  nothing (the indexer's stream waits for new actions). */
+    function fakeWs(opts: { refuse?: boolean; actions?: typeof all } = {}) {
+      const subscriptions: Array<Record<string, unknown>> = [];
+      class FakeWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        readyState = 0;
+        onopen: (() => void) | null = null;
+        onmessage: ((m: { data: string }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        sent: string[] = [];
+        constructor(
+          readonly url: string,
+          readonly protocol: string,
+        ) {
+          setTimeout(() => {
+            if (opts.refuse) {
+              this.readyState = 3;
+              this.onerror?.();
+              return;
+            }
+            this.readyState = 1;
+            this.onopen?.();
+          }, 1);
+        }
+        send(text: string) {
+          const msg = JSON.parse(text) as {
+            type: string;
+            id?: string;
+            payload?: { variables: Record<string, unknown> };
+          };
+          const reply = (m: unknown) => setTimeout(() => this.onmessage?.({ data: JSON.stringify(m) }), 0);
+          if (msg.type === 'connection_init') reply({ type: 'connection_ack' });
+          if (msg.type === 'subscribe') {
+            subscriptions.push(msg.payload!.variables);
+            const from = (msg.payload!.variables.offset as { height: number }).height;
+            for (const a of opts.actions ?? all)
+              if (a.transaction.block.height >= from)
+                reply({ id: msg.id, type: 'next', payload: { data: { contractActions: a } } });
+          }
+        }
+        close() {
+          this.readyState = 3;
+        }
+      }
+      return { FakeWebSocket: FakeWebSocket as unknown as typeof WebSocket, subscriptions };
+    }
+
+    const indexer = (actions: typeof all, tip: number) =>
+      stubIndexer((b) => {
+        if (b.query.includes('type: DEPLOY'))
+          return { data: { contract: { actions: [{ transaction: { block: { height: 10 } } }] } } };
+        const limit = Number(b.variables.limit);
+        return { data: { contract: { actions: [...actions].reverse().slice(0, limit) }, block: { height: tip } } };
+      });
+
+    it('streams the older actions over the indexer’s WebSocket from the deploy’s block, and calls it complete', async () => {
+      const { calls, fetchImpl } = indexer(all, 2_000);
+      const ws = fakeWs();
+      const chain = new ChainReader({
+        indexerUrl: URL_,
+        networkId: 'stagenet',
+        fetchImpl,
+        WebSocketImpl: ws.FakeWebSocket,
+      });
+      const hist = await chain.accountHistory(ACCOUNT);
+      expect(hist.complete).toBe(true);
+      expect(hist.throughHeight).toBe(2_000);
+      expect(hist.txs).toHaveLength(720);
+      expect(hist.txs[0]!.hash).toBe(h(1)); // oldest first
+      expect(hist.txs.find((t) => t.hash === h(8))!.inputs).toEqual(['ee'.repeat(32)]);
+      expect(ws.subscriptions).toEqual([{ address: ACCOUNT, offset: { height: 10 } }]);
+      // One page read, one deploy read; nothing by a hash anyone named.
+      expect(calls.map((c) => (c.body.query.includes('DEPLOY') ? 'deploy' : 'page'))).toEqual(['page', 'deploy']);
+      // The next read: the page reaches back to what this session already holds, so no stream.
+      const again = await chain.accountHistory(ACCOUNT);
+      expect(again.complete).toBe(true);
+      expect(again.txs).toHaveLength(720);
+      expect(ws.subscriptions).toHaveLength(1);
+    });
+
+    it('a stream that is refused, or ends before the page, leaves the history INCOMPLETE (with the reason)', async () => {
+      const { fetchImpl } = indexer(all, 2_000);
+      const refused = new ChainReader({
+        indexerUrl: URL_,
+        networkId: 'stagenet',
+        fetchImpl,
+        WebSocketImpl: fakeWs({ refuse: true }).FakeWebSocket,
+      });
+      const r = await refused.accountHistory(ACCOUNT);
+      expect(r.complete).toBe(false);
+      expect(r.gap).toMatch(/stream failed/);
+      expect(r.txs).toHaveLength(500); // only the newest page: nothing older invented
+      // The indexer's stream serves only part of the gap, then waits (a lagging replica): the read gives up.
+      const lagging = new ChainReader({
+        indexerUrl: URL_,
+        networkId: 'stagenet',
+        fetchImpl,
+        WebSocketImpl: fakeWs({ actions: own.slice(0, 50) }).FakeWebSocket,
+      });
+      (lagging as unknown as { histories: { o: { streamTimeoutMs: number } } }).histories.o.streamTimeoutMs = 300;
+      const l = await lagging.accountHistory(ACCOUNT);
+      expect(l.complete).toBe(false);
+      expect(l.gap).toMatch(/too long/);
+    });
+
+    it('a page that is not full is the whole history: no stream', async () => {
+      const { fetchImpl } = indexer(own, 200);
+      const ws = fakeWs();
+      const chain = new ChainReader({
+        indexerUrl: URL_,
+        networkId: 'stagenet',
+        fetchImpl,
+        WebSocketImpl: ws.FakeWebSocket,
+      });
+      const hist = await chain.accountHistory(ACCOUNT);
+      expect(hist).toMatchObject({ complete: true, throughHeight: 200 });
+      expect(hist.txs).toHaveLength(120);
+      expect(ws.subscriptions).toEqual([]);
+    });
+
+    it('an event the ledger does not accept leaves its transaction out and the history incomplete', async () => {
+      const broken = own.map((a, i) =>
+        i === 3 ? { ...a, transaction: { ...a.transaction, zswapLedgerEvents: [{ id: 1, raw: 'abcd' }] } } : a,
+      );
+      const { fetchImpl } = indexer(broken, 200);
+      const hist = await new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl }).accountHistory(
+        ACCOUNT,
+      );
+      expect(hist.complete).toBe(false);
+      expect(hist.gap).toMatch(/could not be read/);
+      expect(hist.txs).toHaveLength(119);
+    });
   });
 });

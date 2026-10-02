@@ -13,9 +13,10 @@
 // market-account check on the chain's own state (the verifier keys pinned in this build, the
 // authority retired, ONE device and it is this wallet's, this browser's encryption key, this
 // network's salt); the nonce, the device counter, the inbox and the public balances are read there
-// too. The relay still decodes the account's Zswap events (positions and spends, Q31), and the page
-// checks that report against the indexer's raw events. A withdrawal's change coin is computed here,
-// never taken from the relay (Q28 A).
+// too. Which shielded coins exist and which are spent, the page decodes ITSELF from the account's
+// complete history on the indexer (AA 00047 P11.B, questions Q47 A, superseding Q31: ledger-v9 in the
+// page, loaded lazily); the relay's report of them is no longer read. A withdrawal's change coin is
+// computed here, never taken from the relay (Q28 A).
 //
 // AA 00047 P10 (audit round 2, spec FR-004b "Round 2"):
 //   - R2-5: a withdrawal's change is written down (a PENDING RECOVERY RECORD on the coin list: the
@@ -27,27 +28,33 @@
 //     `confirmedOnChain`); the indexer read goes past 500 transactions (../chain/indexer.ts);
 //   - R2-3: an account whose on-chain encryption key is no longer this browser's, with this wallet
 //     as its one device, gets "Restore my encryption key" (`restoreEncryptionKey`).
+//
+// AA 00047 P11.B (audit round 3, spec FR-004b "Round 3"): coins are identified by their full
+// commitment (R3-3), and a pending recovery record is resolved only on POSITIVE chain evidence from the
+// page's own decode (R3-4): its change's leaf, its input spent by another transaction, or a COMPLETE
+// history showing the input never spent while the nonce moved on.
 
 import {
   RELAY_ACTIONS,
   buildRelayActionMessage,
+  activityOf,
   bytesToHex,
-  checkZswapActivity,
   chooseCoin,
   confirmedOnChain,
   contractCoinCommitment,
-  contractCoinNullifier,
   encPublicKeyOf,
   hexToBytes,
+  historyCovers,
   localCoin,
   parseShieldedAddress,
   reconcileCoins,
+  spendOf,
+  type AccountHistory,
   type AccountStateView,
   type AppendInboxPayload,
   type CancelOffersPayload,
   type CancelOffersResult,
   type JobView,
-  type OwnedInput,
   type PassportAuth,
   type RegisterResult,
   type RestoreEncKeyPayload,
@@ -328,8 +335,13 @@ export interface SyncResult {
   /** The market-account check on the chain's state (audit C3). Balances are shown either way;
    *  every action refuses an account that fails it. */
   check: AccountCheck;
-  /** The relay's reported coin facts that the indexer's own events do not carry (dropped, Q31). */
+  /** Always 0 since AA 00047 P11.B: the relay's coin report is no longer read (kept for callers). */
   unsupported: number;
+  /** The account's history as this page decoded it (AA 00047 P11.B, questions Q47 A). */
+  history: AccountHistory;
+  /** The chain height the state (nonce, inbox) was read at: a decision from what the history LACKS
+   *  needs the history complete through it (@nightmarket/core `historyCovers`). */
+  stateHeight: number;
   /** The account's public balances, from the chain. */
   unshielded: AccountOnChain['unshielded'];
   /** Unspent coins the chain does not confirm (an inbox note with no leaf, a change not shown yet):
@@ -339,13 +351,13 @@ export interface SyncResult {
 
 /**
  * The inbox walk: read the account's state from the CHAIN (its inbox ciphertexts included), decrypt
- * HERE with the account's secret, then reconcile with the ledger's record of the account's leaves
- * (the exact `mt_index` of each coin) and spends (nullifiers). The relay decodes those from the
- * ledger's events; its report is kept only where the indexer's own raw events carry it (Q31). Coins
- * that only this browser knows (a withdrawal's change not yet filed, Q13) are kept.
+ * HERE with the account's secret, then reconcile with the account's leaves (the exact `mt_index` of
+ * each coin) and spends (nullifiers), which this page decodes itself from the account's complete
+ * history on the public indexer (AA 00047 P11.B, questions Q47 A; ../chain/history.ts). Coins that only
+ * this browser knows (a withdrawal's change not yet filed, Q13) are kept. The relay is not asked.
  */
 export async function syncAccount(env: OperationEnv, account: string): Promise<SyncResult> {
-  const { relay, store, scope } = env;
+  const { store, scope } = env;
   const secret = readSecret(store, scope, account);
   if (!secret)
     throw new OperationError('This browser does not hold the account secret. Import your export to use it here.');
@@ -373,32 +385,16 @@ export async function syncAccount(env: OperationEnv, account: string): Promise<S
     });
   }
   const previous = readCoins(store, scope, account);
-  const reported = await relay.zswap(account);
-  // The transactions the report names for coins this browser knows: what the chain read must hold
-  // (the indexer's newest page, then the rest by hash for a long history, R2-6).
-  const commitments = new Set<string>();
-  const nullifiers = new Set<string>();
-  for (const c of [...previous, ...inbox, ...previous.flatMap((p) => (p.pending ? [p.pending.input] : []))]) {
-    commitments.add(contractCoinCommitment(c, account));
-    nullifiers.add(contractCoinNullifier(c, account));
-  }
-  const need = [
-    ...reported.outputs.filter((o) => commitments.has(low(o.commitment))).map((o) => o.txHash),
-    ...reported.inputs.filter((i) => nullifiers.has(low(i.nullifier))).map((i) => i.txHash),
-  ];
-  const txs = await env.chain.accountTransactions(account, need);
-  const checked = checkZswapActivity(account, reported, txs);
+  // Read AFTER the state: a history complete through the state's height holds every transaction the
+  // state reflects (R3-4).
+  const history = await env.chain.accountHistory(account);
+  const activity = activityOf(history);
   const coins = settlePendingWithdrawals(
     account,
-    reconcileCoins({
-      account,
-      inbox,
-      outputs: checked.activity.outputs,
-      inputs: checked.activity.inputs,
-      previous,
-    }),
-    checked.activity.inputs,
+    reconcileCoins({ account, inbox, outputs: activity.outputs, inputs: activity.inputs, previous }),
+    history,
     BigInt(onChain.view.authNonce),
+    onChain.blockHeight,
   );
   store.put(scope, 'coins', coins, { account });
   return {
@@ -406,7 +402,9 @@ export async function syncAccount(env: OperationEnv, account: string): Promise<S
     coins,
     unreadable,
     check: found.check,
-    unsupported: checked.unsupported.length,
+    unsupported: 0,
+    history,
+    stateHeight: onChain.blockHeight,
     unshielded: onChain.unshielded,
     unconfirmed: coins.filter((c) => !c.spent && !confirmedOnChain(c)).length,
   };
@@ -414,27 +412,27 @@ export async function syncAccount(env: OperationEnv, account: string): Promise<S
 
 /**
  * Reconcile every PENDING RECOVERY RECORD (a withdrawal's change, written before it was sent; R2-5)
- * against the chain:
- *   - the chain shows the change's leaf: confirmed, the record becomes an ordinary change coin
- *     (spendable now, and filed in the inbox by `secureChange`);
- *   - the account's nonce moved past the one it signed and the coin it spends was never spent on
- *     chain: that withdrawal can never land, so the record goes, and the input coin, if this browser
- *     had set it aside, is spendable again;
- *   - the input coin was spent and another record of the same coin is the one the chain shows: this
- *     one goes;
- *   - otherwise it stays pending: the withdrawal may still land (the nonce has not moved), or it
- *     landed and the change is not shown yet. Never in a balance, never spendable, meanwhile.
- * `inputs` are the spends the chain confirms (the relay's report, checked against the indexer).
+ * against the chain, on POSITIVE evidence from this page's own decode of the account's history only
+ * (AA 00047 P11.B, audit round 3 R3-4 / F-A3-2 / F-B3-3):
+ *   - the change's leaf is on chain (its full commitment): confirmed; the record becomes an ordinary
+ *     change coin (spendable now, and filed in the inbox by `secureChange`);
+ *   - the coin it spends was spent by a transaction that did NOT create this change (another record of
+ *     the same coin landed, or another payment spent it): this withdrawal can never land; the record
+ *     goes;
+ *   - the account's nonce moved past the one it signed, and the history, COMPLETE through the height
+ *     the nonce was read at, shows the coin it spends never spent: it can never land; the record goes,
+ *     and the input coin, if this browser had set it aside, is spendable again;
+ *   - otherwise it stays pending: the withdrawal may still land, it landed and the leaf is not read yet,
+ *     or the history is not complete. Never in a balance, never spendable, never dropped, meanwhile.
  */
 export function settlePendingWithdrawals(
   account: string,
   coins: readonly StoredCoin[],
-  inputs: readonly OwnedInput[],
+  history: AccountHistory,
   chainNonce: bigint,
+  stateHeight: number,
 ): StoredCoin[] {
-  const spentOnChain = new Set(inputs.map((i) => low(i.nullifier)));
-  const inputOf = (c: StoredCoin) => contractCoinCommitment(c.pending!.input, account);
-  const landed = new Set(coins.filter((c) => c.pending && confirmedOnChain(c)).map(inputOf));
+  const covered = historyCovers(history, stateHeight);
   const release = new Set<string>();
   const out: StoredCoin[] = [];
   for (const c of coins) {
@@ -447,19 +445,22 @@ export function settlePendingWithdrawals(
       out.push(confirmed);
       continue;
     }
-    const input = inputOf(c);
-    const inputSpent = spentOnChain.has(contractCoinNullifier(c.pending.input, account));
-    if (chainNonce > BigInt(c.pending.authNonce)) {
-      if (!inputSpent) {
-        release.add(input);
-        continue;
-      }
-      if (landed.has(input)) continue;
+    const spentBy = spendOf(history, c.pending.input);
+    if (spentBy) {
+      // Spent, and the change is not among the decoded leaves (else it would be confirmed): when the
+      // spending transaction was decoded and carries no leaf of this change, this one never lands.
+      if (!spentBy.outputs.some((o) => low(o.commitment) === c.commitment)) continue;
+      out.push(c);
+      continue;
+    }
+    if (chainNonce > BigInt(c.pending.authNonce) && covered) {
+      release.add(contractCoinCommitment(c.pending.input, account));
+      continue;
     }
     out.push(c);
   }
   return out.map((c) => {
-    if (!release.has(c.commitment) || !c.spent || spentOnChain.has(contractCoinNullifier(c, account))) return c;
+    if (!release.has(c.commitment) || !c.spent || spendOf(history, c)) return c;
     const { spentTx: _t, ...rest } = c;
     return { ...rest, spent: false };
   });

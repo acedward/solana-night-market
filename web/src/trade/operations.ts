@@ -17,15 +17,25 @@
 //
 // An approval is marked ENDED only from what this browser reads on the CHAIN, and its own signed
 // expiry (AA 00047 P10, audit round 2 R2-4; spec FR-004b "Round 2"), never from the relay's or the
-// exchange's word: filled once its own call's wanted-coin note is in the account's inbox and the
-// account's nonce moved; cancelled once the nonce moved and no such note is there; expired once its
-// signed `validUntil` passed. The exchange's "consumed" or "expired" is the LISTING's state, shown
-// apart (`kernelStatus`); one they call taken shows "Settling" until the chain shows it (questions
-// Q44). Records an older page ended too early (on a relay's "succeeded" or the exchange's
-// "expired") are decided again (`reconcileOffers`).
+// exchange's word. Since AA 00047 P11.B (audit round 3 R3-6 / F-A3-3 / F-B3-5; questions Q47 A) the
+// evidence of a FILL is the decoded swap transaction itself: the account's own swap call that received
+// the wanted coin (its full commitment) and consumed the approval, in a transaction of the account's
+// history this page decoded (@nightmarket/core `fillEvidence`); an inbox note, which anyone can file,
+// proves nothing. Cancelled once the nonce moved and the history, COMPLETE through the height the
+// nonce was read at, holds no such transaction; "ended" when the nonce moved but the history is not
+// complete (neither can be claimed); expired once its signed `validUntil` passed. The exchange's
+// "consumed" or "expired" is the LISTING's state, shown apart (`kernelStatus`); one they call taken
+// shows "Settling" until the chain shows it (questions Q44). Records an older page decided otherwise
+// (on a relay's "succeeded", the exchange's "expired", or a note) are decided again (`reconcileOffers`).
 
 import {
-  confirmedOnChain,
+  fillCandidates,
+  fillEvidence,
+  historyCovers,
+  spendOf,
+  type AccountHistory,
+  type CoinInfo,
+  type DecodedCall,
   type BookEntry,
   type JobView,
   type KernelClient,
@@ -247,38 +257,52 @@ export function signedExpiryMs(t: Pick<TradeRecord, 'validUntil'>): number | nul
   return s > 0n ? Number(s) * 1000 : null;
 }
 
-/** One read of the account on the chain: its auth nonce and its coins (the inbox walk's). */
+/** One read of the account on the chain: its auth nonce, its coins (the inbox walk's), and its history
+ *  as this page decoded it (AA 00047 P11.B). */
 export interface ChainView {
   authNonce: bigint;
   coins: readonly StoredCoin[];
+  history: AccountHistory;
+  /** The height the nonce was read at. */
+  stateHeight: number;
+  /** A candidate fill transaction's decoded calls (undefined when not read). */
+  calls: (txHash: string) => readonly DecodedCall[] | undefined;
+}
+
+/** The coin an approval WANTS, exactly as the wallet signed it (the swap circuit's challenge binds it):
+ *  its fresh nonce, and the want leg's colour and amount (a sell wants the quote, a buy the base). */
+export function wantCoinOf(
+  t: Pick<TradeRecord, 'side' | 'base' | 'quote' | 'baseRaw' | 'quoteRaw' | 'wantNonce'>,
+): CoinInfo {
+  const sell = t.side === 'sell';
+  return {
+    nonce: t.wantNonce.replace(/^0x/, '').toLowerCase(),
+    color: (sell ? t.quote : t.base).replace(/^0x/, '').toLowerCase(),
+    value: BigInt(sell ? t.quoteRaw : t.baseRaw).toString(10),
+  };
 }
 
 /**
  * What the CHAIN (and the approval's own signed expiry) says of one of the account's approvals, a
- * make or a take (AA 00047 P10, R2-4). From one read of the account (its nonce and its inbox are one
- * state, so a fill and the nonce it moves are seen together):
- *   filled     the account's nonce moved past the one it signed AND its own call's wanted-coin note
- *              is in the inbox (the call files it in the same transaction); `settledTx` once the
- *              chain shows that coin's leaf (its creating transaction);
- *   cancelled  the nonce moved and no such note is there: it can never execute (another signed call,
- *              or "Cancel offer");
+ * make or a take (AA 00047 P10, R2-4; P11.B, R3-6). From one read of the account:
+ *   filled     the account's nonce moved past the one it signed AND a transaction of its decoded history
+ *              carries the account's own swap call receiving the wanted coin (its full commitment) and
+ *              spending the approval's coin (`fillEvidence`); `settledTx` is that transaction;
+ *   cancelled  the nonce moved, and the history, complete through the height the nonce was read at,
+ *              holds no such transaction: it can never execute (another signed call, or "Cancel offer");
+ *   ended      the nonce moved, no such transaction was read, and the history is NOT complete: it can
+ *              never execute, but whether it filled is not known (decided again on the next read);
  *   expired    the nonce has not moved but its SIGNED `validUntil` passed: the circuit refuses it;
  *   live       otherwise: it can still execute, whatever the exchange or the relay says.
  */
 export function decideApproval(t: TradeRecord, chain: ChainView, now: number): TradeRecord {
+  const { settledTx: _s, fillVerified: _v, ...open } = t;
   if (chain.authNonce > BigInt(t.authNonce)) {
-    const note = chain.coins.find((c) => c.inInbox && c.nonce === t.wantNonce);
-    if (!note) {
-      const { settledTx: _s, ...rest } = t;
-      return { ...rest, status: 'cancelled' };
-    }
-    return {
-      ...t,
-      status: 'filled',
-      ...(confirmedOnChain(note) && note.createdTx ? { settledTx: note.createdTx } : {}),
-    };
+    const give = chain.coins.find((c) => c.commitment === t.coin) ?? null;
+    const fill = fillEvidence({ history: chain.history, want: wantCoinOf(t), give, calls: chain.calls });
+    if (fill) return { ...open, status: 'filled', settledTx: fill.txHash, fillVerified: true };
+    return { ...open, status: historyCovers(chain.history, chain.stateHeight) ? 'cancelled' : 'ended' };
   }
-  const { settledTx: _s, ...open } = t;
   const until = signedExpiryMs(t);
   return { ...open, status: until !== null && now >= until ? 'expired' : 'live' };
 }
@@ -297,13 +321,31 @@ export async function reconcileOffers(
   kernel: Pick<KernelClient, 'offerStatus'> | null,
   now = Date.now(),
 ): Promise<TradeRecord[]> {
-  // Everything but a fill the chain confirmed (its settling transaction known) and a refusal.
+  // Everything but a fill proven by its decoded swap transaction (R3-6) and a refusal: a "filled" an
+  // older page decided from a note alone is decided again.
   const open = readTrades(env.store, env.scope, account).filter(
-    (t) => t.status !== 'refused' && !(t.status === 'filled' && t.settledTx),
+    (t) => t.status !== 'refused' && !(t.status === 'filled' && t.fillVerified && t.settledTx),
   );
   if (open.length === 0) return [];
   const synced = await syncAccount(env, account);
-  const chain: ChainView = { authNonce: BigInt(synced.state.authNonce), coins: synced.coins };
+  // The raw bytes of every transaction that may have filled one of them (its wanted coin's leaf, and a
+  // swap call of the account), decoded: the evidence of a fill (R3-6).
+  const authNonce = BigInt(synced.state.authNonce);
+  const candidates = new Set(
+    open.filter((t) => authNonce > BigInt(t.authNonce)).flatMap((t) => fillCandidates(synced.history, wantCoinOf(t))),
+  );
+  const calls = new Map<string, DecodedCall[]>();
+  for (const hash of candidates) {
+    const c = await env.chain.transactionCalls(hash).catch(() => null);
+    if (c) calls.set(hash, c);
+  }
+  const chain: ChainView = {
+    authNonce,
+    coins: synced.coins,
+    history: synced.history,
+    stateHeight: synced.stateHeight,
+    calls: (h) => calls.get(h),
+  };
   const changed: TradeRecord[] = [];
   for (const o of open) {
     let next: TradeRecord = { ...decideApproval(o, chain, now), checkedAt: now };
@@ -315,10 +357,30 @@ export async function reconcileOffers(
         /* the listing's state stays the last one seen */
       }
     }
+    // A coin this page set aside for an approval that can no longer execute and never spent it, as
+    // the complete history shows, is spendable again (the take's coin, set aside when the relay said
+    // it settled).
+    if (next.status === 'cancelled') releaseSetAside(env, account, next.coin, synced.history);
     putTrade(env.store, env.scope, account, next);
     if (next.status !== o.status || next.settledTx !== o.settledTx) changed.push(next);
   }
   return changed;
+}
+
+/** Give back a coin this page set aside (`spent` without a chain spend) once the complete history
+ *  shows the payment it was set aside for never happened (R3-4's rule, for takes). */
+function releaseSetAside(env: OperationEnv, account: string, commitment: string, history: AccountHistory) {
+  const coins = readCoins(env.store, env.scope, account);
+  const c = coins.find((x) => x.commitment === commitment);
+  if (!c?.spent || c.pending) return;
+  if (spendOf(history, c)) return;
+  const { spentTx: _t, ...rest } = c;
+  env.store.put(
+    env.scope,
+    'coins',
+    coins.map((x) => (x.commitment === commitment ? { ...rest, spent: false } : x)),
+    { account },
+  );
 }
 
 /** For a page: the guard before a signed action, from this browser's records (L-TRD.3). */

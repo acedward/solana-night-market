@@ -112,6 +112,8 @@ const STATE_TEXT: Record<ShownState, string> = {
   filled: 'Filled',
   expired: 'Expired',
   cancelled: 'Cancelled',
+  // The nonce moved but the page has not read the account's whole history yet (AA 00047 P11.B).
+  ended: 'Ended',
   refused: 'Refused',
 };
 
@@ -122,6 +124,7 @@ const STATE_PILL: Record<ShownState, PillStatus> = {
   filled: 'filled',
   expired: 'idle',
   cancelled: 'cancelled',
+  ended: 'idle',
   refused: 'failed',
 };
 

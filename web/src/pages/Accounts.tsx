@@ -463,6 +463,8 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // AA 00047 P11.B: why the page could not read the account's whole history from Midnight, if so.
+  const [historyGap, setHistoryGap] = useState<string | null>(null);
 
   const owner = wallet.status === 'connected' ? wallet.deviceKey : null;
   const scope = useMemo(() => (owner ? { network: network.name, owner } : null), [owner, network.name]);
@@ -537,7 +539,8 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     if (!e || !account || !hasSecret) return;
     setSyncing(true);
     try {
-      await syncAccount(e, account.address);
+      const r = await syncAccount(e, account.address);
+      setHistoryGap(r.history.complete ? null : (r.history.gap ?? 'the read did not finish'));
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'The balances could not be refreshed.' });
     } finally {
@@ -869,7 +872,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">
               <p className="small muted">Not in your balances yet, or waiting for you.</p>
-              {unsecured.length === 0 && waiting.length === 0 && unconfirmed === 0 && !job ? (
+              {unsecured.length === 0 && waiting.length === 0 && unconfirmed === 0 && historyGap === null && !job ? (
                 <p className="pending-item small muted">Nothing pending.</p>
               ) : null}
               {waiting.length > 0 && (
@@ -892,6 +895,13 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                     />
                   ))}
                 </div>
+              )}
+              {historyGap !== null && (
+                <p className="pending-item small muted" data-testid="history-incomplete">
+                  This page could not read your account&apos;s whole history from Midnight ({historyGap}). Coins it
+                  could not confirm are not counted, and it does not say how an offer ended until it can. It tries again
+                  on every refresh.
+                </p>
               )}
               {unconfirmed > 0 && (
                 <p className="pending-item small muted" data-testid="unconfirmed-notes" data-count={unconfirmed}>

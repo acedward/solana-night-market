@@ -16,6 +16,7 @@ import {
   parsePrice,
   type AccountStateView,
   type ActionRequest,
+  type DecodedCall,
   type InboxPage,
   type JobView,
   type MarketPair,
@@ -64,6 +65,8 @@ class FakeRelay {
   state!: AccountStateView;
   entries: Array<string | null> = [];
   zswapActivity: ZswapActivity = { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 };
+  /** The decoded calls of the account's swap transactions (AA 00047 P11.B: the evidence of a fill). */
+  txCalls = new Map<string, DecodedCall[]>();
 
   async submit(action: RelayActionName, request: ActionRequest): Promise<JobView> {
     this.submitted.push({ action, request });
@@ -149,7 +152,8 @@ async function setup() {
 }
 
 /** What the chain shows once a swap call of this account executes (the relay's fake doing it): the
- *  wanted coin's note and leaf in `txHash`, the paid coin spent, the nonce moved. */
+ *  wanted coin's note and leaf in `txHash`, the paid coin spent, the nonce moved, and the transaction's
+ *  decoded swap call (AA 00047 P11.B: the account's own call receiving the wanted coin). */
 async function executeSwap(relay: FakeRelay, pk: Uint8Array, payload: Record<string, unknown>, txHash: string) {
   const p = payload as {
     wantNonce: string;
@@ -160,7 +164,22 @@ async function executeSwap(relay: FakeRelay, pk: Uint8Array, payload: Record<str
   await addInbox(relay, pk, [{ nonce: p.wantNonce, color: p.wantColor, value: BigInt(p.wantAmount) }]);
   relay.zswapActivity.outputs.at(-1)!.txHash = txHash;
   relay.zswapActivity.inputs.push({ nullifier: contractCoinNullifier(p.coin, ACCOUNT), txHash, blockHeight: 2 });
+  relay.txCalls.set(txHash, [swapCall({ nonce: p.wantNonce, color: p.wantColor, value: p.wantAmount }, p.coin)]);
   relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
+}
+
+/** The account's own swap call, as the page decodes it from the transaction: it receives `want` and
+ *  spends `coin`. */
+function swapCall(
+  want: { nonce: string; color: string; value: string },
+  coin: { nonce: string; color: string; value: string },
+): DecodedCall {
+  return {
+    address: ACCOUNT,
+    entryPoint: 'open_swap_shielded_with_ed25519',
+    receives: [contractCoinCommitment(want, ACCOUNT)],
+    nullifiers: [contractCoinNullifier(coin, ACCOUNT)],
+  };
 }
 
 async function addInbox(
@@ -378,7 +397,7 @@ describe('take an offer (L-TRD.2)', () => {
 });
 
 describe('reconciling My offers (FR-011: whoever settles it)', () => {
-  it('marks the offer filled when its wanted coin reaches the inbox, with the settling transaction', async () => {
+  it('marks the offer filled by the decoded swap transaction that paid its wanted coin, with that transaction', async () => {
     const { relay, e, pk } = await setup();
     relay.results['open-swap'] = {
       offerId: 'f0'.repeat(32),
@@ -393,13 +412,24 @@ describe('reconciling My offers (FR-011: whoever settles it)', () => {
     expect(await reconcileOffers(e, ACCOUNT, kernel)).toEqual([]);
 
     // Someone takes it: the circuit files the wanted coin (and the change) in the inbox, and the
-    // offer's coin is spent in the same transaction.
-    const payload = relay.submitted[0]!.request.payload as { wantNonce: string };
+    // offer's coin is spent in the same transaction, by the account's own swap call.
+    const payload = relay.submitted[0]!.request.payload as {
+      wantNonce: string;
+      coin: { nonce: string; color: string; value: string };
+    };
     await addInbox(relay, pk, [
       { nonce: payload.wantNonce, color: QUOTE.midnightColour, value: 2_100_000n },
       { nonce: '09'.repeat(32), color: BASE.midnightColour, value: 1n * U },
     ]);
     relay.zswapActivity.outputs.at(-2)!.txHash = 'settle-tx';
+    relay.zswapActivity.inputs.push({
+      nullifier: contractCoinNullifier(payload.coin, ACCOUNT),
+      txHash: 'settle-tx',
+      blockHeight: 2,
+    });
+    relay.txCalls.set('settle-tx', [
+      swapCall({ nonce: payload.wantNonce, color: QUOTE.midnightColour, value: '2100000' }, payload.coin),
+    ]);
     relay.state.authNonce = '5';
     const changed = await reconcileOffers(e, ACCOUNT, { offerStatus: async () => 'consumed' as const });
     expect(changed).toHaveLength(1);
@@ -559,7 +589,7 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
     }
   });
 
-  it('decideApproval: filled needs the call’s own note AND the moved nonce; a note alone proves nothing', () => {
+  it('decideApproval: filled needs the decoded swap call and the moved nonce; a note alone proves nothing', () => {
     const t = {
       offerId: 'f6'.repeat(32),
       role: 'make' as const,
@@ -570,7 +600,7 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
       baseRaw: '1',
       quoteRaw: '1',
       summary: 's',
-      coin: '01'.repeat(32),
+      coin: contractCoinCommitment({ nonce: '01'.repeat(32), color: BASE.midnightColour, value: '1' }, ACCOUNT),
       authNonce: '4',
       wantNonce: '0d'.repeat(32),
       createdAt: 0,
@@ -578,30 +608,152 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
       validUntil: '2000000000',
       status: 'live' as const,
     };
+    const want = { nonce: '0d'.repeat(32), color: QUOTE.midnightColour, value: '1' };
+    const give = { nonce: '01'.repeat(32), color: BASE.midnightColour, value: '1' };
+    const W = contractCoinCommitment(want, ACCOUNT);
     const note = {
-      nonce: '0d'.repeat(32),
-      color: QUOTE.midnightColour,
-      value: '1',
-      mtIndex: null,
-      commitment: 'x',
+      ...want,
+      mtIndex: '7',
+      commitment: W,
       origin: 'inbox' as const,
       inInbox: true,
       spent: false,
+      createdTx: 'dep',
     };
-    // A note filed by anyone (deposit_shielded) while the nonce has not moved: still live.
-    expect(decideApproval(t, { authNonce: 4n, coins: [note] }, 0).status).toBe('live');
-    // The nonce moved and the note is there: filled (settled once the chain shows the coin's leaf).
-    expect(decideApproval(t, { authNonce: 5n, coins: [note] }, 0)).toMatchObject({ status: 'filled' });
-    expect(decideApproval(t, { authNonce: 5n, coins: [{ ...note, mtIndex: '7', createdTx: 'tx7' }] }, 0)).toMatchObject(
-      {
-        status: 'filled',
-        settledTx: 'tx7',
-      },
+    const tx = (hash: string, entryPoints: string[]) => ({
+      hash,
+      blockHeight: 5,
+      id: 1,
+      entryPoints,
+      outputs: [{ commitment: W, mtIndex: '7' }],
+      inputs: [],
+    });
+    const view = (o: {
+      authNonce: bigint;
+      txs?: ReturnType<typeof tx>[];
+      complete?: boolean;
+      calls?: Record<string, DecodedCall[]>;
+    }) => ({
+      authNonce: o.authNonce,
+      coins: [note],
+      history: { account: ACCOUNT, txs: o.txs ?? [], complete: o.complete ?? true, throughHeight: 100 },
+      stateHeight: 9,
+      calls: (h: string) => o.calls?.[h],
+    });
+    // A note (and even a real coin) filed by anyone while the nonce has not moved: still live.
+    expect(decideApproval(t, view({ authNonce: 4n, txs: [tx('dep', ['deposit_shielded'])] }), 0).status).toBe('live');
+    // The nonce moved, and the wanted coin's leaf and note are there, but from a DEPOSIT: cancelled.
+    expect(decideApproval(t, view({ authNonce: 5n, txs: [tx('dep', ['deposit_shielded'])] }), 0).status).toBe(
+      'cancelled',
     );
-    // The nonce moved and no note: cancelled. Signed "never" (an older record): no expiry from time.
-    expect(decideApproval(t, { authNonce: 5n, coins: [] }, 0).status).toBe('cancelled');
+    // The account's own swap call received it (and spent the offer's coin): filled, by that transaction.
+    const swap = view({
+      authNonce: 5n,
+      txs: [tx('swap', ['open_swap_shielded_with_ed25519'])],
+      calls: { swap: [swapCall(want, give)] },
+    });
+    expect(decideApproval(t, swap, 0)).toMatchObject({ status: 'filled', settledTx: 'swap', fillVerified: true });
+    // A swap call of the account that received ANOTHER coin, with the wanted one deposited by another
+    // call in the same transaction: not this offer's fill.
+    const bundled = view({
+      authNonce: 5n,
+      txs: [tx('swap2', ['open_swap_shielded_with_ed25519', 'deposit_shielded'])],
+      calls: {
+        swap2: [
+          swapCall({ ...want, nonce: '0e'.repeat(32) }, give),
+          { address: ACCOUNT, entryPoint: 'deposit_shielded', receives: [W], nullifiers: [] },
+        ],
+      },
+    });
+    expect(decideApproval(t, bundled, 0).status).toBe('cancelled');
+    // The swap call received the wanted coin but paid from another coin: not this approval's call.
+    const otherCoin = view({
+      authNonce: 5n,
+      txs: [tx('swap3', ['open_swap_shielded_with_ed25519'])],
+      calls: { swap3: [swapCall(want, { ...give, nonce: '02'.repeat(32) })] },
+    });
+    expect(
+      decideApproval({ ...t }, { ...otherCoin, coins: [note, { ...note, ...give, commitment: t.coin }] }, 0).status,
+    ).toBe('cancelled');
+    // The nonce moved, nothing proves a fill, and the history is NOT complete: ended, neither claimed.
+    expect(decideApproval(t, view({ authNonce: 5n, txs: [], complete: false }), 0).status).toBe('ended');
+    // A transaction whose raw bytes were not read proves nothing either.
+    expect(
+      decideApproval(
+        t,
+        view({ authNonce: 5n, txs: [tx('swap', ['open_swap_shielded_with_ed25519'])], complete: false }),
+        0,
+      ).status,
+    ).toBe('ended');
+    // Signed "never" (an older record): no expiry from time.
     const { validUntil: _v, ...never } = t;
-    expect(decideApproval(never, { authNonce: 4n, coins: [] }, 9e15).status).toBe('live');
+    expect(decideApproval(never, view({ authNonce: 4n }), 9e15).status).toBe('live');
+  });
+
+  it('R3-6: a REAL coin someone deposits with the wanted nonce never turns a cancelled offer into Filled', async () => {
+    const { relay, e, pk } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    const payload = relay.submitted[0]!.request.payload as { wantNonce: string; wantColor: string; wantAmount: string };
+    // The attacker knows the wanted coin (the relay saw the payload) and pays for it: a real leaf and a
+    // note, filed by `deposit_shielded`, in a transaction of its own.
+    await addInbox(relay, pk, [
+      { nonce: payload.wantNonce, color: payload.wantColor, value: BigInt(payload.wantAmount) },
+    ]);
+    relay.zswapActivity.outputs.at(-1)!.txHash = 'planted';
+    relay.txCalls.set('planted', [
+      {
+        address: ACCOUNT,
+        entryPoint: 'deposit_shielded',
+        receives: [relay.zswapActivity.outputs.at(-1)!.commitment],
+        nullifiers: [],
+      },
+    ]);
+    // The owner cancels (the nonce moves).
+    relay.results['cancel-offers'] = { txId: 'c1'.repeat(32) };
+    relay.afterJob['cancel-offers'] = () => {
+      relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
+    };
+    const r = await cancelOffers(e, ACCOUNT);
+    expect(r.cancelled).toBe(1);
+    const [rec] = readTrades(e.store, e.scope, ACCOUNT);
+    expect(rec).toMatchObject({ status: 'cancelled' });
+    expect(rec!.settledTx).toBeUndefined();
+  });
+
+  it('R3-6: a "Filled" an older page decided from a note alone is decided again', async () => {
+    const { relay, e, pk } = await setup();
+    relay.results['open-swap'] = listed;
+    const rec = await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    const payload = relay.submitted[0]!.request.payload as { wantNonce: string; wantColor: string; wantAmount: string };
+    await addInbox(relay, pk, [
+      { nonce: payload.wantNonce, color: payload.wantColor, value: BigInt(payload.wantAmount) },
+    ]);
+    relay.zswapActivity.outputs.at(-1)!.txHash = 'planted';
+    relay.state.authNonce = '5';
+    // P10's page called it filled, settled by the planted deposit.
+    putTrade(e.store, e.scope, ACCOUNT, { ...rec, status: 'filled', settledTx: 'planted' });
+    const [back] = await reconcileOffers(e, ACCOUNT, null);
+    expect(back).toMatchObject({ status: 'cancelled' });
+    expect(back!.settledTx).toBeUndefined();
+  });
+
+  it('R3-6: with the history incomplete, a moved nonce shows Ended, never Filled or Cancelled; decided once it is complete', async () => {
+    const { relay, e, pk } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    (e.chain as FakeChain).complete = false;
+    relay.state.authNonce = '5';
+    const [ended] = await reconcileOffers(e, ACCOUNT, null);
+    expect(ended).toMatchObject({ status: 'ended' });
+    expect(offerShown(ended!)).toEqual({ state: 'ended', listed: false });
+    expect(liveOffer(readTrades(e.store, e.scope, ACCOUNT), Date.now())).toBeNull(); // it never blocks a new offer
+    // The complete history shows the swap that filled it.
+    await executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'swap-tx');
+    relay.state.authNonce = '5';
+    (e.chain as FakeChain).complete = true;
+    const [filled] = await reconcileOffers(e, ACCOUNT, null);
+    expect(filled).toMatchObject({ status: 'filled', settledTx: 'swap-tx' });
   });
 });
 

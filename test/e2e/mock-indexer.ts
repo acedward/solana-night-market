@@ -7,20 +7,31 @@
 //     compiled account's own constructor with the relay's fields and the pinned key set's real
 //     verifier keys (packages/core/test/fixtures/account-state.ts), so the page's real decoder and
 //     real market-account check run on it;
-//   - `contract(address) { actions { transaction { … zswapLedgerEvents } } }`: the account's
-//     transactions, with raw events that carry the account's address and each coin's commitment or
-//     nullifier, for the page's check of the relay's Zswap report.
-// A test can make the chain differ from what an honest market would deploy (`tamper`), or from what
-// the relay reports (`hideFromEvents`).
+//   - the account's HISTORY (AA 00047 P11.B, questions Q47 A): `contract(address) { actions(limit) }`
+//     (newest first, at most 500) and the `contractActions` SUBSCRIPTION over a WebSocket (oldest first
+//     from a block height, then waiting, as the indexer does), each action with its transaction's
+//     height, range in the Zswap tree, verdict, the entry point of the account's call and the ledger
+//     EVENTS, serialised byte for byte as ledger-v9 emits them
+//     (packages/core/test/fixtures/ledger-events.ts), so the page's real ledger-v9 decoder runs on them;
+//   - `transactions(offset: { hash }) { raw }`: a swap transaction's raw bytes, built by ledger-v9
+//     (./ledger-tx.ts).
+// A test can make the chain differ from what an honest market would deploy (`tamper`), hide a leaf or
+// a spend from the events (`hideFromEvents`), put griefers' deposits in front of the account's own
+// (`padActions`), or refuse the stream (`noStream`).
 
 import type { Route } from '@playwright/test';
 
+import type { WebSocketRoute } from '@playwright/test';
+
 import { accountStateHex, FIXTURE_VERIFIER_KEYS } from '../../packages/core/test/fixtures/account-state.js';
+import { zswapInputEventHex, zswapOutputEventHex } from '../../packages/core/test/fixtures/ledger-events.js';
 import { networkSaltFor } from '../../packages/core/src/passport/account-chain.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { ACCOUNT, type MockRelay } from './mock-relay.js';
 
 export const INDEXER = 'http://indexer.test/api/v4/graphql';
+/** Its WebSocket endpoint (the page derives it from INDEXER). */
+export const INDEXER_WS = 'ws://indexer.test/api/v4/graphql/ws';
 
 /** The site configuration's network override that points the page at this indexer. */
 export const INDEXER_OVERRIDE = { midnight: { indexerUrl: INDEXER } } as const;
@@ -30,7 +41,6 @@ const CORS = {
   'access-control-allow-headers': '*',
   'access-control-allow-methods': '*',
 };
-const PREFIX = Buffer.from('midnight:event[v14]:').toString('hex');
 
 /** How a compromised relay's account can differ from the market's own (audit C3, F-A2/F-B5). */
 export interface Tamper {
@@ -61,8 +71,12 @@ export class MockIndexer {
   /** AA 00047 P10 (R2-6): this many NEWER transactions of the account than its own (a griefer's
    *  one-unit deposits), so its real ones are past the indexer's newest page of `actions(limit)`. */
   padActions = 0;
-  /** The transactions read by hash (`transactions(offset: { hash })`). */
+  /** The transactions read by hash (`transactions(offset: { hash })`: their raw bytes). */
   readonly byHash: string[] = [];
+  /** The subscriptions the page opened, with the block height each started at. */
+  readonly streams: number[] = [];
+  /** Refuse the WebSocket stream (a Content-Security-Policy or a proxy that blocks it). */
+  noStream = false;
 
   constructor(private readonly relay: MockRelay) {}
 
@@ -106,32 +120,107 @@ export class MockIndexer {
     });
   }
 
+  /** The account's actions as the indexer serves them, OLDEST first: one per call of the account, each
+   *  with its transaction (and the ledger events of the account's leaves and spends in it). */
   private actions() {
-    const byHash = new Map<
-      string,
-      { hash: string; block: { height: number }; zswapLedgerEvents: Array<{ id: number; raw: string }> }
-    >();
+    const r = this.relay;
+    const events = new Map<string, Array<{ id: number; raw: string }>>();
+    const ranges = new Map<string, number[]>();
     let id = 1;
-    const add = (txHash: string, height: number, value: string) => {
-      const tx = byHash.get(txHash) ?? { hash: txHash, block: { height }, zswapLedgerEvents: [] };
-      if (!this.hideFromEvents.has(value))
-        tx.zswapLedgerEvents.push({ id: id++, raw: `${PREFIX}080080${ACCOUNT}${value}00` });
-      byHash.set(txHash, tx);
-    };
-    for (const o of this.relay.outputs) add(o.txHash, o.blockHeight, o.commitment);
-    for (const i of this.relay.inputs) add(i.txHash, i.blockHeight, i.nullifier);
-    return [...byHash.values()];
+    for (const o of r.outputs) {
+      ranges.set(o.txHash, [...(ranges.get(o.txHash) ?? []), Number(o.mtIndex)]);
+      if (this.hideFromEvents.has(o.commitment)) continue;
+      const raw = zswapOutputEventHex({
+        txHash: o.txHash,
+        contract: ACCOUNT,
+        commitment: o.commitment,
+        mtIndex: BigInt(o.mtIndex),
+      });
+      events.set(o.txHash, [...(events.get(o.txHash) ?? []), { id: id++, raw }]);
+    }
+    for (const i of r.inputs) {
+      if (this.hideFromEvents.has(i.nullifier)) continue;
+      const raw = zswapInputEventHex({ txHash: i.txHash, contract: ACCOUNT, nullifier: i.nullifier });
+      events.set(i.txHash, [...(events.get(i.txHash) ?? []), { id: id++, raw }]);
+    }
+    const own = [...r.chainTxs.entries()]
+      .sort(([, a], [, b]) => a.id - b.id)
+      .flatMap(([hash, t]) => {
+        const at = ranges.get(hash) ?? [];
+        const transaction = {
+          hash,
+          id: t.id,
+          block: { height: t.height },
+          zswapStartIndex: at.length ? Math.min(...at) : 0,
+          zswapEndIndex: at.length ? Math.max(...at) + 1 : 0,
+          transactionResult: { status: 'SUCCESS' },
+          zswapLedgerEvents: events.get(hash) ?? [],
+        };
+        const calls = t.entryPoints.length ? t.entryPoints : [null];
+        return calls.map((entryPoint) => ({ __typename: 'ContractCall', entryPoint, transaction }));
+      });
+    // A griefer's one-unit deposits, NEWER than everything of the account's own: a real leaf each.
+    const pad = Array.from({ length: this.padActions }, (_, i) => {
+      const hash = `f${(i + 1).toString(16).padStart(63, '0')}`;
+      return {
+        __typename: 'ContractCall',
+        entryPoint: 'deposit_shielded',
+        transaction: {
+          hash,
+          id: 100_000 + i,
+          block: { height: 100_000 + i },
+          zswapStartIndex: 1_000_000 + i,
+          zswapEndIndex: 1_000_001 + i,
+          transactionResult: { status: 'SUCCESS' },
+          zswapLedgerEvents: [
+            {
+              id: 10_000_000 + i,
+              raw: zswapOutputEventHex({
+                txHash: hash,
+                contract: ACCOUNT,
+                commitment: (i + 1).toString(16).padStart(64, 'c'),
+                mtIndex: 1_000_000 + i,
+              }),
+            },
+          ],
+        },
+      };
+    });
+    return [...own, ...pad];
+  }
+
+  /** The chain's tip: past every transaction, and never before the state's read (height 99). */
+  private tip() {
+    return Math.max(99, ...this.actions().map((a) => a.transaction.block.height)) + 1;
   }
 
   /** The account's actions as the indexer serves them: NEWEST first, at most `limit` (it caps 500). */
   private page(limit: number) {
-    const own = this.actions().sort((a, b) => b.block.height - a.block.height);
-    const pad = Array.from({ length: this.padActions }, (_, i) => ({
-      hash: `f${(this.padActions - i).toString(16).padStart(63, '0')}`,
-      block: { height: 100_000 + this.padActions - i },
-      zswapLedgerEvents: [] as Array<{ id: number; raw: string }>,
-    }));
-    return [...pad, ...own].slice(0, Math.min(limit, 500)).map((transaction) => ({ transaction }));
+    return this.actions().reverse().slice(0, Math.min(limit, 500));
+  }
+
+  /** The `contractActions` subscription (graphql-transport-ws): every action from the offset's block
+   *  height, oldest first, then nothing more (the stream stays open, as the indexer's does). */
+  handleWs(ws: WebSocketRoute) {
+    ws.onMessage((m) => {
+      const msg = JSON.parse(String(m)) as {
+        type?: string;
+        id?: string;
+        payload?: { variables?: Record<string, unknown> };
+      };
+      if (msg.type === 'connection_init') {
+        if (this.noStream) return ws.close({ code: 1011, reason: 'refused' });
+        return ws.send(JSON.stringify({ type: 'connection_ack' }));
+      }
+      if (msg.type !== 'subscribe') return;
+      const v = msg.payload?.variables ?? {};
+      const from = Number((v.offset as { height?: number } | undefined)?.height ?? 0);
+      this.streams.push(from);
+      const ours = String(v.address ?? '').toLowerCase() === ACCOUNT && this.relay.registered;
+      for (const a of ours ? this.actions() : [])
+        if (a.transaction.block.height >= from)
+          ws.send(JSON.stringify({ id: msg.id, type: 'next', payload: { data: { contractActions: a } } }));
+    });
   }
 
   async handle(route: Route) {
@@ -162,21 +251,21 @@ export class MockIndexer {
       return json(200, { data: { contract: state ? { state } : null } });
     }
     if (query.includes('transactions(offset')) {
-      // By hash (AA 00047 P10, R2-6): the account's own transactions, wherever they are.
-      const own = new Map(this.actions().map((t) => [t.hash, t]));
-      const data: Record<string, unknown[]> = {};
-      for (const [k, v] of Object.entries(body.variables ?? {})) {
-        const h = String(v);
-        this.byHash.push(h);
-        const t = own.get(h);
-        data[k.replace(/^h/, 't')] = t ? [{ ...t, contractActions: [{ address: ACCOUNT }] }] : [];
-      }
-      return json(200, { data });
+      // A transaction's raw bytes, by hash (AA 00047 P11.B: a swap's, for the evidence of a fill).
+      const h = String(body.variables?.hash ?? '');
+      this.byHash.push(h);
+      const t = this.relay.chainTxs.get(h);
+      return json(200, { data: { transactions: t?.raw ? [{ hash: h, raw: t.raw }] : [] } });
     }
     if (query.includes('actions(')) {
       this.queries.push(`actions:${address}`);
       const limit = Number(body.variables?.limit ?? 100);
-      return json(200, { data: { contract: ours && this.relay.registered ? { actions: this.page(limit) } : null } });
+      return json(200, {
+        data: {
+          contract: ours && this.relay.registered ? { actions: this.page(limit) } : null,
+          block: { height: this.tip() },
+        },
+      });
     }
     this.queries.push(`state:${address}`);
     const state = ours ? await this.stateHex() : null;

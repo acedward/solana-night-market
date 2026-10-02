@@ -13,6 +13,20 @@
 // The sponsor wallet is only borrowed for its public keys (midnight-js needs a wallet provider to
 // build a call); neither action spends the sponsor's DUST. The coin the give is paid from is the
 // call's private state for this job only, and is wiped when the job ends (Q5).
+//
+// Whose failure is it (AA 00047 P11, audit round 3 R3-7 / F-B3-6)? The failure budget charges only
+// failures the requester caused (../actions/failure-budget.ts), and the batcher's refusals read as the
+// counterparty's (`exchange-error`, `take-refused`: a maker who cancelled must not lock takers out).
+// A taker could therefore take a live offer with its OWN spent coin (a valid membership path still
+// proves) and repeat the failure for free. So:
+//   - BEFORE proving, the coin the call spends is checked unspent on chain (../chain/coin-spend.ts:
+//     its nullifier against the account's whole history): `coin-spent`, nothing proven (make and
+//     take alike);
+//   - AFTER a settlement refusal, the relay looks at the taker's side first: its coin spent meanwhile
+//     → `coin-spent`, its account's auth nonce moved (another of its approvals landed) →
+//     `stale-authorisation`; both are the taker's and are charged. Only otherwise is the refusal the
+//     maker's or the exchange's (not charged), and those are bounded per account by
+//     `TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY` (../actions/account-caps.ts `admitTake`).
 
 import type { ExpiryLimits, OpenSwapResult, TakeResult } from '@nightmarket/core';
 
@@ -22,6 +36,7 @@ import type { DeviceArm, TradeAction, TradeCheckOk } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
+import { assertCoinUnspent, coinSpent, type SpendReader } from '../chain/coin-spend.js';
 import { PublicError, type JobContext, type JobExecutor } from '../queue/jobs.js';
 import type { SponsorSession } from '../sponsor/session.js';
 import { AccountOfferError, proveGuaranteedOffer, type AccountOfferCall } from './account-offer.js';
@@ -55,6 +70,9 @@ export interface TradeDeps {
   expiry?: ExpiryLimits;
   /** For tests: Unix seconds now. */
   now?: () => number;
+  /** The spent coins of an account (AA 00047 P11, R3-7): a call's coin is checked unspent before its
+   *  proof, and a refused take is attributed. Absent: no check (tests of other behaviour). */
+  coins?: SpendReader;
 }
 
 /**
@@ -79,6 +97,43 @@ export function batcherRefusalError(httpStatus: number, error: string | undefine
     'take-refused',
     `the exchange did not settle the take${error ? `: ${error.slice(0, 300)}` : ''}`,
   );
+}
+
+/**
+ * A take the batcher refused, attributed (AA 00047 P11, R3-7): the TAKER's fault when its own coin is
+ * spent by now (`coin-spent`) or its account moved past the signed nonce (`stale-authorisation`), both
+ * charged to it; otherwise the maker's or the exchange's (`exchange-error`, `take-refused`; not
+ * charged). A 429 is the exchange's cap. When the chain cannot be read, the refusal stays the
+ * counterparty's (never charge on a guess).
+ */
+export async function attributeSettlementRefusal(
+  deps: Pick<TradeDeps, 'coins' | 'log'>,
+  rt: Pick<PassportRuntime, 'ledgerState'>,
+  account: string,
+  taker: { coin: { nonce: string; color: string; value: string }; authNonce: string },
+  httpStatus: number,
+  error: string | undefined,
+): Promise<PublicError> {
+  const counterparty = batcherRefusalError(httpStatus, error);
+  if (httpStatus === 429) return counterparty;
+  try {
+    if (deps.coins && (await coinSpent(deps.coins, account, taker.coin))) {
+      return new PublicError(
+        'coin-spent',
+        'the exchange did not settle the take: the coin it pays with was already spent on Midnight. Refresh your balances and take again with another coin',
+      );
+    }
+    const ledger = await rt.ledgerState(account);
+    if (ledger && ledger.auth_nonce !== BigInt(taker.authNonce)) {
+      return new PublicError(
+        'stale-authorisation',
+        'the exchange did not settle the take: another approval of your account landed first, so this one can no longer settle. Take again and sign once more',
+      );
+    }
+  } catch (e) {
+    deps.log.warn('a refused take could not be attributed (chain read failed)', { error: e });
+  }
+  return counterparty;
 }
 
 const seconds = (ms: number) => Math.round(ms / 100) / 10;
@@ -148,6 +203,11 @@ export function openSwapExecutor(deps: TradeDeps): JobExecutor {
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'open-swap', raw, ctx);
     const offer = await callOf(deps, check);
+    // R3-7: an offer paid from a spent coin could never settle; refuse it before any proof.
+    if (deps.coins) {
+      const coins = deps.coins;
+      await withReplayRelease(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, check.payload.coin));
+    }
     const prove = deps.prove ?? proveGuaranteedOffer;
     const proven = await withReplayRelease(deps, check.digestHex, () =>
       ctx.prove(() =>
@@ -234,6 +294,11 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
     ctx.stage('offer-checked', { offerId: p.offerId });
 
     const offer = await callOf(deps, check);
+    // R3-7: the taker's coin must be unspent BEFORE any proof (a spent coin still proves membership).
+    if (deps.coins) {
+      const coins = deps.coins;
+      await withReplayRelease(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, p.coin));
+    }
     const prove = deps.prove ?? proveGuaranteedOffer;
     return withReplayRelease(deps, check.digestHex, () =>
       ctx.prove(() =>
@@ -280,7 +345,7 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
             if (!b.ok || !b.transactionHash) {
               deps.log.warn('the batcher refused a take', { status: b.httpStatus, error: b.error });
               deps.onBatcherRefusal?.(b.httpStatus);
-              throw batcherRefusalError(b.httpStatus, b.error);
+              throw await attributeSettlementRefusal(deps, rt, check.account, p, b.httpStatus, b.error);
             }
             ctx.stage('settled', { tx: b.transactionHash, offerId: p.offerId });
             const result: TakeResult = {

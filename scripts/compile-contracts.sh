@@ -29,10 +29,13 @@
 # Outputs land in the submodule's git-ignored managed/ directories, exactly where the upstream
 # sources import them from. A stamp over every input skips the work when nothing changed.
 #
-# Environment: COMPACTC_ACCOUNT / COMPACTC_CALLEES name compilers already installed; each must sit in
-# a toolchain directory that scripts/fetch-compactc.sh --verify accepts (the pinned archive kept
-# beside the binaries, every file of it unchanged: AA 00047 P10, R2-9), not only print the right
-# version line. Otherwise scripts/fetch-compactc.sh installs (and re-verifies) the pinned ones.
+# Environment: COMPACTC_ACCOUNT / COMPACTC_CALLEES name compilers already installed; each must BE the
+# `compactc` (symbolic links followed) of a toolchain directory that scripts/fetch-compactc.sh
+# --verify accepts (the pinned archive kept beside the binaries, every file of it unchanged: AA 00047
+# P10, R2-9), not only print the right version line, and the script then runs that verified
+# `<dir>/compactc` itself, never the path as given (`fetch-compactc.sh --resolve`; AA 00047 P11, audit
+# round 3 R3-10: another executable in a verified directory used to pass). Otherwise
+# scripts/fetch-compactc.sh installs (and re-verifies) the pinned ones.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -54,8 +57,8 @@ ACCOUNT_CC="${COMPACTC_ACCOUNT:-}"
 if [[ -z "$ACCOUNT_CC" ]]; then
   ACCOUNT_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" 0.35.0)"
 else
-  bash "$ROOT/scripts/fetch-compactc.sh" --verify "$(dirname "$ACCOUNT_CC")" 0.35.0 || {
-    echo "compile-contracts: COMPACTC_ACCOUNT=$ACCOUNT_CC is not a verified compactc 0.35.0 toolchain" >&2
+  ACCOUNT_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" --resolve "$ACCOUNT_CC" 0.35.0)" || {
+    echo "compile-contracts: COMPACTC_ACCOUNT=$COMPACTC_ACCOUNT is not a verified compactc 0.35.0 toolchain" >&2
     exit 65
   }
 fi
@@ -67,8 +70,8 @@ CALLEE_CC="${COMPACTC_CALLEES:-}"
 if [[ -z "$CALLEE_CC" ]]; then
   CALLEE_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" 0.34.0)"
 else
-  bash "$ROOT/scripts/fetch-compactc.sh" --verify "$(dirname "$CALLEE_CC")" 0.34.0 || {
-    echo "compile-contracts: COMPACTC_CALLEES=$CALLEE_CC is not a verified compactc 0.34.0 toolchain" >&2
+  CALLEE_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" --resolve "$CALLEE_CC" 0.34.0)" || {
+    echo "compile-contracts: COMPACTC_CALLEES=$COMPACTC_CALLEES is not a verified compactc 0.34.0 toolchain" >&2
     exit 65
   }
 fi

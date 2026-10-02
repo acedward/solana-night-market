@@ -143,10 +143,11 @@ export function laneRelay(o: {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ account, payload, passportAuth: { owner, signature: '00'.repeat(64), useCounter: '0' } }),
     });
-    const body = (await res.json()) as { job?: { requestId: string }; error?: { code: string } };
+    const body = (await res.json()) as { job?: { requestId: string }; error?: { code: string; detail?: string } };
     return {
       status: res.status,
       code: body.error?.code,
+      detail: body.error?.detail,
       retryAfter: res.headers.get('retry-after'),
       id: body.job?.requestId,
     };

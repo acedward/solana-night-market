@@ -127,6 +127,14 @@ export class IndexerChainReader implements ChainReader {
     return zswapActivityOf(account, found.txs, await this.decoder, found.tip);
   }
 
+  /** The nullifiers the account's coins were spent with, over its WHOLE history (AA 00047 P11, audit
+   *  round 3 R3-7: a coin is checked unspent before a proof is spent on it), or null when there is no
+   *  such contract. */
+  async spentNullifiers(account: string): Promise<ReadonlySet<string> | null> {
+    const z = await this.zswap(account);
+    return z ? new Set(z.inputs.map((i) => i.nullifier.replace(/^0x/, '').toLowerCase())) : null;
+  }
+
   async unshielded(account: string): Promise<UnshieldedBalancesView | null> {
     if (!this.stateOf) throw new ChainReadNotImplementedError('this relay does not read contract balances');
     const [state, tip] = await Promise.all([this.stateOf(account), this.indexer.tip()]);

@@ -131,6 +131,8 @@ describe('AccountCaps (unit)', () => {
       makesPerDay: 20,
       cancelsPerDay: 5,
       restoresPerDay: 3,
+      withdrawsPerDay: 100,
+      unsettledTakesPerDay: 10,
     });
     expect(
       testConfig({
@@ -139,7 +141,14 @@ describe('AccountCaps (unit)', () => {
         CANCELS_PER_ACCOUNT_PER_DAY: '2',
         RESTORES_PER_ACCOUNT_PER_DAY: '9',
       }).accountCaps,
-    ).toEqual({ maxOpenOffers: 1, makesPerDay: 7, cancelsPerDay: 2, restoresPerDay: 9 });
+    ).toEqual({
+      maxOpenOffers: 1,
+      makesPerDay: 7,
+      cancelsPerDay: 2,
+      restoresPerDay: 9,
+      withdrawsPerDay: 100,
+      unsettledTakesPerDay: 10,
+    });
     expect(() => testConfig({ CANCELS_PER_ACCOUNT_PER_DAY: '0' })).toThrow(/CANCELS_PER_ACCOUNT_PER_DAY/);
   });
 });

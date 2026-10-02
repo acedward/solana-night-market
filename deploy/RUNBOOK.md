@@ -414,7 +414,12 @@ site then offers to put the browser's key back: the same circuit, to the BROWSER
 approval that reads "Rotate encryption key / New key <fingerprint>". The relay refuses the on-chain
 key itself (that would only be a cancel) and an all-zero key; a restore has its own daily cap
 (`RESTORES_PER_ACCOUNT_PER_DAY`, 3), never uses up the cancels, and is never refused by the failure
-budget.
+budget. **Only the account's opening key** (audit round 3 R3-9, questions Q50): the relay lands a
+restore only to the key the account was OPENED with (the `enc_key` in the state its deploy transaction
+created, which the browser chose and checks at opening), and refuses any other key (`401`,
+`malformed`). A page that talked a wallet into "Rotate encryption key" for the page's own key can
+therefore not have the market land it for free. A proof of possession of the new key would not have
+helped: that page holds its own key's secret.
 
 **F-B6: a withdrawal's recipient encryption key.** A withdrawal to a Midnight wallet carries the
 wallet's encryption key (so the wallet can find the coin), which the signed message does not cover.
@@ -454,11 +459,20 @@ TTL, one hour; `via-sponsor`: `DEMO_TOKENS_PENDING_SETTLE_SECONDS`, 4 h). When t
 looked up in the account's on-chain inbox: there → delivered; not there and past its time (plus five
 minutes) → minted again; not there yet but it could still land → the claim stops with
 `demo-tokens-settling` (not counted as a failed delivery; try later) and nothing is minted. A pending
-token with nothing to look for (a `via-sponsor` mint to the sponsor wallet cut off before its deposit)
-is **quarantined**: the relay never mints it again, the claim completes with the rest, and the job's
-result lists it as `held`. An operator decides: check the sponsor wallet for a coin of that colour
-and deposit it to the account by hand, or remove the token from the record's `quarantined` (with the
-relay stopped) to let the key claim it again. The log says `a demo token was held back (quarantined)`.
+token with nothing to look for (a `via-sponsor` mint to the sponsor wallet cut off before the wallet
+saw the coin) is **quarantined**: the relay never mints it again, the claim completes with the rest,
+and the job's result lists it as `held`. An operator decides: check the sponsor wallet for a coin of
+that colour and deposit it to the account by hand, or remove the token from the record's
+`quarantined` (with the relay stopped) to let the key claim it again. The log says `a demo token was
+held back (quarantined)`.
+
+**`via-sponsor` keeps its two stages apart** (audit round 3 R3-8). Once the sponsor wallet holds the
+minted coin, the claim records the mint as **minted** (with its transaction id), before the deposit is
+built; the deposit is then pending with its own entry and keeps the mint's id. A resumed claim after
+a confirmed mint **deposits only**, from the sponsor's balance of that token, and never mints again:
+also when the deposit could no longer land. When the sponsor no longer holds enough of the token to
+deposit, the state is unclear and the token is **quarantined** (`its deposit could not be resumed`).
+`direct` has one transaction per token and is unchanged.
 
 **The claims store** is `<RELAY_DATA_DIR>/demo-token-claims.json`, rewritten atomically on every
 change, next to a lock file that keeps a second relay off it: **one relay per data dir**. The lock
@@ -545,6 +559,8 @@ value; request bodies are never logged).
 | Opening accounts | 100 a day in all (`REGISTER_DAILY_CAP`), 3 a day per client address (`REGISTER_PER_CLIENT_DAILY_CAP`), 1 queued or running at once (`REGISTER_MAX_IN_FLIGHT`) | Rolling 24 hours, counted when admitted (a failed registration still spent its proofs). Past a cap: `429 registration-daily-cap` / `registration-client-cap`; while one is in flight: `503 registration-busy`, Retry-After 60. See the numbers below. |
 | Failed jobs | 5 per Solana key and 5 per account a day (`FAILURE_BUDGET_PER_OWNER_PER_DAY`, `FAILURE_BUDGET_PER_ACCOUNT_PER_DAY`) | A job that fails after it started proving FOR A REASON THE REQUESTER CAUSED counts (a circuit refusal, the node refusing the transaction). Not counted: the market's own failures (no keys, the exchange unreachable or at its cap), a counterparty's (a take of an offer its maker cancelled or let expire: `exchange-error`, `take-refused`, `take-*`, `offer-gone`) and the infrastructure's (the proof server, the node or the indexer failed: the customer sees `market-unavailable`). Past the budget: `429 failure-budget` until the oldest failure is a day old. It is checked at admission, when the job reaches its lane and when it first reaches the prover; a job refused there proves nothing and gives back what its request claimed. **Withdrawals, unshielded withdrawals, cancels and key restores are never refused by it.** Questions Q38. |
 | Per account | 1 job queued or running (`JOBS_PER_ACCOUNT`); 3 offers that may still settle (`OFFERS_MAX_OPEN_PER_ACCOUNT`); 20 makes (`MAKES_PER_ACCOUNT_PER_DAY`), 5 cancels (`CANCELS_PER_ACCOUNT_PER_DAY`) and 3 key restores (`RESTORES_PER_ACCOUNT_PER_DAY`) in any rolling 24 hours | `429 account-busy`, `open-offers-cap`, `makes-daily-cap`, `cancels-daily-cap`, `restores-daily-cap`, with Retry-After. An offer stops counting at its signed expiry, when the account's nonce moves past it (a cancel, a withdrawal), when its job fails, or when the exchange says it was taken or ended. A daily charge is given back when the job failed before proving or not by the requester. See the numbers below; questions Q37. |
+| Withdrawals per account (owner decision Q46 A at 100; audit round 3 R3-2) | 100 sponsored withdrawals in any rolling 24 hours (`WITHDRAWS_DAILY_CAP`), shielded and unshielded together; past it, **one whole-coin withdrawal per listed token** in any rolling 24 hours | `429 withdraws-daily-cap`, Retry-After, `detail` `whole-coin-exit` (this token's exit is still open: a shielded withdrawal of a whole coin, `amount` = the coin's value, no change; or any unshielded withdrawal of the token, which never makes change) or `whole-coin-exit-used` (used in the last 24 hours, or the market does not list the token). The page says nothing about the allowance until it sees this code (Q46). Charges are given back like the other caps. See the numbers below; questions Q49. |
+| Unsettled takes per account (audit round 3 R3-7) | 10 takes in any rolling 24 hours (`TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY`) that were proven and then refused for a reason the relay could not pin on the taker (the maker's or the exchange's) | `429 takes-unsettled-cap`, Retry-After; only takes wait, never charged to the failure budget. Before proving, a make's, take's or shielded withdrawal's coin is checked unspent on chain (`coin-spent`, nothing proven); a refused take whose own coin is spent by then (`coin-spent`) or whose account moved past the signed nonce (`stale-authorisation`) is the taker's and is charged. Each unsettled take costs a proof and one of the batcher's 1,000 settlements a day. |
 | Offer and take expiry | a make at most 3,600 s ahead, a take 600 s, at least 60 s left | Section 6. |
 | Demo tokens | once per key; `DEMO_TOKENS_DAILY_CAP` a day; 3 failed deliveries | Section 7. |
 | Change re-filing (`append-inbox`) | only against the relay's single-use entitlement for that change, at most `APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY` (20) a day per account | The entitlement key derives from the sponsor seed: a new sponsor seed voids entitlements already issued. |
@@ -581,6 +597,33 @@ With the defaults:
 - the sponsor pays for at most 5 cancels and 3 key restores per account a day. Accounts accumulate
   (at most 100 new ones a day, 3 per client address), so the worst case is (accounts) × 8 small
   transactions a day: watch the sponsor's DUST (section 4.5) and lower the caps if a pattern shows.
+
+**Why the withdrawal numbers, and the sponsor's worst case per day** (audit round 3 R3-2: F-B3-1
+MAJOR, F-A3-4; owner decision Q46 A at 100; questions Q49). A withdrawal is the one sponsor-paid action
+a customer must always be able to repeat, so it had no cap: one account could withdraw 1 base unit to
+itself, reuse the change, and repeat (auditor A's probe: 30 of 30 admitted), each time on the
+sponsor's DUST, until `sponsor-low` stopped the site for everyone. Now, per account and per rolling 24
+hours, the sponsor pays at most (stagenet fees of section 4.3; the unshielded withdrawal's fee is not
+measured on stagenet and is taken as the shielded one's):
+
+| What the sponsor pays for, per account per day | Count | DUST at margin 20 (default) | DUST at margin 5 |
+|---|---|---|---|
+| Withdrawals (`WITHDRAWS_DAILY_CAP`) | 100 | 100 × 0.83 = 83 | 100 × 0.42 = 42 |
+| Change re-filings (`APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY`, one per withdrawal with change) | 20 | 20 × 1.5 = 30 | 20 × 0.75 = 15 |
+| Whole-coin exits past the allowance (one per listed token; 6 on stagenet) | 6 | 6 × 0.83 ≈ 5 | 6 × 0.42 ≈ 2.5 |
+| Cancels and key restores (above) | 5 + 3 | ≈ 8 × 0.83 ≈ 7 | ≈ 8 × 0.42 ≈ 3.5 |
+| **One account's worst case a day** | | **≈ 125 DUST** | **≈ 63 DUST** |
+
+Makes and takes cost the sponsor nothing (the batcher pays a settlement); demo tokens are once per
+key (section 7). One account can therefore use at most about 125 DUST a day, about a sixth of what
+1,000 registered NIGHT generates (714 DUST a day, section 4.3). Several accounts are bounded by the
+registration caps (100 new accounts a day, each costing the sponsor about 41 DUST to open at margin
+20) and, market-wide, by the one prover lane: a withdrawal holds it about 40–45 s, so the lane can run
+at most about 2,000 sponsored transactions a day, about 1,700 DUST at margin 20 (2,400 NIGHT to
+sustain). Size the sponsor for the traffic you expect, watch `sponsor.dustSpecks` (section 8), and
+lower `WITHDRAWS_DAILY_CAP` if a pattern shows; the page explains the allowance only once a customer
+reaches it. An honest customer withdraws a handful of times a day; past the allowance, one whole
+coin of each listed token still leaves every day, so funds never get stuck.
 ## 10. What customers must know
 
 - **Phantom approves every action, and shows what it approves.** The message is readable: the
@@ -607,16 +650,20 @@ With the defaults:
 - The relay's jobs live in memory: a relay restart forgets running jobs (restart when `/health`
   `queue.lanes` shows nothing running or waiting).
 - Proofs one at a time (section 9).
-- An account with 500 or more contract actions cannot be reconciled until the relay pages
-  through the indexer (`/v1/accounts/<account>/zswap` answers `501 history-too-long`).
+- An account's history is read in full (audit round 3 R3-5): past the indexer's 500-action page the
+  relay reads the rest through the indexer's `contractActions` subscription, so the relay needs
+  `MIDNIGHT_INDEXER_WS_URL` (the network profile's default on stagenet) and a WebSocket path to the
+  indexer. Only an account past 100,000 actions answers `501 history-too-long`.
 - A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6; questions Q28:
   the one accepted exception to the trustless relay: a relay could hide a withdrawn coin from its
   recipient's wallet scan, not take it).
 - The page reads its account from the public indexer, except which of its coins exist and which are
   spent: the relay decodes those events, and the page keeps only what the indexer's own events carry
   (section 16; questions Q31). A relay can still leave a coin out (hide it), never invent one.
-- The registration caps, the per-account caps and the failure budget are counted in memory: a relay
-  restart resets them (section 9).
+- The registration caps, the per-account caps (the withdrawal allowance included) and the failure
+  budget are counted in memory: a relay restart resets them (section 9).
+- The withdrawal allowance is per account (questions Q49): many accounts can each use theirs; the
+  registration caps and the prover lane bound the total (section 9, the sponsor's worst case).
 - One request per account at a time: a second one is refused (`429 account-busy`) until the first
   finishes (section 9).
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).

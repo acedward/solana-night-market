@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { demoTokens, reconcilePending, type DemoMint } from '../src/demo/action.js';
+import { DemoMintUnclearError, demoTokens, reconcilePending, type DemoMint } from '../src/demo/action.js';
 import { DemoTokenClaims, type ClaimRecord } from '../src/demo/claims.js';
 import type { ResolvedPackItem } from '../src/demo/pack.js';
 import type { PassportRuntime } from '../src/passport/runtime.js';
@@ -297,6 +297,222 @@ describe('a demo token is never minted twice (R2-7)', () => {
     const direct = src.indexOf('async direct(');
     before("beforeSubmit?.({ stage: 'mint-and-deposit'", 'contracts.submitTx(', direct);
     before("beforeSubmit?.({ stage: 'mint' })", 'submitCallTx as unknown');
-    before("beforeSubmit?.({ stage: 'deposit', entry })", 'custody.depositShielded(coin, entry)');
+    before("beforeSubmit?.({ stage: 'deposit', entry", 'custody.depositShielded(coin, entry)');
+    // AA 00047 P11, R3-8: the confirmed mint is recorded before the deposit is built.
+    before("beforeSubmit?.({ stage: 'minted', mintTx })", "beforeSubmit?.({ stage: 'deposit', entry");
+  });
+});
+
+// AA 00047 P11, audit round 3 R3-8 (F-B3-7): on `via-sponsor`, the confirmed mint (the coin in the
+// sponsor wallet) is recorded apart from the deposit, so a resumed claim after a confirmed mint
+// deposits ONLY, and quarantines what it cannot tell.
+describe('via-sponsor: a confirmed mint is never minted again (R3-8)', () => {
+  /** A via-sponsor faucet on the fake chain, following ./faucet.ts `viaSponsor`'s protocol: the mint
+   *  (`mint` → the sponsor's balance → `minted`), then the deposit (`deposit`, its entry). */
+  function viaSponsor(c: ReturnType<typeof chain>) {
+    const balance = new Map<string, bigint>();
+    const mintCalls: string[] = [];
+    const depositCalls: string[] = [];
+    let n = 0;
+    const faucet =
+      (
+        o: {
+          crash?: 'after-mint' | 'after-deposit-submit';
+          depositLands?: boolean;
+          ttl?: number;
+        } = {},
+      ): DemoMint =>
+      async ({ item: it, beforeSubmit, resume }) => {
+        const amount = BigInt(it.amount);
+        let mintTx = resume?.mintTx;
+        if (!resume) {
+          beforeSubmit({ stage: 'mint' });
+          mintCalls.push(it.symbol);
+          balance.set(it.colour, (balance.get(it.colour) ?? 0n) + amount);
+          mintTx = `${++n}`.repeat(64).slice(0, 64);
+          beforeSubmit({ stage: 'minted', mintTx });
+          if (o.crash === 'after-mint') throw new Error('socket hang up: the relay stopped');
+        } else if ((balance.get(it.colour) ?? 0n) < amount) {
+          throw new DemoMintUnclearError('the sponsor does not hold the minted token');
+        }
+        const entry = new Uint8Array(192).fill(++n);
+        beforeSubmit({
+          stage: 'deposit',
+          entry,
+          ...(mintTx ? { mintTx } : {}),
+          notAfter: Math.floor(Date.now() / 1000) + (o.ttl ?? 3600),
+        });
+        depositCalls.push(it.symbol);
+        if (o.depositLands !== false) {
+          c.inbox.push(entry);
+          balance.set(it.colour, balance.get(it.colour)! - amount);
+        }
+        if (o.crash === 'after-deposit-submit') throw new Error('socket hang up: the response was lost');
+        return { ...(mintTx ? { mint: mintTx } : {}), deposit: `d${n}`.padEnd(64, '0') };
+      };
+    return { balance, mintCalls, depositCalls, faucet };
+  }
+  const viaSponsorDemo = (claims: DemoTokenClaims, c: ReturnType<typeof chain>, mint: DemoMint, now?: () => number) =>
+    demoTokens({
+      runtime: () => c.rt,
+      sponsor: new FakeSponsor(),
+      claims,
+      pack: [TA],
+      path: 'via-sponsor',
+      arm: testArm,
+      mint,
+      log: silentLog(),
+      ...(now ? { now } : {}),
+    });
+
+  it('a mint confirmed in the sponsor wallet and then cut off before its deposit: the resumed claim deposits only', async () => {
+    const c = chain();
+    const claims = new DemoTokenClaims({ file: null, dailyCap: 10 });
+    const f = viaSponsor(c);
+    let first = true;
+    const mint: DemoMint = (o) => (first ? ((first = false), f.faucet({ crash: 'after-mint' })(o)) : f.faucet()(o));
+    const d = viaSponsorDemo(claims, c, mint);
+    expect((await claimOnce(d)).code).not.toBe('ok');
+    expect(claims.record(OWNER)?.pending?.[TA.colour]).toMatchObject({ stage: 'minted' });
+    const again = await claimOnce(d);
+    expect(again.code).toBe('ok');
+    expect(again.stages).toContain('reconciled:minted');
+    expect(f.mintCalls).toEqual(['tA']); // minted ONCE
+    expect(f.depositCalls).toEqual(['tA']);
+    expect(c.inbox).toHaveLength(1);
+    expect(claims.record(OWNER)).toMatchObject({ state: 'claimed' });
+    const minted = (again.result as { minted: Array<{ txs: { mint?: string; deposit?: string } }> }).minted;
+    expect(minted[0]!.txs.mint).toBe(claims.record(OWNER)!.delivered![TA.colour]!.mint);
+  });
+
+  it('a deposit that can no longer land is deposited again, never minted again (F-B3-7)', async () => {
+    const c = chain();
+    const claims = new DemoTokenClaims({ file: null, dailyCap: 10 });
+    const f = viaSponsor(c);
+    let now = Math.floor(Date.now() / 1000);
+    let first = true;
+    const mint: DemoMint = (o) =>
+      first
+        ? ((first = false), f.faucet({ crash: 'after-deposit-submit', depositLands: false, ttl: 60 })(o))
+        : f.faucet()(o);
+    const d = viaSponsorDemo(claims, c, mint, () => now);
+    expect((await claimOnce(d)).code).not.toBe('ok');
+    expect(claims.record(OWNER)?.pending?.[TA.colour]).toMatchObject({ stage: 'deposit' });
+    expect(claims.record(OWNER)?.pending?.[TA.colour]?.mintTx).toMatch(/^[0-9a-f]{64}$/);
+    // Before the deposit's last landing time: the claim waits (nothing minted, nothing deposited).
+    expect((await claimOnce(d)).code).toBe('demo-tokens-settling');
+    now += 3600 + 600; // past its TTL and the margin: it can no longer land
+    const again = await claimOnce(d);
+    expect(again.code).toBe('ok');
+    expect(f.mintCalls).toEqual(['tA']); // the sponsor's first mint is used; no second issuance
+    expect(f.depositCalls).toEqual(['tA', 'tA']);
+    expect(c.inbox).toHaveLength(1);
+  });
+
+  it('a deposit found on chain is delivered, keeping the mint’s transaction id', async () => {
+    const c = chain();
+    const claims = new DemoTokenClaims({ file: null, dailyCap: 10 });
+    const f = viaSponsor(c);
+    let first = true;
+    const mint: DemoMint = (o) =>
+      first ? ((first = false), f.faucet({ crash: 'after-deposit-submit' })(o)) : f.faucet()(o);
+    const d = viaSponsorDemo(claims, c, mint);
+    await claimOnce(d);
+    const mintTx = claims.record(OWNER)?.pending?.[TA.colour]?.mintTx;
+    const again = await claimOnce(d);
+    expect(again.code).toBe('ok');
+    expect(f.mintCalls).toEqual(['tA']);
+    expect(f.depositCalls).toEqual(['tA']);
+    expect(claims.record(OWNER)?.delivered?.[TA.colour]).toMatchObject({ mint: mintTx, reconciled: true });
+  });
+
+  it('a resumed deposit whose minted token the sponsor no longer holds is QUARANTINED: never minted or deposited again', async () => {
+    const c = chain();
+    const claims = new DemoTokenClaims({ file: null, dailyCap: 10 });
+    const f = viaSponsor(c);
+    let first = true;
+    const mint: DemoMint = (o) => (first ? ((first = false), f.faucet({ crash: 'after-mint' })(o)) : f.faucet()(o));
+    const d = viaSponsorDemo(claims, c, mint);
+    await claimOnce(d);
+    f.balance.set(TA.colour, 0n); // the sponsor's coin went elsewhere: the state is unclear
+    const again = await claimOnce(d);
+    expect(again.code).toBe('ok');
+    expect(again.result).toMatchObject({ held: [{ symbol: 'tA', colour: TA.colour }], minted: [] });
+    expect(claims.record(OWNER)?.quarantined?.[TA.colour]).toMatchObject({ stage: 'minted' });
+    expect(f.mintCalls).toEqual(['tA']);
+    expect(f.depositCalls).toEqual([]);
+    expect(await claimOnce(d)).toMatchObject({ code: 'refused:already-claimed' });
+  });
+
+  it('a mint submitted but never confirmed stays unclear: quarantined, as before', async () => {
+    const c = chain();
+    const claims = new DemoTokenClaims({ file: null, dailyCap: 10 });
+    const f = viaSponsor(c);
+    let first = true;
+    const mint: DemoMint = (o) =>
+      first
+        ? ((first = false),
+          (async ({ beforeSubmit }) => {
+            beforeSubmit({ stage: 'mint' });
+            throw new Error('socket hang up');
+          }) as DemoMint)(o)
+        : f.faucet()(o);
+    const d = viaSponsorDemo(claims, c, mint);
+    await claimOnce(d);
+    const again = await claimOnce(d);
+    expect(again.result).toMatchObject({ held: [{ symbol: 'tA' }] });
+    expect(f.mintCalls).toEqual([]);
+  });
+
+  it('DemoFaucets.viaSponsor with `resume` deposits from the sponsor’s balance and never mints; without the balance it says the state is unclear', async () => {
+    const { DemoFaucets } = await import('../src/demo/faucet.js');
+    const Rx = await import('rxjs');
+    const deposits: string[] = [];
+    const rt = {
+      providers: async () => ({}),
+      compiledAccount: () => ({}),
+      client: {
+        account: {
+          CustodyAccount: {
+            connect: async () => ({
+              depositShielded: async (_c: unknown, e: Uint8Array) => {
+                deposits.push(hex(e).slice(0, 8));
+                return { txId: 'dd'.repeat(32) };
+              },
+            }),
+          },
+        },
+      },
+    } as unknown as PassportRuntime;
+    const faucets = new DemoFaucets(rt, silentLog());
+    // Any mint would load the faucet bundle, which this runtime does not have: it would throw.
+    const wallet = (held: bigint) =>
+      ({
+        wallet: { state: () => Rx.of({ isSynced: true, shielded: { balances: { [TA.colour]: held } } }) },
+      }) as never;
+    const pendings: unknown[] = [];
+    const out = await faucets.viaSponsor({
+      wallet: wallet(5_000_000n),
+      account: ACCOUNT,
+      encKey: new Uint8Array(32).fill(9),
+      item: TA,
+      stage: () => {},
+      beforeSubmit: (p) => pendings.push(p),
+      resume: { mintTx: 'ab'.repeat(32) },
+    });
+    expect(out).toEqual({ mint: 'ab'.repeat(32), deposit: 'dd'.repeat(32) });
+    expect(deposits).toHaveLength(1);
+    expect(pendings).toMatchObject([{ stage: 'deposit', mintTx: 'ab'.repeat(32) }]);
+    await expect(
+      faucets.viaSponsor({
+        wallet: wallet(999_999n),
+        account: ACCOUNT,
+        encKey: new Uint8Array(32).fill(9),
+        item: TA,
+        stage: () => {},
+        resume: {},
+      }),
+    ).rejects.toBeInstanceOf(DemoMintUnclearError);
+    expect(deposits).toHaveLength(1);
   });
 });

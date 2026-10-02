@@ -160,7 +160,11 @@ async function main(): Promise<void> {
       log.error('the Passport runtime could not be loaded; account actions are unavailable', { error: e });
     }
   }
-  const indexer = new IndexerClient({ indexerUrl: config.network.midnight.indexerUrl });
+  // AA 00047 P11 (R3-5): a history past one indexer page is read through the WebSocket subscription.
+  const indexer = new IndexerClient({
+    indexerUrl: config.network.midnight.indexerUrl,
+    indexerWsUrl: config.network.midnight.indexerWsUrl,
+  });
   const chain: ChainReader = runtime
     ? new IndexerChainReader(
         (account) => runtime!.ledgerState(account),
@@ -252,7 +256,12 @@ async function main(): Promise<void> {
   // Audit round 2 R2-1 (AA 00047 P10): per-account caps on offers, cancels and key restores, and one
   // queued-or-running job per account (RUNBOOK section 9).
   const kernel = new KernelClient({ baseUrl: config.network.zswap.kernelUrl, retries: 1, timeoutMs: 10_000 });
-  const accountCaps = new AccountCaps({ ...config.accountCaps, offerStatus: (id) => kernel.offerStatus(id) });
+  // AA 00047 P11 (R3-2, Q46): the withdrawal allowance's whole-coin exit is per LISTED token.
+  const accountCaps = new AccountCaps({
+    ...config.accountCaps,
+    offerStatus: (id) => kernel.offerStatus(id),
+    isListedColour: (colour) => config.tokens.byColour(colour) !== undefined,
+  });
   const accountGate = new AccountGate(config.limits.jobsPerAccount);
   const queue = new JobQueue({
     ttlSeconds: config.limits.jobTtlSeconds,
@@ -291,6 +300,8 @@ async function main(): Promise<void> {
           replay,
           entitlements,
           log: log.child({ component: 'accounts' }),
+          // AA 00047 P11 (R3-7): a coin is checked unspent before a proof is spent on it.
+          ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
         }),
         {
           runtime: () => runtime,
@@ -302,6 +313,7 @@ async function main(): Promise<void> {
           replay,
           expiry: config.expiry,
           log: log.child({ component: 'trade' }),
+          ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
           onBatcherRefusal: (httpStatus) => {
             batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
           },
@@ -320,8 +332,9 @@ async function main(): Promise<void> {
         path: config.demoTokens.path,
         arm: wired.arm,
         ...(accountKeys ? { accountKeys } : {}),
+        // A resumed via-sponsor deposit (AA 00047 P11, R3-8) is a via-sponsor deposit whatever the path.
         mint: (o) =>
-          o.path === 'direct'
+          o.path === 'direct' && !o.resume
             ? faucets.direct({ ...o, networkId: config.network.midnightNetworkId })
             : faucets.viaSponsor(o),
         pendingSettleSeconds: config.demoTokens.pendingSettleSeconds,

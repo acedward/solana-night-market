@@ -20,6 +20,7 @@ import {
 } from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
+import { assertCoinUnspent, type SpendReader } from '../chain/coin-spend.js';
 import type { AppendEntitlements } from './entitlements.js';
 import type { Logger } from '../log.js';
 import type { DeviceArm, GatedAction } from '../passport/arm.js';
@@ -46,6 +47,9 @@ export interface AccountActionDeps {
   /** Issues and checks the single-use entitlements `append-inbox` needs (security review F-B3). */
   entitlements: AppendEntitlements;
   log: Logger;
+  /** The spent coins of an account (AA 00047 P11, R3-7): a shielded withdrawal's coin is checked
+   *  unspent before its proof. Absent: no check. */
+  coins?: SpendReader;
 }
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
@@ -247,6 +251,11 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
         deps.replay.release(check.digestHex);
         throw new PublicError('unauthorised', "the recipient is not the one the device's relay envelope names");
       }
+    }
+    // AA 00047 P11 (R3-7): a spent coin still proves membership; refuse it before the proof.
+    if (deps.coins) {
+      const coins = deps.coins;
+      await runGated(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, p.coin));
     }
     return runGated(deps, check.digestHex, () =>
       ctx.prove(() =>

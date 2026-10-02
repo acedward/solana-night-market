@@ -183,6 +183,21 @@ export class PassportRuntime {
     return (await pdp.queryContractState(address)) ?? null;
   }
 
+  /**
+   * The encryption key the account was OPENED with: its ledger `enc_key` in the state its deploy
+   * transaction created (the constructor's `encryption_key`, which the browser chose and checks at
+   * opening), or null when the indexer has no deploy for the address. `restore-enc-key` lands only
+   * this key (AA 00047 P11, audit round 3 R3-9 / F-A3-5).
+   */
+  async openingEncKey(account: string): Promise<Uint8Array | null> {
+    const pdp = this.shared.publicDataProvider as {
+      queryDeployContractState(a: string): Promise<{ data: unknown } | null>;
+    };
+    const state = await pdp.queryDeployContractState(account);
+    if (!state) return null;
+    return Uint8Array.from((this.client.contract.ledger(state.data as never) as AccountLedger).enc_key);
+  }
+
   /** The account's public ledger state, or null when there is no contract at the address. */
   async ledgerState(account: string): Promise<AccountLedger | null> {
     const pdp = this.shared.publicDataProvider as { queryContractState(a: string): Promise<{ data: unknown } | null> };

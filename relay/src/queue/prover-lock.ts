@@ -11,8 +11,10 @@
 //      waited through `burst` grants in a row to higher ranks gets the next turn: withdrawals always
 //      move (at least one turn in `burst + 1` under any flood).
 //   2. FAIRNESS within a rank (kept from P10): each key's jobs run in order, and the job at the head of
-//      a key's queue is passed by each other key at most ONCE while it waits. So within its rank a job
-//      waits behind at most one job of each other key, exactly the round-robin bound of P10.
+//      a key's queue is passed by each other key's job OF ITS RANK at most ONCE while it waits. So within
+//      its rank a job waits behind at most one job of each other key, exactly the round-robin bound of
+//      P10. (Passes across ranks are bounded by step 1's `burst` instead: a customer's take that went
+//      ahead of the withdrawals does not put the customer's next withdrawal behind all of them.)
 //   3. USAGE within a rank: among the heads step 2 allows, the key that was granted the lane FEWER times
 //      in the last `usageWindowSeconds` goes first; then the earlier signed deadline; then the earlier
 //      arrival. A customer who rarely uses the market goes ahead of accounts that keep the lane busy.
@@ -71,7 +73,8 @@ interface Head {
   w: Waiter;
   /** When it became its key's head (the board's counter). */
   since: number;
-  /** The keys granted the lane since this job became its key's head: none may pass it again. */
+  /** The keys granted the lane for a job of this head's rank since it became its key's head: none
+   *  may pass it again within the rank. */
   passedBy: Set<string>;
 }
 
@@ -320,7 +323,7 @@ function before(b: Board, x: Head, y: Head): boolean {
 }
 
 /** Update the board for a grant of `w` (a head): it leaves, its key's next job becomes the head, every
- *  other head records that `w`'s key passed it, and the lower ranks count the grant. */
+ *  other head of its rank records that `w`'s key passed it, and the lower ranks count the grant. */
 function granted(b: Board, w: Waiter): void {
   const head = b.heads.get(w.key)!;
   for (const k of head.passedBy) decrement(b.blocked[w.rank]!, k);
@@ -333,7 +336,7 @@ function granted(b: Board, w: Waiter): void {
   const waitingRanks = new Set<ProverRank>();
   for (const [key, h] of b.heads) {
     waitingRanks.add(h.w.rank);
-    if (key === w.key || h.passedBy.has(w.key)) continue;
+    if (key === w.key || h.w.rank !== w.rank || h.passedBy.has(w.key)) continue;
     h.passedBy.add(w.key);
     const m = b.blocked[h.w.rank]!;
     m.set(w.key, (m.get(w.key) ?? 0) + 1);

@@ -145,6 +145,27 @@ describe('within a rank, accounts with fewer recent jobs go first (R4-1)', () =>
   });
 });
 
+describe('passes across ranks do not count against a job (R4-1)', () => {
+  it('a customer whose take went ahead of the attackers’ withdrawals is not then put behind all of them', async () => {
+    const lock = new ProverLock();
+    for (const k of ['A1', 'A2', 'A3']) await use(lock, k, 2);
+    const order: string[] = [];
+    const hold = (id: string) => async (r: () => void) => {
+      order.push(id);
+      await sleep(3);
+      r();
+    };
+    const release = await lock.acquire(t('holder', 'holder', 2));
+    const jobs = ['A1', 'A2', 'A3'].map((k) => lock.acquire(t(k.toLowerCase(), k, 2)).then(hold(k.toLowerCase())));
+    jobs.push(lock.acquire(t('take', 'C', 0)).then(hold('take')));
+    release();
+    await sleep(1); // the take holds the lane: the customer's withdrawal arrives now
+    jobs.push(lock.acquire(t('withdraw', 'C', 2)).then(hold('withdraw')));
+    await Promise.all(jobs);
+    expect(order).toEqual(['take', 'withdraw', 'a1', 'a2', 'a3']);
+  });
+});
+
 describe('when would a job start? (estimate and position, R4-1)', () => {
   it('a take behind queued withdrawals is estimated to start when the holder ends; a withdrawal after them all', async () => {
     let now = 5_000_000;

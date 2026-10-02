@@ -1,15 +1,16 @@
 // Badges and pills: short labels that classify a row or a value.
 //
-//   <Badge tone="green">Two-sided</Badge>            a market's status
-//   <NetworkBadge network="sepolia" />               "SEPOLIA" (on the masthead, or onLight)
+//   <Badge tone="green">Active</Badge>               a market's status
+//   <NetworkBadge network="midnight" />              "MIDNIGHT" (a network label)
 //   <StatusPill status="live">Live</StatusPill>      an offer's or transfer's state, with a dot
-//   <NoValue>no liquidity</NoValue>                  a value that is deliberately absent
+//   <NoValue>no buyers</NoValue>                     a value that is deliberately absent
 //   <YoursBadge />                                   the account's own offer in a book
 
 import type { HTMLAttributes, ReactNode } from 'react';
 
 import { cx } from './format.js';
 
+// Tone names are kept from the first design: in the dark theme 'navy' is violet, 'gold' amber.
 export type BadgeTone = 'navy' | 'gold' | 'grey' | 'green' | 'red';
 
 export function Badge({ tone = 'grey', className, ...rest }: HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone }) {
@@ -22,10 +23,10 @@ export function NetworkBadge({
   children,
   className,
   ...rest
-}: HTMLAttributes<HTMLSpanElement> & { network: 'sepolia' | 'midnight'; onLight?: boolean; children?: ReactNode }) {
+}: HTMLAttributes<HTMLSpanElement> & { network: 'midnight'; onLight?: boolean; children?: ReactNode }) {
   return (
     <span className={cx('net', `net-${network}`, onLight && 'net-light', className)} {...rest}>
-      {children ?? (network === 'sepolia' ? 'Sepolia' : 'Midnight')}
+      {children ?? 'Midnight'}
     </span>
   );
 }

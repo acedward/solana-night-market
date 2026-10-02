@@ -10,7 +10,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
-import { ShieldedAddressError, formatShieldedAddress, parseShieldedAddress } from '@mnbank/core';
+import { ShieldedAddressError, formatShieldedAddress, parseShieldedAddress } from '@nightmarket/core';
 
 describe('shielded addresses', () => {
   it('decodes what the wallet SDK encodes, and encodes what it decodes', () => {

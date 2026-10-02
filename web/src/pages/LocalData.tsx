@@ -1,9 +1,11 @@
-// The Local data tab (spec US4, FR-004, Q11): every record the bank keeps in this browser, with
-// secrets masked until revealed, and Export, Import and CLEAR ALL. Styled with the MN Bank design
-// system (plan P1.5): a ruled record table that stacks on a phone, and the CLEAR ALL dialog with
-// "Export first" and a typed confirmation.
+// The Your data tab (route #local; spec US4, FR-004, Q11): every record the market keeps in this
+// browser, with secrets masked until revealed, and Export (back up), Import (restore) and CLEAR ALL.
+// A record table that stacks on a phone, and the CLEAR ALL dialog with "Export first" and a typed
+// confirmation (AA 00047 P8.1: the dark consumer design, plain words).
 
-import { useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useMemo, useRef, useState, type ChangeEvent } from 'react';
+
+import { shortSolanaAddress, solanaAddressOf } from '@nightmarket/core';
 
 import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import {
@@ -11,14 +13,17 @@ import {
   ButtonRow,
   Cell,
   EmptyState,
+  Icon,
   Notice,
   PageHead,
   Panel,
   StatementTable,
   Sub,
+  Toast,
   TypedConfirmDialog,
 } from '../design/index.js';
-import { RelayClient } from '../relay/client.js';
+import { useChain } from '../chain/ChainContext.js';
+import type { AccountChain } from '../chain/indexer.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
 import { MAX_IMPORT_READ_BYTES, SCHEMA_VERSION, STORE_PREFIX, type ExportFile } from '../store/schema.js';
@@ -50,49 +55,49 @@ function download(name: string, text: string): void {
 /**
  * Import as one change (security review F-B5): check the whole file first; an encryption secret it
  * would replace with a different one is accepted only when the new public key is the account's
- * on-chain key (so a file cannot swap in a key that opens nothing); then write it all or nothing.
+ * on-chain key (so a file cannot swap in a key that opens nothing), read from the public indexer
+ * itself, not the relay (AA 00047 P9.S, questions Q26); then write it all or nothing.
  */
 export async function importFile(
   store: LocalStore,
-  relay: Pick<RelayClient, 'accountState'>,
+  chain: Pick<AccountChain, 'accountState'>,
   file: unknown,
-  scope: { network: string; evmAddress: string },
+  scope: { network: string; owner: string },
 ): Promise<{ imported: number; replaced: number }> {
   const plan = store.prepareImport(file, scope);
   const approved = new Set<string>();
   for (const c of plan.secretChanges) {
     if (!c.account) continue;
-    const state = await relay.accountState(c.account).catch(() => null);
+    const state = await chain.accountState(c.account).catch(() => null);
     if (state && state.encKey === c.encPublicKey) approved.add(c.account);
   }
   return store.commitImport(plan, { approvedSecretReplacements: approved });
 }
 
-export function LocalData({ network, relayUrl }: { network: string; relayUrl: string }) {
+export function LocalData({ network }: { network: string }) {
   const { status, store, revision } = useStore();
+  const chain = useChain();
   const wallet = useWallet();
   const assets = useAssetFilter();
   const [revealed, setRevealed] = useState<ReadonlySet<string>>(new Set());
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const dismiss = useCallback(() => setMessage(null), []);
 
   // `revision` changes on every write here or in another tab.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const records = useMemo<RecordView[]>(() => store?.list() ?? [], [store, revision]);
-  const scope = wallet.address ? { network, evmAddress: wallet.address } : null;
+  const scope = wallet.deviceKey ? { network, owner: wallet.deviceKey } : null;
   const mine = scope
     ? records.filter(
-        (r) =>
-          !r.parsed.scope.global &&
-          r.parsed.scope.network === network &&
-          r.parsed.scope.evmAddress === scope.evmAddress.toLowerCase(),
+        (r) => !r.parsed.scope.global && r.parsed.scope.network === network && r.parsed.scope.owner === scope.owner,
       )
     : [];
   const wallets = new Set(
     records
       .filter((r) => !r.parsed.scope.global)
-      .map((r) => (r.parsed.scope.global ? '' : `${r.parsed.scope.network}/${r.parsed.scope.evmAddress}`)),
+      .map((r) => (r.parsed.scope.global ? '' : `${r.parsed.scope.network}/${r.parsed.scope.owner}`)),
   );
   const totalBytes = records.reduce((n, r) => n + r.bytes, 0);
 
@@ -100,10 +105,10 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     if (!store || !scope) return;
     const file = store.exportWallet(scope);
     const date = new Date().toISOString().slice(0, 10);
-    download(`mn-bank-${network}-${scope.evmAddress.toLowerCase().slice(0, 10)}-${date}.json`, exportFileText(file));
+    download(`night-market-${network}-${solanaAddressOf(scope.owner).slice(0, 8)}-${date}.json`, exportFileText(file));
     setMessage({
       kind: 'ok',
-      text: `Exported ${file.records.length} records. Keep the file safe: it holds your account's viewing secret.`,
+      text: `Backed up ${file.records.length} records. Keep the file private: it holds your account's viewing key.`,
     });
   };
 
@@ -118,13 +123,13 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     if (f.size > MAX_IMPORT_READ_BYTES) {
       setMessage({
         kind: 'error',
-        text: 'This file is larger than an MN Bank export can be (20 MB). Nothing was imported.',
+        text: 'This file is larger than a Night Market export can be (20 MB). Nothing was imported.',
       });
       return;
     }
     try {
       const json: unknown = JSON.parse(await f.text());
-      const r = await importFile(store, new RelayClient(relayUrl), json, scope);
+      const r = await importFile(store, chain, json, scope);
       setMessage({
         kind: 'ok',
         text: `Imported ${r.imported} records${r.replaced ? ` (${r.replaced} replaced)` : ''}.`,
@@ -135,7 +140,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
         text:
           err instanceof ImportError
             ? err.message
-            : 'This file could not be read as an MN Bank export. Nothing was imported.',
+            : 'This file could not be read as a Night Market export. Nothing was imported.',
       });
     }
   };
@@ -145,7 +150,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     const n = store.clearAll();
     setConfirming(false);
     setRevealed(new Set());
-    setMessage({ kind: 'ok', text: `Removed ${n} keys. MN Bank keeps nothing in this browser now.` });
+    setMessage({ kind: 'ok', text: `Removed ${n} keys. Night Market keeps nothing in this browser now.` });
   };
 
   const toggle = (key: string) =>
@@ -160,9 +165,9 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
     <section aria-labelledby="local-data-title" data-testid="local-data">
       <PageHead
         eyebrow="Your records"
-        title="Local data"
+        title="Your data"
         titleId="local-data-title"
-        lede="Everything MN Bank keeps about you stays in this browser: your account, its encryption secret, your coins, transfers and offers. The bank's servers keep none of it. Without this data your account's funds cannot be spent, so export it and keep the file safe."
+        lede="Everything Night Market knows about you stays in this browser: your account, its viewing key, your coins and your offers. The market's servers keep none of it. You need this data to use your tokens, so back it up and keep the file private."
       />
 
       {status !== 'ok' && (
@@ -179,18 +184,18 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
       )}
       {store?.readOnly && (
         <Notice tone="danger" role="alert" className="panel-intro" data-testid="store-read-only">
-          This browser holds data from a newer version of MN Bank. This page will not change it.
+          This browser holds data from a newer version of Night Market. This page will not change it.
         </Notice>
       )}
       {message && (
-        <Notice
-          tone={message.kind === 'error' ? 'danger' : 'success'}
-          role="status"
-          className="panel-intro"
+        <Toast
+          tone={message.kind === 'error' ? 'error' : 'success'}
+          onClose={dismiss}
+          timerKey={message.text}
           data-testid="local-message"
         >
           {message.text}
-        </Notice>
+        </Toast>
       )}
 
       <Panel>
@@ -202,8 +207,8 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
         </p>
 
         {records.length === 0 ? (
-          <EmptyState data-testid="records-empty" title="Nothing stored">
-            MN Bank keeps nothing in this browser.
+          <EmptyState data-testid="records-empty" icon="data" title="Nothing stored">
+            Night Market keeps nothing in this browser.
           </EmptyState>
         ) : (
           <StatementTable
@@ -232,7 +237,8 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
                         'all networks and wallets'
                       ) : (
                         <>
-                          {s.network} · wallet <span title={s.evmAddress}>{short(s.evmAddress)}</span>
+                          {s.network} · wallet{' '}
+                          <span title={solanaAddressOf(s.owner)}>{shortSolanaAddress(solanaAddressOf(s.owner))}</span>
                           {s.account ? (
                             <>
                               {' '}
@@ -287,7 +293,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
                 onClick={exportMine}
                 disabled={!store || !scope || mine.length === 0}
               >
-                Export this wallet&apos;s data
+                <Icon name="arrowUp" /> Back up (export)
               </Button>
               <Button
                 variant="secondary"
@@ -295,7 +301,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
                 onClick={() => fileInput.current?.click()}
                 disabled={!store || !scope}
               >
-                Import
+                Restore (import)
               </Button>
               <input
                 ref={fileInput}
@@ -308,8 +314,8 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
             </ButtonRow>
             <p className="explain">
               {scope
-                ? `Export saves this wallet's records as a JSON file, including the encryption secret: keep it as safe as a bank card. Import accepts only a file for ${network} and this wallet.`
-                : 'Connect your wallet to export or import its data.'}
+                ? `Back up saves this wallet's records as a JSON file, including your account's viewing key: keep it private. Restore accepts only a file for ${network} and this wallet.`
+                : 'Connect your Solana wallet to back up or restore its data.'}
             </p>
           </div>
           <Button
@@ -318,7 +324,7 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
             onClick={() => setConfirming(true)}
             disabled={!store || records.length === 0}
           >
-            CLEAR ALL
+            Clear all data
           </Button>
         </div>
       </Panel>
@@ -343,24 +349,24 @@ export function LocalData({ network, relayUrl }: { network: string; relayUrl: st
 
       <TypedConfirmDialog
         open={confirming}
-        title="Clear all MN Bank data from this browser?"
+        title="Clear all Night Market data from this browser?"
         phrase={CLEAR_ALL_PHRASE}
         testIdPrefix="clear"
         warning={
           <>
-            <strong>Without an export you cannot spend these funds again.</strong> Your account&apos;s coins can only be
-            spent with this data: unless you have a recent export, export it first.
+            <strong>Without a backup you cannot use these tokens again.</strong> Your account&apos;s coins can only be
+            spent with this data: unless you have a recent backup, back it up first.
           </>
         }
         onExportFirst={scope && mine.length > 0 ? exportMine : undefined}
-        exportLabel="Export this wallet's data first"
+        exportLabel="Back up this wallet's data first"
         confirmLabel="Clear all data"
         onConfirm={clearAll}
         onCancel={() => setConfirming(false)}
       >
         <p>
-          This removes all {records.length} records MN Bank keeps here, for {wallets.size} wallet
-          {wallets.size === 1 ? '' : 's'}. The bank&apos;s servers have no copy.
+          This removes all {records.length} records Night Market keeps here, for {wallets.size} wallet
+          {wallets.size === 1 ? '' : 's'}. The market&apos;s servers have no copy.
         </p>
       </TypedConfirmDialog>
     </section>

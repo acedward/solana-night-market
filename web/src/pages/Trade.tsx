@@ -1,30 +1,35 @@
-// The Trade section (spec US7, US8; plan L-TRD): buy or sell a stock at USDC prices, either by
-// making an offer ("Sell N at P" / "Buy N at P", pre-filled from the best ask or bid) or by taking
-// one whole offer from the book. Every trade is ONE wallet signature; the exact legs are shown
-// before it. The account's offers (My offers) are reconciled from the chain and the exchange.
+// The Trade section (plan L-TRD, generic since AA 00047; the consumer layout of P8.1, spec FR-006b):
+// on any listed pair BASE/QUOTE, buy or sell the base at a price in the quote, either by taking one
+// whole offer from the book ("Buy or sell now") or by publishing your own ("Create offer", pre-filled
+// from the best price). Every trade is ONE wallet signature (the Solana wallet's, lane B2); the exact
+// amounts are shown before it, and the signing modal follows the market's part to the end. The
+// account's offers (Your offers and trades) are reconciled from the chain and the exchange.
+//
+// On-chain or not (P8.2, the owner's Q18 finding; questions Q24): creating an offer puts NOTHING on
+// the chain. The relay proves the offer and the exchange lists it; the tokens stay in the account
+// until someone takes it, and the take is the one Midnight transaction that settles it. The page
+// says so wherever the account's own offers show (./trade/messages.ts).
 //
 // The seam limits are enforced and explained here (Q9, FR-019): one live offer at a time, each
 // payment from one coin (an offer the account cannot pay keeps a greyed Buy or Sell that says why
-// on hover, focus and tap: "Not enough wStkA. You hold 100.00 wStkA.", AA 00044), and a warning
-// before a take cancels a live offer (L-TRD.3).
-//
-// Styled with the MN Bank design system (plan P4-A, following web/README.md "Adopting the design
-// system"): the order form and the book side by side as in the approved mockup, statement tables
-// for the book and My offers, the stage tracker for a trade in progress. Presentation only: the
-// behaviour and every data-testid are L-TRD's. The bank's status (plan P4-A error states) pauses
+// on hover, focus and tap: "Not enough twBTC. You hold 0.10 twBTC.", AA 00044), and a warning
+// before a take cancels a live offer (L-TRD.3). The market's status (plan P4-A error states) pauses
 // the actions it cannot carry out, with the reason, before anything is signed.
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
   type BookEntry,
   type JobView,
   KernelClient,
   type Market,
+  type MarketPair,
   type NetworkProfile,
   type OrderLegs,
   type TokenEntry,
   type TradeSide,
+  TAKE_LIFETIME_SECONDS,
+  deadlineText,
   formatPrice,
   formatUnits,
   fundWithOneCoin,
@@ -32,98 +37,115 @@ import {
   parsePrice,
   parseUnits,
   takeLegs,
-} from '@mnbank/core';
+} from '@nightmarket/core';
+import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
+import { useActivity } from '../activity/ActivityContext.js';
+import { OFFER_OFF_CHAIN, stageWords, type ActivityKind } from '../activity/activity.js';
+import { PortfolioDock, PortfolioToggle } from '../account/PortfolioDock.js';
+import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
+import { AccountCheckNotice } from '../chain/AccountCheckNotice.js';
+import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import {
   Button,
+  ButtonLink,
   ButtonRow,
   Cell,
   EmptyState,
   Field,
   Hash,
+  Icon,
   NoValue,
   Notice,
   PageHead,
+  PairIcon,
   Panel,
   Segmented,
   Select,
+  Skeleton,
   StageTracker,
   StatementTable,
   StatusPill,
   Sub,
+  Toast,
   Tooltip,
   UnitInput,
   YoursBadge,
-  tokenDisplayName,
   type Column,
   type PillStatus,
   type TrackerStage,
 } from '../design/index.js';
-import { assetFilterText, useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useMarkets } from '../market/MarketContext.js';
-import { askText, bidText } from '../market/view.js';
+import { askText, bidText, lastTradeText, spreadText } from '../market/view.js';
 import { syncAccount, type OperationEnv } from '../passport/operations.js';
 import { findAccount, readCoins, readSecret } from '../passport/records.js';
-import { BankNotices, useBankStatus } from '../relay/BankStatus.js';
+import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
-import { guardFor, makeOffer, reconcileOffers, takeOffer } from '../trade/operations.js';
-import { liveOffer, readTrades, type TradeRecord } from '../trade/records.js';
+import { OPEN_OFFERS_NOTE, madeOfferText, tookOfferText } from '../trade/messages.js';
+import { cancelOffers, guardFor, makeOffer, offerShown, reconcileOffers, takeOffer } from '../trade/operations.js';
+import { liveOffer, readTrades } from '../trade/records.js';
+import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet } from '../wallet/WalletContext.js';
 
-const short = (s: string, head = 8, tail = 6) =>
-  s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
 const amt = (raw: bigint, t: TokenEntry) => formatUnits(raw, t.decimals, { minFractionDigits: 2, grouping: true });
 const clock = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 const placed = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 
-const STAGE_TEXT: Record<string, string> = {
-  queued: 'Waiting in line',
-  running: 'Started',
-  proving: 'Preparing the offer’s proof (about a minute)',
-  proven: 'Offer proven',
-  posted: 'Sent to the exchange',
-  listed: 'Listed on the exchange',
-  'offer-checked': 'The offer is still there and is exactly the one you chose',
+/** The take's own stages, in more words than the modal's (the tracker has the room). */
+const TAKE_STAGE_TEXT: Record<string, string> = {
+  'offer-checked': 'The offer is still there, and exactly the one you chose',
   merged: 'Your side and the offer combined into one transaction',
-  settled: 'Settled',
-  succeeded: 'Done',
-  failed: 'Failed',
 };
+const stageText = (stage: string, action: string) =>
+  (action === 'take' ? TAKE_STAGE_TEXT[stage] : undefined) ?? stageWords(stage, action);
 
-const STATE_TEXT: Record<TradeRecord['status'], string> = {
-  live: 'Live',
+type ShownState = ReturnType<typeof offerShown>['state'];
+
+const STATE_TEXT: Record<ShownState, string> = {
+  // A live offer is listed on the market, not on-chain (questions Q24); one the exchange has not
+  // listed (yet) says so, never "Listed" (AA 00047 P9.S, the P8.2 follow-up).
+  live: 'Listed',
+  unlisted: 'Not listed yet',
+  // The exchange (or the relay) says it is taken; the chain does not show it yet (AA 00047 P10, R2-4).
+  settling: 'Settling',
   filled: 'Filled',
   expired: 'Expired',
   cancelled: 'Cancelled',
+  // The nonce moved but the page has not read the account's whole history yet (AA 00047 P11.B).
+  ended: 'Ended',
   refused: 'Refused',
 };
 
-const STATE_PILL: Record<TradeRecord['status'], PillStatus> = {
+const STATE_PILL: Record<ShownState, PillStatus> = {
   live: 'live',
+  unlisted: 'progress',
+  settling: 'progress',
   filled: 'filled',
   expired: 'idle',
   cancelled: 'cancelled',
+  ended: 'idle',
   refused: 'failed',
 };
 
 const PREFILL_HINT: Record<TradeSide, string> = {
-  sell: 'Use the best ask',
-  buy: 'Use the best bid',
+  sell: 'Use the best price',
+  buy: 'Use the best price',
 };
 
-/** `#trade?stock=wStkA&offer=<id>`: the Markets page's Take buttons link here. */
+/** `#trade?pair=twBTC/twUSDC&offer=<id>`: the Markets page's Buy and Sell links come here. */
 function hashParams(): URLSearchParams {
   const q = window.location.hash.split('?')[1] ?? '';
   return new URLSearchParams(q);
 }
 
-/** A trade job in progress, as the bank reports it (the stage tracker of the design system). */
+/** A trade job in progress, as the market reports it (the stage tracker of the design system). */
 function Tracker({ job }: { job: JobView }) {
+  const make = job.action === 'open-swap';
   const shown = job.stages.filter((s) => s.stage !== 'queued' || job.stages.length === 1);
   const stages: TrackerStage[] = shown.map((s, i) => ({
     key: `${s.stage}-${i}`,
-    title: STAGE_TEXT[s.stage] ?? s.stage,
+    title: stageText(s.stage, job.action),
     state: i < shown.length - 1 || job.state === 'succeeded' ? 'done' : job.state === 'failed' ? 'failed' : 'current',
     time: clock(s.at * 1000),
     detail:
@@ -147,55 +169,56 @@ function Tracker({ job }: { job: JobView }) {
   return (
     <Panel
       className="section-gap"
-      title="Your trade"
+      title={make ? 'Your offer' : 'Your trade'}
       meta={
         <span className="small">
-          {STAGE_TEXT[job.stage] ?? job.stage}
-          {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in the queue` : ''}
+          {stageText(job.stage, job.action)}
+          {job.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : ''}
         </span>
       }
       data-testid="trade-tracker"
       data-state={job.state}
       data-stage={job.stage}
     >
-      <StageTracker stages={stages} label="Your trade" />
+      <StageTracker stages={stages} label={make ? 'Your offer' : 'Your trade'} />
+      {make && <p className="table-note">{OFFER_OFF_CHAIN}</p>}
     </Panel>
   );
 }
 
-/** The exact legs of an order or a take, as in the mockup: what leaves the account, what arrives. */
+/** The exact amounts of an order or a take: what leaves the account, what arrives. */
 function LegsPreview({
   legs,
-  stock,
-  usdc,
+  base,
+  quote,
   foot,
 }: {
   legs: OrderLegs;
-  stock: TokenEntry;
-  usdc: TokenEntry;
+  base: TokenEntry;
+  quote: TokenEntry;
   foot?: string;
 }) {
-  const giveT = legs.side === 'sell' ? stock : usdc;
-  const wantT = legs.side === 'sell' ? usdc : stock;
+  const giveT = legs.side === 'sell' ? base : quote;
+  const wantT = legs.side === 'sell' ? quote : base;
   return (
     <div className="legs" data-testid="legs" aria-label="What this trade does">
       <div className="leg">
-        <span className="k">You give</span>
+        <span className="k">You pay</span>
         <span className="v num" data-testid="legs-give" data-raw={legs.give.amount.toString()}>
-          {amt(legs.give.amount, giveT)} {giveT.midnightName}
+          {amt(legs.give.amount, giveT)} {giveT.symbol}
         </span>
       </div>
       <div className="leg">
-        <span className="k">You receive</span>
+        <span className="k">You get</span>
         <span className="v num" data-testid="legs-want" data-raw={legs.want.amount.toString()}>
-          {amt(legs.want.amount, wantT)} {wantT.midnightName}
+          {amt(legs.want.amount, wantT)} {wantT.symbol}
         </span>
       </div>
       <div className="foot" data-testid="legs-price">
-        Price {formatPrice(legs.effectivePrice, { round: legs.side === 'sell' ? 'up' : 'down' }).text}{' '}
-        {usdc.midnightName} per {stock.midnightName}
+        Price {formatPrice(legs.effectivePrice, { round: legs.side === 'sell' ? 'up' : 'down' }).text} {quote.symbol}{' '}
+        per {base.symbol}
         {legs.rounded && (
-          <span data-testid="legs-rounded"> (rounded to a whole unit of {usdc.midnightName}, in your favour)</span>
+          <span data-testid="legs-rounded"> (rounded to a whole unit of {quote.symbol}, in your favour)</span>
         )}
         {foot ? <>. {foot}</> : null}
       </div>
@@ -203,19 +226,50 @@ function LegsPreview({
   );
 }
 
+/** The pair's best prices at a glance, beside the market picker. */
+function PairStats({ market, quote }: { market: Market | null; quote: TokenEntry }) {
+  const value = (v: string | null | undefined, cls?: string) =>
+    market === null ? <Skeleton width="4.5em" /> : v ? <span className={cls}>{v}</span> : <NoValue>—</NoValue>;
+  return (
+    <>
+      <span className="sr-only">Prices in {quote.symbol}</span>
+      <dl className="pair-stats" data-testid="pair-stats">
+        <div>
+          <dt>Buy at</dt>
+          <dd>{value(market?.asks.best ? askText(market.asks.best.price) : null, 'price-ask')}</dd>
+        </div>
+        <div>
+          <dt>Sell at</dt>
+          <dd>{value(market?.bids.best ? bidText(market.bids.best.price) : null, 'price-bid')}</dd>
+        </div>
+        <div>
+          <dt>Spread</dt>
+          <dd>{value(market ? spreadText(market) : null)}</dd>
+        </div>
+        <div>
+          <dt>Last trade</dt>
+          <dd>{value(market ? lastTradeText(market.lastTrade) : null)}</dd>
+        </div>
+      </dl>
+    </>
+  );
+}
+
 export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
-  const { state, registry } = useMarkets();
+  const { state, registry, pairs: allPairs } = useMarkets();
   const { store, revision } = useStore();
   const wallet = useWallet();
-  const bank = useBankStatus();
+  const connect = useConnectPrompt();
+  const activity = useActivity();
+  const relayStatus = useRelayStatus();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
+  const chain = useChain();
   const kernel = useMemo(() => new KernelClient({ baseUrl: network.zswap.kernelUrl }), [network]);
   const assets = useAssetFilter();
   const params = hashParams();
-  const usdc = registry?.usdc() ?? null;
-  // Only the markets whose two assets the asset filter shows (plan 00042).
-  const stocks = (registry?.stocks() ?? []).filter((s) => !!usdc && assets.showsPair(s, usdc));
-  const [stockName, setStockName] = useState<string>(params.get('stock') ?? stocks[0]?.midnightName ?? '');
+  // Only the pairs whose two tokens the asset filter shows (plan 00042).
+  const pairs: MarketPair[] = allPairs.filter((p) => assets.showsPair(p.base, p.quote));
+  const [pairId, setPairId] = useState<string>(params.get('pair') ?? pairs[0]?.id ?? '');
   const [picked, setPicked] = useState<string | null>(params.get('offer'));
   const [side, setSide] = useState<TradeSide>('sell');
   const [quantity, setQuantity] = useState('');
@@ -224,25 +278,38 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmTake, setConfirmTake] = useState<BookEntry | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const dismiss = useCallback(() => setMessage(null), []);
 
-  const stock = stocks.find((s) => s.midnightName === stockName) ?? stocks[0] ?? null;
+  const pair = pairs.find((p) => p.id === pairId) ?? pairs[0] ?? null;
+  const base = pair?.base ?? null;
+  const quote = pair?.quote ?? null;
   const market: Market | null =
-    state.status === 'ready' && stock
-      ? (state.snapshot.markets.find((m) => m.stock.midnightColour === stock.midnightColour) ?? null)
-      : null;
+    state.status === 'ready' && pair ? (state.snapshot.markets.find((m) => m.pair.id === pair.id) ?? null) : null;
 
-  const evmAddress = wallet.status === 'connected' ? wallet.address : null;
-  const scope = useMemo(() => (evmAddress ? { network: network.name, evmAddress } : null), [evmAddress, network.name]);
+  const owner = wallet.status === 'connected' ? wallet.deviceKey : null;
+  const scope = useMemo(() => (owner ? { network: network.name, owner } : null), [owner, network.name]);
   const account = useMemo(
     () => (store && scope ? findAccount(store, scope) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, revision],
   );
-  const hasSecret = !!(store && scope && account && readSecret(store, scope, account.address));
+  const secret = store && scope && account ? readSecret(store, scope, account.address) : null;
+  const hasSecret = !!secret;
   const coins = useMemo(
     () => (store && scope && account ? readCoins(store, scope, account.address) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, account, revision],
+  );
+  // The market-account check on the chain (AA 00047 P9.S, audit C3): no trade without it.
+  const accountCheck = useAccountCheck(
+    account && hasSecret ? account.address : null,
+    owner,
+    secret?.encPublicKey ?? null,
+    revision,
+    (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
+    account?.txs?.waveOne ?? null,
   );
   const trades = useMemo(
     () => (store && scope && account ? readTrades(store, scope, account.address) : []),
@@ -256,21 +323,26 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     return () => clearInterval(t);
   }, []);
   const live = liveOffer(trades, now);
+  // An approval the chain has not decided yet (a live make, a take the market reports settled): the
+  // page keeps reconciling while there is one (AA 00047 P10, R2-4).
+  const unsettled = trades.some((t) => t.status === 'live');
   // The history lists only the markets the filter shows; a live offer (the banner) always shows.
-  const shownTrades = trades.filter((t) => assets.showsColour(t.stock) && assets.showsColour(t.usdc));
+  const shownTrades = trades.filter((t) => assets.showsColour(t.base) && assets.showsColour(t.quote));
 
   const env = useCallback((): OperationEnv | null => {
-    if (!store || !scope || !wallet.provider || !wallet.address) return null;
+    if (!store || !scope || !wallet.signing) return null;
     return {
       relay,
+      chain,
       store,
       scope,
-      provider: wallet.provider,
-      owner: wallet.address,
-      chainId: network.evm.chainId,
-      onJob: setJob,
+      signing: wallet.signing,
+      onJob: (j) => {
+        setJob(j);
+        activity.job(j);
+      },
     };
-  }, [store, scope, wallet.provider, wallet.address, relay, network]);
+  }, [store, scope, wallet.signing, relay, chain, activity]);
 
   // Reconcile My offers and the coins when the page opens, and every 30 s while an offer is live.
   const accountAddress = account?.address;
@@ -280,7 +352,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     try {
       const changed = await reconcileOffers(e, accountAddress, kernel);
       if (changed.length === 0) await syncAccount(e, accountAddress);
-      const filled = changed.find((c) => c.status === 'filled');
+      // A make someone else settled (a take's own result is the take's toast).
+      const filled = changed.find((c) => c.status === 'filled' && c.role === 'make');
       if (filled) setMessage({ kind: 'ok', text: `Your offer (${filled.summary}) was filled.` });
     } catch {
       /* the next refresh tries again; the page keeps the last known state */
@@ -289,65 +362,100 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   useEffect(() => {
     if (!accountAddress) return;
     const t = setTimeout(() => void reconcile(), 0);
-    const every = live ? setInterval(() => void reconcile(), 30_000) : null;
+    const every = live || unsettled ? setInterval(() => void reconcile(), 30_000) : null;
     return () => {
       clearTimeout(t);
       if (every) clearInterval(every);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountAddress, evmAddress, !!live]);
+  }, [accountAddress, owner, !!live || unsettled]);
+
+  // Bring the review into view when an offer is picked (on a phone it sits above the book).
+  useEffect(() => {
+    if (confirmTake) confirmRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [confirmTake]);
 
   const head = (
     <PageHead
-      eyebrow="Buy and sell at USDC prices"
+      eyebrow="Make and take offers"
       title="Trade"
       lede={
-        usdc
-          ? `Every trade is one asset against ${usdc.midnightName}, at a price in ${usdc.midnightName}. Take an existing offer now, or place your own at your price. You sign once per trade; the bank pays the network fees.`
-          : 'Every trade is one asset against USDC. Take an existing offer now, or place your own at your price.'
+        pair
+          ? `Buy or sell ${pair.base.symbol} for ${pair.quote.symbol}: take an offer from the book now, or create your own at your price. One approval in Phantom per trade; the market pays the network fees.`
+          : 'Every trade is one token against another. Take an offer from the book now, or create your own at your price.'
       }
+      actions={<PortfolioToggle open={drawer} onClick={() => setDrawer(true)} />}
     />
   );
 
-  if (registry && usdc && stocks.length === 0 && assets.filtering) {
+  if (registry && pairs.length === 0 && assets.filtering) {
     return (
       <section data-testid="section-trade">
         {head}
-        <EmptyState data-testid="trade-filtered-empty" title="No market in this view">
-          A market shows only when both of its assets are listed. {assetFilterText(assets)}
+        <EmptyState data-testid="trade-filtered-empty" icon="markets" title="No market in this view">
+          A market shows only when both of its tokens are listed. {assetFilterText(assets)}
         </EmptyState>
       </section>
     );
   }
-  if (!registry || !stock || !usdc) {
+  if (!registry || !pair || !base || !quote) {
     return (
       <section data-testid="section-trade">
         {head}
         <Notice tone="danger" role="alert">
-          Trading is not configured for this network.
+          Trading is not set up for this network.
         </Notice>
       </section>
     );
   }
+  // The market layout: trading first, the portfolio beside it (docked, or a drawer on narrow screens).
+  const layout = (main: ReactNode) => (
+    <section data-testid="section-trade">
+      {head}
+      <div className="market-layout">
+        <div className="market-main">{main}</div>
+        <PortfolioDock network={network} relayUrl={relayUrl} open={drawer} onClose={() => setDrawer(false)} />
+      </div>
+    </section>
+  );
+
   if (wallet.status !== 'connected' || !scope) {
-    return (
-      <section data-testid="section-trade">
-        {head}
-        <EmptyState title="Connect your wallet">Connect your wallet to trade.</EmptyState>
-      </section>
+    return layout(
+      <EmptyState
+        icon="wallet"
+        title="Connect your wallet to trade"
+        action={
+          connect ? (
+            <Button data-testid="trade-connect-cta" onClick={connect}>
+              <Icon name="wallet" /> Connect Phantom
+            </Button>
+          ) : undefined
+        }
+      >
+        <span data-testid="trade-connect">
+          {wallet.supported
+            ? 'Connect your Solana wallet to trade. It only signs messages: it needs no SOL.'
+            : 'Trading with a Solana wallet is coming to this site. Until then, browse the order books on Markets.'}
+        </span>
+      </EmptyState>,
     );
   }
   if (!account || !hasSecret) {
-    return (
-      <section data-testid="section-trade">
-        {head}
-        <EmptyState title="No account in this browser">
-          <span data-testid="trade-no-account">
-            Open an account on <a href="#accounts">Accounts</a> (or import your export on{' '}
-            <a href="#local">Local data</a>) to trade.
-          </span>
-        </EmptyState>
-      </section>
+    return layout(
+      <EmptyState
+        icon="portfolio"
+        title="Open your free account to trade"
+        action={
+          <ButtonLink variant="primary" href="#account" data-testid="trade-open-account">
+            Open your account
+          </ButtonLink>
+        }
+      >
+        <span data-testid="trade-no-account">
+          Open an account on <a href="#account">Portfolio</a> (or import your backup on <a href="#local">Your data</a>)
+          to trade. It takes one approval in Phantom, and the market pays every fee.
+        </span>
+      </EmptyState>,
     );
   }
 
@@ -365,27 +473,29 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   let legsError: string | null = null;
   if (quantity.trim() !== '' && price.trim() !== '') {
     try {
-      legs = orderLegs(side, stock, usdc, parseUnits(quantity, stock.decimals), parsePrice(price, usdc));
+      legs = orderLegs(side, base, quote, parseUnits(quantity, base.decimals), parsePrice(price, quote));
     } catch (e) {
-      legsError = e instanceof Error ? e.message : 'Enter a quantity and a price.';
+      legsError = e instanceof Error ? e.message : 'Enter an amount and a price.';
     }
   }
-  const makeFunding = legs ? fundWithOneCoin(coins, legs.give, legs.side === 'sell' ? stock : usdc) : null;
+  const makeFunding = legs ? fundWithOneCoin(coins, legs.give, legs.side === 'sell' ? base : quote) : null;
   const makeGuard = guardFor({ store: store!, scope }, account.address, 'open-swap', now);
 
-  // What the bank's status says the page cannot do now (plan P4-A error states).
-  const paused = bank.spendingPaused;
-  const batcherDown = bank.health ? !bank.health.batcher.reachable : false;
+  // What the market's status says the page cannot do now (plan P4-A error states).
+  const paused = relayStatus.spendingPaused;
+  const batcherDown = relayStatus.health ? !relayStatus.health.batcher.reachable : false;
   const exchangeDown = state.status === 'unavailable';
+  // The account failed the market-account check on the chain: nothing is signed for it (P9.S).
+  const refusedAccount = accountCheck.status === 'failed';
 
-  const run = async (label: string, fn: (e: OperationEnv) => Promise<void>) => {
+  const run = async (label: string, kind: ActivityKind, fn: (e: OperationEnv) => Promise<void>) => {
     const e = env();
     if (!e) return;
     setBusy(label);
     setMessage(null);
     setJob(null);
     try {
-      await fn(e);
+      await activity.run(kind, () => fn(e));
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Something went wrong.' });
     } finally {
@@ -393,13 +503,29 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     }
   };
 
+  // "Cancel offer" (audit C6, questions Q30): one approval, one transaction that moves the account's
+  // nonce, so the offer can never be taken; done when the chain shows it.
+  const doCancel = () =>
+    void run('cancel', 'cancel-offers', async (e) => {
+      const r = await cancelOffers(e, account.address);
+      const tx = `tx ${r.txId.slice(0, 8)}…${r.txId.slice(-6)}`;
+      setMessage({
+        kind: 'ok',
+        // Cancelled only when the chain shows the nonce moved AND the offer was not filled (R2-4).
+        text:
+          r.cancelled > 0
+            ? `Cancelled: your offer can no longer be taken by anyone (${tx}).`
+            : `Done (${tx}): nothing signed before can be used any more. Your offer was taken before the cancel landed; it shows as Filled.`,
+      });
+    });
+
   const submitMake = (ev: FormEvent) => {
     ev.preventDefault();
-    if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused) return;
+    if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused || refusedAccount) return;
     const l = legs;
-    void run('make', async (e) => {
-      const rec = await makeOffer(e, account.address, l, { stock, usdc });
-      setMessage({ kind: 'ok', text: `Your offer is on the exchange: ${rec.summary} (offer ${short(rec.offerId)}).` });
+    void run('make', 'open-swap', async (e) => {
+      const rec = await makeOffer(e, account.address, l, pair);
+      setMessage({ kind: 'ok', text: madeOfferText(rec) });
       setQuantity('');
     });
   };
@@ -408,22 +534,19 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const asks = market?.asks.entries ?? [];
   const bids = market?.bids.entries ?? [];
   const takeability = (e: BookEntry) => {
-    const l = takeLegs(e, stock, usdc);
-    return { legs: l, funding: fundWithOneCoin(coins, l.give, l.side === 'sell' ? stock : usdc) };
+    const l = takeLegs(e, base, quote);
+    return { legs: l, funding: fundWithOneCoin(coins, l.give, l.side === 'sell' ? base : quote) };
   };
-  const cannotTake = !!busy || !!paused || batcherDown || exchangeDown;
+  const cannotTake = !!busy || !!paused || batcherDown || exchangeDown || refusedAccount;
   const startTake = (e: BookEntry) => {
     setMessage(null);
     setConfirmTake(e);
   };
   const doTake = (e: BookEntry) =>
-    void run('take', async (env2) => {
+    void run('take', 'take', async (env2) => {
       setConfirmTake(null);
-      const rec = await takeOffer(env2, account.address, e, { stock, usdc });
-      setMessage({
-        kind: 'ok',
-        text: `Done: ${rec.summary}, settled in one transaction (tx ${short(rec.settledTx ?? '')}).`,
-      });
+      const rec = await takeOffer(env2, account.address, e, pair);
+      setMessage({ kind: 'ok', text: tookOfferText(rec) });
       setPicked(null);
     });
   const takeGuard = guardFor({ store: store!, scope }, account.address, 'take', now);
@@ -434,9 +557,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const bestBid = market?.bids.best ?? null;
 
   const bookColumns = (kind: 'asks' | 'bids'): Column[] => [
-    { label: 'Price', sub: usdc.midnightName },
-    { label: 'Quantity', sub: stock.midnightName, align: 'right' },
-    { label: kind === 'asks' ? 'You pay' : 'You get', sub: usdc.midnightName, align: 'right' },
+    { label: 'Price', sub: quote.symbol },
+    { label: 'Amount', sub: base.symbol, align: 'right' },
+    { label: kind === 'asks' ? 'You pay' : 'You get', sub: quote.symbol, align: 'right' },
     { label: 'Action', srOnly: true, align: 'right' },
   ];
 
@@ -446,7 +569,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       <div>
         <div className="book-side-head">
           <h4 id={headId}>
-            {kind === 'asks' ? 'Asks' : 'Bids'}{' '}
+            {kind === 'asks' ? 'Sellers' : 'Buyers'}{' '}
             <span className="small muted">{kind === 'asks' ? '— you buy' : '— you sell'}</span>
           </h4>
           <span className="small muted">
@@ -464,7 +587,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             <tbody>
               <tr className="row-empty">
                 <td colSpan={4}>
-                  <NoValue>no {kind}</NoValue>
+                  <NoValue>{kind === 'asks' ? 'nobody is selling' : 'nobody is buying'}</NoValue>
                 </td>
               </tr>
             </tbody>
@@ -477,23 +600,23 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                 // One row group per offer.
                 <tbody key={e.offerId} data-testid="trade-line" data-offer={e.offerId}>
                   <tr
-                    aria-selected={picked === e.offerId}
-                    className={picked === e.offerId ? 'row-selected' : undefined}
+                    aria-selected={picked === e.offerId || confirmTake?.offerId === e.offerId}
+                    className={picked === e.offerId || confirmTake?.offerId === e.offerId ? 'row-selected' : undefined}
                   >
                     <td className="num">
                       <span className={kind === 'asks' ? 'price-ask' : 'price-bid'}>
                         {kind === 'asks' ? askText(e.price) : bidText(e.price)}
                       </span>
                     </td>
-                    <td className="num">{amt(e.stockRaw, stock)}</td>
-                    <td className="num">{amt(e.usdcRaw, usdc)}</td>
+                    <td className="num">{amt(e.baseRaw, base)}</td>
+                    <td className="num">{amt(e.quoteRaw, quote)}</td>
                     <td className="act">
                       {own ? (
                         <YoursBadge data-testid="own-offer" />
                       ) : t.funding.ok ? (
                         <Button
                           size="small"
-                          variant={picked === e.offerId ? 'primary' : 'secondary'}
+                          variant={kind === 'asks' ? 'buy' : 'sell'}
                           data-testid="take-line"
                           disabled={cannotTake}
                           onClick={() => startTake(e)}
@@ -528,21 +651,20 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const takeConfirm = (() => {
     if (!confirmTake) return null;
     const t = takeability(confirmTake);
+    const verb = t.legs.side === 'buy' ? 'Buy' : 'Sell';
     return (
-      <Panel
-        as="div"
-        tone="quiet"
-        headingLevel={4}
-        className="section-gap"
-        title={`${t.legs.side === 'buy' ? 'Buy' : 'Sell'} — the whole offer`}
-        data-testid="take-confirm"
-        data-offer={confirmTake.offerId}
-      >
+      <div ref={confirmRef} data-testid="take-confirm" data-offer={confirmTake.offerId}>
+        <p className="panel-intro small">
+          <strong>
+            {verb} {amt(confirmTake.baseRaw, base)} {base.symbol}
+          </strong>{' '}
+          — the whole offer, in one step.
+        </p>
         <LegsPreview
           legs={t.legs}
-          stock={stock}
-          usdc={usdc}
-          foot="All or nothing: you pay and receive exactly these amounts, from one coin"
+          base={base}
+          quote={quote}
+          foot="All or nothing: you pay and get exactly these amounts, from one coin"
         />
         {!t.funding.ok && (
           <Notice tone="danger" role="alert" className="panel-intro" data-testid="take-not-fundable">
@@ -555,36 +677,55 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           </Notice>
         )}
         <ButtonRow stretch>
-          <Button data-testid="take-sign" disabled={cannotTake || !t.funding.ok} onClick={() => doTake(confirmTake)}>
-            {takeGuard.kind === 'warn' ? 'Cancel my offer and sign' : 'Sign and take'}
+          <Button
+            variant={t.legs.side === 'buy' ? 'buy' : 'sell'}
+            className="btn-block"
+            data-testid="take-sign"
+            disabled={cannotTake || !t.funding.ok}
+            onClick={() => doTake(confirmTake)}
+          >
+            {takeGuard.kind === 'warn' ? `Cancel my offer and ${verb.toLowerCase()}` : `${verb} now`}
           </Button>
-          <Button variant="secondary" onClick={() => setConfirmTake(null)}>
+          <Button variant="secondary" className="btn-block" onClick={() => setConfirmTake(null)}>
             Back
           </Button>
         </ButtonRow>
-      </Panel>
+        <p className="xsmall muted gap-top" data-testid="take-validity">
+          You approve once in Phantom; the market pays the network fees. Your approval is valid for{' '}
+          {Math.round(TAKE_LIFETIME_SECONDS / 60)} minutes: if the market has not settled it by then, nobody can.
+        </p>
+      </div>
     );
   })();
 
-  return (
-    <section data-testid="section-trade">
-      {head}
+  return layout(
+    <>
       {message && (
-        <Notice
-          tone={message.kind === 'error' ? 'danger' : 'success'}
-          role={message.kind === 'error' ? 'alert' : 'status'}
-          className="panel-intro"
+        <Toast
+          tone={message.kind === 'error' ? 'error' : 'success'}
+          onClose={dismiss}
+          timerKey={message.text}
           data-testid="trade-message"
         >
           {message.text}
-        </Notice>
+        </Toast>
       )}
       {exchangeDown && state.status === 'unavailable' && (
         <Notice tone="danger" role="alert" className="panel-intro" data-testid="trade-exchange-unavailable">
-          Exchange unavailable: {state.reason}. You cannot trade until it answers again.
+          Exchange unavailable: {state.reason}. You can trade again as soon as it answers.
         </Notice>
       )}
-      <BankNotices place="trade" className="panel-intro" />
+      <RelayNotices place="trade" className="panel-intro" />
+      {accountCheck.status !== 'ok' && (
+        <AccountCheckNotice
+          check={accountCheck}
+          restore={
+            <a href="#account" data-testid="trade-restore-key">
+              Restore it on Portfolio.
+            </a>
+          }
+        />
+      )}
       {paused && (
         <Notice tone="warning" className="panel-intro" data-testid="trade-paused">
           Not now: {paused}
@@ -593,179 +734,238 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       {live && (
         <Notice
           tone="warning"
-          title="One live offer per account."
+          title="One live offer at a time."
           className="panel-intro"
           data-testid="live-offer-banner"
+          data-listed={offerShown(live).listed ? 'yes' : 'no'}
         >
-          You have a live offer: {live.summary}, until {clock(live.expiresAt)}. Any other signed action (a take, a
-          withdrawal, a bridge move) cancels it; we ask you before it happens.
+          {offerShown(live).listed
+            ? `Your offer is listed on the market: ${live.summary}, until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)} (the expiry you approved).`
+            : `Your offer is not listed on the market (yet): ${live.summary}. It can still be taken until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)}, the expiry you approved.`}{' '}
+          It is not on-chain: your tokens stay in your account until someone takes it. Any other approval (a take or a
+          withdrawal) cancels it; we ask you first.
+          <ButtonRow className="gap-top">
+            <Button
+              variant="secondary"
+              size="small"
+              data-testid="cancel-offer"
+              disabled={!!busy || !!paused || refusedAccount}
+              onClick={doCancel}
+            >
+              {busy === 'cancel' ? 'Cancelling…' : 'Cancel offer'}
+            </Button>
+          </ButtonRow>
         </Notice>
       )}
 
+      <div className="pair-bar">
+        <div className="pair-picker">
+          <PairIcon base={base.symbol} quote={quote.symbol} />
+          <label className="sr-only" htmlFor="tr-pair">
+            Market
+          </label>
+          <Select
+            id="tr-pair"
+            value={pair.id}
+            onChange={(e) => {
+              setPairId(e.target.value);
+              setPicked(null);
+              setConfirmTake(null);
+            }}
+            data-testid="trade-pair"
+          >
+            {pairs.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.base.symbol} / {p.quote.symbol}
+              </option>
+            ))}
+          </Select>
+          <span className="pair-name small muted">{base.name}</span>
+        </div>
+        <PairStats market={state.status === 'ready' ? market : null} quote={quote} />
+      </div>
+
       <div className="trade-grid">
-        <Panel as="form" title="New offer" onSubmit={submitMake} data-testid="make-section" noValidate>
-          <Field label="Side">
-            <Segmented
-              label="Side"
-              options={[
-                { value: 'buy', label: `Buy ${stock.midnightName}`, testId: 'side-buy' },
-                { value: 'sell', label: `Sell ${stock.midnightName}`, testId: 'side-sell' },
-              ]}
-              value={side}
-              onChange={(v) => {
-                setSide(v);
-                prefill(v);
-              }}
-            />
-          </Field>
-          <Field label="Asset" htmlFor="tr-stock">
-            <Select
-              id="tr-stock"
-              value={stock.midnightName}
-              onChange={(e) => {
-                setStockName(e.target.value);
-                setPicked(null);
-              }}
-              data-testid="trade-stock"
-            >
-              {stocks.map((s) => (
-                <option key={s.midnightColour} value={s.midnightName}>
-                  {s.midnightName} — {tokenDisplayName(s)} / {usdc.midnightName}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <div className="form-grid">
-            <Field label="Quantity" htmlFor="tr-qty">
-              <UnitInput
-                id="tr-qty"
-                unit={stock.midnightName}
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                inputMode="decimal"
-                autoComplete="off"
-                data-testid="make-quantity"
-              />
-            </Field>
-            <Field
-              label={`Price per ${stock.midnightName}`}
-              htmlFor="tr-price"
-              hint={
-                <Button variant="link" onClick={() => prefill(side)} data-testid="make-prefill">
-                  {PREFILL_HINT[side]}
-                  {side === 'sell' && bestAsk ? ` (${askText(bestAsk.price)})` : ''}
-                  {side === 'buy' && bestBid ? ` (${bidText(bestBid.price)})` : ''}
-                </Button>
-              }
-            >
-              <UnitInput
-                id="tr-price"
-                unit={usdc.midnightName}
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                inputMode="decimal"
-                autoComplete="off"
-                data-testid="make-price"
-              />
-            </Field>
+        <Panel title="Order book" meta={`prices in ${quote.symbol}`} data-testid="trade-book">
+          {market?.status === 'no-liquidity' && (
+            <Notice className="panel-intro" data-testid="trade-no-liquidity">
+              No offers yet: nobody is buying or selling {base.symbol} for {quote.symbol} right now. Create the first
+              offer.
+            </Notice>
+          )}
+          <div className="book-stack">
+            {bookSide(asks, 'asks')}
+            {market && spreadText(market) !== null && (
+              <p className="spread-line">
+                <span>Spread</span>
+                <strong>
+                  {spreadText(market)} {quote.symbol}
+                </strong>
+              </p>
+            )}
+            {bookSide(bids, 'bids')}
           </div>
-          {legsError && (
-            <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-error">
-              {legsError}
-            </Notice>
-          )}
-          {legs && (
-            <LegsPreview
-              legs={legs}
-              stock={stock}
-              usdc={usdc}
-              {...(makeFunding?.ok
-                ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the bank pays them' }
-                : {})}
-            />
-          )}
-          {legs && makeFunding && !makeFunding.ok && (
-            <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-not-fundable">
-              {makeFunding.reason}
-            </Notice>
-          )}
-          {makeGuard.kind === 'refuse' && (
-            <Notice tone="warning" role="alert" className="panel-intro" data-testid="make-refused">
-              {makeGuard.message}
-            </Notice>
-          )}
-          <ButtonRow stretch>
-            <Button
-              type="submit"
-              data-testid="make-sign"
-              disabled={!!busy || !!paused || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'}
-            >
-              {busy === 'make' ? 'Publishing…' : 'Sign and publish offer'}
-            </Button>
-          </ButtonRow>
-          <p className="small muted section-gap">
-            Your offer stays on the exchange until someone takes it (all of it) or it expires, about an hour after you
-            sign. Signing anything else from this account before then cancels it.
+          <p className="table-note">
+            Offers are listed on the market, not on-chain. Taking one is all or nothing: you pay and get exactly the
+            amounts shown, from one coin, settled on Midnight in one transaction.
           </p>
         </Panel>
 
-        <Panel title="Take an offer" meta={`${stock.midnightName} / ${usdc.midnightName}`} data-testid="take-section">
-          <p className="small muted panel-intro">
-            Offers are all or nothing: you pay and receive exactly the amounts shown, from one coin.
-          </p>
-          <ButtonRow stretch>
-            <Button
-              data-testid="buy-best-ask"
-              disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
-              onClick={() => bestAsk && startTake(bestAsk)}
-            >
-              Buy at best ask{bestAsk ? ` (${askText(bestAsk.price)})` : ''}
-            </Button>
-            <Button
-              variant="secondary"
-              data-testid="sell-best-bid"
-              disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
-              onClick={() => bestBid && startTake(bestBid)}
-            >
-              Sell at best bid{bestBid ? ` (${bidText(bestBid.price)})` : ''}
-            </Button>
-          </ButtonRow>
-          {market?.status === 'no-liquidity' && (
-            <Notice className="section-gap" data-testid="trade-no-liquidity">
-              No liquidity: nobody is offering to buy or sell {stock.midnightName} right now. You can make an offer
-              instead.
-            </Notice>
-          )}
-          {pickedGone && (
-            <Notice tone="warning" className="section-gap" data-testid="picked-gone">
-              The offer you picked is no longer on the exchange.
-            </Notice>
-          )}
-          {pickedEntry && !confirmTake && (
-            <ButtonRow className="section-gap">
-              <Button
-                variant="secondary"
-                data-testid="take-picked"
-                disabled={!!busy}
-                onClick={() => startTake(pickedEntry)}
+        <div className="trade-side">
+          <Panel
+            title="Buy or sell now"
+            meta={`${base.symbol} / ${quote.symbol}`}
+            tone="accent"
+            data-testid="take-section"
+          >
+            {takeConfirm ?? (
+              <>
+                <div className="quick-actions">
+                  <Button
+                    variant="buy"
+                    data-testid="buy-best-ask"
+                    disabled={!bestAsk || cannotTake || !takeability(bestAsk).funding.ok}
+                    onClick={() => bestAsk && startTake(bestAsk)}
+                  >
+                    <span>Buy {base.symbol}</span>
+                    <span className="price">{bestAsk ? `at ${askText(bestAsk.price)}` : 'nobody is selling'}</span>
+                  </Button>
+                  <Button
+                    variant="sell"
+                    data-testid="sell-best-bid"
+                    disabled={!bestBid || cannotTake || !takeability(bestBid).funding.ok}
+                    onClick={() => bestBid && startTake(bestBid)}
+                  >
+                    <span>Sell {base.symbol}</span>
+                    <span className="price">{bestBid ? `at ${bidText(bestBid.price)}` : 'nobody is buying'}</span>
+                  </Button>
+                </div>
+                <p className="xsmall muted gap-top">
+                  Takes the best whole offer from the book. Or pick any line in the book.
+                </p>
+                {pickedGone && (
+                  <Notice tone="warning" className="gap-top" data-testid="picked-gone">
+                    The offer you picked is no longer on the exchange.
+                  </Notice>
+                )}
+                {pickedEntry && (
+                  <ButtonRow className="gap-top">
+                    <Button
+                      variant="secondary"
+                      className="btn-block"
+                      data-testid="take-picked"
+                      disabled={!!busy}
+                      onClick={() => startTake(pickedEntry)}
+                    >
+                      Review the offer you picked
+                    </Button>
+                  </ButtonRow>
+                )}
+              </>
+            )}
+          </Panel>
+
+          <Panel as="form" title="Create offer" onSubmit={submitMake} data-testid="make-section" noValidate>
+            <Field label="I want to">
+              <Segmented
+                label="Side"
+                options={[
+                  { value: 'buy', label: `Buy ${base.symbol}`, testId: 'side-buy' },
+                  { value: 'sell', label: `Sell ${base.symbol}`, testId: 'side-sell' },
+                ]}
+                value={side}
+                onChange={(v) => {
+                  setSide(v);
+                  prefill(v);
+                }}
+              />
+            </Field>
+            <div className="form-grid">
+              <Field label="Amount" htmlFor="tr-qty">
+                <UnitInput
+                  id="tr-qty"
+                  unit={base.symbol}
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  placeholder="0.00"
+                  data-testid="make-quantity"
+                />
+              </Field>
+              <Field
+                label={`Price per ${base.symbol}`}
+                htmlFor="tr-price"
+                hint={
+                  <Button variant="link" onClick={() => prefill(side)} data-testid="make-prefill">
+                    {PREFILL_HINT[side]}
+                    {side === 'sell' && bestAsk ? ` (${askText(bestAsk.price)})` : ''}
+                    {side === 'buy' && bestBid ? ` (${bidText(bestBid.price)})` : ''}
+                  </Button>
+                }
               >
-                Review the offer you picked
-              </Button>
-            </ButtonRow>
-          )}
-          {takeConfirm}
-          <div className="book-stack section-gap">
-            {bookSide(asks, 'asks')}
-            {bookSide(bids, 'bids')}
-          </div>
-        </Panel>
+                <UnitInput
+                  id="tr-price"
+                  unit={quote.symbol}
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  placeholder="0.00"
+                  data-testid="make-price"
+                />
+              </Field>
+            </div>
+            {legsError && (
+              <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-error">
+                {legsError}
+              </Notice>
+            )}
+            {legs && (
+              <LegsPreview
+                legs={legs}
+                base={base}
+                quote={quote}
+                {...(makeFunding?.ok
+                  ? { foot: 'Paid from one coin; any change stays in your account. Fees: none, the market pays them' }
+                  : {})}
+              />
+            )}
+            {legs && makeFunding && !makeFunding.ok && (
+              <Notice tone="danger" role="alert" className="panel-intro" data-testid="make-not-fundable">
+                {makeFunding.reason}
+              </Notice>
+            )}
+            {makeGuard.kind === 'refuse' && (
+              <Notice tone="warning" role="alert" className="panel-intro" data-testid="make-refused">
+                {makeGuard.message}
+              </Notice>
+            )}
+            <Button
+              type="submit"
+              className="btn-block"
+              data-testid="make-sign"
+              disabled={
+                !!busy || !!paused || refusedAccount || !legs || !makeFunding?.ok || makeGuard.kind === 'refuse'
+              }
+            >
+              {busy === 'make' ? 'Preparing your offer…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
+            </Button>
+            <p className="xsmall muted gap-top" data-testid="make-off-chain">
+              One approval in Phantom lists your offer on the market; it puts nothing on-chain. Your tokens stay in your
+              account until someone takes the whole offer (then it settles on Midnight in one transaction), until it
+              expires one hour after you approve: the expiry is part of what you approve, so nobody can take it later.
+              Cancel it sooner with Cancel offer; approving anything else from this account cancels it too.
+            </p>
+          </Panel>
+        </div>
       </div>
 
       {job && <Tracker job={job} />}
 
       <Panel
         className="section-gap"
-        title="My offers and trades"
+        title="Your offers and trades"
         meta={
           <Button
             variant="secondary"
@@ -779,10 +979,13 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         }
         data-testid="my-offers"
       >
+        <p className="panel-intro small muted" data-testid="my-offers-off-chain">
+          {OPEN_OFFERS_NOTE}
+        </p>
         <StatementTable
-          caption="My offers and trades"
+          caption="Your offers and trades"
           columns={[
-            { label: 'Placed' },
+            { label: 'Placed', sub: 'UTC' },
             { label: 'Trade' },
             { label: 'Kind' },
             { label: 'Status', align: 'right' },
@@ -793,21 +996,36 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           {shownTrades.length === 0 ? (
             <tr className="row-empty">
               <td colSpan={6}>
-                <NoValue>No trades yet.</NoValue>
+                <NoValue>No trades yet. Your offers and takes show here.</NoValue>
               </td>
             </tr>
           ) : (
             shownTrades.map((t) => (
-              <tr key={`${t.role}-${t.offerId}`} data-testid="my-trade" data-role={t.role} data-state={t.status}>
+              <tr
+                key={`${t.role}-${t.offerId}`}
+                data-testid="my-trade"
+                data-role={t.role}
+                data-state={t.status}
+                data-shown={offerShown(t).state}
+              >
                 <Cell block num>
                   {placed(t.createdAt)}
                 </Cell>
                 <Cell label="Trade">{t.summary}</Cell>
-                <Cell label="Kind">{t.role === 'make' ? 'Your offer' : 'Taken'}</Cell>
+                <Cell label="Kind">{t.role === 'make' ? 'Your offer' : 'You took'}</Cell>
                 <Cell label="Status" align="right" data-testid="my-trade-state">
                   <span className="num-wrap">
-                    <StatusPill status={STATE_PILL[t.status]}>{STATE_TEXT[t.status]}</StatusPill>
-                    {t.role === 'make' && t.status === 'live' && <Sub>until {clock(t.expiresAt)}</Sub>}
+                    <StatusPill status={STATE_PILL[offerShown(t).state]}>{STATE_TEXT[offerShown(t).state]}</StatusPill>
+                    {t.role === 'make' && t.status === 'live' && (
+                      // The signed expiry: its time here (the table stays narrow), the full date and
+                      // time on hover and in the banner (audit C6).
+                      <Sub
+                        data-testid="my-trade-expiry"
+                        title={`Expires ${t.validUntil ? deadlineText(t.validUntil) : clock(t.expiresAt)}`}
+                      >
+                        until {clock(t.expiresAt)}
+                      </Sub>
+                    )}
                   </span>
                 </Cell>
                 <Cell label="Offer" align="right">
@@ -821,6 +1039,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           )}
         </StatementTable>
       </Panel>
-    </section>
+    </>,
   );
 }

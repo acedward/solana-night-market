@@ -1,32 +1,29 @@
 // The live markets for the whole app: one feed per page load, started while at least one
-// component shows prices (the Markets page, or holdings that are valued) and stopped when none
-// does, so a page without prices makes no exchange request.
+// component shows prices (the Markets page, the Trade page) and stopped when none does, so a page
+// without prices makes no exchange request.
 //
-// For the holdings view (plan L-ACC.2), `useMarkets()` also values holdings at the best bid:
-//   const { value, valueAll, state } = useMarkets();
-//   value(colour, amountRaw)  -> { kind: 'usdc' | 'priced' | 'no-liquidity' | 'unavailable' | 'unknown-token', … }
-//   valueAll([{ colour, amountRaw }]) -> { items, totalUsdcRaw, excluded }
-// A stock with no live bid is "no liquidity" and left out of the total (spec US2); while the
-// feed is loading or the exchange is unavailable, stocks are 'unavailable' (USDC still counts).
+// The markets are the site's configured pairs (`config.json` `pairs`, or the network's default
+// list): any two shielded tokens, none special (AA 00047). Holdings are shown in each token's own
+// units; nothing is totalled in a "home" currency.
 
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react';
 
 import {
   type FeedState,
-  type HoldingsValuation,
   KernelClient,
   MarketFeed,
+  type MarketPair,
+  NETWORK_DEFAULT_PAIRS,
   type NetworkProfile,
   type TokenRegistry,
-  type Valuation,
   registryFor,
-  valueHolding,
-  valueHoldings,
-} from '@mnbank/core';
+  resolvePairs,
+} from '@nightmarket/core';
 
 interface MarketsContext {
   feed: MarketFeed | null;
   registry: TokenRegistry | null;
+  pairs: readonly MarketPair[];
   /** Why there is no feed (for example a network without a token list). */
   error: string | null;
   kernelUrl: string;
@@ -40,11 +37,14 @@ const Ctx = createContext<MarketsContext | null>(null);
 export function MarketProvider({
   network,
   tokens,
+  pairs: configuredPairs,
   children,
 }: {
   network: NetworkProfile;
-  /** The site configuration's token list; the stagenet registry is built in. */
+  /** The site configuration's token list (extends, or replaces, the network's built-in one). */
   tokens?: unknown;
+  /** The site configuration's pairs (`BASE/QUOTE`), or undefined for the network's default. */
+  pairs?: unknown;
   children: ReactNode;
 }) {
   const ctx = useMemo<MarketsContext>(() => {
@@ -55,34 +55,44 @@ export function MarketProvider({
     } catch (e) {
       error = e instanceof Error ? e.message : 'no token list';
     }
+    let pairs: MarketPair[] = [];
+    if (registry) {
+      const resolved = resolvePairs(registry, configuredPairs, NETWORK_DEFAULT_PAIRS[network.name]);
+      for (const w of resolved.warnings) console.warn(`Night Market: ${w}`);
+      pairs = resolved.pairs;
+    }
     const feed = registry
-      ? new MarketFeed({ client: new KernelClient({ baseUrl: network.zswap.kernelUrl }), registry })
+      ? new MarketFeed({ client: new KernelClient({ baseUrl: network.zswap.kernelUrl }), registry, pairs })
       : null;
-    return { feed, registry, error, kernelUrl: network.zswap.kernelUrl };
-  }, [network, tokens]);
+    return { feed, registry, pairs, error, kernelUrl: network.zswap.kernelUrl };
+  }, [network, tokens, configuredPairs]);
   useEffect(() => () => ctx.feed?.stop(), [ctx]);
   return <Ctx.Provider value={ctx}>{children}</Ctx.Provider>;
 }
 
-/** The bank's token list (the site configuration's, or stagenet's built-in one), WITHOUT
- *  starting the price feed: for views that only name tokens. */
+/** The market's token list (the network's built-in one, as the site configuration extends it),
+ *  WITHOUT starting the price feed: for views that only name tokens. */
 export function useTokenRegistry(): TokenRegistry | null {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('useTokenRegistry outside MarketProvider');
   return ctx.registry;
 }
 
+/** The site's pairs, in display order, WITHOUT starting the price feed. */
+export function usePairs(): readonly MarketPair[] {
+  const ctx = useContext(Ctx);
+  if (!ctx) throw new Error('usePairs outside MarketProvider');
+  return ctx.pairs;
+}
+
 export interface MarketsValue {
   state: FeedState;
   registry: TokenRegistry | null;
+  pairs: readonly MarketPair[];
   error: string | null;
   kernelUrl: string;
   /** Refresh now (coalesced with a refresh already running). */
   refresh(): void;
-  /** Value one holding in USDC base units at the best bid. */
-  value(colour: string, amountRaw: bigint): Valuation;
-  /** Value a list of holdings; the total leaves out what has no price and counts it. */
-  valueAll(holdings: ReadonlyArray<{ colour: string; amountRaw: bigint }>): HoldingsValuation;
 }
 
 const LOADING: FeedState = { status: 'loading', stream: 'off' };
@@ -91,7 +101,7 @@ const noop = () => () => {};
 export function useMarkets(): MarketsValue {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('useMarkets outside MarketProvider');
-  const { feed, registry } = ctx;
+  const { feed, registry, pairs } = ctx;
 
   useEffect(() => {
     if (!feed) return;
@@ -108,24 +118,15 @@ export function useMarkets(): MarketsValue {
     feed ? feed.getState() : LOADING,
   );
 
-  return useMemo<MarketsValue>(() => {
-    const snapshot = state.status === 'ready' ? state.snapshot : null;
-    return {
+  return useMemo<MarketsValue>(
+    () => ({
       state,
       registry,
+      pairs,
       error: ctx.error,
       kernelUrl: ctx.kernelUrl,
       refresh: () => void feed?.refresh(),
-      value: (colour, amountRaw) =>
-        registry ? valueHolding(snapshot, registry, colour, amountRaw) : { kind: 'unknown-token' },
-      valueAll: (holdings) =>
-        registry
-          ? valueHoldings(snapshot, registry, holdings)
-          : {
-              items: holdings.map((h) => ({ ...h, valuation: { kind: 'unknown-token' } as const })),
-              totalUsdcRaw: 0n,
-              excluded: holdings.length,
-            },
-    };
-  }, [state, registry, feed, ctx.error, ctx.kernelUrl]);
+    }),
+    [state, registry, pairs, feed, ctx.error, ctx.kernelUrl],
+  );
 }

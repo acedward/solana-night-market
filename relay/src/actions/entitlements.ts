@@ -1,12 +1,10 @@
 // Sponsored inbox appends (security review F-B3).
 //
-// `append-inbox` files a 192-byte entry sealed to the account's own key: the bank cannot read it,
+// `append-inbox` files a 192-byte entry sealed to the account's own key: the market cannot read it,
 // so it cannot tell a real change coin from junk. It therefore sponsors an append ONLY against a
 // single-use ENTITLEMENT it issued itself, when it ran an operation that left a coin of the account
 // without a correct inbox entry:
-//   - a withdrawal to a wallet with change (`withdraw_shielded_with_evm` files no entry for it);
-//   - a bridge withdrawal start with change (it files 192 zero bytes);
-//   - a bridge settle whose entry does not describe the coin it minted.
+//   - a withdrawal to a wallet with change (the arm's `withdraw_shielded` files no entry for it).
 //
 // The relay keeps no per-customer record (Q5, FR-003). The entitlement is a token the browser keeps
 // with the coin: `ae1.<account>.<op>.<expiry>.<mac>`, where `op` identifies the operation (a hash of
@@ -23,7 +21,7 @@
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
-import { APPEND_ENTITLEMENT_PATTERN } from '@mnbank/core';
+import { APPEND_ENTITLEMENT_PATTERN } from '@nightmarket/core';
 
 import type { AdmissionOutcome } from './admission.js';
 
@@ -41,13 +39,13 @@ export interface AppendEntitlementOptions {
 export type EntitlementCheck = { ok: true; op: string; expiresAt: number } | { ok: false; reason: string };
 
 const DAY = 86_400;
-const MAC_LABEL = 'mn-bank relay: append-inbox entitlement v1';
+const MAC_LABEL = 'night-market relay: append-inbox entitlement v1';
 
 /** The MAC key: derived from the sponsor seed (stable across restarts), or random without one. */
 export function entitlementKey(sponsorSeedHex: string | null): Uint8Array {
   if (!sponsorSeedHex) return randomBytes(32);
   return createHmac('sha256', Buffer.from(sponsorSeedHex, 'hex'))
-    .update('mn-bank relay: append-inbox entitlement key v1')
+    .update('night-market relay: append-inbox entitlement key v1')
     .digest();
 }
 
@@ -83,13 +81,13 @@ export class AppendEntitlements {
   /** Whether `token` is a valid, unexpired entitlement of `account` (MAC and expiry only). */
   verify(token: unknown, account: string | undefined): EntitlementCheck {
     if (typeof token !== 'string' || !APPEND_ENTITLEMENT_PATTERN.test(token)) {
-      return { ok: false, reason: 'no entitlement: the bank files an inbox entry only for change it recorded' };
+      return { ok: false, reason: 'no entitlement: the market files an inbox entry only for change it recorded' };
     }
     const [, acc, op, exp, mac] = token.split('.') as [string, string, string, string, string];
     const expiresAt = Number(exp);
     const want = Buffer.from(this.mac(acc, op, expiresAt), 'hex');
     if (!timingSafeEqual(want, Buffer.from(mac, 'hex'))) {
-      return { ok: false, reason: 'the entitlement was not issued by this bank' };
+      return { ok: false, reason: 'the entitlement was not issued by this market' };
     }
     if (acc !== normAccount(account)) return { ok: false, reason: 'the entitlement is for another account' };
     if (expiresAt <= this.now()) return { ok: false, reason: 'the entitlement has expired' };
@@ -124,7 +122,7 @@ export class AppendEntitlements {
         ok: false,
         status: 429,
         code: 'append-budget',
-        reason: `this account has had ${times.length} inbox appends queued in the last 24 hours, the most the bank pays for (refused requests do not count); try again in about ${hours} hour${hours === 1 ? '' : 's'}`,
+        reason: `this account has had ${times.length} inbox appends queued in the last 24 hours, the most the market pays for (refused requests do not count); try again in about ${hours} hour${hours === 1 ? '' : 's'}`,
       };
     }
     const at = this.now();

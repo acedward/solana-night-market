@@ -16,7 +16,6 @@ export default defineConfig([
     'playwright-report/**',
     'test-results/**',
     'packages/core/src/passport/vendor/offer-codec.ts',
-    'relay/src/bridge/vendor/relayer.ts',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

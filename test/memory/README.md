@@ -34,6 +34,10 @@ test/memory/run-prover-memory.sh synthetic --stock    # expected: FAIL (killed a
 
 ## Real: a k=18 proof against the pinned proof server
 
+> **Not in this build (Night Market, AA 00047).** The real mode below proved MN Bank's EVM-arm
+> call, which was removed with the EVM arm; `relay/src/tools/prover-memory.ts` now refuses it. It
+> returns on the Ed25519 arm with lane B3. The synthetic mode (what CI runs) is unchanged.
+
 ```sh
 KEYS_DIR=/path/to/keys test/memory/run-prover-memory.sh real
 ```
@@ -63,7 +67,7 @@ Extra arguments go to the harness:
 | `BUDGET_MB` | 512 synthetic, 768 real | the peak anonymous memory allowed |
 | `PROOFS` | 4 | proofs in a row |
 | `OUT_DIR` | `test-results/prover-memory` | where the JSON report goes (`synthetic.json`, `real.json`) |
-| `NAME` | `mnbank-mem` | prefix of the containers, the volumes and the network it creates |
+| `NAME` | `nightmarket-mem` | prefix of the containers, the volumes and the network it creates |
 | `KEEP` | 0 | 1 keeps the proof server and its downloaded parameters for the next run |
 
 `test/memory/run-prover-memory.sh down` removes everything a `KEEP=1` run left. Without `KEEP`,

@@ -1,28 +1,37 @@
-// Plan P1.5 testing: the visual smoke of the MN Bank design. Every page at 1280 px and at 375 px
-// (a touch phone), with:
+// Plan P1.5 testing, redone for the dark consumer design (AA 00047 P8.1, spec FR-006b; plan P8
+// testing: 390, 768 and 1440 px): the visual smoke of the Night Market design. Every page at 1440 px
+// (a desktop), 768 px (a touch tablet) and 390 px (a touch phone), with:
 //   - a screenshot per page (saved under $VISUAL_OUT_DIR, default test-results/visual);
 //   - no horizontal page scroll, and no element wider than the page outside its own scroll box;
-//   - every button at least 44 px tall on the phone (and every full-size button on desktop);
-//   - the self-hosted fonts loaded from the page's own origin, and nothing else left it;
-//   - a clean fallback when the font files cannot load (Georgia / the system sans);
-//   - no gradients or glass effects, and motion off under prefers-reduced-motion.
-// The contrast of the colour tokens is checked by web/test/design-contrast.test.ts.
+//   - every button at least 44 px tall on touch screens (and every full-size button on desktop);
+//   - the self-hosted font (Inter) loaded from the page's own origin, and nothing else left it;
+//   - a clean fallback when the font files cannot load (the system sans);
+//   - no glass effects (backdrop blur), and motion off under prefers-reduced-motion.
+// Gradients are allowed now, on decorative parts only (questions Q20: the brand gradient, the
+// primary buttons, the night-sky background); every text colour's contrast, including the labels
+// on both ends of the button gradient, is checked by web/test/design-contrast.test.ts.
 
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
 
+import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
-import { connect, installCustomer, serveExchange } from './visual-fixtures.js';
+import { connectPhantom, installMockPhantom } from './mock-phantom.js';
+import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
+import { MockRelay, RELAY } from './mock-relay.js';
+import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const OUT = process.env.VISUAL_OUT_DIR ?? `${root}/test-results/visual`;
 mkdirSync(OUT, { recursive: true });
 
 const VIEWPORTS = [
-  { name: 'desktop', width: 1280, height: 900, touch: false },
-  { name: 'phone375', width: 375, height: 812, touch: true },
+  { name: 'desktop', width: 1440, height: 900, touch: false },
+  { name: 'tablet768', width: 768, height: 1024, touch: true },
+  { name: 'phone390', width: 390, height: 844, touch: true },
 ] as const;
 
 /** Layout checks that must hold on every page, at every width. */
@@ -50,7 +59,8 @@ async function assertLayout(page: Page, touch: boolean) {
       .filter((b) => b.getBoundingClientRect().height > 0 && !b.closest('.hash') && !b.classList.contains('btn-link'))
       .map((b) => ({
         text: (b.textContent ?? '').trim().slice(0, 30),
-        h: b.getBoundingClientRect().height,
+        // To 0.01 px: an element mid-animation can measure 43.99994 from floating-point error.
+        h: Math.round(b.getBoundingClientRect().height * 100) / 100,
         small: b.classList.contains('btn-small'),
       }));
     const styled = Array.from(document.querySelectorAll('*')).map((el) => getComputedStyle(el));
@@ -59,7 +69,6 @@ async function assertLayout(page: Page, touch: boolean) {
       vw,
       wide,
       buttons,
-      gradients: styled.filter((s) => s.backgroundImage.includes('gradient')).length,
       glass: styled.filter((s) => s.backdropFilter && s.backdropFilter !== 'none').length,
     };
   });
@@ -68,7 +77,6 @@ async function assertLayout(page: Page, touch: boolean) {
   for (const b of r.buttons) {
     if (touch || !b.small) expect(b.h, `button "${b.text}" is at least 44 px tall`).toBeGreaterThanOrEqual(44);
   }
-  expect(r.gradients, 'no gradients').toBe(0);
   expect(r.glass, 'no glass effects').toBe(0);
 }
 
@@ -86,57 +94,120 @@ for (const vp of VIEWPORTS) {
       deviceScaleFactor: vp.touch ? 2 : 1,
     });
 
-    test('Accounts before a wallet connects', async ({ page }) => {
+    test('About and its known limitations (AA 00047 P11.D)', async ({ page }) => {
       const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: false });
-      await page.goto('/#accounts');
+      await page.goto('/#about');
+      await expect(page.getByTestId('about-limit').first()).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-about`);
+      expect(ex.external).toEqual([]);
+    });
+
+    test('Account before a wallet connects', async ({ page }) => {
+      const ex = await serveExchange(page);
+      await page.goto('/#account');
       await expect(page.getByTestId('connect')).toBeVisible();
+      await expect(page.getByTestId('account-connect')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts-disconnected`);
+      await shot(page, `${vp.name}-account-disconnected`);
       expect(ex.external).toEqual([]);
     });
 
-    test('Accounts: no account in this browser yet', async ({ page }) => {
+    test('the Connect menu (Phantom found)', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: false });
-      await page.goto('/#accounts');
-      await connect(page);
-      await expect(page.getByTestId('no-account')).toBeVisible();
-      await expect(
-        page.locator('[data-testid=sepolia-row][data-symbol=stkA] [data-testid=sepolia-balance]'),
-      ).toHaveText('989,690.00');
+      await installMockPhantom(page);
+      await page.goto('/#markets');
+      await page.getByTestId('connect').click();
+      await expect(page.getByTestId('wallet-option')).toHaveText(/Phantom/);
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts-open`);
+      await shot(page, `${vp.name}-connect-menu`, false);
     });
 
-    test('Accounts: the statement', async ({ page }) => {
-      const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
-      await page.goto('/#accounts');
-      await connect(page);
-      await expect(page.locator('[data-testid=passport-row]')).toHaveCount(4);
-      await expect(page.getByTestId('unsecured-coin')).toHaveCount(1);
-      // wStkA 60 + 40 at the best bid 0.95; wUSDC 11 + 9.50 + the 0.50 change at face value.
-      await expect(page.locator('[data-testid=passport-row][data-name=wStkA] [data-testid=passport-value]')).toHaveText(
-        '95.00',
+    test('Trade and Account with a connected wallet: the books, the forms and the holdings panel', async ({ page }) => {
+      await serveExchange(page);
+      const phantom = await installMockPhantom(page);
+      const relay = new MockRelay();
+      const indexer = new MockIndexer(relay);
+      await page.route(`${RELAY}/**`, (r) => relay.handle(r));
+      await page.route(INDEXER, (r) => indexer.handle(r));
+      await page.route('**/config.json', (r) =>
+        r.fulfill({ json: { network: 'stagenet', relayUrl: RELAY, overrides: INDEXER_OVERRIDE } }),
       );
-      await expect(
-        page.locator('[data-testid=passport-row][data-name=wStkA] [data-testid=passport-largest]'),
-      ).toHaveText('60.00');
-      await expect(page.getByTestId('passport-total')).toHaveText('116.00');
+      await page.goto('/#account');
+      await page.getByTestId('connect').click();
+      await page.getByTestId('wallet-option').click();
+      await expect(page.getByTestId('wallet-address')).toBeVisible();
+      await page.getByTestId('open-account').click();
+      await expect(page.getByTestId('masthead-account')).toBeVisible();
+      await page.getByTestId('get-demo-tokens').click();
+      await expect(page.getByTestId('demo-message')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-accounts`);
-      expect(ex.external).toEqual([]);
+      await shot(page, `${vp.name}-account-connected`);
+      await page.getByTestId('tab-trade').click();
+      await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-trade-connected`);
+      // The signing panel, while Phantom's window is open.
+      const release = phantom.holdNext();
+      await page.getByTestId('tab-account').click();
+      await page.getByTestId('withdraw-kind-shielded').click();
+      await page.getByTestId('send-amount').fill('1');
+      await page
+        .getByTestId('send-recipient')
+        .fill(
+          formatShieldedAddress({ coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) }, 'stagenet'),
+        );
+      await page.getByTestId('send-submit').click();
+      await expect(page.getByTestId('sign-prompt')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-sign-prompt`, false);
+      release();
+      await expect(page.getByTestId('sign-prompt')).toHaveCount(0);
+    });
+
+    // AA 00047 P8.2 (questions Q24): a make's own progress (Preparing your offer, then Listed on the
+    // market) and the listed offer, which says it is not on-chain.
+    test('Trade: making an offer (preparing, listing, listed)', async ({ page }) => {
+      const { relay } = await setup(page, { seeded: true });
+      await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+      await connectPhantom(page);
+      await page.getByTestId('side-sell').click();
+      await page.getByTestId('make-quantity').fill('0.05');
+      await page.getByTestId('make-price').fill('61500');
+      const hold = relay.holdNextJob();
+      await page.getByTestId('make-sign').click();
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'proving');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-preparing`, false);
+      hold.at(['proving', 'proven', 'posted']);
+      await expect(page.getByTestId('activity-stage')).toHaveAttribute('data-stage', 'posted', { timeout: 10_000 });
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listing`, false);
+      hold();
+      await expect(page.getByTestId('live-offer-banner')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('my-offers-off-chain')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-offer-listed`);
     });
 
     test('Markets with a book open', async ({ page }) => {
       await serveExchange(page);
       await page.goto('/#markets');
       await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
-      await page.locator('[data-testid=market-row][data-stock=wStkA]').getByTestId('open-book').click();
+      await page.locator('[data-testid=market-row][data-pair="twUSDM/twUSDC"]').getByTestId('open-book').click();
       await expect(page.getByTestId('book')).toBeVisible();
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-markets`);
+    });
+
+    test('Markets: a pair of 18- and 8-decimal tokens (twETH/twBTC)', async ({ page }) => {
+      await serveExchange(page);
+      await page.goto('/#markets');
+      await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
+      await page.locator('[data-testid=market-row][data-pair="twETH/twBTC"]').getByTestId('open-book').click();
+      await expect(page.getByTestId('book')).toHaveAttribute('data-pair', 'twETH/twBTC');
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-markets-eth-btc`);
     });
 
     test('Markets when the exchange is down', async ({ page }) => {
@@ -149,9 +220,8 @@ for (const vp of VIEWPORTS) {
 
     test('Local data', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTransfers: true });
+      await seedRecords(page, customerRecords().entries);
       await page.goto('/#local');
-      await connect(page);
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-local`);
@@ -160,9 +230,8 @@ for (const vp of VIEWPORTS) {
     // Layout checks run before any screenshot: a full-page capture can reset the touch emulation.
     test('Local data: the CLEAR ALL dialog', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
+      await seedRecords(page, customerRecords().entries);
       await page.goto('/#local');
-      await connect(page);
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
       await page.getByTestId('clear-all').click();
       await expect(page.getByTestId('clear-dialog')).toBeVisible();
@@ -176,22 +245,6 @@ for (const vp of VIEWPORTS) {
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
     });
 
-    test('Transfers: a deposit being funded, one in flight, one finished', async ({ page }) => {
-      await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTransfers: true });
-      await page.goto('/#transfers');
-      await connect(page);
-      await expect(page.locator('[data-testid=transfer][data-state=running]')).toHaveCount(1);
-      await expect(page.locator('[data-testid=transfer][data-state=succeeded]')).toHaveCount(1);
-      await page.getByTestId('deposit-token').selectOption('stkB');
-      await page.getByTestId('deposit-amount').fill('50');
-      await page.getByTestId('deposit-continue').click();
-      await expect(page.getByTestId('deposit-held')).not.toHaveText('—');
-      await expect(page.getByTestId('withdraw-largest')).toContainText('60 wStkA');
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-transfers`);
-    });
-
     test('Trade before a wallet connects', async ({ page }) => {
       await serveExchange(page);
       await page.goto('/#trade');
@@ -200,58 +253,19 @@ for (const vp of VIEWPORTS) {
       await shot(page, `${vp.name}-trade-disconnected`);
     });
 
-    // Plan P4-A: Trade on the design system — the order form, the book, a take being reviewed
-    // (with a line the account cannot pay: a greyed Buy that says why, AA 00044), the live-offer
-    // rule and My offers.
-    test('Trade: the order form, the book, a take under review and My offers', async ({ page }) => {
-      const ex = await serveExchange(page);
-      await installCustomer(page, { withAccount: true, withTrades: true });
-      await page.goto('/#trade');
-      await connect(page);
-      await expect(page.locator('[data-testid=trade-line]').first()).toBeVisible();
-      await expect(page.getByTestId('live-offer-banner')).toContainText('sell 2.00 wStkA at 1.10');
-      await expect(page.locator('[data-testid=my-trade]')).toHaveCount(2);
-      await expect(page.locator('[data-testid=take-line-not-enough]').first()).toBeDisabled();
-      await expect(page.locator('[data-testid=not-takeable]')).toHaveCount(0);
-      // The design components, not the old plain markup.
-      await expect(page.getByTestId('make-section')).toHaveClass(/panel/);
-      await expect(page.getByTestId('take-section')).toHaveClass(/panel/);
-      await expect(page.locator('[data-testid=trade-book-asks]')).toHaveClass(/book/);
-      await expect(page.getByTestId('side-sell')).toHaveAttribute('aria-checked', 'true');
-      await page.getByTestId('make-quantity').fill('10');
-      await page.getByTestId('make-price').fill('1.05');
-      await expect(page.getByTestId('legs-give')).toHaveText('10.00 wStkA');
-      await page.getByTestId('buy-best-ask').click();
-      await expect(page.getByTestId('take-confirm')).toBeVisible();
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-trade`);
-      // The greyed Buy's tooltip open (a tap on the phone, a hover on the desktop) fits the page.
-      const notEnough = page.locator('[data-testid=not-enough]').first();
-      if (vp.touch) await notEnough.tap();
-      else await notEnough.hover();
-      await expect(notEnough.getByTestId('tooltip')).toBeVisible();
-      await expect(notEnough.getByTestId('tooltip')).toHaveText(/^Not enough wUSDC\. You hold [0-9.,]+ wUSDC\.$/);
-      await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-trade-not-enough`);
-      expect(ex.external).toEqual([]);
-    });
-
-    test('an error state: the bank low on fee funds, withdrawals paused (plan P4-A)', async ({ page }) => {
+    test('an error state: the market low on fee funds (plan P4-A)', async ({ page }) => {
       await serveExchange(page);
-      await installCustomer(page, { withAccount: true });
       await page.route('**/health', (route) =>
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(healthBody({ dustLow: true, vaultGasLow: true })),
+          body: JSON.stringify(healthBody({ dustLow: true })),
         }),
       );
-      await page.goto('/#transfers');
-      await connect(page);
-      await expect(page.getByTestId('bank-sponsor-low')).toBeVisible();
-      await expect(page.getByTestId('bank-vault-gas-low')).toBeVisible();
+      await page.goto('/#markets');
+      await expect(page.getByTestId('market-sponsor-low')).toBeVisible();
       await assertLayout(page, vp.touch);
-      await shot(page, `${vp.name}-transfers-paused`);
+      await shot(page, `${vp.name}-markets-paused`);
     });
   });
 }
@@ -269,9 +283,10 @@ test('the fonts are self-hosted, load, and nothing else leaves the page', async 
     });
     return out;
   });
-  expect(faces).toEqual(expect.arrayContaining(['Libre Caslon Text 400', 'Source Sans 3 400', 'Source Sans 3 600']));
-  expect(await page.evaluate(() => document.fonts.check('400 16px "Source Sans 3"'))).toBe(true);
-  expect(await page.evaluate(() => document.fonts.check('400 22px "Libre Caslon Text"'))).toBe(true);
+  // One variable face (weights 100–900), the Latin subset only: the page's text is English.
+  expect(faces).toEqual(expect.arrayContaining(['Inter Variable 100 900']));
+  expect(await page.evaluate(() => document.fonts.check('400 16px "Inter Variable"'))).toBe(true);
+  expect(await page.evaluate(() => document.fonts.check('650 28px "Inter Variable"'))).toBe(true);
   const fontFiles = requests.filter((u) => /\.woff2?(\?|$)/.test(u));
   expect(fontFiles.length).toBeGreaterThan(0);
   for (const u of fontFiles) expect(new URL(u).hostname).toBe('127.0.0.1');
@@ -282,9 +297,9 @@ test('the fonts are self-hosted, load, and nothing else leaves the page', async 
 test('without the font files the page falls back cleanly', async ({ page }) => {
   await serveExchange(page);
   await page.route(/\.woff2?(\?.*)?$/, (route) => route.abort('failed'));
-  await page.setViewportSize({ width: 375, height: 812 });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/#markets');
-  await expect(page.getByRole('heading', { name: 'MN Bank' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Night Market' })).toBeVisible();
   await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
   await page.evaluate(() => document.fonts.ready);
   const loaded = await page.evaluate(() => {
@@ -295,20 +310,20 @@ test('without the font files the page falls back cleanly', async ({ page }) => {
     return n;
   });
   expect(loaded).toBe(0);
-  // The stacks name real fallbacks after the web fonts.
+  // The stack names real fallbacks after the web font.
   const families = await page.evaluate(() => ({
     heading: getComputedStyle(document.querySelector('.page-title')!).fontFamily,
     body: getComputedStyle(document.body).fontFamily,
   }));
-  expect(families.heading).toMatch(/^"?Libre Caslon Text"?, Georgia/);
-  expect(families.body).toMatch(/^"?Source Sans 3"?, /);
+  expect(families.heading).toMatch(/^"?Inter Variable"?, Inter, -apple-system/);
+  expect(families.body).toMatch(/^"?Inter Variable"?, Inter, -apple-system/);
   await assertLayout(page, false);
-  await shot(page, 'phone375-markets-font-fallback');
+  await shot(page, 'phone390-markets-font-fallback');
 });
 
 test('restrained motion, and none under prefers-reduced-motion', async ({ page }) => {
   await serveExchange(page);
-  await page.goto('/#accounts');
+  await page.goto('/#account');
   const tab = page.getByTestId('tab-markets');
   expect(await tab.evaluate((el) => getComputedStyle(el).transitionDuration)).toMatch(/^0\.12s/);
   await page.emulateMedia({ reducedMotion: 'reduce' });

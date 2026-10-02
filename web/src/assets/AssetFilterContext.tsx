@@ -1,7 +1,7 @@
 // The asset filter for every view (plan 00042): ONE source, the list in this browser's local data
-// (./filter.ts), applied to the bank's token list within the site's set (plan 00046: config.json
-// `assets`, or the network's default). Accounts, Markets, Trade and Transfers ask it what to show;
-// nothing else changes. With no list, the site's whole set shows.
+// (./filter.ts), applied to the market's token list within the site's set (plan 00046: config.json
+// `assets`, or the network's default). Account, Markets and Trade ask it what to show; nothing else
+// changes. With no list, the site's whole set shows.
 //
 //   const assets = useAssetFilter();
 //   tokens.filter(assets.shows)                 the assets to list
@@ -10,21 +10,16 @@
 
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
 
-import { SEPOLIA_ETH } from '@mnbank/core';
-
 import { Button, Notice } from '../design/index.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import { useStore } from '../store/StoreContext.js';
-import { type AssetView, type FilterAsset, assetView, readAssetFilter, saveAssetFilter } from './filter.js';
-
-/** Sepolia ETH pays the customer's gas and is not an asset of the bank: always shown. */
-export const ETH_ASSET: FilterAsset = { symbol: SEPOLIA_ETH.symbol, midnightName: SEPOLIA_ETH.symbol };
+import { type AssetView, assetView, readAssetFilter, saveAssetFilter } from './filter.js';
 
 /** The list the URL set when this browser could not keep it (main.tsx): this page load only. */
 export const pageLoadAssets: { list: string[] | null } = { list: null };
 
 export interface AssetFilterValue extends AssetView {
-  /** Whether a Midnight colour's asset is shown; a colour the bank does not know shows only while
+  /** Whether a Midnight colour's asset is shown; a colour the market does not know shows only while
    *  nothing is filtered. */
   showsColour(colour: string): boolean;
   /** Forget the list: every asset shows again. */
@@ -46,7 +41,7 @@ export function AssetFilterProvider({
   const [pageLoad, setPageLoad] = useState<string[] | null>(() => pageLoadAssets.list);
   const value = useMemo<AssetFilterValue>(
     () => {
-      const view = assetView(readAssetFilter(store) ?? pageLoad, registry?.tokens ?? [], [ETH_ASSET], site);
+      const view = assetView(readAssetFilter(store) ?? pageLoad, registry?.tokens ?? [], [], site);
       return {
         ...view,
         showsColour: (colour) => {

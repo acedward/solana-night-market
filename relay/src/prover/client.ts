@@ -1,9 +1,12 @@
-// A small client for the proof server (midnightntwrk/proof-server 9.0.0-rc.6, the one server the
-// relay uses for the wallet's DUST proofs and every Passport circuit; plan Pins, P0.5).
+// A small client for a proof server (midnightntwrk/proof-server). The relay talks to TWO of them
+// until stagenet moves to dust/10 (AA 00047 spike 3 §6, ../config.ts): the CONTRACT prover
+// 9.0.0-rc.8 (the account's compactc 0.35.0 circuits) and the DUST prover 9.0.0-rc.6 (the sponsor
+// wallet's fee payments).
 //
-// Proving itself goes through midnight-js's HTTP proof provider, which uploads the prover key
-// from the key volume with each /prove call. This client covers what the relay needs around it:
-// version and readiness for /health, and the capacity the server reports.
+// Proving itself goes through midnight-js's HTTP proof provider (the contract prover, which gets
+// the prover key streamed from the key volume with each /prove call) and the wallet SDK (the DUST
+// prover). This client covers what the relay needs around them: version and readiness for
+// /health, and the capacity each server reports.
 
 export interface ProofServerReady {
   status: string;

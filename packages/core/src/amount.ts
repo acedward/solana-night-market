@@ -1,7 +1,7 @@
 // Exact token amounts. Every amount is a bigint count of base units; text is only ever parsed
 // into, or formatted from, base units. No floating point anywhere.
 //
-// The tokens here have 6 decimals (the stocks and USDC) or 18 (Sepolia ETH).
+// Tokens carry 0 to 18 decimals (twUSDC 6, twBTC 8, twETH 18).
 
 export class AmountError extends Error {
   override name = 'AmountError';
@@ -84,7 +84,7 @@ export interface Ratio {
 /**
  * The price of one whole BASE token in QUOTE tokens, from raw base units:
  * (quoteRaw / 10^quoteDecimals) / (baseRaw / 10^baseDecimals).
- * Example: 10 wStkA (6 dp) for 10.5 wUSDC (6 dp) is 1.05 USDC per wStkA.
+ * Example: 0.5 twBTC (8 dp) for 30,000 twUSDC (6 dp) is 60,000 twUSDC per twBTC.
  */
 export function priceRatio(quoteRaw: bigint, quoteDecimals: number, baseRaw: bigint, baseDecimals: number): Ratio {
   checkDecimals(quoteDecimals);
@@ -114,7 +114,7 @@ export function formatRatio(
 /**
  * What `baseRaw` base units cost in quote base units at price `r` (whole quote per whole
  * base), rounded toward zero: floor(baseRaw * r * 10^quoteDecimals / 10^baseDecimals).
- * Example: 10 wStkA (10_000_000n, 6 dp) at 1.05 USDC is 10_500_000n wUSDC (6 dp).
+ * Example: 0.5 twBTC (50_000_000n, 8 dp) at 60,000 twUSDC is 30_000_000_000n twUSDC (6 dp).
  */
 export function quoteForBase(baseRaw: bigint, baseDecimals: number, r: Ratio, quoteDecimals: number): bigint {
   checkDecimals(baseDecimals);

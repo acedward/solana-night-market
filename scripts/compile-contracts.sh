@@ -2,21 +2,40 @@
 # Light compile (--skip-zk: contract JavaScript and type declarations only, NO prover keys)
 # of the Passport account and its callees, from the pinned submodule vendor/passport.
 #
-# Why: the browser needs the compiled account's `pureCircuits` (challenges, boot commitment,
-# the offer's change nonce) and the vault's `depositPath`. The generated modules are not in
-# git upstream, so every checkout builds them. Prover keys are a separate one-shot volume
+# Why: the browser needs the compiled account's `pureCircuits` (challenges, the Ed25519 arm's
+# message renderers, the boot commitment, the offer's change nonce). The generated modules are not
+# in git upstream, so every checkout builds them. Prover keys are a separate one-shot volume
 # (relay-keys-init; plan P0.5 decision) and are never built here.
 #
-# Order (the compiler resolves a declared contract type to <compact-path>/<TypeName>, and the
-# generated JS imports its callee by relative path, so callees go first and sit side by side):
-#   1. SignetSigner   <- erc20-vault/src/vendor/signet-contract.compact
-#   2. SignetCircuits <- node_modules/@sig-net/midnight/src/circuits.compact
-#   3. Erc20Vault     <- erc20-vault/src/erc20-vault.compact
+# Toolchain (AA 00047 B1.5, the recipe of acedward/passport branch 00047-solana-ed25519-arm):
+#   - the ACCOUNT with compactc 0.35.0 (--feature-zkir-v3): its Ed25519 arm uses the 0.35.0
+#     standard library's `ed25519Verify`, `sha512` and Curve25519 types;
+#   - its declared CALLEES (the ERC20 vault and the Signet singleton) with compactc 0.34.0, as
+#     upstream builds them (the vault is deployed and frozen). The account only reads their
+#     declarations at compile time; the 0.35.0 module does not import their JavaScript. Night Market
+#     calls none of their circuits (no bridge).
+#   - then scripts/pin-contract-runtime.mjs points the account module (only it) at compact-runtime
+#     0.20.0 (the `@midnight-ntwrk/compact-runtime-0.20` alias); the SDK keeps 0.19.0.
+# Both compilers come from scripts/fetch-compactc.sh (release archives, SHA-256 pinned).
+#
+# Order (the compiler resolves a declared contract type to <compact-path>/<TypeName>, so callees go
+# first and sit side by side):
+#   1. SignetSigner   <- erc20-vault/src/vendor/signet-contract.compact            (0.34.0)
+#   2. SignetCircuits <- node_modules/@sig-net/midnight/src/circuits.compact       (0.34.0)
+#   3. Erc20Vault     <- erc20-vault/src/erc20-vault.compact                       (0.34.0)
 #   4. account        <- contracts/account.compact, with contracts/managed/{Erc20Vault,SignetSigner}
-#                        linked to the vault's own output (upstream scripts/link-callees.sh)
+#                        linked to the vault's own output (upstream scripts/link-callees.sh) (0.35.0)
 #
 # Outputs land in the submodule's git-ignored managed/ directories, exactly where the upstream
 # sources import them from. A stamp over every input skips the work when nothing changed.
+#
+# Environment: COMPACTC_ACCOUNT / COMPACTC_CALLEES name compilers already installed; each must BE the
+# `compactc` (symbolic links followed) of a toolchain directory that scripts/fetch-compactc.sh
+# --verify accepts (the pinned archive kept beside the binaries, every file of it unchanged: AA 00047
+# P10, R2-9), not only print the right version line, and the script then runs that verified
+# `<dir>/compactc` itself, never the path as given (`fetch-compactc.sh --resolve`; AA 00047 P11, audit
+# round 3 R3-10: another executable in a verified directory used to pass). Otherwise
+# scripts/fetch-compactc.sh installs (and re-verifies) the pinned ones.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,11 +53,35 @@ SIG="$NM/@sig-net/midnight"
   exit 66
 }
 
-COMPACTC="${COMPACTC:-}"
-if [[ -z "$COMPACTC" ]]; then COMPACTC="$(bash "$ROOT/scripts/fetch-compactc.sh")"; fi
-[[ "$("$COMPACTC" --version)" == "0.34.0" ]] || {
-  echo "compile-contracts: compactc 0.34.0 required, got $("$COMPACTC" --version)" >&2
+ACCOUNT_CC="${COMPACTC_ACCOUNT:-}"
+if [[ -z "$ACCOUNT_CC" ]]; then
+  ACCOUNT_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" 0.35.0)"
+else
+  ACCOUNT_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" --resolve "$ACCOUNT_CC" 0.35.0)" || {
+    echo "compile-contracts: COMPACTC_ACCOUNT=$COMPACTC_ACCOUNT is not a verified compactc 0.35.0 toolchain" >&2
+    exit 65
+  }
+fi
+[[ "$("$ACCOUNT_CC" --version)" == "0.35.0 (debb05f94 2026-09-29)" ]] || {
+  echo "compile-contracts: compactc 0.35.0 (debb05f94) required for the account, got $("$ACCOUNT_CC" --version)" >&2
   exit 65
+}
+CALLEE_CC="${COMPACTC_CALLEES:-}"
+if [[ -z "$CALLEE_CC" ]]; then
+  CALLEE_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" 0.34.0)"
+else
+  CALLEE_CC="$(bash "$ROOT/scripts/fetch-compactc.sh" --resolve "$CALLEE_CC" 0.34.0)" || {
+    echo "compile-contracts: COMPACTC_CALLEES=$COMPACTC_CALLEES is not a verified compactc 0.34.0 toolchain" >&2
+    exit 65
+  }
+fi
+[[ "$("$CALLEE_CC" --version)" == "0.34.0" ]] || {
+  echo "compile-contracts: compactc 0.34.0 required for the callees, got $("$CALLEE_CC" --version)" >&2
+  exit 65
+}
+JS_RUN="$(command -v bun || command -v node)" || {
+  echo "compile-contracts: bun or node is required" >&2
+  exit 66
 }
 SIG_VERSION="$(node -p "require('$SIG/package.json').version" 2>/dev/null || bun -e "console.log(require('$SIG/package.json').version)")"
 [[ "$SIG_VERSION" == "0.23.0" ]] || {
@@ -48,12 +91,13 @@ SIG_VERSION="$(node -p "require('$SIG/package.json').version" 2>/dev/null || bun
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
 inputs() {
-  "$COMPACTC" --version
+  "$ACCOUNT_CC" --version
+  "$CALLEE_CC" --version
   echo "sig-net/midnight $SIG_VERSION"
   git -C "$ROOT/vendor/passport" rev-parse HEAD 2>/dev/null || true
   find "$P/contracts" -name '*.compact' -not -path '*/managed/*' -not -path '*/node_modules/*' | LC_ALL=C sort | xargs cat
   find "$SIG/src" -name '*.compact' | LC_ALL=C sort | xargs cat
-  cat "$ROOT/scripts/compile-contracts.sh"
+  cat "$ROOT/scripts/compile-contracts.sh" "$ROOT/scripts/pin-contract-runtime.mjs"
 }
 STAMP_VALUE="$(inputs | sha256 | cut -d' ' -f1)"
 STAMP="$P/contracts/managed/.light-compile-stamp"
@@ -62,11 +106,11 @@ if [[ "${FORCE:-0}" != 1 && -f "$STAMP" && "$(cat "$STAMP")" == "$STAMP_VALUE" &
   exit 0
 fi
 
-compile() { # <compact-path> <source> <target>
+compile() { # <compactc> <compact-path> <source> <target>
   local t0=$SECONDS
-  rm -rf "$3"
-  COMPACT_PATH="$1" "$COMPACTC" --skip-zk --feature-zkir-v3 --compact-path "$1" "$2" "$3"
-  echo "compile-contracts: $(basename "$3") in $((SECONDS - t0)) s" >&2
+  rm -rf "$4"
+  COMPACT_PATH="$2" "$1" --skip-zk --feature-zkir-v3 --compact-path "$2" "$3" "$4"
+  echo "compile-contracts: $(basename "$4") ($("$1" --version | cut -d' ' -f1)) in $((SECONDS - t0)) s" >&2
 }
 
 # The vault package imports @sig-net/midnight through ../node_modules (upstream
@@ -74,9 +118,9 @@ compile() { # <compact-path> <source> <target>
 ln -sfn "$NM" "$V/node_modules"
 
 mkdir -p "$V/managed" "$P/contracts/managed"
-compile "$NM" "$V/src/vendor/signet-contract.compact" "$V/managed/SignetSigner"
-compile "$NM" "$SIG/src/circuits.compact" "$V/managed/SignetCircuits"
-compile "$NM:$V/managed" "$V/src/erc20-vault.compact" "$V/managed/Erc20Vault"
+compile "$CALLEE_CC" "$NM" "$V/src/vendor/signet-contract.compact" "$V/managed/SignetSigner"
+compile "$CALLEE_CC" "$NM" "$SIG/src/circuits.compact" "$V/managed/SignetCircuits"
+compile "$CALLEE_CC" "$NM:$V/managed" "$V/src/erc20-vault.compact" "$V/managed/Erc20Vault"
 
 # upstream scripts/link-callees.sh: a real directory whose children are links
 for name in Erc20Vault SignetSigner; do
@@ -84,7 +128,8 @@ for name in Erc20Vault SignetSigner; do
   mkdir -p "$P/contracts/managed/$name"
   for child in "$V/managed/$name"/*; do ln -s "$child" "$P/contracts/managed/$name/$(basename "$child")"; done
 done
-compile "$NM:$P/contracts/managed" "$P/contracts/account.compact" "$P/contracts/managed/account"
+compile "$ACCOUNT_CC" "$NM:$P/contracts/managed" "$P/contracts/account.compact" "$P/contracts/managed/account"
+"$JS_RUN" "$ROOT/scripts/pin-contract-runtime.mjs" "$P/contracts/managed/account"
 
 for d in "$V/managed/SignetSigner" "$V/managed/SignetCircuits" "$V/managed/Erc20Vault" "$P/contracts/managed/account"; do
   [[ -f "$d/contract/index.js" && -f "$d/contract/index.d.ts" ]] || {

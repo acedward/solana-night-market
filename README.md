@@ -1,40 +1,183 @@
-# Passport EVM dApp
+# Night Market
 
-A bank-style web app for opening and using Passport accounts on Midnight with an EVM wallet.
+A create-and-trade market on Midnight, controlled by Solana wallets. **A proof of concept on test
+networks: nothing here carries real value.**
 
 ## What this is
 
-A customer with only an EVM wallet (MetaMask or any EIP-1193 wallet) can:
+A customer with only a Solana wallet (Phantom) can:
 
-1. **Open an account.** Connect the wallet and open a Passport account on Midnight with one signature. The wallet is the account's key; no Midnight wallet is needed.
-2. **See holdings.** See the tokens held on Sepolia and in the Passport account, side by side, like a bank statement.
-3. **Bridge both ways.** Move tokens from Sepolia into the Passport account on Midnight, and back out to any Sepolia address.
-4. **See prices.** See the USDC price of each asset (tokenised stocks, test T-bills), taken only from the live ZSwap offer book. A pair with no live offers shows "no liquidity".
-5. **Buy and sell.** Trade an asset against USDC by making an offer at a chosen price, or by taking an offer already in the book.
-6. **Keep data in the browser.** Everything the dApp stores about a customer stays in the browser. A Local data tab shows it and offers Export, Import and Clear all.
+1. **Open an account.** Connect the wallet and open a Passport account on Midnight. The wallet's
+   Ed25519 key is the account's key: it only signs messages, needs no SOL, and no Midnight wallet
+   is needed. The market pays every Midnight fee.
+2. **Get demo tokens.** The market's stagenet tokens are the native Midnight test tokens of
+   [`effectstream/mint-test-tokens`](https://github.com/effectstream/mint-test-tokens) (twBTC,
+   twETH, twUSDC, twUSDM).
+3. **See the order books.** Each configured market is two tokens, any two: twBTC/twUSDC,
+   twETH/twUSDC, twUSDM/twUSDC and twETH/twBTC by default. Prices come only from the live ZSwap
+   offer book; a market with no live offers shows "no liquidity". No token is special.
+4. **Make and take offers.** Trade one token for another by making an offer at a chosen price, or
+   by taking an offer already in the book.
+5. **Keep data in the browser.** Everything the market stores about a customer stays in the
+   browser. A Local data tab shows it and offers Export, Import and Clear all.
+
+Night Market is built from [MN Bank](https://github.com/acedward/passport-evm-dapp) (an EVM-wallet
+bank on the same Passport accounts), with the EVM wallet, Sepolia and the bridge removed. Its
+history is this repository's `main`.
+
+## Status
+
+A proof of concept on Midnight stagenet, on the `00047-solana-night-market` branch (pull request
+into `main`, ready for review). Its limits are listed under [Known limitations](#known-limitations).
+
+| Step | What | State |
+|---|---|---|
+| B1 | Rebrand; remove Sepolia, EVM and the bridge; the mint-test-tokens registry; generic pairs | done |
+| Track A | The Passport account's Ed25519 arm (`acedward/passport`, branch `00047-solana-ed25519-arm`) | done (draft PR acedward/passport#6) |
+| B2 | Web: Phantom connect, account opening, the market UI, the signing screens | done (lane `00047-lane-web`) |
+| B3 | Relay: Ed25519 actions (one wallet prompt each), both proof servers, key pins, the demo-token endpoint | done (lane `00047-lane-relay`) |
+| P6 | Integration and stagenet acceptance: two accounts on a localnet and on stagenet (open, demo tokens, a make listed on the staging kernel, a take settled by the staging batcher, a withdrawal), a tampered proof refused by the node (`test/stack/p6/`) | done |
+| P8 | The end-user dark design | done |
+| P9–P11 | Security review rounds and their fix passes: the wallet's readable text is what the circuit enforces; the browser checks every account and decodes its coins and fills itself; the relay is bounded per account and per day | done; what remains is under [Known limitations](#known-limitations) |
+| P11.I | The stagenet re-acceptance with the current keys (`21493588…`): two new accounts opened and checked by the page, demo tokens, a make listed on the staging kernel, a take settled by the staging batcher and shown "Filled" by the page's own decode of the swap, a shielded and an unshielded withdrawal, a cancel, and the relay's refusals | done (2026-10-02) |
+
+The signing seams are `packages/core/src/signing.ts` (the device key and
+signature types), `web/src/wallet/signing.ts` (`ActionSigning`, what the browser asks the wallet
+to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a signed call).
 
 ## Architecture
 
-- **Web app**: a static site. It connects the EVM wallet, holds the customer's records in local storage, and computes balances and prices in the browser.
-- **Relay**: a stateless service. It proves each transaction, pays the Midnight fees from a sponsor wallet, and drives bridge requests to completion. It stores nothing about individual customers.
-- **Networks**: Midnight stagenet and Ethereum Sepolia. Both are test networks; nothing here carries real value.
+- **Web app**: a static site. It connects the Solana wallet, holds the customer's records in local
+  storage, and computes balances and prices in the browser.
+- **Relay**: a stateless service. It proves each transaction and pays the Midnight fees from a
+  sponsor wallet. It stores nothing about individual customers except which Solana keys have
+  received their demo tokens (a small claims file, `deploy/RUNBOOK.md` section 7). It is not
+  trusted for state: the web app reads each account from Midnight's public indexer itself,
+  refuses one that is not the market's own or has any device besides the connected wallet, and
+  decodes the account's coins and fills itself (`deploy/RUNBOOK.md` section 16).
+- **Network**: Midnight stagenet, a test network.
+
+## Known limitations
+
+Night Market is a proof of concept on Midnight stagenet, a test network. It trades only free
+faucet test tokens, which have no value. These limits remain; the site's About page (`/#about`)
+says the same in plain words.
+
+**Accounts**
+
+- **A new account refused at opening stays refused, and that wallet cannot open another account on
+  this site.** The page checks every new account before anything is signed for it, and keeps a
+  refusal. Anyone can cause one by depositing into the account in the few blocks (about 3) between
+  its deploy and the retirement of its setup key; so can an honest relay that retires the key more
+  than 100 blocks after the deploy (a relay restarted between its two deploy steps, for example).
+  Nothing is lost: the account holds nothing yet. (Audit R4-6; questions Q42, Q51.)
+- **A page that proves and pays for itself can change the account's encryption key with one
+  approval.** The wallet then reads "Rotate encryption key". The market's relay only lands a change
+  back to the key the account was opened with, so such a page must prove and pay the transaction
+  itself. If it does, it can read the sealed notes filed after the change (privacy); it cannot move
+  funds, and the site offers to restore the browser's key. (R3-9; questions Q50.)
+- One live offer per account, and one coin per payment (coins are not merged).
+- All of a customer's data is in their browser; Export is the only backup.
+- Ledger-backed Phantom accounts are refused (they sign a wrapped message).
+
+**What the page trusts**
+
+- **A withdrawal's recipient encryption key is not signed.** The one approval binds the recipient,
+  the token and the amount, but not the key the recipient's wallet uses to find the coin. A
+  dishonest relay could hide a withdrawn coin from the recipient's wallet scan; it cannot redirect
+  or spend it. This is the one accepted exception to the trustless relay. (Questions Q28.)
+- **The public indexer is trusted to serve the chain faithfully.** The page reads and decodes the
+  account from Midnight's public indexer itself and checks what it can (each transaction's hash,
+  each coin's place in its transaction), but it is not a light client: it does not check the
+  indexer against block headers.
+- **Histories over 500 actions** are read past the indexer's first page through its WebSocket
+  subscription. That path runs live with small pages and is tested with recorded histories of up
+  to 1,800 actions, not with a live account past 500. (Questions Q56.)
+
+**The relay and the sponsor**
+
+- **A replay window for the relay's own sign-in message.** Opening an account and claiming demo
+  tokens use a one-time sign-in message. The relay remembers up to `AUTH_MAX_USED_NONCES`
+  (200,000) used nonces; past that it forgets the oldest, and a captured signed message could be
+  accepted again until its own expiry (at most 10 minutes). Only its signer holds it (it travels
+  over TLS), it moves no funds, and every cap still applies. (Questions Q40.)
+- **Sponsor costs.** The market pays every fee. The per-account caps (one job at a time, offers,
+  makes, cancels, key restores, 100 withdrawals a day) bound what one account costs; many accounts
+  are bounded only by the registration caps (100 new accounts a day, 3 per client address) and the
+  one prover lane. The caps and counters live in memory and reset when the relay restarts.
+  (Questions Q37, Q49; `deploy/RUNBOOK.md` section 9.)
+- **One prover for the whole market.** Every action waits its turn on one proof server. Takes go
+  first, then makes, and a take or make the queue cannot start before its signed expiry is refused
+  at once (`prover-busy`). Withdrawals, cancels and the other actions wait behind at most one job of
+  each other account (the least recent users first), so a flood from many accounts can delay them
+  by minutes, never stop them; after the exchange's settlement service answers HTTP 429 (its daily
+  cap), takes pause for 5 minutes (`exchange-busy`). (Audit R4-1, R4-3; questions Q59, Q61;
+  `deploy/RUNBOOK.md` section 9.)
+- **A crowd of takes can make the market answer "busy".** Among takes, the accounts that used the
+  prover least in the last hour go first. So a crowd of takes from fresh accounts (about 15 waiting at
+  once) gets a customer's take refused at once (`prover-busy`): nothing is sent or charged, and the
+  customer tries again shortly. Each take in such a crowd needs a funded account, a live offer and a
+  coin, and refused ones count toward that account's daily limits; keeping it up takes about 80
+  accounts in rotation. (Audit R4b-2.)
+- **The exchange's daily allowance is shared.** The staging exchange's settlement service (its
+  batcher) settles a limited number of takes a day (1,000) for all its clients together, and anyone
+  can call it directly, not only this market. Once it is used up, takes pause market-wide
+  (`exchange-busy`) until it resets; making offers, cancelling and withdrawing keep working. Only the
+  exchange's operator can change this. (Audit R4b-4; issue 00055.)
+- **An offer that can never settle.** A maker can list an offer that asks to be paid a coin its own
+  account has already received (the `want-reused` check covers takes only). No take of that offer
+  can settle, and each taker who tries it uses one of their 10 daily unsettled-take tries and one of
+  the exchange's settlements. The make caps (20 a day) bound how many such offers one account can
+  list, and no funds are at risk. (Audit R4c-1.)
+- **A rare race can mislabel a take.** When an account's own offer is filled at the same moment as
+  one of its own takes (the same coin and the same wanted coin), the relay may report the take as
+  settled. Only the label is wrong: the account really received the coin. The page never makes such
+  a pair. (Audit R4c-2.)
+- **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
+  failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
+  for another pending claim, which is then held back for the operator. (Audit R4-7.)
+- **Proof-server memory.** The 9.0.0-rc.8 contract prover's memory grows across proofs. Run it
+  with a 14 GB cap and restart it periodically while no proof runs (`deploy/RUNBOOK.md` sections 2
+  and 12.1). A proof cut off fails its job, and the customer is not charged for it.
+
+The question and audit numbers refer to the project's planning records.
 
 ## How this branch works
 
-`00039-passport-evm-dapp` is the master branch of this project's single pull request into `main`. Work is done on short-lived branches whose temporary pull requests target this branch, and each is merged in with a merge commit once its checks are green. The master pull request stays a draft until the work is complete.
+`00047-solana-night-market` is the master branch of this project's single pull request into
+`main`. Work is done on short-lived branches whose temporary pull requests target this branch, and
+each is merged in with a merge commit once its checks are green. The master pull request is ready
+for review. It merges after the Passport arm: acedward/passport#4, then #6, then `vendor/passport`
+is re-pinned here.
 
 ## Repository layout
 
 | Path | What it holds |
 |---|---|
-| `packages/core` | Shared, environment-neutral TypeScript: network profiles, the token registry, amount maths, the relay's action authorisation and API types, and the browser-safe Passport client surface (`@mnbank/core/passport`). |
+| `packages/core` | Shared, environment-neutral TypeScript: network profiles, the token registry (built from the vendored mint-test-tokens registry), the market pairs, amount maths, the relay's action envelope and API types, and the browser-safe Passport client surface (`@nightmarket/core/passport`). |
 | `relay/` | The relay service (Bun + Hono). |
 | `web/` | The web app (Vite + React). |
 | `deploy/` | Compose files, Dockerfiles, `.env.example` and the runbook. |
-| `docs/` | Reference notes: `PERFORMANCE.md` (proof times and DUST per action, from the live runs). |
+| `docs/` | Reference notes: `PERFORMANCE.md` (MN Bank's proof times and DUST per action). |
 | `scripts/` | The contract light compile, the Docker check runner and the secret scan. |
-| `test/` | Browser end-to-end tests (Playwright). |
-| `vendor/passport` | A git submodule: [`acedward/passport`](https://github.com/acedward/passport), pinned. The account contract and its client come from here. |
+| `test/` | Browser end-to-end tests (Playwright) and the take gate's offline half. |
+| `vendor/passport` | A git submodule: [`acedward/passport`](https://github.com/acedward/passport), pinned to the Ed25519 arm's branch `00047-solana-ed25519-arm`. The account contract and its client (the Solana device, its readable messages and checks) come from here. |
+
+## Configuration
+
+The site reads `config.json` next to `index.html` (`web/public/config.json`):
+
+| Key | Meaning |
+|---|---|
+| `network` | `stagenet` (default) or `undeployed` (a local stack). |
+| `relayUrl` | The relay's base URL as the browser sees it. |
+| `tokens` | `{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"? }] }`: tokens added to the network's built-in list (`"mode": "replace"` replaces it). |
+| `pairs` | The markets, `["BASE/QUOTE", …]`; default: the network's pairs. |
+| `assets` | This site's asset set (a list of symbols, or `"all"`); the page's `?assets=` link narrows within it. |
+| `walletTimeoutSeconds` | How long the page waits for the Solana wallet to answer a connection or a signature (5–600; default 120). |
+
+One build and one relay can serve several domains, each with its own `config.json`
+([`web/README.md`](web/README.md)).
 
 ## Development
 
@@ -48,8 +191,13 @@ bun run check                        # format, lint, typecheck, unit tests
 bun run build:web
 ```
 
-`bun run contracts` downloads the pinned Compact compiler (0.34.0) into `.tools/` and checks its
-SHA-256 first. It builds JavaScript and type declarations only, never proving keys.
+`bun run contracts` downloads the pinned Compact compilers into `.tools/` and checks each release
+archive's SHA-256 first: 0.35.0 (`--feature-zkir-v3`) for the account, whose Ed25519 arm needs its
+`ed25519Verify`, and 0.34.0 for the vault and Signet contracts the account declares (compile-time
+inputs only). It builds JavaScript and type declarations only, never proving keys, and points the
+compiled account module at compact-runtime 0.20.0 (`scripts/pin-contract-runtime.mjs`): that module
+alone uses 0.20.0, through the `@midnight-ntwrk/compact-runtime-0.20` alias; the relay's Midnight
+SDK keeps 0.19.0.
 
 To run everything in Docker instead (`node_modules` stays in a Docker volume):
 
@@ -61,23 +209,14 @@ scripts/docker-check.sh down         # remove the container and volumes
 ## Deployment
 
 `deploy/compose.yml` is the deployment bundle for stagenet: a one-shot job that builds and
-verifies the relay's proving keys, the proof server, the relay and the web site.
-[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md) is the operator's guide (sizing, the sponsor wallet,
-secrets, health, limits, upgrades and incidents), and [`deploy/.env.example`](deploy/.env.example)
-documents every setting. One build and one relay can serve several domains, each with its own
-asset set (`config.json` `assets` or `WEB_ASSETS`; [`web/README.md`](web/README.md) and RUNBOOK
-section 16). Every domain must be served over https.
-
-## The local end-to-end
-
-`test/stack/run-e2e.sh all` runs the whole product on a local ledger-9 Midnight stack with the
-ZSwap kernel and batcher, then tears it all down. It drives the web app with Playwright, and the
-page calls the relay over HTTP. Two customers open accounts, are funded, make and take an offer
-in one transaction through the local batcher, and restore an export. Markets is checked against
-a manual computation over the kernel's book.
-
-It needs a Docker host with about 30 GB of memory, so it is not part of the hosted CI.
-`test/stack/README.md` covers what it proves, its requirements, and a self-hosted runner job.
+verifies the relay's proving keys, two proof servers (9.0.0-rc.8 for the account's circuits,
+9.0.0-rc.6 for the sponsor wallet's DUST, until stagenet moves to dust/10), the relay and the web
+site.
+[`deploy/.env.example`](deploy/.env.example) documents every setting (including the pinned key-set
+fingerprint and the demo-token endpoint). The operator's runbook is
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md); a host without Docker, [`deploy/SYSTEMD.md`](deploy/SYSTEMD.md).
+Every domain must be served over https. Before a production deployment, go through the
+[production checklist](deploy/RUNBOOK.md#production-checklist) at the top of the runbook.
 
 ## Checks and the secret scan
 
@@ -96,3 +235,7 @@ labelled-private-key rules, each proven by a self-test on random fakes) over the
 and the working tree. With `SECRET_SCAN_FILES`, it also reads those files in-process and checks
 that no 3-word window of a mnemonic and no key's hex appears anywhere in the tree or the
 history. It never prints a secret.
+
+## License
+
+Apache-2.0 ([`LICENSE`](LICENSE)).

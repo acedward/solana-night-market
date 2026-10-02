@@ -4,34 +4,29 @@
 //
 //   bun relay/src/tools/key-volume.ts prune <root>            delete the prover keys not kept, re-stamp
 //   bun relay/src/tools/key-volume.ts marker-inputs <root>    print the installed set's input stamp
+//   bun relay/src/tools/key-volume.ts kept-provers <bundle>   print the kept prover keys' circuits of a bundle
 //   bun relay/src/tools/key-volume.ts verify <root> [--inputs <stamp>] [--write-marker] [--recheck]
 //
-// `verify` runs the four checks of relay/src/prover/key-volume.ts and prints a JSON report. It
+// `verify` runs the checks of relay/src/prover/key-volume.ts and prints a JSON report. It
 // exits 0 when the set is VERIFIED and 1 otherwise. With --write-marker it writes the report as
-// `<root>/.mnbank-keys.json`; with --recheck it keeps the marker's build facts and, when
-// KEYS_VERIFY_ONCHAIN_EVERY_START=false, trusts the marker's earlier on-chain check.
+// `<root>/.night-market-keys.json`; with --recheck it keeps the marker's build facts.
 //
 // Environment (the relay's own names, so one .env drives both):
 //   RELAY_NETWORK                       stagenet (default) or undeployed
 //   MIDNIGHT_INDEXER_URL                override the profile's indexer
-//   BRIDGE_VAULT_ADDRESS, BRIDGE_SIGNET_SINGLETON   override the profile's contracts
 //   RELAY_KEYS_FINGERPRINT              the pinned verifier-key fingerprint (64 hex)
 //   KEYS_KEEP_PROVERS                   the kept prover keys (<bundle>/<circuit>, comma-separated)
-//   KEYS_VERIFY_ONCHAIN_EVERY_START     true (default) or false
 //   KV_*                                build facts build.sh passes in (toolchain and sources)
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { resolveNetwork, type NetworkOverrides } from '@mnbank/core';
+import { resolveNetwork, type NetworkOverrides } from '@nightmarket/core';
 
-import stagenetRecord from '../../../packages/core/src/tokens/deployments/stagenet-vault.json' with { type: 'json' };
 import {
   KEYED_BUNDLES,
   checkExpectedVk,
-  compareDeployed,
-  deployedVerifierDigests,
   missingProvers,
   parseKeptProvers,
   proversToPrune,
@@ -40,8 +35,8 @@ import {
 } from '../prover/key-volume.js';
 import { scanKeyTree } from '../prover/keys.js';
 
-const MARKER = '.mnbank-keys.json';
-const FORMAT = 'mnbank-key-volume/1';
+const MARKER = '.night-market-keys.json';
+const FORMAT = 'night-market-key-volume/1';
 
 type Json = Record<string, unknown>;
 
@@ -67,43 +62,7 @@ function network() {
   const overrides: NetworkOverrides = {};
   const indexerUrl = env('MIDNIGHT_INDEXER_URL');
   if (indexerUrl) overrides.midnight = { indexerUrl };
-  const vaultAddress = env('BRIDGE_VAULT_ADDRESS')?.replace(/^0x/, '').toLowerCase();
-  const signetSingleton = env('BRIDGE_SIGNET_SINGLETON')?.replace(/^0x/, '').toLowerCase();
-  if (vaultAddress || signetSingleton) {
-    overrides.bridge = {
-      ...(vaultAddress ? { vaultAddress } : {}),
-      ...(signetSingleton ? { signetSingleton } : {}),
-    };
-  }
   return resolveNetwork(name, overrides);
-}
-
-/** The verifier keys deployed at `address`, from the indexer's current contract state. */
-async function deployedKeys(indexerUrl: string, address: string): Promise<Record<string, string>> {
-  const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
-    ContractState: { deserialize(b: Uint8Array): Parameters<typeof deployedVerifierDigests>[0] };
-  };
-  let lastError = 'no attempt';
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      const res = await fetch(indexerUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: `{ contractAction(address: "${address}") { state } }` }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      const body = (await res.json()) as { data?: { contractAction?: { state?: string } | null }; errors?: unknown[] };
-      if (body.errors && body.errors.length > 0) throw new Error(`the indexer answered ${JSON.stringify(body.errors)}`);
-      const hex = body.data?.contractAction?.state;
-      if (!hex) throw new Error(`no contract at ${address}`);
-      return deployedVerifierDigests(ledger.ContractState.deserialize(Uint8Array.from(Buffer.from(hex, 'hex'))));
-    } catch (e) {
-      lastError = (e as Error).message;
-      say(`reading ${address} failed (attempt ${attempt}/5): ${lastError}`);
-      if (attempt < 5) await new Promise((r) => setTimeout(r, attempt * 10_000));
-    }
-  }
-  throw new Error(`the deployed verifier keys of ${address} could not be read: ${lastError}`);
 }
 
 async function expectedVkOf(root: string, bundle: string): Promise<Record<string, string> | undefined> {
@@ -130,51 +89,9 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
     problems.push(...check.problems);
   }
 
-  // 2. The vault and the singleton against the verifier keys deployed on the network.
-  let onChain: Json;
-  const everyStart = (env('KEYS_VERIFY_ONCHAIN_EVERY_START') ?? 'true').toLowerCase() !== 'false';
-  const earlier = previous?.checks as Json | undefined;
-  const earlierOnChain = earlier?.onChain as Json | undefined;
-  if (opts.recheck && !everyStart && earlierOnChain?.ok === true) {
-    onChain = { ...earlierOnChain, skipped: 'KEYS_VERIFY_ONCHAIN_EVERY_START=false; trusting the check at build time' };
-  } else if (!net.bridge.vaultAddress || !net.bridge.signetSingleton) {
-    onChain = { ok: false, reason: 'the network profile names no vault or singleton' };
-    problems.push(
-      'on-chain: no vault or singleton address is configured (BRIDGE_VAULT_ADDRESS, BRIDGE_SIGNET_SINGLETON)',
-    );
-  } else {
-    const contracts: Json = {};
-    let ok = true;
-    for (const [name, address, bundle] of [
-      ['vault', net.bridge.vaultAddress, 'Erc20Vault'],
-      ['singleton', net.bridge.signetSingleton, 'SignetSigner'],
-    ] as const) {
-      const deployed = await deployedKeys(net.midnight.indexerUrl, address);
-      const cmp = compareDeployed(bundle, ours[bundle]!, deployed);
-      contracts[name] = { address, circuits: Object.keys(ours[bundle]!).length, ...cmp };
-      problems.push(...cmp.problems);
-      if (cmp.problems.length > 0) ok = false;
-      if (cmp.extraOnChain.length > 0)
-        warnings.push(`${name}: deployed operations this compile lacks: ${cmp.extraOnChain.join(', ')}`);
-    }
-    onChain = { ok, indexer: net.midnight.indexerUrl, checkedUtc: nowUtc(), contracts };
-  }
-
-  // 2b. On stagenet, also PR #4's deployment record (vendored in @mnbank/core).
-  let record: Json = { applies: false };
-  if (net.name === 'stagenet' && net.bridge.vaultAddress === stagenetRecord.vaultContractAddress) {
-    const vault = compareDeployed('Erc20Vault', ours.Erc20Vault!, stagenetRecord.artefacts.vault.verifierKeys);
-    const signet = compareDeployed(
-      'SignetSigner',
-      ours.SignetSigner!,
-      stagenetRecord.artefacts.signetSigner.verifierKeys,
-    );
-    record = { applies: true, vault: vault.equal, signetSigner: signet.equal };
-    problems.push(
-      ...vault.problems.map((p) => `PR #4 record: ${p}`),
-      ...signet.problems.map((p) => `PR #4 record: ${p}`),
-    );
-  }
+  // 2. (MN Bank also checked the bridge vault's and the Signet singleton's keys against the ones
+  //    deployed on the network; Night Market proves none of their circuits. Checking a Night Market
+  //    account's on-chain verifier keys against the pinned set is lane B3's, spec FR-005.)
 
   // 3. The prover keys the relay proves with.
   const missing = missingProvers(root, kept);
@@ -200,13 +117,18 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
       source: env('KV_SOURCE') ?? null,
       compactc: env('KV_COMPACTC_VERSION') ?? null,
       compactcArchiveSha256: env('KV_COMPACTC_ARCHIVE_SHA256') ?? null,
+      // The account's declared callees (compile-time inputs only; not installed) and the runtime the
+      // account module is pinned to (AA 00047 B1.5).
+      calleeCompactc: env('KV_CALLEE_COMPACTC_VERSION') ?? null,
+      calleeCompactcArchiveSha256: env('KV_CALLEE_COMPACTC_ARCHIVE_SHA256') ?? null,
+      contractRuntime: env('KV_CONTRACT_RUNTIME') ?? null,
       sigNetMidnight: env('KV_SIGNET_VERSION') ?? null,
       passportCommit: env('KV_PASSPORT_COMMIT') ?? null,
       accountSourceSha256: env('KV_ACCOUNT_SHA256') ?? null,
       compileSeconds: env('KV_COMPILE_SECONDS') ? Number(env('KV_COMPILE_SECONDS')) : null,
     },
     keptProvers: kept,
-    checks: { expectedVk, onChain, pr4Record: record, provers: { kept: kept.length, missing }, fingerprint },
+    checks: { expectedVk, provers: { kept: kept.length, missing }, fingerprint },
     problems,
     warnings,
   };
@@ -221,6 +143,12 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
 
 async function main(): Promise<number> {
   const [cmd, root, ...rest] = process.argv.slice(2);
+  if (cmd === 'kept-provers' && root) {
+    // (`root` is the bundle name here: an import copies only these prover keys, build.sh.)
+    const kept = parseKeptProvers(env('KEYS_KEEP_PROVERS'));
+    for (const k of kept) if (k.startsWith(`${root}/`)) process.stdout.write(`${k.slice(root.length + 1)}\n`);
+    return 0;
+  }
   if (!cmd || !root) {
     say('usage: key-volume.ts prune|marker-inputs|verify <root> [options]');
     return 64;

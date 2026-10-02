@@ -1,7 +1,7 @@
 // The relay-assisted take (questions file Q15, option A): the fallback when a Passport account
 // cannot take an offer in one atomic transaction. One signature, several transactions, NOT atomic:
 //
-//   1. the account withdraws its WHOLE coin to the relay's taker wallet (`withdraw_shielded_with_evm`,
+//   1. the account withdraws its WHOLE coin to the relay's taker wallet (the arm's `withdraw_shielded`,
 //      the customer's one signature). The whole coin, so no change stays behind without an inbox
 //      entry (Q13);
 //   2. that wallet takes the maker's offer through the batcher as an ordinary wallet taker;
@@ -9,7 +9,7 @@
 //      `deposit_shielded`, each coin with an inbox entry sealed to the account's key.
 //
 // If the offer is gone by step 2 — or the take does not settle — the wallet deposits the coin back
-// unchanged: the REFUND. While the take is in flight the bank holds the customer's coin (custodial,
+// unchanged: the REFUND. While the take is in flight the relay holds the customer's coin (custodial,
 // for minutes), which is the cost of this option.
 //
 // This module is the orchestration only; every chain operation is an injected step, so the order,

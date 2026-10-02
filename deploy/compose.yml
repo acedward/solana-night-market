@@ -1,4 +1,7 @@
-# MN Bank: the deployment bundle (plan 00039 P4-B). The runbook is deploy/RUNBOOK.md.
+# Night Market: the deployment bundle (carried over from MN Bank, plan 00039 P4-B). The runbook is
+# deploy/RUNBOOK.md. Lane B1 removed Sepolia and the bridge; B1.5 moved the keys to compactc 0.35.0
+# and split the proof server in two (the rc.8 contract prover beside the rc.6 DUST prover); B3 wired
+# the Ed25519 arm, the demo-token faucet bundle and the relay's claims volume.
 #
 #   cp deploy/.env.example deploy/.env         # then edit it; secrets stay in files, never here
 #   docker compose -f deploy/compose.yml build
@@ -7,21 +10,27 @@
 #   docker compose -f deploy/compose.yml ps             # everything healthy?
 #
 # Services, in start order:
-#   keys          one-shot: builds the relay's prover/verifier keys into the `keys` volume with
-#                 compactc 0.34.0, verifies them (vault + Signet keys = the ones deployed on the
-#                 network; account keys = compiled expectedVk; fingerprint = RELAY_KEYS_FINGERPRINT),
+#   keys          one-shot: builds the relay's prover/verifier keys into the `keys` volume (the
+#                 account with compactc 0.35.0; its declared callees with 0.34.0, compile-time only;
+#                 the demo-token faucet with 0.34.0, its mint key checked against the deployed one),
+#                 verifies them (keys = compiled expectedVk; fingerprint = RELAY_KEYS_FINGERPRINT),
 #                 then exits 0. Later starts only re-verify. A failure stops everything below.
-#   proof-server  midnightntwrk/proof-server 9.0.0-rc.6 (pinned by digest): proves every Passport
-#                 circuit and the sponsor wallet's DUST spends. Internal only. Starts with `keys`.
-#   relay         proves, pays DUST from the sponsor wallet, submits, drives bridge requests, and
-#                 closes bridge requests their owners left open (Q21 A). Mounts `keys` read-only;
+#   proof-server-contracts  midnightntwrk/proof-server 9.0.0-rc.8 (pinned by digest): proves the
+#                 account's circuits (compactc 0.35.0 = ZKIR 3.1, which rc.6 cannot read). Internal.
+#   proof-server-dust       midnightntwrk/proof-server 9.0.0-rc.6 (pinned by digest): proves the
+#                 sponsor wallet's DUST spends (stagenet requires dust/9 until it moves to dust/10;
+#                 then one rc.8+ server serves both). Internal.
+#   relay-data-init one-shot, before every relay start: hands the `relay-data` volume to RELAY_USER
+#                 (busybox, pinned by digest; root with CAP_CHOWN only, no network), so a relay run
+#                 as the host user (RUNBOOK section 3) can write its claims file.
+#   relay         proves, pays DUST from the sponsor wallet, and submits. Mounts `keys` read-only;
 #                 refuses to start on a key set that is incomplete or not the pinned one.
 #   web           the static site on unprivileged nginx, with /relay/ proxied to the relay.
 #
-# Nothing secret is in this file or in any image: the sponsor seed and the Sepolia RPC URL are
-# files on the host (SPONSOR_SEED_HOST_FILE, SEPOLIA_RPC_URL_HOST_FILE), mounted as secrets.
+# Nothing secret is in this file or in any image: the sponsor seed is a file on the host
+# (SPONSOR_SEED_HOST_FILE), mounted as a secret.
 
-name: ${COMPOSE_PROJECT_NAME:-mnbank}
+name: ${COMPOSE_PROJECT_NAME:-nightmarket}
 
 x-hardening: &hardening
   cap_drop: [ALL]
@@ -41,18 +50,17 @@ services:
     build:
       context: ..
       dockerfile: deploy/key-volume.Dockerfile
-    image: mnbank/key-volume:${IMAGE_TAG:-local}
+    image: nightmarket/key-volume:${IMAGE_TAG:-local}
     environment:
       RELAY_NETWORK: ${RELAY_NETWORK:-stagenet}
       MIDNIGHT_INDEXER_URL: ${MIDNIGHT_INDEXER_URL:-}
-      BRIDGE_VAULT_ADDRESS: ${BRIDGE_VAULT_ADDRESS:-}
-      BRIDGE_SIGNET_SINGLETON: ${BRIDGE_SIGNET_SINGLETON:-}
       RELAY_KEYS_FINGERPRINT: ${RELAY_KEYS_FINGERPRINT:-}
       KEYS_KEEP_PROVERS: ${KEYS_KEEP_PROVERS:-}
       KEYS_VERIFY_ONCHAIN_EVERY_START: ${KEYS_VERIFY_ONCHAIN_EVERY_START:-true}
-      KEYS_MIN_FREE_GB: ${KEYS_MIN_FREE_GB:-10}
+      KEYS_MIN_FREE_GB: ${KEYS_MIN_FREE_GB:-16}
       KEYS_IMPORT_DIR: ${KEYS_IMPORT_DIR:-}
       KEYS_ACCOUNT_SOURCE_SHA256: ${KEYS_ACCOUNT_SOURCE_SHA256:-}
+      KEYS_FAUCET_MINT_VK_SHA256: ${KEYS_FAUCET_MINT_VK_SHA256:-}
       MIDNIGHT_PP: /zk-params
     volumes:
       - keys:/app/vendor/passport/contract/contracts/managed
@@ -63,21 +71,79 @@ services:
     mem_limit: ${KEYS_JOB_MEM_LIMIT:-12g}
     restart: 'no'
 
-  proof-server:
+  proof-server-contracts:
     <<: [*hardening, *logging]
-    # 9.0.0-rc.6, the stagenet pin: one server for the wallet's DUST proofs and every Passport
-    # circuit. A k=18 proof needs about 8 GB. The image has no shell or HTTP client, so it has no
-    # Docker health check: the relay's /health reports it (proofServer.reachable, version).
-    image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    # 9.0.0-rc.8 (index digest from its release notes): the account's circuits. A k=18 proof of the
+    # Ed25519 arm peaks near 9.4 GiB (AA 00047 A5 d). The image has no shell or HTTP client, so it
+    # has no Docker health check: the relay's /health reports it (proofServer.reachable, version).
+    # `docker pull` of this tag has been seen to hang; a host that loaded it another way (for
+    # example through the registry API, then `docker load`, which keeps no digest) sets
+    # CONTRACT_PROOF_SERVER_IMAGE=midnightntwrk/proof-server:9.0.0-rc.8.
+    image: ${CONTRACT_PROOF_SERVER_IMAGE:-midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf}
     environment:
       PORT: '6300'
       # Where it keeps the public parameters and the zswap keys it fetches at start (its own
       # volume, so a restart does not fetch them again).
       MIDNIGHT_PP: /proof-params
     volumes:
-      - proof-params:/proof-params
-    mem_limit: ${PROOF_SERVER_MEM_LIMIT:-12g}
+      - contract-proof-params:/proof-params
+    # 14g (AA 00047 P11.I, plan risk R7): rc.8's memory GROWS across proofs. One k=18 proof peaks
+    # near 9.4 GiB, but after a few proofs it reached 11.94 GiB of a 12 GiB cap (local run, P10.I) and
+    # was killed at 14 GB after about 25 (P9.I). Also restart it periodically (RUNBOOK section 12.1).
+    mem_limit: ${CONTRACT_PROOF_SERVER_MEM_LIMIT:-14g}
     restart: unless-stopped
+
+  proof-server-dust:
+    <<: [*hardening, *logging]
+    # 9.0.0-rc.6, the stagenet pin for the wallet's DUST proofs (dust/9). Small proofs (well under a
+    # second each); /health reports it as dustProofServer.
+    image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    environment:
+      PORT: '6300'
+      MIDNIGHT_PP: /proof-params
+    volumes:
+      - dust-proof-params:/proof-params
+    mem_limit: ${DUST_PROOF_SERVER_MEM_LIMIT:-4g}
+    restart: unless-stopped
+
+  relay-data-init:
+    <<: *logging
+    # The relay runs as RELAY_USER (RUNBOOK section 3: the host user, so it can read the seed file).
+    # A new named volume would take the image's /var/lib/night-market (uid 1000, mode 700), and a
+    # relay of any other uid could not write its claims lock: it exited 78 in a restart loop (AA
+    # 00047 P7.4). This one-shot runs before every relay start: it takes the directory, sets mode
+    # 700, then hands its contents (symlinks not followed) and the directory to RELAY_USER. The
+    # relay mounts the volume with `nocopy`, so Docker never copies the image's ownership back over
+    # it. Root here, but with no capability except CHOWN, no network, a read-only root and only this
+    # volume.
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    user: '0:0'
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    read_only: true
+    environment:
+      RELAY_USER: ${RELAY_USER:-1000:1000}
+    volumes:
+      - relay-data:/data
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        case "$$RELAY_USER" in
+          '' | *[!0-9:]* | :* | *: | *:*:*)
+            echo "relay-data-init: RELAY_USER must be a numeric uid:gid, such as the host user's (id -u, id -g); got '$$RELAY_USER'" >&2
+            exit 64 ;;
+        esac
+        chown 0:0 /data
+        chmod 0700 /data
+        find /data -mindepth 1 -depth -exec chown -h "$$RELAY_USER" {} +
+        chown "$$RELAY_USER" /data
+        echo "relay-data-init: the relay's data dir now belongs to $$RELAY_USER: $$(ls -ldn /data)"
+    mem_limit: 64m
+    restart: 'no'
 
   relay:
     <<: [*hardening, *logging]
@@ -86,7 +152,7 @@ services:
       dockerfile: deploy/relay.Dockerfile
       args:
         RELAY_VERSION: ${RELAY_VERSION:-local}
-    image: mnbank/relay:${IMAGE_TAG:-local}
+    image: nightmarket/relay:${IMAGE_TAG:-local}
     env_file:
       # Every relay setting (deploy/.env.example). RELAY_ENV_FILE points elsewhere when the
       # compose command itself runs with --env-file <other file>.
@@ -96,17 +162,25 @@ services:
       HOME: /tmp
       RELAY_NETWORK: ${RELAY_NETWORK:-stagenet}
       RELAY_TRUST_PROXY: ${RELAY_TRUST_PROXY:-true}
-      MIDNIGHT_PROOF_SERVER_URL: http://proof-server:6300
+      MIDNIGHT_CONTRACT_PROOF_SERVER_URL: http://proof-server-contracts:6300
+      MIDNIGHT_DUST_PROOF_SERVER_URL: http://proof-server-dust:6300
       MIDNIGHT_MANAGED_PATH: /app/vendor/passport/contract/contracts/managed
       # A deployment never runs keyless: no key volume, or an incomplete one, stops the relay.
       RELAY_REQUIRE_KEYS: 'true'
       SPONSOR_SEED_FILE: /run/secrets/sponsor_seed
-      SEPOLIA_RPC_URL_FILE: /run/secrets/sepolia_rpc_url
+      # The demo-token claims store (the relay's only persistent state; one relay per data dir).
+      RELAY_DATA_DIR: /var/lib/night-market
     secrets:
       - sponsor_seed
-      - sepolia_rpc_url
     volumes:
       - keys:/app/vendor/passport/contract/contracts/managed:ro
+      # nocopy: the owner and mode of the data dir are relay-data-init's (RELAY_USER, 700), never
+      # the image's directory (uid 1000), whichever container touches a new volume first.
+      - type: volume
+        source: relay-data
+        target: /var/lib/night-market
+        volume:
+          nocopy: true
     user: ${RELAY_USER:-1000:1000}
     read_only: true
     tmpfs:
@@ -116,14 +190,18 @@ services:
       # Operators only (health checks from the host). The public reaches the relay through web.
       - 127.0.0.1:${RELAY_HOST_PORT:-18080}:8080
     depends_on:
+      relay-data-init:
+        condition: service_completed_successfully
       keys:
         condition: service_completed_successfully
-      proof-server:
+      proof-server-contracts:
+        condition: service_started
+      proof-server-dust:
         condition: service_started
     healthcheck:
-      # Healthy while /health is not "down" (down = proof server unreachable, sponsor wallet
-      # error, or a key set other than the pinned one). "degraded" (low DUST, kernel down, low
-      # vault gas, …) is still healthy here: read /health for the detail.
+      # Healthy while /health is not "down" (down = either proof server unreachable, sponsor
+      # wallet error, or a key set other than the pinned one). "degraded" (low DUST, kernel down, …) is
+      # still healthy here: read /health for the detail.
       test:
         - CMD
         - bun
@@ -144,7 +222,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/web.Dockerfile
-    image: mnbank/web:${IMAGE_TAG:-local}
+    image: nightmarket/web:${IMAGE_TAG:-local}
     environment:
       WEB_NETWORK: ${RELAY_NETWORK:-stagenet}
       WEB_RELAY_URL: ${WEB_RELAY_URL:-/relay}
@@ -152,6 +230,7 @@ services:
       WEB_TRUSTED_PROXIES: ${WEB_TRUSTED_PROXIES:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       WEB_CONTENT_SECURITY_POLICY: ${WEB_CONTENT_SECURITY_POLICY:-}
       WEB_ASSETS: ${WEB_ASSETS:-}
+      WEB_PAIRS: ${WEB_PAIRS:-}
     read_only: true
     tmpfs:
       - /tmp
@@ -170,15 +249,18 @@ services:
     restart: unless-stopped
 
 volumes:
-  # The compiled contracts with the relay's prover keys (about 3.6 GB), written by `keys`.
+  # The compiled contracts with the relay's prover keys, written by `keys` (MN Bank's set was about
+  # 3.6 GB; the Ed25519 set with the demo faucet is 2.2 GB, measured 2026-09-30).
   keys: {}
   # The proving system's public parameters (SRS) the key compile fetches (about 0.2 GB).
   zk-params: {}
-  # The proof server's parameters and zswap keys (about 0.3 GB), fetched at its first start.
-  proof-params: {}
+  # Each proof server's parameters and zswap keys (about 0.3 GB each), fetched at its first start.
+  contract-proof-params: {}
+  dust-proof-params: {}
+  # The relay's demo-token claims (a small JSON file; back it up with the deployment). Owned by
+  # RELAY_USER, mode 700: relay-data-init sets both before every relay start.
+  relay-data: {}
 
 secrets:
   sponsor_seed:
     file: ${SPONSOR_SEED_HOST_FILE:?set SPONSOR_SEED_HOST_FILE to the sponsor seed file on the host (deploy/RUNBOOK.md)}
-  sepolia_rpc_url:
-    file: ${SEPOLIA_RPC_URL_HOST_FILE:?set SEPOLIA_RPC_URL_HOST_FILE to the file holding the Sepolia RPC URL (deploy/RUNBOOK.md)}

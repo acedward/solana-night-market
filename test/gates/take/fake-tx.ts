@@ -89,7 +89,7 @@ export function accountOffer(
   const guaranteed = legs === 0;
   const call = {
     address: 'aa'.repeat(32),
-    entryPoint: 'open_swap_shielded_with_evm',
+    entryPoint: 'open_swap_shielded_with_ed25519',
     guaranteedTranscript: guaranteed ? {} : undefined,
     fallibleTranscript: guaranteed ? undefined : {},
   };

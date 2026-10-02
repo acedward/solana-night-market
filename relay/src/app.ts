@@ -9,8 +9,8 @@
 //   GET  /v1/accounts/:account/state    public ledger reads (L-ACC)
 //   GET  /v1/accounts/:account/inbox    public inbox ciphertexts (L-ACC)
 //   GET  /v1/accounts/:account/zswap    the account's Zswap leaves (exact positions) and spends (L-ACC)
-//   GET  /v1/bridge/quote               the Sepolia fields a bridge start signs, nonce included (L-BRG)
-//   GET  /v1/bridge/closed/:requestId   how a request this relay closed recently ended (P4-A, Q21 A)
+//   GET  /v1/accounts/:account/unshielded  the account's unshielded balances (B3, for B2's holdings)
+//   GET  /v1/demo-tokens[?owner=<key>]  the demo-token pack, its limits, and whether a key claimed (B3)
 //
 // Request bodies are never logged. Errors are JSON: {"error": {"code", "message", "detail"?}}.
 
@@ -20,27 +20,35 @@ import { cors } from 'hono/cors';
 import {
   API_PATHS,
   ActionRequestSchema,
-  BRIDGE_KINDS,
-  type BridgeClosedResponse,
-  type BridgeKind,
-  type BridgeQuote,
   RELAY_ACTIONS,
   type ActionRequest,
+  type DemoTokensInfo,
   type HealthResponse,
   type NonceResponse,
   type PublicConfig,
   type RelayActionName,
-} from '@mnbank/core';
+  NOT_SUPPORTED_REASON,
+  type RelayActionScheme,
+} from '@nightmarket/core';
 
-import type { AdmissionOutcome } from './actions/admission.js';
+import { AccountGate } from './actions/account-gate.js';
+import type { AdmissionOutcome, JobEnd } from './actions/admission.js';
 import type { ActionDefinition } from './actions/catalogue.js';
+import {
+  BUDGET_EXEMPT_ACTIONS,
+  countsAgainstBudget,
+  isInfrastructureFailure,
+  type FailureBudget,
+} from './actions/failure-budget.js';
 import type { NonceStore } from './auth/nonces.js';
 import { verifyRelayActionRequest, type VerifyOutcome } from './auth/verifiers.js';
 import { AccountHistoryTooLongError } from './chain/indexer.js';
 import { ChainReadNotImplementedError, type ChainReader } from './chain/reader.js';
+import { clientKey } from './client-key.js';
 import type { RelayConfig } from './config.js';
 import type { Logger } from './log.js';
-import type { JobQueue } from './queue/jobs.js';
+import { PublicError, type JobExecutor, type JobQueue } from './queue/jobs.js';
+import { proverPriority } from './queue/priority.js';
 import { RateLimiter } from './ratelimit.js';
 import type { SponsorSession } from './sponsor/session.js';
 
@@ -54,16 +62,22 @@ export interface AppDeps {
   sponsor: SponsorSession;
   health: () => Promise<HealthResponse>;
   chain: ChainReader;
-  /** The bridge's read side (plan L-BRG): the quote a start signs; absent when the relay cannot bridge. */
-  bridge?: {
-    available(): boolean;
-    quote(kind: BridgeKind, account: string, erc20?: string): Promise<BridgeQuote>;
-    /** How a request this relay finished recently ended (public facts only), or null. */
-    closedOutcome?(requestId: string): BridgeClosedResponse | null;
-  };
-  /** Verifies a gated call's own Passport signature (lanes); absent in P1. */
+  /** The RelayAction envelope's signature scheme (the Solana wallet's, lane B3); absent until it is
+   *  wired, and then every `relay-action` route answers `not-supported`. */
+  scheme?: RelayActionScheme;
+  /** Verifies a gated call's own Passport signature through the device arm (lane B3); absent until
+   *  an arm is wired, and then every `passport-call` route answers `not-supported`. */
   passportCall?: (def: ActionDefinition, request: ActionRequest) => Promise<VerifyOutcome>;
-  /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop). */
+  /** The demo-token pack and limits (GET /v1/demo-tokens, B3); absent: the endpoint is off. */
+  demoTokens?: (owner?: string) => DemoTokensInfo;
+  /** The failure budget per owner and per account (AA 00047 P9, audit C4: ./actions/failure-budget.ts);
+   *  absent: none. */
+  failures?: FailureBudget;
+  /** One queued-or-running job per account (AA 00047 P10, R2-1: ./actions/account-gate.ts); default:
+   *  a gate of `config.limits.jobsPerAccount`. */
+  accountGate?: AccountGate;
+  /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop).
+   *  Every per-client cap keys it by `clientKey` (an IPv6 client by its /64: AA 00047 P10, R2-1/R2-8). */
   clientAddress?: (c: Context) => string;
   now?: () => number;
 }
@@ -95,8 +109,11 @@ function defaultClientAddress(trustProxy: boolean): (c: Context) => string {
 
 export function createApp(deps: AppDeps): Hono {
   const { config, log } = deps;
-  const clientAddress = deps.clientAddress ?? defaultClientAddress(config.trustProxy);
+  const address = deps.clientAddress ?? defaultClientAddress(config.trustProxy);
+  // Every per-client cap (rate limits, nonces, registration) keys an IPv6 client by its /64.
+  const clientAddress = (c: Context) => clientKey(address(c), config.clientPrefixes);
   const limits = config.limits;
+  const gate = deps.accountGate ?? new AccountGate(limits.jobsPerAccount);
   const readLimiter = new RateLimiter(limits.readsPerMinute);
   const healthLimiter = new RateLimiter(limits.healthPerMinute);
   const nonceLimiter = new RateLimiter(limits.noncesPerMinute);
@@ -149,23 +166,37 @@ export function createApp(deps: AppDeps): Hono {
   app.get(API_PATHS.config, (c) => {
     const body: PublicConfig = {
       network: config.network.name,
-      chainId: config.network.evm.chainId,
       relayVersion: deps.version,
-      bridge: {
-        vaultAddress: config.network.bridge.vaultAddress,
-        vaultEvmAddress: config.network.bridge.vaultEvmAddress,
+      limits: {
+        authMaxTtlSeconds: limits.authMaxTtlSeconds,
+        jobTtlSeconds: limits.jobTtlSeconds,
+        offerMaxLifetimeSeconds: config.expiry.offerMaxLifetimeSeconds,
+        takeMaxLifetimeSeconds: config.expiry.takeMaxLifetimeSeconds,
       },
-      limits: { authMaxTtlSeconds: limits.authMaxTtlSeconds, jobTtlSeconds: limits.jobTtlSeconds },
+      withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
     };
     return c.json(body);
   });
 
   app.get(API_PATHS.nonce, (c) => {
-    const refused = limited(nonceLimiter, clientAddress(c), c);
+    const client = clientAddress(c);
+    const refused = limited(nonceLimiter, client, c);
     if (refused) return refused;
-    const { nonce, expiresAt } = deps.nonces.issue();
-    const body: NonceResponse = { nonce, expiresAt, maxTtlSeconds: limits.authMaxTtlSeconds };
+    // Outstanding nonces are never evicted (audit C9 / F-A7.3): a client at its own cap, or a full
+    // store, is refused until its nonces are used or expire.
+    const issued = deps.nonces.issue(client);
     c.header('Cache-Control', 'no-store');
+    if (!issued.ok) {
+      c.header('Retry-After', String(issued.retryAfterSeconds));
+      return issued.refused === 'client-cap'
+        ? apiError(c, 429, 'rate-limited', 'too many unused authorisation nonces from this address; use them or wait')
+        : apiError(c, 503, 'busy', 'the relay is handing out too many authorisation nonces; try again shortly');
+    }
+    const body: NonceResponse = {
+      nonce: issued.nonce,
+      expiresAt: issued.expiresAt,
+      maxTtlSeconds: limits.authMaxTtlSeconds,
+    };
     return c.json(body);
   });
 
@@ -180,13 +211,31 @@ export function createApp(deps: AppDeps): Hono {
       : apiError(c, 404, 'not-found', 'no such job (it may have expired, or the relay restarted)');
   });
 
+  app.get(API_PATHS.demoTokens, (c) => {
+    const refused = limited(readLimiter, clientAddress(c), c);
+    if (refused) return refused;
+    const owner = c.req.query('owner')?.replace(/^0x/, '').toLowerCase();
+    if (owner !== undefined && !/^[0-9a-f]{64}$/.test(owner))
+      return apiError(c, 400, 'bad-request', 'owner must be a device key (64 hex)');
+    c.header('Cache-Control', 'no-store');
+    const body: DemoTokensInfo = deps.demoTokens?.(owner) ?? {
+      enabled: false,
+      pack: [],
+      perKey: 1,
+      dailyCap: 0,
+      remainingToday: 0,
+      ...(owner ? { claimed: false } : {}),
+    };
+    return c.json(body);
+  });
+
   app.get(API_PATHS.queue, (c) => {
     const refused = limited(readLimiter, clientAddress(c), c);
     if (refused) return refused;
     return c.json(deps.queue.stats());
   });
 
-  const accountRead = (kind: 'state' | 'inbox' | 'zswap') => async (c: Context) => {
+  const accountRead = (kind: 'state' | 'inbox' | 'zswap' | 'unshielded') => async (c: Context) => {
     const refused = limited(readLimiter, clientAddress(c), c);
     if (refused) return refused;
     const account = c.req.param('account')?.replace(/^0x/, '').toLowerCase() ?? '';
@@ -201,6 +250,10 @@ export function createApp(deps: AppDeps): Hono {
         const z = await deps.chain.zswap(account);
         return z ? c.json(z) : apiError(c, 404, 'not-found', 'no such account');
       }
+      if (kind === 'unshielded') {
+        const u = await deps.chain.unshielded(account);
+        return u ? c.json(u) : apiError(c, 404, 'not-found', 'no such account');
+      }
       const from = Number(c.req.query('from') ?? '0');
       const limit = Math.min(Number(c.req.query('limit') ?? '100'), 500);
       if (!Number.isInteger(from) || from < 0 || !Number.isInteger(limit) || limit < 1)
@@ -209,64 +262,25 @@ export function createApp(deps: AppDeps): Hono {
       return page ? c.json(page) : apiError(c, 404, 'not-found', 'no such account');
     } catch (e) {
       if (e instanceof ChainReadNotImplementedError) return apiError(c, 501, 'not-implemented', e.message);
-      // A known limit, not an outage (RUNBOOK §12, plan question Q27): say which, so the page can.
+      // A known limit, not an outage: say which, so the page can. Since AA 00047 P11 (R3-5) the relay
+      // reads past one indexer page; only a history past its bound (100,000 actions) is refused.
       if (e instanceof AccountHistoryTooLongError) {
-        log.warn('account history beyond one indexer page; not read (no paging yet)', { kind, limit: e.limit });
+        log.warn('account history beyond what the relay reads', { kind, limit: e.limit });
         return apiError(
           c,
           501,
           'history-too-long',
-          `this account has ${e.limit} or more actions, more history than this version of the bank can read`,
+          `this account has more than ${e.limit} actions, more history than this version of the market can read`,
         );
       }
       log.warn('chain read failed', { kind, error: e });
       return apiError(c, 503, 'chain-unavailable', 'the chain could not be read right now; try again shortly');
     }
   };
-  app.get(API_PATHS.bridgeQuote, async (c) => {
-    const refused = limited(readLimiter, clientAddress(c), c);
-    if (refused) return refused;
-    const kind = c.req.query('kind') as BridgeKind | undefined;
-    const account = (c.req.query('account') ?? '').replace(/^0x/, '').toLowerCase();
-    const erc20 = c.req.query('erc20');
-    if (!kind || !(BRIDGE_KINDS as readonly string[]).includes(kind) || !/^[0-9a-f]{64}$/.test(account))
-      return apiError(c, 400, 'bad-request', 'needs kind=deposit|withdraw and a 64-hex account');
-    if (erc20 !== undefined && !/^0x[0-9a-fA-F]{40}$/.test(erc20))
-      return apiError(c, 400, 'bad-request', 'erc20 must be a 0x-prefixed 20-byte address');
-    if (!deps.bridge || !deps.bridge.available())
-      return apiError(c, 503, 'bridge-unavailable', 'the bank cannot bridge right now');
-    c.header('Cache-Control', 'no-store');
-    try {
-      return c.json(await deps.bridge.quote(kind, account, erc20));
-    } catch (e) {
-      if (e instanceof Error && e.name === 'PublicError') {
-        return apiError(c, 400, (e as Error & { code: string }).code, e.message);
-      }
-      log.warn('bridge quote failed', { error: e });
-      return apiError(
-        c,
-        503,
-        'chain-unavailable',
-        'Sepolia or the vault could not be read right now; try again shortly',
-      );
-    }
-  });
-
-  app.get('/v1/bridge/closed/:requestId', (c) => {
-    const refused = limited(readLimiter, clientAddress(c), c);
-    if (refused) return refused;
-    const id = (c.req.param('requestId') ?? '').replace(/^0x/, '').toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(id)) return apiError(c, 400, 'bad-request', 'not a vault request id');
-    const done = deps.bridge?.closedOutcome?.(id) ?? null;
-    c.header('Cache-Control', 'no-store');
-    return done
-      ? c.json(done)
-      : apiError(c, 404, 'not-found', 'this relay has not closed that request recently (or it restarted since)');
-  });
-
   app.get('/v1/accounts/:account/state', accountRead('state'));
   app.get('/v1/accounts/:account/inbox', accountRead('inbox'));
   app.get('/v1/accounts/:account/zswap', accountRead('zswap'));
+  app.get('/v1/accounts/:account/unshielded', accountRead('unshielded'));
 
   // ── the one state-changing route ─────────────────────────────────────────
 
@@ -277,7 +291,8 @@ export function createApp(deps: AppDeps): Hono {
       onError: (c) => apiError(c, 413, 'payload-too-large', 'the request body is too large'),
     }),
     async (c) => {
-      const refused = limited(actionLimiter, clientAddress(c), c);
+      const client = clientAddress(c);
+      const refused = limited(actionLimiter, client, c);
       if (refused) return refused;
       const name = c.req.param('action') as RelayActionName;
       const def = (RELAY_ACTIONS as readonly string[]).includes(name) ? deps.catalogue.get(name) : undefined;
@@ -302,9 +317,14 @@ export function createApp(deps: AppDeps): Hono {
       if (def.requiresSponsor) {
         const s = deps.sponsor.status();
         if (!s.synced)
-          return apiError(c, 503, 'sponsor-unavailable', 'the bank cannot pay network fees right now; try again later');
+          return apiError(
+            c,
+            503,
+            'sponsor-unavailable',
+            'the market cannot pay network fees right now; try again later',
+          );
         if (s.dustSpecks !== null && s.dustSpecks < config.sponsor.dustLowSpecks) {
-          return apiError(c, 503, 'sponsor-low', 'the bank is low on network fee funds; try again later');
+          return apiError(c, 503, 'sponsor-low', 'the market is low on network fee funds; try again later');
         }
       }
 
@@ -313,7 +333,7 @@ export function createApp(deps: AppDeps): Hono {
         outcome = verifyRelayActionRequest(request.auth, {
           action: def.action,
           network: config.network.name,
-          chainId: config.network.evm.chainId,
+          ...(deps.scheme ? { scheme: deps.scheme } : {}),
           account,
           payload: request.payload,
           maxTtlSeconds: limits.authMaxTtlSeconds,
@@ -323,7 +343,7 @@ export function createApp(deps: AppDeps): Hono {
       } else if (deps.passportCall) {
         outcome = await deps.passportCall(def, request);
       } else {
-        outcome = { ok: false, code: 'not-supported', reason: 'this action cannot be authorised yet' };
+        outcome = { ok: false, code: 'not-supported', reason: NOT_SUPPORTED_REASON };
       }
       if (!outcome.ok) {
         log.info('action refused', { action: def.action, code: outcome.code });
@@ -337,7 +357,7 @@ export function createApp(deps: AppDeps): Hono {
         const envelope = verifyRelayActionRequest(request.auth, {
           action: def.action,
           network: config.network.name,
-          chainId: config.network.evm.chainId,
+          ...(deps.scheme ? { scheme: deps.scheme } : {}),
           account,
           payload: request.payload,
           maxTtlSeconds: limits.authMaxTtlSeconds,
@@ -356,27 +376,95 @@ export function createApp(deps: AppDeps): Hono {
         }
       }
 
-      const ownerRefused = limited(ownerLimiter, outcome.signer.toLowerCase(), c);
+      const signer = outcome.signer.toLowerCase();
+      const ownerRefused = limited(ownerLimiter, signer, c);
       if (ownerRefused) {
         // Refused after the authorisation was accepted: let the same signature be sent again later.
         outcome.release?.();
         return ownerRefused;
       }
 
-      // The action's own admission check (security review F-B2, F-B3), before any queue slot.
+      // The failure budget (AA 00047 P9, audit C4; P10, R2-2): an owner or account whose jobs keep
+      // failing for reasons they caused waits, so a failing call is not free to repeat. Withdrawals,
+      // cancels and key restores are never refused by it (./actions/failure-budget.ts).
+      const exempt = BUDGET_EXEMPT_ACTIONS.has(def.action);
+      const budget = exempt ? undefined : deps.failures?.check(signer, account);
+      if (budget && !budget.ok) {
+        outcome.release?.();
+        c.header('Retry-After', String(budget.retryAfterSeconds));
+        log.info('action refused', { action: def.action, code: 'failure-budget' });
+        return apiError(c, 429, 'failure-budget', budget.reason);
+      }
+
+      // One queued-or-running job per account (AA 00047 P10, R2-1): taken before the admission check,
+      // so a second request of a busy account claims nothing.
+      const slot = account ? gate.take(account) : () => {};
+      if (!slot) {
+        outcome.release?.();
+        c.header('Retry-After', String(ACCOUNT_BUSY_RETRY_SECONDS));
+        log.info('action refused', { action: def.action, code: 'account-busy' });
+        return apiError(
+          c,
+          429,
+          'account-busy',
+          'this account already has a request in progress; wait for it to finish, then try again',
+        );
+      }
+
+      // The action's own admission check (security review F-B2, F-B3; AA 00047 P9: registration caps,
+      // offer expiry; P10: the per-account caps), before any queue slot.
       let admitted: AdmissionOutcome = { ok: true };
       if (def.admit) {
         try {
-          admitted = await def.admit({ account, payload: payload.data, signer: outcome.signer });
+          admitted = await def.admit({ account, payload: payload.data, signer: outcome.signer, client });
         } catch (e) {
           outcome.release?.();
+          slot();
           log.warn('admission check failed', { action: def.action, error: e });
           return apiError(c, 503, 'chain-unavailable', 'the account could not be checked right now; try again shortly');
         }
         if (!admitted.ok) {
           outcome.release?.();
+          slot();
           log.info('action refused', { action: def.action, code: admitted.detail ?? admitted.code });
+          if (admitted.retryAfterSeconds !== undefined) c.header('Retry-After', String(admitted.retryAfterSeconds));
           return apiError(c, admitted.status, admitted.code, admitted.reason, admitted.detail);
+        }
+      }
+      const ok = admitted;
+      // Give back everything the request claimed: the authorisation and whatever the admission
+      // charged (an entitlement and the day's append allowance, security review F-B7; a registration
+      // slot; an offer slot and a daily charge, P10).
+      const giveBack = () => {
+        outcome.release?.();
+        ok.release?.();
+      };
+
+      // AA 00047 P11.F (audit round 4 R4-1 / F-A4-1): a take or a make carries the deadline its device
+      // signed, and its job must start with `minRemainingSeconds` still left. When the prover lane would
+      // reach it too late (./queue/prover-lock.ts: takes go first, so only a crowd of takes or a long
+      // holder can do this), it is refused NOW, before any queue slot, proof or DUST, instead of expiring
+      // in the queue; nothing is charged and the customer signs again later.
+      const deadline = proverPriority(def.action, payload.data).deadline;
+      if (deadline !== undefined) {
+        const waitSeconds = deps.queue.estimateProverWaitSeconds({
+          action: def.action,
+          ...(account ? { account } : {}),
+          payload: payload.data,
+        });
+        const { minRemainingSeconds, takeMaxLifetimeSeconds, offerMaxLifetimeSeconds } = config.expiry;
+        if (now() + waitSeconds > deadline - minRemainingSeconds) {
+          giveBack();
+          slot();
+          const lifetime = def.action === 'take' ? takeMaxLifetimeSeconds : offerMaxLifetimeSeconds;
+          c.header('Retry-After', String(Math.max(1, waitSeconds - (lifetime - minRemainingSeconds))));
+          log.info('action refused', { action: def.action, code: 'prover-busy', waitSeconds });
+          return apiError(
+            c,
+            503,
+            'prover-busy',
+            `the market's prover is busy: this ${def.action === 'take' ? 'take' : 'offer'} would only start in about ${waitSeconds} s, too late for the expiry you signed. Nothing was sent; try again shortly and sign once more`,
+          );
         }
       }
 
@@ -393,18 +481,24 @@ export function createApp(deps: AppDeps): Hono {
             ...(account ? { account } : {}),
             signer: outcome.signer,
           },
-          executor: def.executor,
+          executor: guarded(def.executor, {
+            action: def.action,
+            owner: signer,
+            account,
+            ...(deps.failures ? { failures: deps.failures } : {}),
+            refuse: giveBack,
+            ...(ok.finished ? { finished: ok.finished } : {}),
+          }),
         });
       } finally {
         if (!job) {
-          // Refused after admission (a full queue, or an error): nothing was queued, so give back
-          // everything the request claimed, the authorisation and whatever the admission charged
-          // (an entitlement and the day's append allowance, security review F-B7).
-          outcome.release?.();
-          if (admitted.ok) admitted.release?.();
+          // Refused after admission (a full queue, or an error): nothing was queued.
+          giveBack();
+          slot();
         }
       }
       if (!job) return apiError(c, 503, 'busy', 'the relay is at capacity; try again later');
+      void deps.queue.settled(job.requestId).finally(slot);
       log.info('action queued', { action: def.action, requestId: job.requestId });
       return c.json({ job }, 202);
     },
@@ -417,6 +511,100 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   return app;
+}
+
+/** Seconds a busy account is told to wait (`429 account-busy`): about one proof. */
+export const ACCOUNT_BUSY_RETRY_SECONDS = 30;
+
+/**
+ * `executor`, as the route queues it (AA 00047 P9 audit C4; P10 audit round 2 R2-2):
+ *   - when the job reaches its lane, and again when it first reaches the PROVER (an account-lane job
+ *     such as a make waits for the prover inside ctx.prove), the failure budget is checked AGAIN
+ *     (F-B2-3: jobs queued before the owner's or account's last allowed failure must not prove after
+ *     it); a refused job proves nothing, gives back everything its request claimed (`refuse`) and
+ *     fails with `failure-budget`, so the same signature can be sent again later. Exempt actions
+ *     (withdrawals, cancels, key restores) are never refused;
+ *   - a failure the requester caused after proving started counts against `owner` and `account`;
+ *   - an infrastructure failure (the proof server, the node, the indexer) is reported to the
+ *     customer as `market-unavailable`, not as an internal error, and is never charged;
+ *   - `finished` hears how the job ended (the admission's open-offer slot and daily charges).
+ */
+export function guarded(
+  executor: JobExecutor,
+  o: {
+    action: RelayActionName;
+    owner: string;
+    account?: string;
+    failures?: FailureBudget;
+    refuse?: () => void;
+    finished?: (end: JobEnd) => void;
+  },
+): JobExecutor {
+  return async (payload, ctx) => {
+    let refused = false;
+    /** The budget, again: throws (and gives the request's claims back) when it ran out meanwhile. */
+    const recheck = () => {
+      if (!o.failures || BUDGET_EXEMPT_ACTIONS.has(o.action)) return;
+      const budget = o.failures.check(o.owner, o.account);
+      if (budget.ok) return;
+      refused = true;
+      o.refuse?.();
+      ctx.log.info('job refused at its lane: failure budget', { action: o.action });
+      throw new PublicError('failure-budget', budget.reason);
+    };
+    recheck();
+    let proved = false;
+    /** Whether the job's failure counted (decided once): a failure inside a proof is recorded BEFORE
+     *  the prover lane passes to the next job, whose own check must see it. */
+    let charged: boolean | null = null;
+    const charge = (e: unknown, inProof: boolean): boolean => {
+      if (charged === null) {
+        charged = countsAgainstBudget(e, inProof);
+        if (charged) o.failures?.record(o.owner, o.account);
+      }
+      return charged;
+    };
+    const watched = {
+      ...ctx,
+      prove: <T>(fn: () => Promise<T>): Promise<T> => {
+        const first = !proved;
+        proved = true;
+        return ctx.prove(async () => {
+          if (first) recheck(); // now holding the prover, before any proving time is spent
+          try {
+            return await fn();
+          } catch (e) {
+            if (!refused) charge(e, true);
+            throw e;
+          }
+        });
+      },
+    };
+    let result: Record<string, unknown>;
+    try {
+      result = await executor(payload, watched);
+    } catch (e) {
+      if (refused) throw e; // nothing proved; the claims were given back
+      const counted = charge(e, proved);
+      const code = e instanceof PublicError ? e.code : isInfrastructureFailure(e) ? 'market-unavailable' : undefined;
+      o.finished?.({ ok: false, proved, requesterFault: counted, ...(code ? { code } : {}) });
+      if (!(e instanceof PublicError) && isInfrastructureFailure(e)) {
+        ctx.log.warn('job failed on the market side (infrastructure)', { error: e });
+        throw new PublicError(
+          'market-unavailable',
+          "the market's prover or its connection to Midnight failed while working on this request. It does not count against you; try again shortly",
+        );
+      }
+      throw e;
+    }
+    o.finished?.({ ok: true, proved, requesterFault: false, result });
+    return result;
+  };
+}
+
+/** `executor` with the failure budget alone (AA 00047 P9): `guarded` without an action's exemption. */
+export function budgeted(executor: JobExecutor, failures: FailureBudget, owner: string, account?: string): JobExecutor {
+  return guarded(executor, { action: 'take', owner, ...(account ? { account } : {}), failures });
 }
 
 /** The routes that change state, for the auth test to enumerate (every one must refuse

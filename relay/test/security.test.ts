@@ -1,13 +1,13 @@
 // Logs never carry secrets; config errors never echo them; the funding lock follows the shared
 // convention; nonces and rate limits behave.
 
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { generateMnemonic, mnemonicToSeedSync } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
-import { hexlify, randomBytes } from 'ethers';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { NonceStore } from '../src/auth/nonces.js';
@@ -30,8 +30,8 @@ afterEach(() => {
 
 describe('log redaction', () => {
   it('cuts registered secrets out of messages, fields and errors, and hides sensitive keys', () => {
-    const seed = hexlify(randomBytes(32)).slice(2);
-    const rpc = `https://sepolia.example.test/v3/${hexlify(randomBytes(16)).slice(2)}`;
+    const seed = randomBytes(32).toString('hex');
+    const rpc = `https://rpc.example.test/v3/${randomBytes(16).toString('hex')}`;
     const redactor = new Redactor();
     redactor.addSecret(seed);
     redactor.addSecret(rpc);
@@ -73,7 +73,14 @@ describe('configuration', () => {
     expect(() => loadConfig({ RELAY_NETWORK: 'mainnet' }, tokens)).toThrow(ConfigError);
     expect(() => loadConfig({ RELAY_NETWORK: 'undeployed' }, tokens)).toThrow(/token/);
     const { config } = loadConfig({ RELAY_NETWORK: 'stagenet' }, tokens);
-    expect(config.tokens.usdc().midnightName).toBe('wUSDC');
+    expect(config.tokens.tokens.map((t) => t.symbol)).toEqual([
+      'twBTC',
+      'twETH',
+      'twUSDC',
+      'twUSDM',
+      'utwUSDC',
+      'utwBTC',
+    ]);
     expect(config.sponsor.enabled).toBe(false);
   });
 
@@ -91,11 +98,41 @@ describe('configuration', () => {
     expect(() => loadConfig({ RELAY_NETWORK: 'stagenet', ZSWAP_KERNEL_URL: 'nope' }, tokens)).toThrow(ConfigError);
   });
 
+  it('names two proof servers: rc.8 for the contract circuits, rc.6 for the DUST (and refuses the single-server names)', () => {
+    const { config } = loadConfig({ RELAY_NETWORK: 'stagenet' }, tokens);
+    expect(config).toMatchObject({
+      contractProofServerUrl: 'http://proof-server-contracts:6300',
+      contractProofServerVersion: '9.0.0-rc.8',
+      dustProofServerUrl: 'http://proof-server-dust:6300',
+      dustProofServerVersion: '9.0.0-rc.6',
+    });
+    const set = loadConfig(
+      {
+        RELAY_NETWORK: 'stagenet',
+        MIDNIGHT_CONTRACT_PROOF_SERVER_URL: 'http://rc8:6300',
+        CONTRACT_PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.9',
+        MIDNIGHT_DUST_PROOF_SERVER_URL: 'http://rc6:6300',
+        DUST_PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.7',
+      },
+      tokens,
+    ).config;
+    expect([set.contractProofServerUrl, set.contractProofServerVersion]).toEqual(['http://rc8:6300', '9.0.0-rc.9']);
+    expect([set.dustProofServerUrl, set.dustProofServerVersion]).toEqual(['http://rc6:6300', '9.0.0-rc.7']);
+    expect(() => loadConfig({ RELAY_NETWORK: 'stagenet', MIDNIGHT_DUST_PROOF_SERVER_URL: 'nope' }, tokens)).toThrow(
+      /MIDNIGHT_DUST_PROOF_SERVER_URL is not a URL/,
+    );
+    expect(() =>
+      loadConfig({ RELAY_NETWORK: 'stagenet', MIDNIGHT_PROOF_SERVER_URL: 'http://proof-server:6300' }, tokens),
+    ).toThrow(/MIDNIGHT_CONTRACT_PROOF_SERVER_URL.*MIDNIGHT_DUST_PROOF_SERVER_URL/);
+    expect(() =>
+      loadConfig({ RELAY_NETWORK: 'stagenet', PROOF_SERVER_EXPECTED_VERSION: '9.0.0-rc.6' }, tokens),
+    ).toThrow(ConfigError);
+  });
+
   it('reads secrets from files, and never echoes them in an error', () => {
     const mnemonic = generateMnemonic(wordlist, 256);
     const files: Record<string, string> = {
       '/seed': `# test\nWALLET=${mnemonic}\n`,
-      '/rpc': 'https://rpc.example.test/key/abcdef0123456789\n',
       '/bad': 'not a seed at all',
     };
     const read = (p: string) => {
@@ -103,11 +140,11 @@ describe('configuration', () => {
       throw new Error('ENOENT');
     };
     const { secrets } = loadConfig(
-      { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: '/seed', SEPOLIA_RPC_URL_FILE: '/rpc' },
+      { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: '/seed' },
       (p) => (p === '/t' ? tokens() : read(p)),
     );
     expect(secrets.sponsorSeedHex).toBe(Buffer.from(mnemonicToSeedSync(mnemonic, '')).toString('hex'));
-    expect(secrets.sepoliaRpcUrl).toBe('https://rpc.example.test/key/abcdef0123456789');
+    expect(Object.keys(secrets).sort()).toEqual(['sponsorSeedHex', 'sponsorSeedSource']);
     for (const bad of ['/bad', '/missing']) {
       try {
         loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: bad }, (p) =>
@@ -122,7 +159,7 @@ describe('configuration', () => {
   });
 
   it('parses hex seeds and mnemonics, and refuses invalid mnemonics', () => {
-    const hex = hexlify(randomBytes(32)).slice(2);
+    const hex = randomBytes(32).toString('hex');
     expect(parseSponsorSeed(`0x${hex.toUpperCase()}`)).toBe(hex);
     expect(parseSponsorSeed(`SEED="${hex}"`)).toBe(hex);
     const words = generateMnemonic(wordlist, 128).split(' ');
@@ -133,7 +170,7 @@ describe('configuration', () => {
   });
 
   it('on a live network, a sponsor needs the shared lock or a declared dedicated seed', () => {
-    const seed = hexlify(randomBytes(32)).slice(2);
+    const seed = randomBytes(32).toString('hex');
     const env = { RELAY_NETWORK: 'stagenet', SPONSOR_ENABLED: 'true', SPONSOR_SEED: seed };
     expect(() => loadConfig(env, tokens)).toThrow(/SPONSOR_FUNDING_LOCK_FILE/);
     expect(
@@ -188,7 +225,7 @@ describe('the funding lock', () => {
         indexerUrl: 'http://i',
         indexerWsUrl: 'ws://i',
         nodeWsUrl: 'ws://n',
-        proofServerUrl: 'http://p',
+        dustProofServerUrl: 'http://p',
       },
       feeBlocksMargin: 5,
       fundingLockFile: path,
@@ -220,7 +257,7 @@ describe('the funding lock', () => {
           indexerUrl: 'http://i',
           indexerWsUrl: 'ws://i',
           nodeWsUrl: 'ws://n',
-          proofServerUrl: 'http://p',
+          dustProofServerUrl: 'http://p',
         },
         feeBlocksMargin: 5,
         fundingLockFile: path,
@@ -238,27 +275,34 @@ describe('the funding lock', () => {
 });
 
 describe('nonces', () => {
+  /** A nonce the store issued (the test fails if it refused). */
+  const issued = (store: NonceStore, client?: string) => {
+    const r = store.issue(client);
+    if (!r.ok) throw new Error(`refused: ${r.refused}`);
+    return r;
+  };
+
   it('are single use, expire, and are forgotten by a new store (a restart)', () => {
     let now = 100;
     const store = new NonceStore(60, 3, () => now);
-    const { nonce, expiresAt } = store.issue();
+    const { nonce, expiresAt } = issued(store);
     expect(nonce).toMatch(/^0x[0-9a-f]{64}$/);
     expect(expiresAt).toBe(160);
     expect(store.consume(nonce)).toBe('ok');
     expect(store.consume(nonce)).toBe('used');
-    const late = store.issue().nonce;
+    const late = issued(store).nonce;
     now = 161;
     expect(store.consume(late)).toBe('unknown');
-    expect(new NonceStore(60, 3, () => now).consume(store.issue().nonce)).toBe('unknown');
+    expect(new NonceStore(60, 3, () => now).consume(issued(store).nonce)).toBe('unknown');
   });
 
-  it('keeps at most the configured number outstanding', () => {
+  it('issuing stores nothing and never refuses, so no issued nonce is ever pushed out (audit C9; P10 R2-8)', () => {
     const store = new NonceStore(60, 2);
-    const first = store.issue().nonce;
-    store.issue();
-    store.issue();
-    expect(store.consume(first)).toBe('unknown');
-    expect(store.size.issued).toBe(2);
+    const first = issued(store).nonce;
+    for (let i = 0; i < 1000; i++) issued(store, `client-${i}`);
+    expect(store.size).toEqual({ issued: 0, used: 0 });
+    // The first nonce still works.
+    expect(store.consume(first)).toBe('ok');
   });
 });
 

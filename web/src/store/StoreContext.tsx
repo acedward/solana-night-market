@@ -5,7 +5,7 @@ import { LocalStore } from './store.js';
 
 export interface StoreState {
   status: StorageStatus;
-  /** null when this browser will not let the bank keep data. */
+  /** null when this browser will not let the market keep data. */
   store: LocalStore | null;
   /** Changes whenever any record changes, here or in another tab. */
   revision: number;

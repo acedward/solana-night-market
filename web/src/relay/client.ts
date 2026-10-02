@@ -1,30 +1,28 @@
-// The browser's client for the MN Bank relay: nonces, the one action route, job polling (the
-// browser keeps the request id, so a job resumes after a reload, Q5), and the account's public
-// chain reads. Every response is validated against the shared schemas.
+// The browser's client for the Night Market relay: nonces, the one action route and job polling (the
+// browser keeps the request id, so a job resumes after a reload, Q5). Every response is validated
+// against the shared schemas. Since AA 00047 P11.B (questions Q47 A, superseding Q31) the page
+// decodes the account's Zswap activity itself; `zswap` below is kept but the page never calls it.
+//
+// The account's state, inbox and public balances are NOT read here (AA 00047 P9.S, questions Q26:
+// the relay is trustless): the page reads them from the public indexer (../chain/indexer.ts). The
+// relay still serves those routes; this client deliberately has no method for them.
 
 import {
   API_PATHS,
-  AccountStateViewSchema,
   ApiErrorSchema,
-  BridgeClosedResponseSchema,
-  BridgeQuoteSchema,
+  DemoTokensInfoSchema,
   HealthResponseSchema,
-  type BridgeClosedResponse,
   type HealthResponse,
-  type BridgeKind,
-  type BridgeQuote,
-  InboxPageSchema,
   JobViewSchema,
   NonceResponseSchema,
   ZswapActivitySchema,
-  type AccountStateView,
   type ActionRequest,
-  type InboxPage,
+  type DemoTokensInfo,
   type JobView,
   type NonceResponse,
   type RelayActionName,
   type ZswapActivity,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import { relayErrorText } from './messages.js';
 
@@ -60,7 +58,7 @@ export class RelayClient {
     try {
       res = await this.fetchImpl(this.url(path), { cache: 'no-store', ...init });
     } catch {
-      throw new RelayError(0, 'unreachable', 'The bank could not be reached.');
+      throw new RelayError(0, 'unreachable', 'The market could not be reached.');
     }
     const body: unknown = await res.json().catch(() => null);
     if (!res.ok) {
@@ -109,41 +107,21 @@ export class RelayClient {
       if (opts.signal?.aborted) throw new RelayError(0, 'aborted', 'stopped waiting');
       const job = await this.job(requestId);
       if (!job)
-        throw new RelayError(404, 'job-lost', 'The bank no longer knows this request (it expired or restarted).');
+        throw new RelayError(404, 'job-lost', 'The market no longer knows this request (it expired or restarted).');
       onUpdate(job);
       if (job.state === 'succeeded' || job.state === 'failed') return job;
       await new Promise((r) => setTimeout(r, interval));
     }
   }
 
-  async accountState(account: string): Promise<AccountStateView | null> {
-    try {
-      return AccountStateViewSchema.parse(await this.call(API_PATHS.accountState(account)));
-    } catch (e) {
-      if (e instanceof RelayError && e.status === 404) return null;
-      throw e;
-    }
-  }
-
-  async inbox(account: string, from = 0, limit = 500): Promise<InboxPage> {
-    return InboxPageSchema.parse(await this.call(`${API_PATHS.accountInbox(account)}?from=${from}&limit=${limit}`));
-  }
-
-  /** The Sepolia fields a bridge start signs, with the nonce the relay reserves (plan L-BRG). */
-  async bridgeQuote(kind: BridgeKind, account: string, erc20?: string): Promise<BridgeQuote> {
-    const q = new URLSearchParams({ kind, account });
-    if (erc20) q.set('erc20', erc20);
-    return BridgeQuoteSchema.parse(await this.call(`${API_PATHS.bridgeQuote}?${q.toString()}`));
-  }
-
-  /** The bank's health (FR-013): what is paused and why (plan P4-A error states). A down relay
+  /** The market's health (FR-013): what is paused and why (plan P4-A error states). A down relay
    *  answers 503 with the same body. */
   async health(): Promise<HealthResponse> {
     let res: Response;
     try {
       res = await this.fetchImpl(this.url(API_PATHS.health), { cache: 'no-store' });
     } catch {
-      throw new RelayError(0, 'unreachable', 'The bank could not be reached.');
+      throw new RelayError(0, 'unreachable', 'The market could not be reached.');
     }
     const body: unknown = await res.json().catch(() => null);
     const h = HealthResponseSchema.safeParse(body);
@@ -151,17 +129,33 @@ export class RelayClient {
     return h.data;
   }
 
-  /** How the bank closed a transfer recently, or null when it did not (plan P4-A, Q21 A). */
-  async bridgeClosed(requestId: string): Promise<BridgeClosedResponse | null> {
+  /** The account's Zswap leaves and spends, as the relay decodes the ledger's events. NOT used by the
+   *  page since AA 00047 P11.B: it decodes the account's history itself (../chain/history.ts, Q47 A). */
+  async zswap(account: string): Promise<ZswapActivity> {
+    return ZswapActivitySchema.parse(await this.call(API_PATHS.accountZswap(account)));
+  }
+
+  /** What the relay's public configuration says about signing: whether a withdrawal to a wallet
+   *  also needs F-B6's envelope over the whole body (questions Q13; off by default, when the field is
+   *  absent too). */
+  async signingPolicy(): Promise<{ withdrawRecipientEnvelope: boolean }> {
     try {
-      return BridgeClosedResponseSchema.parse(await this.call(API_PATHS.bridgeClosed(requestId)));
-    } catch (e) {
-      if (e instanceof RelayError && e.status === 404) return null;
-      throw e;
+      const body = (await this.call(API_PATHS.config)) as { withdrawRecipientEnvelope?: unknown } | null;
+      return { withdrawRecipientEnvelope: body?.withdrawRecipientEnvelope === true };
+    } catch {
+      return { withdrawRecipientEnvelope: false };
     }
   }
 
-  async zswap(account: string): Promise<ZswapActivity> {
-    return ZswapActivitySchema.parse(await this.call(API_PATHS.accountZswap(account)));
+  /** The demo-token offer (AA 00047, packages/core/src/demo-tokens.ts): the pack, the limits and,
+   *  for `owner`, whether that key has claimed. Null when this relay does not serve it. */
+  async demoTokensInfo(owner?: string): Promise<DemoTokensInfo | null> {
+    const path = owner ? `${API_PATHS.demoTokens}?owner=${encodeURIComponent(owner)}` : API_PATHS.demoTokens;
+    try {
+      return DemoTokensInfoSchema.parse(await this.call(path));
+    } catch (e) {
+      if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
+      throw e;
+    }
   }
 }

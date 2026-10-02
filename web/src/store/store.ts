@@ -1,6 +1,8 @@
 // The browser store: every per-user record, in localStorage, with a schema version and
 // migrations, cross-tab change events, and Export / Import / CLEAR ALL (spec FR-003, FR-004).
 
+import { shortSolanaAddress, solanaAddressOf } from '@nightmarket/core';
+
 import { recordDataProblem } from './record-schemas.js';
 import {
   CARRIED_GLOBAL_KEYS,
@@ -65,7 +67,7 @@ export class StoreFullError extends Error {
   override name = 'StoreFullError';
   constructor() {
     super(
-      'This browser has no room left for MN Bank’s records, so the last change was not saved. Export your data under Local data, free some site data, then reload.',
+      'This browser has no room left for Night Market’s records, so the last change was not saved. Back up your data under Your data, free some site data, then reload.',
     );
   }
 }
@@ -208,7 +210,7 @@ export class LocalStore {
     data: T,
     opts: { account?: string | null; id?: string } = {},
   ): string {
-    if (this.readOnly) throw new StoreReadOnlyError('this browser holds data from a newer version of MN Bank');
+    if (this.readOnly) throw new StoreReadOnlyError('this browser holds data from a newer version of Night Market');
     const key = recordKey(scope, kind, opts);
     try {
       this.markSchema();
@@ -222,7 +224,7 @@ export class LocalStore {
   }
 
   remove(key: string): void {
-    if (this.readOnly) throw new StoreReadOnlyError('this browser holds data from a newer version of MN Bank');
+    if (this.readOnly) throw new StoreReadOnlyError('this browser holds data from a newer version of Night Market');
     this.storage.removeItem(key);
     this.emit();
   }
@@ -270,46 +272,48 @@ export class LocalStore {
       schemaVersion: this.version,
       exportedAt: new Date(this.now()).toISOString(),
       network: s.network,
-      evmAddress: s.evmAddress,
+      owner: s.owner,
       records,
     });
   }
 
   /**
    * Check an export file for the connected wallet, writing nothing (security review F-B4, F-B5):
-   * it must be an MN Bank export for THIS network and THIS wallet, within the size bounds, and every
+   * it must be a Night Market export for THIS network and THIS wallet, within the size bounds, and every
    * record must be one this page writes. Also lists the encryption secrets it would REPLACE with a
    * different one, which `commitImport` refuses unless each is approved (the page checks the new
    * public key against the account's on-chain key first).
    */
   prepareImport(file: unknown, expected: WalletScope): ImportPlan {
     if (this.readOnly)
-      throw new ImportError('This browser holds data from a newer version of MN Bank; nothing was imported.');
+      throw new ImportError('This browser holds data from a newer version of Night Market; nothing was imported.');
     const s = normaliseScope(expected);
     const parsed = ExportFileSchema.safeParse(file);
-    if (!parsed.success) throw new ImportError('This is not an MN Bank local data export.');
+    if (!parsed.success) throw new ImportError('This is not a Night Market local data export.');
     const f = parsed.data;
     if (f.network !== s.network)
       throw new ImportError(
         `This file is for the ${f.network} network, and this page is on ${s.network}. Nothing was imported.`,
       );
-    if (f.evmAddress !== s.evmAddress) {
+    if (f.owner !== s.owner) {
       throw new ImportError(
-        `This file belongs to another wallet (${f.evmAddress.slice(0, 6)}…${f.evmAddress.slice(-4)}). Connect that wallet to import it. Nothing was imported.`,
+        `This file belongs to another wallet (${shortSolanaAddress(solanaAddressOf(f.owner))}). Connect that wallet to import it. Nothing was imported.`,
       );
     }
     if (f.schemaVersion > this.version)
-      throw new ImportError('This file was made by a newer version of MN Bank. Nothing was imported.');
+      throw new ImportError('This file was made by a newer version of Night Market. Nothing was imported.');
     let entries: Array<[string, string]> = f.records.map((r) => [r.key, JSON.stringify(r.value)]);
     if (f.schemaVersion < this.version) {
       const migrated = migrate(entries, f.schemaVersion, this.version, this.migrations);
       if (!migrated)
-        throw new ImportError('This file is from a version of MN Bank this page cannot read. Nothing was imported.');
+        throw new ImportError(
+          'This file is from a version of Night Market this page cannot read. Nothing was imported.',
+        );
       entries = migrated;
     }
     const bytes = entries.reduce((n, [k, v]) => n + k.length + v.length, 0);
     if (bytes > MAX_IMPORT_FILE_BYTES)
-      throw new ImportError('This file holds more than an MN Bank export can (5 MB). Nothing was imported.');
+      throw new ImportError('This file holds more than a Night Market export can (5 MB). Nothing was imported.');
     if (new Set(entries.map(([k]) => k)).size !== entries.length)
       throw new ImportError('The file holds the same record twice. Nothing was imported.');
     const secretChanges: SecretChange[] = [];
@@ -352,7 +356,7 @@ export class LocalStore {
     opts: { approvedSecretReplacements?: ReadonlySet<string> } = {},
   ): { imported: number; replaced: number } {
     if (this.readOnly)
-      throw new ImportError('This browser holds data from a newer version of MN Bank; nothing was imported.');
+      throw new ImportError('This browser holds data from a newer version of Night Market; nothing was imported.');
     for (const c of plan.secretChanges) {
       if (!c.account) {
         throw new ImportError(
@@ -361,7 +365,7 @@ export class LocalStore {
       }
       if (!opts.approvedSecretReplacements?.has(c.account)) {
         throw new ImportError(
-          `This file would replace the encryption secret of account ${c.account.slice(0, 8)}… with another one whose public key is not the account's on-chain key (or the bank could not be reached to check it). Nothing was imported.`,
+          `This file would replace the encryption secret of account ${c.account.slice(0, 8)}… with another one whose public key is not the account's on-chain key (or the market could not be reached to check it). Nothing was imported.`,
         );
       }
     }
@@ -438,7 +442,7 @@ export class LocalStore {
     return this.commitImport(this.prepareImport(file, expected), opts);
   }
 
-  /** Remove EVERY key the bank stored in this browser, for every wallet and network. */
+  /** Remove EVERY key the market stored in this browser, for every wallet and network. */
   clearAll(): number {
     const keys: string[] = [];
     for (let i = 0; i < this.storage.length; i++) {

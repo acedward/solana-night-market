@@ -1,17 +1,20 @@
 // A relay app wired with in-memory fakes, for route tests. No network, no wallet, no ports.
+// Relay envelopes are signed with the TEST scheme (packages/core/test/fixtures/test-signing.ts):
+// the Solana scheme is lane B3's.
 
-import { type BaseWallet, Wallet } from 'ethers';
 import {
   API_PATHS,
-  RELAY_ACTION_TYPES,
   buildRelayActionMessage,
-  relayDomain,
   type HealthResponse,
   type RelayActionName,
-} from '@mnbank/core';
+  type RelayActionScheme,
+} from '@nightmarket/core';
+
+import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
 
 import { defaultCatalogue, type ActionDefinition } from '../src/actions/catalogue.js';
 import { AppendEntitlements } from '../src/actions/entitlements.js';
+import type { FailureBudget } from '../src/actions/failure-budget.js';
 import { createApp, type AppDeps } from '../src/app.js';
 import { NonceStore } from '../src/auth/nonces.js';
 import { notImplementedChainReader, type ChainReader } from '../src/chain/reader.js';
@@ -22,8 +25,8 @@ import type { SponsorSession, SponsorStatus } from '../src/sponsor/session.js';
 
 export const LOCAL_TOKENS = {
   tokens: [
-    { symbol: 'tUSDC', midnightName: 'shielded-a', role: 'usdc', decimals: 6, midnightColour: 'aa'.repeat(32) },
-    { symbol: 'tSTK', midnightName: 'shielded-b', role: 'stock', decimals: 6, midnightColour: 'bb'.repeat(32) },
+    { symbol: 'tA', decimals: 6, midnightColour: 'aa'.repeat(32) },
+    { symbol: 'tB', decimals: 8, midnightColour: 'bb'.repeat(32) },
   ],
 };
 
@@ -73,13 +76,27 @@ export function harness(
     catalogue?: Map<RelayActionName, ActionDefinition>;
     passportCall?: AppDeps['passportCall'];
     chain?: ChainReader;
-    bridge?: AppDeps['bridge'];
+    /** The envelope scheme: the test scheme unless given (null: none, as main.ts until lane B3). */
+    scheme?: RelayActionScheme | null;
+    /** The failure budget (AA 00047 P9 C4 / P10 R2-2); none unless given. */
+    failures?: FailureBudget;
+    /** The job queue (AA 00047 P11.F: a scaled clock); a new one unless given. */
+    queue?: JobQueue;
+    /** The route's clock (Unix seconds); the system clock unless given. */
+    now?: () => number;
   } = {},
 ) {
   const config = opts.config ?? testConfig();
   const log = silentLog();
-  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxNonces);
-  const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
+  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
+  const queue =
+    opts.queue ??
+    new JobQueue({
+      ttlSeconds: config.limits.jobTtlSeconds,
+      maxJobs: config.limits.maxJobs,
+      log,
+      prover: config.proverLane,
+    });
   const catalogue = opts.catalogue ?? defaultCatalogue();
   const health = async (): Promise<HealthResponse> => ({
     status: 'ok',
@@ -89,14 +106,14 @@ export function harness(
     sponsor: { configured: true, state: 'synced', synced: true, dustSpecks: '1', dustLow: false },
     proofServer: {
       reachable: true,
-      version: '9.0.0-rc.6',
+      version: '9.0.0-rc.8',
       jobCapacity: 10,
       keys: { present: false, fingerprint: null, pinned: false, matchesPin: null },
     },
+    dustProofServer: { reachable: true, version: '9.0.0-rc.6', jobCapacity: 10 },
     queue: { jobs: 0, lanes: {} },
     kernel: { reachable: true, synced: true },
     batcher: { reachable: true },
-    vaultGas: { address: '', balanceWei: null, low: null },
   });
   const app = createApp({
     config,
@@ -109,8 +126,10 @@ export function harness(
     health,
     chain: opts.chain ?? notImplementedChainReader,
     ...(opts.passportCall ? { passportCall: opts.passportCall } : {}),
-    ...(opts.bridge ? { bridge: opts.bridge } : {}),
+    ...(opts.failures ? { failures: opts.failures } : {}),
+    ...(opts.scheme === null ? {} : { scheme: opts.scheme ?? testScheme }),
     clientAddress: () => '198.51.100.7',
+    ...(opts.now ? { now: opts.now } : {}),
   });
   return { app, config, log, nonces, queue, catalogue };
 }
@@ -118,14 +137,21 @@ export function harness(
 export const ACCOUNT = '11'.repeat(32);
 
 export function samplePayload(action: RelayActionName): Record<string, unknown> {
-  return action === 'register' ? { encPublicKey: 'ab'.repeat(32) } : { amount: '1000000', colour: 'bb'.repeat(32) };
+  if (action === 'register') return { encPublicKey: 'ab'.repeat(32) };
+  // The demo-token claim's body names the device's use counter (the account is the request's
+  // `account`; AA 00047 P9, audit C8 / F-B10).
+  if (action === 'demo-tokens') return { useCounter: '0' };
+  return { amount: '1000000', colour: 'bb'.repeat(32) };
 }
+
+/** A test device (an Ed25519 key, as a Solana wallet holds). */
+export type TestDevice = ReturnType<typeof testDevice>;
 
 /** Build a correctly signed request body for `action` (or a deliberately broken one). */
 export async function signedBody(
   h: ReturnType<typeof harness>,
   action: RelayActionName,
-  signer: BaseWallet,
+  signer: TestDevice,
   over: {
     owner?: string;
     expiry?: number;
@@ -141,13 +167,13 @@ export async function signedBody(
   const message = buildRelayActionMessage({
     action: over.signedAction ?? action,
     network: over.network ?? h.config.network.name,
-    owner: over.owner ?? signer.address,
+    owner: over.owner ?? signer.deviceKey,
     account: def.requiresAccount ? ACCOUNT : undefined,
     payload,
     nonce,
     expiry: over.expiry ?? Math.floor(Date.now() / 1000) + 120,
   });
-  const signature = await signer.signTypedData(relayDomain(), RELAY_ACTION_TYPES, message);
+  const signature = signer.signEnvelope(message);
   return { ...(def.requiresAccount ? { account: ACCOUNT } : {}), payload, auth: { message, signature } };
 }
 
@@ -158,4 +184,4 @@ export const post = (h: ReturnType<typeof harness>, action: string, body: unknow
     body: JSON.stringify(body),
   });
 
-export const newWallet = (): BaseWallet => Wallet.createRandom();
+export const newWallet = (): TestDevice => testDevice();

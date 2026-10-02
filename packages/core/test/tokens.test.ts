@@ -4,162 +4,207 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { TokenRegistryError, registryFor, registryFromConfig, stagenetRegistry } from '../src/tokens/registry.js';
+import { NETWORK_DEFAULT_PAIRS } from '../src/network.js';
+import { PairConfigError, allPairs, makePair, pairFor, parsePairId, resolvePairs } from '../src/tokens/pairs.js';
+import {
+  STAGENET_SOURCE,
+  TokenRegistryError,
+  registryFor,
+  registryFromConfig,
+  registryFromMintTestTokens,
+  stagenetRegistry,
+} from '../src/tokens/registry.js';
 
-const deployments = (name: string) => fileURLToPath(new URL(`../src/tokens/deployments/${name}`, import.meta.url));
+const vendored = fileURLToPath(new URL('../src/tokens/mint-test-tokens/metadata.stagenet.json', import.meta.url));
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+const colour = (c: string) => c.repeat(64);
 
-describe('vendored deployment records', () => {
-  it('are byte-identical to acedward/passport @ 6c7505a / 07d8ea4 (PROVENANCE.md)', () => {
-    expect(sha256(deployments('stagenet-vault.json'))).toBe(
-      '8897b1eeb72bff8a5dd7038aca9556cc9308246352ef7e0a277a2f5024453a67',
-    );
-    expect(sha256(deployments('sepolia-stk.json'))).toBe(
-      '0c9718001ad5e58ef7fb46de740ba1c9cd452d5257a465c6a4ada99918e7bee7',
-    );
+describe('the vendored mint-test-tokens registry', () => {
+  it('is byte-identical to effectstream/mint-test-tokens @ a51cf3a (PROVENANCE.md)', () => {
+    expect(sha256(vendored)).toBe('973977bc0dbf7eae6afd4b1d92f365326b2b69d257f3597cdaffa9dac34839d0');
+    expect(STAGENET_SOURCE).toEqual({
+      repo: 'effectstream/mint-test-tokens',
+      commit: 'a51cf3ad46520d1ded938fb86db8b7b99373ce56',
+      file: 'metadata/metadata.stagenet.json',
+    });
   });
 });
 
 describe('the stagenet registry', () => {
   const r = stagenetRegistry();
 
-  it('maps USDC to the usdc role and every other bridged token to a stock, in the file order', () => {
-    expect(r.usdc().symbol).toBe('USDC');
-    expect(r.usdc().midnightName).toBe('wUSDC');
-    expect(r.tokens).toHaveLength(8);
-    expect(r.stocks().map((t) => t.midnightName)).toEqual([
-      'wStkA',
-      'wStkB',
-      'wStkC',
-      'TBILL',
-      'TB13W',
-      'TB26W',
-      'TB52W',
+  it('lists the six faucet tokens in the file order, with their privacy and decimals', () => {
+    expect(r.tokens.map((t) => [t.symbol, t.decimals, t.privacy])).toEqual([
+      ['twBTC', 8, 'shielded'],
+      ['twETH', 18, 'shielded'],
+      ['twUSDC', 6, 'shielded'],
+      ['twUSDM', 6, 'shielded'],
+      ['utwUSDC', 6, 'unshielded'],
+      ['utwBTC', 8, 'unshielded'],
     ]);
-    expect(r.tokens.map((t) => t.symbol)).toEqual(['stkA', 'stkB', 'stkC', 'USDC', 'TBILL', 'TB13W', 'TB26W', 'TB52W']);
+    expect(r.shielded().map((t) => t.symbol)).toEqual(['twBTC', 'twETH', 'twUSDC', 'twUSDM']);
   });
 
-  it('carries the pinned addresses, colours and decimals (plan Pins table)', () => {
-    const a = r.byMidnightName('wStkA');
-    expect(a?.sepoliaAddress).toBe('0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52');
-    expect(a?.midnightColour).toBe('5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02');
-    expect(r.byMidnightName('wStkB')?.midnightColour).toBe(
-      'e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588',
+  it("takes each token's ACTIVE deployment: its colour is the registry's tokenId, its issuer the contract", () => {
+    const usdc = r.bySymbol('twUSDC')!;
+    expect(usdc.name).toBe('Test-wrapped USDC');
+    expect(usdc.midnightColour).toBe('e934b965a454ed6857080e9956ea83fb5542e0a860e96ce91daf35f5d7b02c9f');
+    expect(usdc.contract).toBe('11e406f1a83fa87d3fafe62674c1822ad5fb13a1b31765a601f90b2563ab0ec6');
+    expect(usdc.domainSeparator).toBe('mint-test-tokens:twUSDC');
+    expect(r.bySymbol('twBTC')?.midnightColour).toBe(
+      'ad2ba014014e6ec705357be9db5d3ad6f535d4bef6576f84a461f23b313a2e8e',
     );
-    expect(r.byMidnightName('wStkC')?.midnightColour).toBe(
-      'db8ae472c587a0709094eeaf98b81a0d46752db1a807e77bd209814e808f19d9',
+    expect(r.bySymbol('twETH')?.midnightColour).toBe(
+      '2862f0f347068b6c4909079ab8e991067b71fe2263ef00c20f017eefb6e9477a',
     );
-    const usdc = r.usdc();
-    expect(usdc.sepoliaAddress).toBe('0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238');
-    expect(usdc.midnightColour).toBe('e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d');
+    expect(r.bySymbol('twUSDM')?.contract).toBe('6f6dacef3dbddad25137afedadc8beb58bc4a8ee65d8c7150c21ca0bcb9bfede');
+    expect(r.bySymbol('utwUSDC')?.contract).toBe('473e8354fe9cd1d65d30664805ff1672fa9dee3066ae8cb92505e5f1a7a1691e');
+    expect(r.bySymbol('utwBTC')?.contract).toBe('2e962ef4bc7f2f44056a4089fed639fc5b67aca64dc5ed66e6e508b33836b59e');
     for (const t of r.tokens) {
-      expect(t.decimals).toBe(6);
-      expect(t.vault).toBe('7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637');
-      expect(t.source?.commit).toBe('6c7505a4d2ec223fce5eb10266c331576805465a');
+      expect(t.source).toBe(STAGENET_SOURCE);
+      expect(t.domainSeparator).toBe(`mint-test-tokens:${t.symbol}`);
     }
   });
 
-  // PR #4's "TBILL for MN Bank" and "Test T-Bill series for MN Bank" sections (@ 6c7505a).
-  it.each([
-    [
-      'TBILL',
-      '0x1531b11722CF9b600816ED0eAcBc49594DbB991f',
-      '05b32284398b1a75dac4f92dcb8802a57ce2194dd3cae781f870430c18a8a8e9',
-    ],
-    [
-      'TB13W',
-      '0x5cF366decA552c30eBB2504d0b9Ee104A99f1c72',
-      'b3d96e9933fb4548ce8a17a63f4c92bb3894b3571873c3edcc8a08aa7ce2512b',
-    ],
-    [
-      'TB26W',
-      '0x26dB7221903e62310409e454442adBb46E0B6E33',
-      '7b044b55c0493a67eeb16f25d3757eea07f9abaf55e374739953afd449bc3b62',
-    ],
-    [
-      'TB52W',
-      '0x02A0D1BaF66351715A84aC4763b82f1155BdD5b0',
-      '8f4798a5ee48747f37562da76ed8711ad4b4ea1ad7ac16d80eb74b92792b9ec2',
-    ],
-  ])('carries %s as PR #4 lists it: no "w", a stock, its address and colour', (symbol, address, colour) => {
-    const t = r.byMidnightName(symbol);
-    expect(t?.symbol).toBe(symbol);
-    expect(t?.role).toBe('stock');
-    expect(t?.sepoliaAddress).toBe(address);
-    expect(t?.midnightColour).toBe(colour);
-    expect(r.bySepoliaAddress(address)).toBe(t);
-    expect(r.byColour(colour)).toBe(t);
-    expect(r.isTradablePair(r.usdc().midnightColour, colour)).toBe(true);
+  it('agrees with the colours the staging kernel lists (its captured /v1/known-tokens)', () => {
+    const known = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('./fixtures/kernel/staging-2026-09-27/known-tokens.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as Array<{ name: string; token_color: string; decimals: number; kind: string }>;
+    for (const symbol of ['twBTC', 'twETH', 'twUSDC']) {
+      const k = known.find((x) => x.name === symbol.toUpperCase())!;
+      const t = r.bySymbol(symbol)!;
+      expect([k.token_color, k.decimals, k.kind]).toEqual([t.midnightColour, t.decimals, t.privacy]);
+    }
   });
 
-  it('marks every entry confirmed: PR #4 lists them as canonical, USDC included', () => {
-    expect(r.usdc().provisional).toBe(false);
-    expect(r.tokens.every((t) => !t.provisional)).toBe(true);
+  it('finds a token by colour in any case, and by symbol without regard to case', () => {
+    const btc = r.bySymbol('twBTC')!;
+    expect(r.byColour(`0x${btc.midnightColour.toUpperCase()}`)).toBe(btc);
+    expect(r.byColour('not a colour')).toBeUndefined();
+    expect(r.bySymbol('TWBTC')).toBe(btc);
+    expect(r.bySymbol(' twbtc ')).toBe(btc);
+    expect(r.bySymbol('BTC')).toBeUndefined();
   });
 
-  it('looks tokens up by colour and address in any case', () => {
-    expect(r.byColour('0x5EB2A3CEBB2EBE7BA910C78F62C9E28E0D74ACBD00C810730DEF3578860E6A02')?.midnightName).toBe(
-      'wStkA',
+  it('refuses a registry file for another network, or one without an active deployment', () => {
+    const file = JSON.parse(readFileSync(vendored, 'utf8'));
+    expect(() => registryFromMintTestTokens('undeployed', file, STAGENET_SOURCE)).toThrow(/for stagenet/);
+    const noActive = structuredClone(file);
+    noActive.tokens[0].deployments[0].status = 'retired';
+    expect(() => registryFromMintTestTokens('stagenet', noActive, STAGENET_SOURCE)).toThrow(/twBTC: no active/);
+    expect(() => registryFromMintTestTokens('stagenet', { status: 'unavailable' }, STAGENET_SOURCE)).toThrow(
+      TokenRegistryError,
     );
-    expect(r.byColour('not hex')).toBeUndefined();
-    expect(r.bySepoliaAddress('0x2ab7be0769e3bbd5c7d047b422cb383fcc06fb52')?.symbol).toBe('stkA');
-  });
-
-  it('only USDC against one stock is a tradable pair (FR-008)', () => {
-    const usdc = r.usdc().midnightColour;
-    const [a, b] = r.stocks();
-    expect(r.isTradablePair(usdc, a!.midnightColour)).toBe(true);
-    expect(r.isTradablePair(a!.midnightColour, usdc)).toBe(true);
-    expect(r.isTradablePair(a!.midnightColour, b!.midnightColour)).toBe(false);
-    expect(r.isTradablePair(usdc, usdc)).toBe(false);
-    expect(r.isTradablePair(usdc, '11'.repeat(32))).toBe(false);
   });
 });
 
-describe('registries from configuration (the local stack)', () => {
-  const local = {
-    tokens: [
-      { symbol: 'tUSDC', midnightName: 'shielded-a', role: 'usdc', decimals: 6, midnightColour: 'aa'.repeat(32) },
-      {
-        symbol: 'tSTK',
-        midnightName: 'shielded-b',
-        role: 'stock',
-        decimals: 6,
-        midnightColour: `0x${'BB'.repeat(32)}`,
-      },
-    ],
-  };
+describe('registries from configuration', () => {
+  const extra = { symbol: 'nmGOLD', name: 'Night Market gold', decimals: 2, midnightColour: colour('f') };
 
-  it('maps local colours to the roles', () => {
-    const r = registryFromConfig('undeployed', local);
-    expect(r.usdc().midnightName).toBe('shielded-a');
-    expect(r.stocks()[0]?.midnightColour).toBe('bb'.repeat(32));
-    expect(r.usdc().sepoliaAddress).toBe('');
-    expect(r.usdc().source).toBeNull();
+  it('extends the built-in list by default (a token the market deployed itself)', () => {
+    const r = registryFor('stagenet', { tokens: [extra] });
+    expect(r.tokens).toHaveLength(7);
+    expect(r.bySymbol('nmGOLD')).toMatchObject({ decimals: 2, privacy: 'shielded', contract: '', source: null });
+    expect(r.bySymbol('twUSDC')?.source).toBe(STAGENET_SOURCE);
   });
 
-  it('the local network has no built-in list', () => {
-    expect(() => registryFor('undeployed')).toThrow(TokenRegistryError);
-    expect(registryFor('undeployed', local).network).toBe('undeployed');
-    expect(registryFor('stagenet').usdc().symbol).toBe('USDC');
+  it('replaces it on request, and is the whole list on a network with none (the local stack)', () => {
+    expect(registryFor('stagenet', { mode: 'replace', tokens: [extra] }).tokens.map((t) => t.symbol)).toEqual([
+      'nmGOLD',
+    ]);
+    expect(registryFor('undeployed', { tokens: [extra] }).tokens).toHaveLength(1);
+    expect(registryFromConfig('undeployed', { tokens: [extra] }).bySymbol('nmgold')?.name).toBe('Night Market gold');
+    expect(() => registryFor('undeployed')).toThrow(/no built-in token list/);
+    expect(registryFor('stagenet').tokens).toHaveLength(6);
   });
 
-  it('refuses a registry without exactly one usdc, duplicates, or bad values', () => {
-    const [u, s] = local.tokens as unknown as [Record<string, unknown>, Record<string, unknown>];
-    expect(() =>
-      registryFromConfig('undeployed', { tokens: [s, { ...s, midnightName: 'x', midnightColour: 'cc'.repeat(32) }] }),
-    ).toThrow(/exactly one usdc/);
-    expect(() =>
-      registryFromConfig('undeployed', {
-        tokens: [u, { ...u, role: 'usdc', midnightName: 'y', midnightColour: 'dd'.repeat(32) }, s],
-      }),
-    ).toThrow(/exactly one usdc/);
-    expect(() => registryFromConfig('undeployed', { tokens: [u, { ...s, midnightColour: 'aa'.repeat(32) }] })).toThrow(
-      /duplicate colour/,
+  it('refuses duplicates, bad decimals and malformed entries', () => {
+    const dupColour = { ...extra, symbol: 'OTHER', midnightColour: stagenetRegistry().tokens[0]!.midnightColour };
+    expect(() => registryFor('stagenet', { tokens: [dupColour] })).toThrow(/duplicate colour/);
+    expect(() => registryFor('stagenet', { tokens: [{ ...extra, symbol: 'TWUSDC' }] })).toThrow(/duplicate symbol/);
+    expect(() => registryFromConfig('undeployed', { tokens: [{ ...extra, decimals: 19 }] })).toThrow(
+      /invalid token configuration/,
     );
-    expect(() => registryFromConfig('undeployed', { tokens: [u, { ...s, decimals: 19 }] })).toThrow(TokenRegistryError);
-    expect(() => registryFromConfig('undeployed', { tokens: [u, { ...s, midnightColour: 'zz' }] })).toThrow(
-      TokenRegistryError,
+    expect(() => registryFromConfig('undeployed', { tokens: [{ ...extra, symbol: 'no spaces' }] })).toThrow(
+      /invalid token configuration/,
     );
+    expect(() => registryFromConfig('undeployed', { tokens: [] })).toThrow(/invalid token configuration/);
+  });
+});
+
+describe('pairs', () => {
+  const r = stagenetRegistry();
+
+  it("the stagenet default pairs, in the list's order, with no special token", () => {
+    const { pairs, warnings } = resolvePairs(r, undefined, NETWORK_DEFAULT_PAIRS.stagenet);
+    expect(warnings).toEqual([]);
+    expect(pairs.map((p) => p.id)).toEqual(['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC']);
+    expect(pairs.map((p) => [p.base.decimals, p.quote.decimals])).toEqual([
+      [8, 6],
+      [18, 6],
+      [6, 6],
+      [18, 8],
+    ]);
+  });
+
+  it("a site's own list replaces the default, in any case, and a bad entry is skipped with a warning", () => {
+    const { pairs, warnings } = resolvePairs(
+      r,
+      ['twbtc/TWUSDM', 'twETH/twBTC', 'twBTC/twUSDM', 'twUSDM/twBTC', 'utwUSDC/twUSDC', 'nope/twUSDC', 'twBTC', 1],
+      NETWORK_DEFAULT_PAIRS.stagenet,
+    );
+    expect(pairs.map((p) => p.id)).toEqual(['twBTC/twUSDM', 'twETH/twBTC']);
+    expect(warnings).toEqual([
+      'config.json "pairs": twBTC/twUSDM is already listed',
+      'config.json "pairs": twUSDM/twBTC is already listed',
+      'config.json "pairs": utwUSDC/twUSDC: utwUSDC is not shielded, so it cannot trade',
+      'config.json "pairs": nope/twUSDC: unknown token nope',
+      'config.json "pairs": "twBTC" is not a pair (write BASE/QUOTE)',
+      'config.json "pairs": "1" is not a pair (write BASE/QUOTE)',
+    ]);
+  });
+
+  it('a list with nothing valid falls back to the default, so a typo never empties the market', () => {
+    const { pairs, warnings } = resolvePairs(r, ['BTC/USDC'], NETWORK_DEFAULT_PAIRS.stagenet);
+    expect(pairs).toHaveLength(4);
+    expect(warnings.at(-1)).toBe('config.json "pairs" names no valid pair; using the default pairs');
+    expect(resolvePairs(r, 'twBTC/twUSDC', NETWORK_DEFAULT_PAIRS.stagenet).pairs).toHaveLength(4);
+  });
+
+  it('with no default list, every pair of shielded tokens, the earlier token as the base', () => {
+    const local = registryFromConfig('undeployed', {
+      tokens: [
+        { symbol: 'A', decimals: 6, midnightColour: colour('a') },
+        { symbol: 'B', decimals: 6, midnightColour: colour('b') },
+        { symbol: 'U', decimals: 6, privacy: 'unshielded', midnightColour: colour('c') },
+        { symbol: 'C', decimals: 6, midnightColour: colour('d') },
+      ],
+    });
+    expect(resolvePairs(local, undefined, null).pairs.map((p) => p.id)).toEqual(['A/B', 'A/C', 'B/C']);
+    expect(allPairs(local)).toHaveLength(3);
+  });
+
+  it('makePair refuses unknown, unshielded or identical tokens', () => {
+    expect(() => makePair(r, 'twBTC', 'twBTC')).toThrow(PairConfigError);
+    expect(() => makePair(r, 'twBTC', 'utwBTC')).toThrow(/not shielded/);
+    expect(() => makePair(r, 'BTC', 'twBTC')).toThrow(/unknown token BTC/);
+    expect(parsePairId(' twBTC / twUSDC ')).toEqual({ base: 'twBTC', quote: 'twUSDC' });
+    expect(parsePairId('a/b/c')).toBeNull();
+  });
+
+  it('pairFor finds the listed pair of two colours in either orientation', () => {
+    const pairs = resolvePairs(r, undefined, NETWORK_DEFAULT_PAIRS.stagenet).pairs;
+    const btc = r.bySymbol('twBTC')!.midnightColour;
+    const eth = r.bySymbol('twETH')!.midnightColour;
+    const usdm = r.bySymbol('twUSDM')!.midnightColour;
+    expect(pairFor(pairs, eth, btc)).toMatchObject({ pair: { id: 'twETH/twBTC' }, givesBase: true });
+    expect(pairFor(pairs, `0x${btc.toUpperCase()}`, eth)).toMatchObject({
+      pair: { id: 'twETH/twBTC' },
+      givesBase: false,
+    });
+    expect(pairFor(pairs, usdm, btc)).toBeNull();
   });
 });

@@ -3,18 +3,27 @@
 // an unknown account, 501 without a key volume, 503 when the chain cannot be read, and 501
 // `history-too-long` for an account with a full indexer page of actions (no paging yet, Q27).
 
+import { UnshieldedBalancesViewSchema, unshieldedBalancesPath } from '@nightmarket/core';
 import { describe, expect, it } from 'vitest';
 
 import {
   AccountHistoryTooLongError,
   IndexerClient,
   IndexerError,
+  accountTxViews,
   zswapActivityOf,
   type DecodedEvent,
   type RawActionTx,
 } from '../src/chain/indexer.js';
-import { accountStateView, inboxPageOf, type ChainReader, type LedgerView } from '../src/chain/reader.js';
-import { harness } from './harness.js';
+import {
+  IndexerChainReader,
+  accountStateView,
+  inboxPageOf,
+  unshieldedBalancesOf,
+  type ChainReader,
+  type LedgerView,
+} from '../src/chain/reader.js';
+import { harness, testConfig } from './harness.js';
 
 const ME = 'aa'.repeat(32);
 const OTHER = 'bb'.repeat(32);
@@ -88,6 +97,53 @@ describe('IndexerClient.accountTransactions', () => {
     ]);
   });
 
+  // AA 00047 P11.F (R4-2): each call's entry point, so a refused take can be judged by its transaction.
+  it('keeps the entry points of the account’s calls per transaction; decoded views keep the account’s leaves and spends', async () => {
+    const action = (
+      hash: string,
+      height: number,
+      entryPoint: string | null,
+      events: Array<{ id: number; raw: string }>,
+    ) => ({
+      __typename: entryPoint ? 'ContractCall' : 'ContractDeploy',
+      ...(entryPoint ? { entryPoint } : {}),
+      transaction: { hash, block: { height }, zswapLedgerEvents: events },
+    });
+    const c = new IndexerClient({
+      indexerUrl: 'http://indexer',
+      fetchImpl: fakeFetch({
+        data: {
+          contract: {
+            actions: [
+              action('t2', 9, 'open_swap_shielded_with_ed25519', [{ id: 4, raw: 'e4' }]),
+              action('t2', 9, 'deposit_shielded', [{ id: 4, raw: 'e4' }]),
+              action('t1', 5, null, [
+                { id: 1, raw: 'e1' },
+                { id: 3, raw: 'e3' },
+              ]),
+            ],
+          },
+          block: { height: 11 },
+        },
+      }),
+    });
+    const r = await c.accountTransactions(ME);
+    expect(r?.txs.map((t) => [t.hash, t.entryPoints])).toEqual([
+      ['t1', []],
+      ['t2', ['open_swap_shielded_with_ed25519', 'deposit_shielded']],
+    ]);
+    expect(accountTxViews(ME, r!.txs, decode)).toEqual([
+      { hash: 't1', blockHeight: 5, entryPoints: [], outputs: ['01'.repeat(32)], inputs: [] },
+      {
+        hash: 't2',
+        blockHeight: 9,
+        entryPoints: ['open_swap_shielded_with_ed25519', 'deposit_shielded'],
+        outputs: [],
+        inputs: ['04'.repeat(32)],
+      },
+    ]);
+  });
+
   it('answers null for an unknown contract, and throws on indexer errors', async () => {
     expect(
       await new IndexerClient({
@@ -106,7 +162,7 @@ describe('IndexerClient.accountTransactions', () => {
     ).rejects.toThrow('502');
   });
 
-  it('refuses a full page of actions with its own error (no paging yet, Q27)', async () => {
+  it('without a WebSocket URL, refuses a full page of actions with its own error (as before AA 00047 P11)', async () => {
     const actions = Array.from({ length: 3 }, (_, i) => ({
       transaction: { hash: `t${i}`, block: { height: i }, zswapLedgerEvents: [] },
     }));
@@ -138,7 +194,6 @@ describe('account state and inbox views', () => {
     inbox_count: 3n,
     enc_key: Uint8Array.from(Buffer.from('cc'.repeat(32), 'hex')),
     evm_domain_salt: Uint8Array.from(Buffer.from('dd'.repeat(32), 'hex')),
-    vault_address: { bytes: Uint8Array.from(Buffer.from('ee'.repeat(32), 'hex')) },
     devices: [Uint8Array.from(Buffer.from('f1'.repeat(32), 'hex'))],
     inbox: {
       member: (k) => k !== 1n,
@@ -156,8 +211,7 @@ describe('account state and inbox views', () => {
       authNonce: '2',
       inboxCount: '3',
       encKey: 'cc'.repeat(32),
-      vault: 'ee'.repeat(32),
-      evmDomainSalt: 'dd'.repeat(32),
+      networkSalt: 'dd'.repeat(32),
     });
   });
 
@@ -174,7 +228,59 @@ describe('GET /v1/accounts/:account/*', () => {
     accountState: async () => null,
     inbox: async () => null,
     zswap: async () => null,
+    unshielded: async () => null,
     ...over,
+  });
+
+  it('serves the unshielded balances (B3, for the holdings panel): unshielded rows only, non-zero, sorted', async () => {
+    const balance = new Map<{ tag: string; raw?: string }, bigint>([
+      [{ tag: 'unshielded', raw: 'BB'.repeat(32) }, 25_000_000n],
+      [{ tag: 'shielded', raw: 'cc'.repeat(32) }, 7n],
+      [{ tag: 'unshielded', raw: 'aa'.repeat(32) }, 3n],
+      [{ tag: 'unshielded', raw: 'dd'.repeat(32) }, 0n],
+      [{ tag: 'dust' }, 9n],
+    ]);
+    const view = unshieldedBalancesOf(ME, { balance }, 1234);
+    expect(UnshieldedBalancesViewSchema.parse(view)).toEqual({
+      account: ME,
+      balances: [
+        { colour: 'aa'.repeat(32), amount: '3' },
+        { colour: 'bb'.repeat(32), amount: '25000000' },
+      ],
+      blockHeight: 1234,
+    });
+    const h = harness({ chain: chain({ unshielded: async (a) => unshieldedBalancesOf(a, { balance }, 9) }) });
+    const res = await h.app.request(unshieldedBalancesPath(ME));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { balances: unknown[] }).balances).toHaveLength(2);
+    expect((await harness({ chain: chain({}) }).app.request(unshieldedBalancesPath(ME))).status).toBe(404);
+    expect((await harness().app.request(unshieldedBalancesPath(ME))).status).toBe(501);
+  });
+
+  it('reads them from the contract state and the indexer tip', async () => {
+    const indexer = { tip: async () => 77 } as unknown as IndexerClient;
+    const reader = new IndexerChainReader(
+      async () => null,
+      indexer,
+      undefined,
+      async (a) => (a === ME ? { balance: new Map([[{ tag: 'unshielded', raw: 'ee'.repeat(32) }, 5n]]) } : null),
+    );
+    expect(await reader.unshielded(ME)).toEqual({
+      account: ME,
+      balances: [{ colour: 'ee'.repeat(32), amount: '5' }],
+      blockHeight: 77,
+    });
+    expect(await reader.unshielded('00'.repeat(32))).toBeNull();
+    await expect(new IndexerChainReader(async () => null, indexer).unshielded(ME)).rejects.toThrow(/contract balances/);
+  });
+
+  it("tells the page whether withdrawals need F-B6's second signature (Q13)", async () => {
+    const off = (await (await harness().app.request('/v1/config')).json()) as { withdrawRecipientEnvelope?: boolean };
+    expect(off.withdrawRecipientEnvelope).toBe(false);
+    const on = (await (
+      await harness({ config: testConfig({ RELAY_WITHDRAW_RECIPIENT_ENVELOPE: 'true' }) }).app.request('/v1/config')
+    ).json()) as { withdrawRecipientEnvelope?: boolean };
+    expect(on.withdrawRecipientEnvelope).toBe(true);
   });
 
   it('serves the reads, 404 for an unknown account, 503 when the chain fails', async () => {
@@ -199,11 +305,11 @@ describe('GET /v1/accounts/:account/*', () => {
     expect((await h.app.request(`/v1/accounts/${ME}/zswap`)).status).toBe(501);
   });
 
-  it('says 501 history-too-long, not "chain unavailable", for an account beyond one indexer page (Q27)', async () => {
+  it('says 501 history-too-long, not "chain unavailable", for an account beyond what the relay reads', async () => {
     const h = harness({
       chain: chain({
         zswap: async () => {
-          throw new AccountHistoryTooLongError(500);
+          throw new AccountHistoryTooLongError(100_000);
         },
       }),
     });
@@ -211,6 +317,6 @@ describe('GET /v1/accounts/:account/*', () => {
     expect(res.status).toBe(501);
     const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe('history-too-long');
-    expect(body.error.message).toContain('500 or more actions');
+    expect(body.error.message).toContain('more than 100000 actions');
   });
 });

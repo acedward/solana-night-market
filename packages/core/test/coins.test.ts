@@ -10,6 +10,8 @@ import {
   contractCoinCommitment,
   contractCoinNullifier,
   holdingsByColour,
+  confirmedOnChain,
+  unconfirmedCoins,
   localCoin,
   reconcileCoins,
   type OwnedInput,
@@ -151,6 +153,118 @@ describe('reconcileCoins', () => {
   });
 });
 
+// AA 00047 P11.B (audit round 3 R3-3 / F-B3-2, questions Q47 A, Q53): coins are keyed by their FULL
+// commitment, and a position comes only from a leaf with exactly that commitment.
+describe('reconcileCoins keys every coin by its full commitment (R3-3)', () => {
+  // Auditor A's probe `evidence/00047-mn-bank-solana/audit/round3/auditor-A/audit-a3-probe-coins.ts`,
+  // as a test: a genuine 1-unit coin at position 7, then a second note with the SAME colour and nonce
+  // claiming 10^12. Before P11.B the note took over the coin, its position and its confirmation.
+  it('auditor A’s probe: a counterfeit note never inherits the genuine coin’s position, nor replaces it', () => {
+    const colour = 'e934b965a454ed6857080e9956ea83fb5542e0a860e96ce91daf35f5d7b02c9f';
+    const nonce = '22'.repeat(32);
+    const genuine = { nonce, color: colour, value: '1' };
+    const commitment = contractCoinCommitment(genuine, ACCOUNT);
+    const outputs = [{ commitment, mtIndex: '7', txHash: 'aa'.repeat(32), blockHeight: 1 }];
+    const walk1 = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [{ ...genuine, inboxIndex: '0' }],
+      outputs,
+      inputs: [],
+      previous: [],
+    });
+    expect(walk1.map((c) => [c.value, c.mtIndex])).toEqual([['1', '7']]);
+    const walk2 = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [
+        { ...genuine, inboxIndex: '0' },
+        { nonce, color: colour, value: '1000000000000', inboxIndex: '1' },
+      ],
+      outputs,
+      inputs: [],
+      previous: walk1,
+    });
+    expect(walk2.map((c) => [c.value, c.mtIndex, c.commitment === commitment])).toEqual([
+      ['1000000000000', null, false],
+      ['1', '7', true],
+    ]);
+    const [h] = holdingsByColour(walk2);
+    expect(h).toMatchObject({ total: 1n, largest: 1n, coins: 1, unpositioned: 1 });
+    expect(() => chooseCoin(walk2, colour, 500_000_000_000n)).toThrow(CoinChoiceError);
+    expect(chooseCoin(walk2, colour, 1n)).toMatchObject({ value: '1', mtIndex: '7' });
+    // The same with the counterfeit FIRST in the inbox: the order does not matter.
+    const swapped = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [
+        { nonce, color: colour, value: '1000000000000', inboxIndex: '0' },
+        { ...genuine, inboxIndex: '1' },
+      ],
+      outputs,
+      inputs: [],
+      previous: [],
+    });
+    expect(holdingsByColour(swapped)[0]).toMatchObject({ total: 1n });
+  });
+
+  it('a stored position (an older page’s, or a relay’s) is never taken on trust: no leaf, no position', () => {
+    const a = coin(1, USDC, 60_000_000n);
+    const stored = { ...localCoin(a, ACCOUNT, 'change', 'relay-said'), mtIndex: '12' };
+    const [c] = reconcileCoins({ account: ACCOUNT, inbox: [], outputs: [], inputs: [], previous: [stored] });
+    expect(c).toMatchObject({ mtIndex: null });
+    expect(c!.createdTx).toBeUndefined();
+    expect(confirmedOnChain(c!)).toBe(false);
+    // A stored record whose `commitment` field lies about the coin is recomputed from the coin itself.
+    const lying = { ...stored, commitment: 'ff'.repeat(32) };
+    const [d] = reconcileCoins({ account: ACCOUNT, inbox: [], outputs: [leaf(a, 12)], inputs: [], previous: [lying] });
+    expect(d).toMatchObject({ commitment: contractCoinCommitment(a, ACCOUNT), mtIndex: '12' });
+  });
+
+  it('two notes describing the same coin are one coin; another value is another coin', () => {
+    const a = coin(1, USDC, 60_000_000n);
+    const coins = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [
+        { ...a, inboxIndex: '0' },
+        { ...a, inboxIndex: '4' },
+        { ...a, value: '60000001', inboxIndex: '5' },
+      ],
+      outputs: [leaf(a, 3)],
+      inputs: [],
+      previous: [],
+    });
+    expect(coins.map((c) => [c.value, c.inboxIndex, c.mtIndex])).toEqual([
+      ['60000001', '5', null],
+      ['60000000', '0', '3'],
+    ]);
+  });
+
+  it('a coin set aside by this browser stays set aside until released; a chain spend names its transaction', () => {
+    const a = coin(1, USDC, 60_000_000n);
+    const aside = {
+      ...localCoin(a, ACCOUNT, 'inbox'),
+      inInbox: true,
+      inboxIndex: '0',
+      spent: true,
+      spentTx: 'relay-tx',
+    };
+    const [kept] = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [{ ...a, inboxIndex: '0' }],
+      outputs: [leaf(a, 1)],
+      inputs: [],
+      previous: [aside],
+    });
+    expect(kept).toMatchObject({ spent: true, mtIndex: '1' });
+    const [spentOnChain] = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [{ ...a, inboxIndex: '0' }],
+      outputs: [leaf(a, 1)],
+      inputs: [spend(a, 'chain-tx')],
+      previous: [aside],
+    });
+    expect(spentOnChain).toMatchObject({ spent: true, spentTx: 'chain-tx' });
+  });
+});
+
 describe('holdings and the coin a payment uses (Q9)', () => {
   const coins = reconcileCoins({
     account: ACCOUNT,
@@ -169,12 +283,31 @@ describe('holdings and the coin a payment uses (Q9)', () => {
     previous: [],
   });
 
-  it('adds the unspent coins and names the largest single payment', () => {
+  it('adds the unspent coins the chain confirms and names the largest single payment', () => {
     // 100 wUSDC as 60 + 40 shows "largest single payment 60" (spec US2 scenario 1); the spent
-    // coin is out, and the coin without a position counts in the total but cannot pay yet.
+    // coin is out. The coin without a position is NOT in the total (AA 00047 P10, R2-6): only
+    // counted as unconfirmed, since an inbox note alone proves nothing.
     expect(holdingsByColour(coins)).toEqual([
-      { color: USDC, total: 199_000_000n, largest: 60_000_000n, coins: 3, unpositioned: 1, notInInbox: 0 },
+      { color: USDC, total: 100_000_000n, largest: 60_000_000n, coins: 2, unpositioned: 1, notInInbox: 0 },
     ]);
+    expect(unconfirmedCoins(coins).map((c) => c.value)).toEqual(['99000000']);
+  });
+
+  // AA 00047 P10 (audit round 2, R2-6 / F-A2-4): anyone can file an inbox note with
+  // `deposit_shielded`, describing a coin that exists nowhere. It must never show as a coin.
+  it('never counts an inbox note whose coin the chain does not confirm (a fake deposit note)', () => {
+    const fake = reconcileCoins({
+      account: ACCOUNT,
+      inbox: [{ ...coin(9, STK, 1_000_000_000_000n), inboxIndex: '0' }],
+      outputs: [], // no leaf anywhere: the note describes nothing on chain
+      inputs: [],
+      previous: [],
+    });
+    expect(fake).toHaveLength(1);
+    expect(confirmedOnChain(fake[0]!)).toBe(false);
+    expect(holdingsByColour(fake)).toEqual([]); // no row, no total
+    expect(unconfirmedCoins(fake)).toHaveLength(1);
+    expect(() => chooseCoin(fake, STK, 1n)).toThrow(/no spendable coin/);
   });
 
   it('pays from the smallest single coin that covers the amount', () => {

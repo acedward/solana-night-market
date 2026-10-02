@@ -1,78 +1,80 @@
 // Plan P4-A, route tests: auth and rate limits on EVERY state-changing route, with the catalogue
-// the relay really runs (main.ts: register, the gated account calls, the bridge, trading), not the
-// P1 stubs. For each route: an unsigned call, a wrong signer, an expired authorisation, a replay,
-// and an unknown nonce are all refused BEFORE any work (no job queued, no sponsor wallet opened, no
-// bridge call); the per-client and per-owner rate limits apply; a sponsor that is low refuses
-// before any authorisation is used up. Read routes leak nothing secret.
+// the relay runs once a device arm is wired (main.ts with `wiredArm()`: register, the gated account
+// calls, trading), not the stubs. For each route: an unsigned call, a wrong signer, an expired
+// authorisation, a replay, and an unknown nonce are all refused BEFORE any work (no job queued, no
+// sponsor wallet opened); the per-client and per-owner rate limits apply; a sponsor that is low
+// refuses before any authorisation is used up. Read routes leak nothing secret.
 //
 // Two authorisations exist (relay/src/auth/verifiers.ts):
-//   relay-action   register, bridge-resume: a RelayAction signature with a relay-issued nonce;
-//   passport-call  withdraw, append-inbox, bridge-deposit, bridge-withdraw, open-swap, take: the
+//   relay-action   register, demo-tokens: a RelayAction envelope with a relay-issued nonce;
+//   passport-call  withdraw, withdraw-unshielded, append-inbox, cancel-offers, open-swap, take: the
 //                  call's own Passport signature; its "nonce" is the account's on-chain auth nonce.
+// The arm and the envelope scheme are the TEST ones (./fake-arm.ts, the core test scheme): the route
+// rules do not depend on them. The Ed25519 arm's own checks are relay/test/ed25519-arm.test.ts, the
+// Solana scheme's packages/core/test/solana-auth.test.ts.
 
-import { type BaseWallet, Wallet, hexlify, randomBytes } from 'ethers';
+import { randomBytes } from 'node:crypto';
+
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { describe, expect, it } from 'vitest';
 
 import {
   API_PATHS,
-  DEFAULT_EVM_GAS,
   RELAY_ACTIONS,
-  RELAY_ACTION_TYPES,
   buildRelayActionMessage,
-  evmTxParamsJson,
-  registryFromConfig,
-  relayDomain,
   type AppendInboxPayload,
-  type BridgeDepositPayload,
-  type BridgeWithdrawPayload,
+  type CancelOffersPayload,
+  type RestoreEncKeyPayload,
   type HealthResponse,
   type OpenSwapPayload,
   type RelayActionName,
   type TakePayload,
   type WithdrawPayload,
-} from '@mnbank/core';
-import {
-  appendInboxRequest,
-  bridgeDepositStartRequest,
-  bridgeWithdrawStartRequest,
-  evmDeviceEntry,
-  gatedCall,
-  openSwapGatedCall,
-  withdrawRequest,
-} from '@mnbank/core/passport';
+  type WithdrawUnshieldedPayload,
+} from '@nightmarket/core';
 
-import { accountCatalogue, withBridge, withTrade } from '../src/actions/catalogue.js';
+import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
+import { AccountCaps } from '../src/actions/account-caps.js';
+import {
+  accountCatalogue,
+  withAccountCaps,
+  withDemoTokens,
+  withRegistrationCaps,
+  withTrade,
+} from '../src/actions/catalogue.js';
+import { FailureBudget } from '../src/actions/failure-budget.js';
+import { RegistrationCaps } from '../src/actions/registration-caps.js';
+import { demoTokens } from '../src/demo/action.js';
+import { DemoTokenClaims } from '../src/demo/claims.js';
 import { createApp } from '../src/app.js';
 import { NonceStore } from '../src/auth/nonces.js';
 import { passportCallAuthoriser } from '../src/auth/passport-call.js';
 import { DigestReplayGuard } from '../src/auth/verifiers.js';
-import { BridgeService } from '../src/bridge/service.js';
-import { deviceChecker, gatedStartVerifier } from '../src/bridge/wiring.js';
 import { notImplementedChainReader } from '../src/chain/reader.js';
 import { healthCollector, httpProbes } from '../src/health.js';
 import { loadConfig } from '../src/config.js';
-import type { AccountLedger, PassportRuntime } from '../src/passport/runtime.js';
 import { ProofServerClient } from '../src/prover/client.js';
 import { JobQueue } from '../src/queue/jobs.js';
 import type { SponsorStatus } from '../src/sponsor/session.js';
-import { COLOUR_A, FakeBridge, STKA, VAULT } from './bridge-fake.js';
+import { callSigner, fakeAccountRuntime, testArm } from './fake-arm.js';
 import { FakeSponsor, LOCAL_TOKENS, silentLog, testEntitlements } from './harness.js';
 
 const ACCOUNT = '5e'.repeat(32);
-const SALT = '9a'.repeat(32);
 const AUTH_NONCE = 3n;
-const unhex = (h: string) => Uint8Array.from(Buffer.from(h, 'hex'));
+const COLOUR_A = 'a1'.repeat(32);
 
 type Kind = 'relay-action' | 'passport-call';
 const KIND: Record<RelayActionName, Kind> = {
   register: 'relay-action',
-  'bridge-resume': 'relay-action',
   withdraw: 'passport-call',
   'append-inbox': 'passport-call',
-  'bridge-deposit': 'passport-call',
-  'bridge-withdraw': 'passport-call',
   'open-swap': 'passport-call',
   take: 'passport-call',
+  'withdraw-unshielded': 'passport-call',
+  'demo-tokens': 'relay-action',
+  'cancel-offers': 'passport-call',
+  // AA 00047 P10.R: "Restore my encryption key", authorised by its own signature (R2-3).
+  'restore-enc-key': 'passport-call',
 };
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
@@ -84,91 +86,78 @@ class CountingSponsor extends FakeSponsor {
   }
 }
 
-/** The account the device owns: booted, one live `evm` device at use counter 0, auth nonce 3. */
-function fakeRuntime(device: string): PassportRuntime & { reads: number } {
-  const live = new Set([evmDeviceEntry(ACCOUNT, device, 0n, 0n)]);
-  const ledger: AccountLedger = {
-    booted: true,
-    device_count: 1n,
-    device_epoch: 0n,
-    auth_nonce: AUTH_NONCE,
-    inbox_count: 0n,
-    enc_key: new Uint8Array(32),
-    evm_domain_salt: unhex(SALT),
-    vault_address: { bytes: unhex(VAULT) },
-    devices: {
-      member: (e: Uint8Array) => live.has(Buffer.from(e).toString('hex')),
-      [Symbol.iterator]: () => [...live].map(unhex)[Symbol.iterator](),
-    },
-    inbox: { member: () => false, lookup: () => new Uint8Array(192) },
-  };
-  const rt = {
-    reads: 0,
-    ledgerState: async (a: string) => {
-      rt.reads++;
-      return a === ACCOUNT ? ledger : null;
-    },
-  };
-  return rt as unknown as PassportRuntime & { reads: number };
+/** One device (one Ed25519 key, as a Solana wallet holds): it signs relay envelopes (the test
+ *  scheme) and account calls (the test arm). */
+function newDevice() {
+  const secret = ed25519.utils.randomSecretKey();
+  return { envelope: testDevice(secret), calls: callSigner(secret) };
 }
+type Device = ReturnType<typeof newDevice>;
 
-const tokens = registryFromConfig('undeployed', {
-  tokens: [
-    { symbol: 'USDC', midnightName: 'wUSDC', role: 'usdc', decimals: 6, midnightColour: 'b2'.repeat(32), vault: VAULT },
-    {
-      symbol: 'stkA',
-      midnightName: 'wStkA',
-      role: 'stock',
-      decimals: 6,
-      midnightColour: COLOUR_A,
-      sepoliaAddress: STKA,
-      vault: VAULT,
-    },
-  ],
-});
-
-/** The relay as main.ts wires it, with fakes at the edges (runtime, sponsor, bridge backend). */
+/** The relay as main.ts wires it once an arm is wired, with fakes at the edges (runtime, sponsor). */
 function productionRelay(
-  opts: { env?: Record<string, string>; sponsor?: CountingSponsor; appendsPerDay?: number } = {},
+  opts: {
+    env?: Record<string, string>;
+    sponsor?: CountingSponsor;
+    appendsPerDay?: number;
+    /** F-B6's second signature for a withdrawal's encryption key (questions Q13; off by default). */
+    fb6?: boolean;
+  } = {},
 ) {
-  const device = Wallet.createRandom();
-  const config = loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', ...opts.env }, () =>
-    JSON.stringify(LOCAL_TOKENS),
+  const device = newDevice();
+  // These route tests send several calls for the one test account; the one-job-per-account rule
+  // (AA 00047 P10, R2-1) has its own tests (relay/test/fairness.test.ts).
+  const config = loadConfig(
+    { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', JOBS_PER_ACCOUNT: '100', ...opts.env },
+    () => JSON.stringify(LOCAL_TOKENS),
   ).config;
   const log = silentLog();
-  const rt = fakeRuntime(device.address);
+  const rt = fakeAccountRuntime(ACCOUNT, [device.calls.deviceKey], AUTH_NONCE);
   const sponsor = opts.sponsor ?? new CountingSponsor();
   const replay = new DigestReplayGuard(config.limits.authMaxTtlSeconds * 6);
-  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxNonces);
+  const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
-  const fake = new FakeBridge();
   const entitlements = testEntitlements({ maxPerAccountPerDay: opts.appendsPerDay ?? 20 });
-  const bridge = new BridgeService({
-    backend: () => fake,
-    laneLoad: (lane, account) => queue.laneLoad(lane, account),
-    gas: DEFAULT_EVM_GAS,
-    tokens,
-    vaultAddress: VAULT,
-    verifyStart: gatedStartVerifier(() => rt),
-    releaseDigest: (d) => replay.release(d),
-    isDevice: deviceChecker(() => rt),
-    log,
-  });
   const catalogue = withTrade(
-    withBridge(
-      accountCatalogue({
-        runtime: () => rt,
-        sponsor,
-        vaultAddress: VAULT,
-        network: 'undeployed',
-        chainId: 11155111,
-        replay,
-        entitlements,
-        log,
-      }),
-      bridge,
-    ),
-    { runtime: () => rt, sponsor, kernelUrl: 'http://kernel.test', batcherUrl: 'http://batcher.test', replay, log },
+    accountCatalogue({
+      runtime: () => rt,
+      arm: testArm,
+      scheme: testScheme,
+      sponsor,
+      network: 'undeployed',
+      withdrawRecipientEnvelope: opts.fb6 ?? false,
+      replay,
+      entitlements,
+      log,
+    }),
+    {
+      runtime: () => rt,
+      arm: testArm,
+      sponsor,
+      kernelUrl: 'http://kernel.test',
+      batcherUrl: 'http://batcher.test',
+      replay,
+      expiry: config.expiry,
+      log,
+    },
+  );
+  // As main.ts (AA 00047 P9, audit C4): registration caps and the failure budget; (P10, R2-1) the
+  // per-account caps.
+  withRegistrationCaps(catalogue, new RegistrationCaps(config.registration));
+  withAccountCaps(catalogue, new AccountCaps(config.accountCaps));
+  const claims = new DemoTokenClaims({ file: null, dailyCap: 100 });
+  withDemoTokens(
+    catalogue,
+    demoTokens({
+      runtime: () => rt,
+      sponsor,
+      claims,
+      pack: [],
+      path: 'via-sponsor',
+      arm: testArm,
+      mint: async () => ({}),
+      log,
+    }),
   );
   const health = async (): Promise<HealthResponse> => {
     throw new Error('not used here');
@@ -180,38 +169,36 @@ function productionRelay(
     nonces,
     queue,
     catalogue,
+    failures: new FailureBudget(config.failureBudget),
     sponsor,
     health,
     chain: notImplementedChainReader,
-    bridge,
-    passportCall: passportCallAuthoriser(() => rt, replay),
+    scheme: testScheme,
+    passportCall: passportCallAuthoriser(() => rt, testArm, replay),
     clientAddress: () => '198.51.100.7',
   });
-  // Hold every lane with a job that never ends, so an accepted call stays QUEUED: it has done no
-  // work, and its authorisation stays claimed (the replay test needs that).
+  // Hold the prover lane with a job that never ends, so an accepted call stays QUEUED: it has done
+  // no work, and its authorisation stays claimed (the replay test needs that).
   const hold = () => new Promise<Record<string, unknown>>(() => {});
   queue.submit({ action: 'register', lane: 'prover', payload: {}, executor: hold });
-  queue.submit({ action: 'bridge-withdraw', lane: 'withdrawal', payload: {}, executor: hold });
-  queue.submit({ action: 'bridge-deposit', lane: 'deposit', account: ACCOUNT, payload: {}, executor: hold });
-  const HELD = 3;
+  const HELD = 1;
   return {
     app,
     config,
     device,
     rt,
     sponsor,
-    fake,
     queue,
     nonces,
     log,
     catalogue,
     entitlements,
+    held: HELD,
     queued: () => queue.stats().jobs - HELD,
   };
 }
 type Relay = ReturnType<typeof productionRelay>;
 
-const evm = evmTxParamsJson(DEFAULT_EVM_GAS, 0n);
 /** A valid body for each action, before its authorisation; `n` varies it (a distinct call). */
 function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Record<string, unknown> {
   const a = String(authNonce);
@@ -219,8 +206,6 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
   switch (action) {
     case 'register':
       return { encPublicKey: (n % 2 ? 'cd' : 'ab').repeat(32) };
-    case 'bridge-resume':
-      return { kind: 'deposit', requestId: (n % 2 ? 'ef' : 'ab').repeat(32) };
     case 'withdraw':
       return {
         recipient: '11'.repeat(32),
@@ -231,18 +216,15 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
       } satisfies WithdrawPayload;
     case 'append-inbox':
       return { entry: (0xcd + (n % 16)).toString(16).repeat(192), authNonce: a } satisfies AppendInboxPayload;
-    case 'bridge-deposit':
-      return { erc20: STKA, amount, evm, authNonce: a } satisfies BridgeDepositPayload;
-    case 'bridge-withdraw':
-      return {
-        dest: '0x484738A67858305Edfc139B194Ed430Fe4D8e56b',
-        color: COLOUR_A,
-        erc20: STKA,
-        amount,
-        coin: { nonce: '0e'.repeat(32), color: COLOUR_A, value: '2000000', mtIndex: '7' },
-        evm,
-        authNonce: a,
-      } satisfies BridgeWithdrawPayload;
+    case 'withdraw-unshielded':
+      return { recipient: '44'.repeat(32), color: COLOUR_A, amount, authNonce: a } satisfies WithdrawUnshieldedPayload;
+    case 'demo-tokens':
+      // The device's live use counter (AA 00047 P9, audit C8 / F-B10): the fake account's is 0.
+      return { useCounter: '0' };
+    case 'cancel-offers':
+      return { newKey: (0xe0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies CancelOffersPayload;
+    case 'restore-enc-key':
+      return { newKey: (0xb0 + (n % 16)).toString(16).repeat(32), authNonce: a } satisfies RestoreEncKeyPayload;
     case 'open-swap':
     case 'take': {
       const make: OpenSwapPayload = {
@@ -253,7 +235,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
         wantNonce: '11'.repeat(32),
         wantEntry: '22'.repeat(192),
         changeEntry: '00'.repeat(192),
-        validUntil: '0',
+        // A real signed expiry (AA 00047 P9, audit C6): a make an hour ahead at most, a take minutes.
+        validUntil: String(Math.floor(Date.now() / 1000) + (action === 'take' ? 300 : 1800)),
         coin: { nonce: '33'.repeat(32), color: COLOUR_A, value: '3000000', mtIndex: '9' },
         authNonce: a,
       };
@@ -262,36 +245,11 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
   }
 }
 
-async function signPassport(
-  action: RelayActionName,
-  payload: Record<string, unknown>,
-  w: BaseWallet,
-  authNonce: bigint,
-) {
-  const ctx = { account: ACCOUNT, authNonce, evmDomainSalt: SALT };
-  const call =
-    action === 'open-swap' || action === 'take'
-      ? openSwapGatedCall(ctx, w.address, payload as unknown as OpenSwapPayload)
-      : gatedCall(
-          ctx,
-          w.address,
-          action === 'withdraw'
-            ? withdrawRequest(payload as unknown as WithdrawPayload)
-            : action === 'append-inbox'
-              ? appendInboxRequest(payload as unknown as AppendInboxPayload)
-              : action === 'bridge-deposit'
-                ? bridgeDepositStartRequest(payload as unknown as BridgeDepositPayload)
-                : bridgeWithdrawStartRequest(payload as unknown as BridgeWithdrawPayload),
-        );
-  const { EIP712Domain: _d, ...types } = call.typedData.types as Record<string, never>;
-  return w.signTypedData(call.typedData.domain as never, types, call.typedData.message as never);
-}
-
 interface Tamper {
   /** Who signs (default: the account's device). */
-  signer?: BaseWallet;
+  signer?: Device;
   /** The owner the authorisation names (default: the signer). */
-  owner?: string;
+  owner?: Device;
   /** relay-action: a nonce of our choosing; passport-call: the auth nonce signed and sent. */
   nonce?: string | bigint;
   /** relay-action: the expiry. */
@@ -304,7 +262,10 @@ interface Tamper {
 /** A body for `action`, signed as the route requires (or broken as `t` says). */
 async function body(r: Relay, action: RelayActionName, t: Tamper = {}) {
   const signer = t.signer ?? r.device;
+  const owner = t.owner ?? signer;
   const account = action === 'register' ? undefined : ACCOUNT;
+  // demo-tokens is claimed once per key: a variant `n` is a different key's claim in these tests
+  // only where the test says so; its body always names the device's use counter.
   if (KIND[action] === 'relay-action') {
     const payload = payloadFor(action, t.n);
     const nonce =
@@ -314,22 +275,23 @@ async function body(r: Relay, action: RelayActionName, t: Tamper = {}) {
     const message = buildRelayActionMessage({
       action,
       network: r.config.network.name,
-      owner: t.owner ?? signer.address,
+      owner: owner.envelope.deviceKey,
       account,
       payload,
       nonce,
       expiry: t.expiry ?? Math.floor(Date.now() / 1000) + 120,
     });
-    const signature = await signer.signTypedData(relayDomain(), RELAY_ACTION_TYPES, message);
+    const signature = signer.envelope.signEnvelope(message);
     return { ...(account ? { account } : {}), payload, auth: { message, signature } };
   }
   const authNonce = typeof t.nonce === 'bigint' ? t.nonce : AUTH_NONCE;
   const payload = payloadFor(action, t.n, authNonce);
-  // An append is sponsored only against the bank's entitlement for a change (F-B3); it is not signed.
+  // An append is sponsored only against the market's entitlement for a change (F-B3); it is not signed.
   if (action === 'append-inbox' && t.entitlement !== null)
     payload.entitlement = t.entitlement ?? r.entitlements.issue(ACCOUNT, `withdraw:test-${t.n ?? 0}`);
-  const signature = await signPassport(action, payload, signer, authNonce);
-  return { account, payload, passportAuth: { owner: t.owner ?? signer.address, signature, useCounter: '0' } };
+  const { entitlement: _e, ...signed } = payload;
+  const passportAuth = { ...signer.calls.passportAuth(action, ACCOUNT, signed), owner: owner.calls.deviceKey };
+  return { account, payload, passportAuth };
 }
 
 const post = (r: Relay, action: string, b: unknown) =>
@@ -343,10 +305,9 @@ async function refused(r: Relay, res: Response, status: number, detail?: string)
   expect(res.status).toBe(status);
   const b = (await res.json()) as { error: { code: string; detail?: string } };
   if (detail) expect(b.error.detail).toBe(detail);
-  // Before any work: nothing queued, the sponsor wallet never opened, the bridge never called.
+  // Before any work: nothing queued, the sponsor wallet never opened.
   expect(r.queued()).toBe(0);
   expect(r.sponsor.walletCalls).toBe(0);
-  expect(r.fake.calls).toEqual([]);
   return b;
 }
 
@@ -376,17 +337,16 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (acti
 
   it('refuses a call signed by someone who is not the owner, or not a device of the account', async () => {
     const r = productionRelay();
-    const stranger = Wallet.createRandom();
+    const stranger = newDevice();
     // Signed by a stranger in the device's name.
     await refused(
       r,
-      await post(r, action, await body(r, action, { signer: stranger, owner: r.device.address })),
+      await post(r, action, await body(r, action, { signer: stranger, owner: r.device })),
       401,
-      'wrong-signer',
+      'bad-signature',
     );
-    if (kind === 'passport-call' || action === 'bridge-resume') {
-      // Signed by a stranger in their own name: not a device of this account. A resume is refused
-      // at admission too (security review F-B2), so it never takes a queue slot.
+    if (kind === 'passport-call') {
+      // Signed by a stranger in their own name: not a device of this account.
       await refused(r, await post(r, action, await body(r, action, { signer: stranger })), 401, 'wrong-signer');
     }
   });
@@ -462,13 +422,23 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (acti
   });
 });
 
-describe('a withdrawal to a wallet binds its encryption key (security review F-B6)', () => {
+describe('one prompt per withdrawal by default (questions Q13 option B)', () => {
+  it('accepts a withdrawal to a wallet with its encryption key and no second signature', async () => {
+    const r = productionRelay();
+    const b = await body(r, 'withdraw');
+    const res = await post(r, 'withdraw', { ...b, payload: { ...b.payload, recipientEncryptionKey: '55'.repeat(32) } });
+    expect(res.status).toBe(202);
+    expect(r.queued()).toBe(1);
+  });
+});
+
+describe('a withdrawal to a wallet binds its encryption key when F-B6 is on (RELAY_WITHDRAW_RECIPIENT_ENVELOPE)', () => {
   const KEY = '55'.repeat(32);
   /** A withdraw to a wallet: the Passport call (which cannot cover the key) and, optionally, a
    *  RelayAction envelope over the whole body by `envelopeSigner`, for `signedKey`. */
   async function withdrawTo(
     r: Relay,
-    opts: { sentKey?: string; signedKey?: string; envelopeSigner?: BaseWallet | null } = {},
+    opts: { sentKey?: string; signedKey?: string; envelopeSigner?: Device | null } = {},
   ) {
     const b = await body(r, 'withdraw');
     const signedPayload = { ...b.payload, recipientEncryptionKey: opts.signedKey ?? KEY };
@@ -479,36 +449,36 @@ describe('a withdrawal to a wallet binds its encryption key (security review F-B
     const message = buildRelayActionMessage({
       action: 'withdraw',
       network: r.config.network.name,
-      owner: envelopeSigner.address,
+      owner: envelopeSigner.envelope.deviceKey,
       account: ACCOUNT,
       payload: signedPayload,
       nonce,
       expiry: Math.floor(Date.now() / 1000) + 120,
     });
-    const signature = await envelopeSigner.signTypedData(relayDomain(), RELAY_ACTION_TYPES, message);
+    const signature = envelopeSigner.envelope.signEnvelope(message);
     return { ...b, payload, auth: { message, signature } };
   }
 
   it('accepts the call with an envelope over the whole body, by the same device', async () => {
-    const r = productionRelay();
+    const r = productionRelay({ fb6: true });
     expect((await post(r, 'withdraw', await withdrawTo(r))).status).toBe(202);
     expect(r.queued()).toBe(1);
   });
 
   it('refuses a changed encryption key after signing, a missing envelope, or another signer, before any work', async () => {
-    let r = productionRelay();
+    let r = productionRelay({ fb6: true });
     await refused(
       r,
       await post(r, 'withdraw', await withdrawTo(r, { sentKey: '66'.repeat(32) })),
       401,
       'payload-mismatch',
     );
-    r = productionRelay();
+    r = productionRelay({ fb6: true });
     await refused(r, await post(r, 'withdraw', await withdrawTo(r, { envelopeSigner: null })), 401, 'malformed');
-    r = productionRelay();
+    r = productionRelay({ fb6: true });
     await refused(
       r,
-      await post(r, 'withdraw', await withdrawTo(r, { envelopeSigner: Wallet.createRandom() })),
+      await post(r, 'withdraw', await withdrawTo(r, { envelopeSigner: newDevice() })),
       401,
       'wrong-signer',
     );
@@ -585,14 +555,14 @@ describe('append-inbox daily allowance on refusals (security review F-B7)', () =
       appendsPerDay: 3,
       env: { JOB_MAX: '10', RATE_LIMIT_ACTIONS_PER_MIN: '1000', RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN: '1000' },
     });
-    // Fill the relay: seven jobs of other customers (each in its own deposit lane, so each runs)
-    // beside the three lane holders, all held until `open`.
+    // Fill the relay: nine jobs of other customers (each in its own account lane, so each runs)
+    // beside the prover-lane holder, all held until `open`.
     let open!: () => void;
     const gate = new Promise<Record<string, unknown>>((resolve) => (open = () => resolve({})));
-    const fillers = Array.from({ length: 7 }, (_, i) =>
+    const fillers = Array.from({ length: 9 }, (_, i) =>
       r.queue.submit({
-        action: 'bridge-deposit',
-        lane: 'deposit',
+        action: 'append-inbox',
+        lane: 'account',
         account: (0x10 + i).toString(16).repeat(32),
         payload: {},
         executor: () => gate,
@@ -626,7 +596,7 @@ describe('append-inbox daily allowance on refusals (security review F-B7)', () =
     expect(r.queue.stats().jobs).toBe(10);
 
     // … and only then is the allowance used up. The refusal says what was counted: appends the
-    // bank queued, not entries filed (a queued append can still fail).
+    // market queued, not entries filed (a queued append can still fail).
     const over = await post(r, 'append-inbox', await body(r, 'append-inbox', { n: 9 }));
     expect(over.status).toBe(429);
     const e = (await over.json()) as { error: { code: string; message: string } };
@@ -652,62 +622,26 @@ describe('append-inbox daily allowance on refusals (security review F-B7)', () =
   });
 });
 
-describe('bridge-resume admission (security review F-B2)', () => {
-  it("refuses strangers' resumes before the queue, so they cannot fill it, and the owner's still queues", async () => {
-    const r = productionRelay({
-      env: { JOB_MAX: '10', RATE_LIMIT_ACTIONS_PER_MIN: '1000', RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN: '1000' },
-    });
-    // The review's attack: two EOAs of the attacker's own, each signing resumes in its own name.
-    // (Keys made once: a random HD wallet per request is slow enough to time the test out in CI.)
-    const strangers = [new Wallet(hexlify(randomBytes(32))), new Wallet(hexlify(randomBytes(32)))];
-    const statuses: number[] = [];
-    // 12 > the 7 free slots of JOB_MAX 10: before the fix the last ones were refused as "busy".
-    for (let i = 0; i < 12; i++) {
-      const signer = strangers[i % 2]!;
-      statuses.push((await post(r, 'bridge-resume', await body(r, 'bridge-resume', { signer, n: i }))).status);
-    }
-    expect(new Set(statuses)).toEqual(new Set([401]));
-    expect(r.queue.stats().jobs).toBe(3); // only the three lane holders
-    expect(r.fake.calls).toEqual([]);
-    expect((await post(r, 'bridge-resume', await body(r, 'bridge-resume'))).status).toBe(202);
-  }, 20_000);
-
-  it('answers 503 and keeps nothing when the account cannot be read at admission', async () => {
-    const r = productionRelay();
-    (r.rt as unknown as { ledgerState: () => Promise<never> }).ledgerState = async () => {
-      throw new Error('indexer down');
-    };
-    const res = await post(r, 'bridge-resume', await body(r, 'bridge-resume'));
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('chain-unavailable');
-    expect(r.queued()).toBe(0);
-  });
-});
-
 describe('read routes leak nothing secret', () => {
-  it('health, config, nonces, jobs, queue, quotes and closed requests carry no secret and no job input', async () => {
+  it('health, config, nonces, jobs and the queue carry no secret and no job input', async () => {
     const seed = 'fa'.repeat(32);
-    const rpc = 'https://sepolia.example.test/v3/0123456789abcdef0123456789abcdef';
-    const files: Record<string, string> = {
-      '/t': JSON.stringify(LOCAL_TOKENS),
-      '/seed': `SEED=${seed}\n`,
-      '/rpc': rpc,
-    };
+    const files: Record<string, string> = { '/t': JSON.stringify(LOCAL_TOKENS), '/seed': `SEED=${seed}\n` };
     const { config, secrets } = loadConfig(
-      { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: '/seed', SEPOLIA_RPC_URL_FILE: '/rpc' },
+      { RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: '/seed' },
       (p) => files[p]!,
     );
     expect(secrets.sponsorSeedHex).toBe(seed);
     const r = productionRelay();
-    // A real health collector whose Sepolia probe holds the keyed RPC URL.
-    const fetched: string[] = [];
     const health = healthCollector({
       network: config.network.name,
       version: 'test',
       startedAt: 0,
       sponsor: r.sponsor,
       dustLowSpecks: config.sponsor.dustLowSpecks,
-      prover: new ProofServerClient('http://prover.test', '9.0.0-rc.6', (async () => {
+      prover: new ProofServerClient('http://prover.test', '9.0.0-rc.8', (async () => {
+        throw new TypeError('down');
+      }) as unknown as typeof fetch),
+      dustProver: new ProofServerClient('http://dust-prover.test', '9.0.0-rc.6', (async () => {
         throw new TypeError('down');
       }) as unknown as typeof fetch),
       keys: () => ({
@@ -724,47 +658,30 @@ describe('read routes leak nothing secret', () => {
       probes: httpProbes({
         kernelUrl: 'http://kernel.test',
         batcherUrl: 'http://batcher.test',
-        vaultEvmAddress: '0x648216975e722494bFF92E88FFc68C8F8d438FaA',
-        sepoliaRpcUrl: secrets.sepoliaRpcUrl,
         log: r.log,
-        fetchImpl: (async (u: string | URL) => {
-          fetched.push(String(u));
-          return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x1' }));
-        }) as unknown as typeof fetch,
+        fetchImpl: (async () => new Response(JSON.stringify({ status: 'ok' }))) as unknown as typeof fetch,
       }),
-      vaultEvmAddress: '0x648216975e722494bFF92E88FFc68C8F8d438FaA',
-      vaultGasLowWei: 1n,
       cacheSeconds: 0,
     });
-    const h = await health();
-    expect(fetched).toContain(rpc); // the probe used the secret...
-    // ...and the answer does not carry it.
-    const texts: string[] = [JSON.stringify(h)];
+    const texts: string[] = [JSON.stringify(await health())];
 
     // A job carrying a coin and a signature: its view shows neither.
     const b = await body(r, 'withdraw');
     const posted = (await (await post(r, 'withdraw', b)).json()) as { job: { requestId: string } };
-    for (const path of [
-      '/v1/config',
-      API_PATHS.nonce,
-      API_PATHS.queue,
-      API_PATHS.job(posted.job.requestId),
-      `/v1/bridge/quote?kind=deposit&account=${ACCOUNT}&erc20=${STKA}`,
-      `/v1/bridge/closed/${'ab'.repeat(32)}`,
-    ]) {
+    for (const path of ['/v1/config', API_PATHS.nonce, API_PATHS.queue, API_PATHS.job(posted.job.requestId)]) {
       const res = await r.app.request(path);
       expect(res.status, path).toBeLessThan(500);
       texts.push(await res.text());
     }
     const all = texts.join('\n');
-    for (const secret of [seed, rpc, new URL(rpc).pathname, '0123456789abcdef0123456789abcdef']) {
-      expect(all).not.toContain(secret);
-    }
-    const signature = (b.passportAuth as { signature: string }).signature;
-    for (const input of [signature.slice(2), '33'.repeat(32), 'passportAuth', '"payload"', '"auth"']) {
+    expect(all).not.toContain(seed);
+    const signature = b.passportAuth!.signature;
+    for (const input of [signature, '33'.repeat(32), 'passportAuth', '"payload"', '"auth"']) {
       expect(all).not.toContain(input);
     }
     // The log never saw the body either.
-    expect(r.log.lines.join('\n')).not.toContain(signature.slice(2));
+    expect(r.log.lines.join('\n')).not.toContain(signature);
+    // A random secret-looking value never appears either (no echo of arbitrary input).
+    expect(all).not.toContain(randomBytes(16).toString('hex'));
   });
 });

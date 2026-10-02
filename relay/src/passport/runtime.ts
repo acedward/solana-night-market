@@ -27,7 +27,9 @@ export interface PassportRuntimeOptions {
   networkId: string;
   indexerUrl: string;
   indexerWsUrl: string;
-  proofServerUrl: string;
+  /** The CONTRACT prover (proof server 9.0.0-rc.8): the account's circuits are compactc 0.35.0's
+   *  ZKIR 3.1, which rc.6 cannot read. The sponsor wallet's DUST goes to rc.6 (../sponsor/facade.ts). */
+  contractProofServerUrl: string;
   /** Proof requests may take minutes (k=18); the HTTP provider's timeout, ms. */
   proofTimeoutMs?: number;
   /** A balanced transaction's time to live, ms (the node's fee window is short). */
@@ -40,16 +42,18 @@ const VENDOR = '../../../vendor/passport/contract';
 /** The client modules, loaded once. `compiled` is the very module `contract.js` re-exports
  *  (same path, so the same instance), imported directly for its `expectedVk` table. */
 async function importClient() {
-  const [account, signer, contract, compiled, witnesses, shape, compactJs] = await Promise.all([
+  const [account, signer, contract, compiled, witnesses, ed25519, shape, compactJs] = await Promise.all([
     import(`${VENDOR}/src/wallet/account.js`),
     import(`${VENDOR}/src/wallet/signer.js`),
     import(`${VENDOR}/src/wallet/contract.js`),
     import(`${VENDOR}/contracts/managed/account/contract/index.js`),
     import(`${VENDOR}/src/wallet/witnesses.js`),
+    // Track A's Ed25519 arm client (Ed25519Device, strict decoding, the tweetnacl pre-check).
+    import(`${VENDOR}/src/wallet/ed25519.js`),
     import('./account-shape.js'),
     import('@midnight-ntwrk/compact-js'),
   ]);
-  return { account, signer, contract, compiled, witnesses, shape, compactJs };
+  return { account, signer, contract, compiled, witnesses, ed25519, shape, compactJs };
 }
 export type PassportClient = Awaited<ReturnType<typeof importClient>>;
 
@@ -118,7 +122,7 @@ export class PassportRuntime {
       zkConfigProvider: new NodeZkConfigProvider(join(managedPath, 'account')),
       // midnight-js's HTTP proof provider, rebuilt to stream each prover key to the proof server
       // instead of holding copies of it (plan P5.1b, question Q25; ../prover/proving-provider.ts).
-      proofProvider: await relayProofProvider(options.proofServerUrl, managedPath, {
+      proofProvider: await relayProofProvider(options.contractProofServerUrl, managedPath, {
         timeout: options.proofTimeoutMs ?? 900_000,
         log: options.log,
       }),
@@ -127,13 +131,12 @@ export class PassportRuntime {
     return new PassportRuntime(client, { ...options, managedPath }, shared);
   }
 
-  /** The indexer-backed public data provider every job shares (the bridge's relayer reads the
-   *  vault's request records through it). */
+  /** The indexer-backed public data provider every job shares. */
   get publicDataProvider(): unknown {
     return this.shared.publicDataProvider;
   }
 
-  /** The proof provider every job shares (relay/src/tools/prover-memory.ts measures it). */
+  /** The proof provider every job shares. */
   get proofProvider(): unknown {
     return this.shared.proofProvider;
   }
@@ -143,8 +146,8 @@ export class PassportRuntime {
     return this.shared.zkConfigProvider;
   }
 
-  /** The compiled account (the MN Bank shape), with the coin-store witnesses and the key
-   *  volume's assets. */
+  /** The compiled account (the Night Market shape: ./account-shape.ts), with the coin-store
+   *  witnesses and the key volume's assets. */
   compiledAccount(): unknown {
     const { compactJs, contract, shape, witnesses } = this.client;
     const { CompiledContract } = compactJs;
@@ -173,6 +176,28 @@ export class PassportRuntime {
     };
   }
 
+  /** A contract's on-chain state (operations, verifier keys, maintenance authority), or null when
+   *  there is no contract at the address (FR-005: ./account-keys.ts, the demo faucets' check). */
+  async contractState(address: string): Promise<unknown> {
+    const pdp = this.shared.publicDataProvider as { queryContractState(a: string): Promise<unknown> };
+    return (await pdp.queryContractState(address)) ?? null;
+  }
+
+  /**
+   * The encryption key the account was OPENED with: its ledger `enc_key` in the state its deploy
+   * transaction created (the constructor's `encryption_key`, which the browser chose and checks at
+   * opening), or null when the indexer has no deploy for the address. `restore-enc-key` lands only
+   * this key (AA 00047 P11, audit round 3 R3-9 / F-A3-5).
+   */
+  async openingEncKey(account: string): Promise<Uint8Array | null> {
+    const pdp = this.shared.publicDataProvider as {
+      queryDeployContractState(a: string): Promise<{ data: unknown } | null>;
+    };
+    const state = await pdp.queryDeployContractState(account);
+    if (!state) return null;
+    return Uint8Array.from((this.client.contract.ledger(state.data as never) as AccountLedger).enc_key);
+  }
+
   /** The account's public ledger state, or null when there is no contract at the address. */
   async ledgerState(account: string): Promise<AccountLedger | null> {
     const pdp = this.shared.publicDataProvider as { queryContractState(a: string): Promise<{ data: unknown } | null> };
@@ -190,8 +215,8 @@ export interface AccountLedger {
   readonly auth_nonce: bigint;
   readonly inbox_count: bigint;
   readonly enc_key: Uint8Array;
+  /** The network salt every Ed25519 challenge binds (the account's sealed `evm_domain_salt`). */
   readonly evm_domain_salt: Uint8Array;
-  readonly vault_address: { bytes: Uint8Array };
   devices: { member(e: Uint8Array): boolean; [Symbol.iterator](): Iterator<Uint8Array> };
   inbox: { member(k: bigint): boolean; lookup(k: bigint): Uint8Array };
 }

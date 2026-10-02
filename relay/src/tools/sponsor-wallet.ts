@@ -95,14 +95,14 @@ async function withWallet<T>(
       state: () => Promise<FacadeState>;
       handle: Record<string, unknown>;
     },
-    ctx: { networkId: string; seedHex: string; vault: string; indexerUrl: string; indexerWsUrl: string },
+    ctx: { networkId: string; seedHex: string; anyContract: string; indexerUrl: string; indexerWsUrl: string },
   ) => Promise<T>,
 ): Promise<T> {
   const { config, secrets } = loadConfig(process.env, (p) => readFileSync(p, 'utf8'));
   if (!secrets.sponsorSeedHex) throw new ConfigError('SPONSOR_SEED_FILE is not set');
   await refuseIfRelayHoldsWallet();
   const lock = config.sponsor.fundingLockFile
-    ? takeFundingLock(config.sponsor.fundingLockFile, 'mn-bank sponsor-wallet tool')
+    ? takeFundingLock(config.sponsor.fundingLockFile, 'night-market sponsor-wallet tool')
     : null;
   try {
     const opened = await openFacadeWallet(
@@ -112,7 +112,7 @@ async function withWallet<T>(
         indexerUrl: config.network.midnight.indexerUrl,
         indexerWsUrl: config.network.midnight.indexerWsUrl,
         nodeWsUrl: config.network.midnight.nodeWsUrl,
-        proofServerUrl: config.proofServerUrl,
+        dustProofServerUrl: config.dustProofServerUrl,
       },
       { feeBlocksMargin: config.sponsor.feeBlocksMargin },
     );
@@ -146,7 +146,8 @@ async function withWallet<T>(
         {
           networkId: config.network.midnightNetworkId,
           seedHex: secrets.sponsorSeedHex,
-          vault: config.network.bridge.vaultAddress,
+          // Any deployed contract serves to read the ledger parameters: the first token issuer.
+          anyContract: config.tokens.tokens.find((t) => t.contract !== '')?.contract ?? '',
           indexerUrl: config.network.midnight.indexerUrl,
           indexerWsUrl: config.network.midnight.indexerWsUrl,
         },
@@ -160,8 +161,13 @@ async function withWallet<T>(
 }
 
 /** The live DUST generation parameters, read with the ledger parameters of any contract. */
-async function liveDustParameters(ctx: { networkId: string; vault: string; indexerUrl: string; indexerWsUrl: string }) {
-  if (!ctx.vault) return null;
+async function liveDustParameters(ctx: {
+  networkId: string;
+  anyContract: string;
+  indexerUrl: string;
+  indexerWsUrl: string;
+}) {
+  if (!ctx.anyContract) return null;
   try {
     const { setNetworkId } = await import('@midnight-ntwrk/midnight-js-network-id');
     setNetworkId(ctx.networkId as never);
@@ -169,7 +175,7 @@ async function liveDustParameters(ctx: { networkId: string; vault: string; index
     const pdp = indexerPublicDataProvider(ctx.indexerUrl, ctx.indexerWsUrl) as unknown as {
       queryZSwapAndContractState(a: string): Promise<readonly unknown[] | null>;
     };
-    const states = await pdp.queryZSwapAndContractState(ctx.vault);
+    const states = await pdp.queryZSwapAndContractState(ctx.anyContract);
     const dust = (states?.[2] as { dust?: Record<string, unknown> } | undefined)?.dust;
     if (!dust) return null;
     const pick = (k: string) =>

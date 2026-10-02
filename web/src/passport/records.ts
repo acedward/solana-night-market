@@ -1,26 +1,28 @@
 // The records the account features keep in this browser (spec FR-003, Q5), and small typed
 // accessors over the store. Every per-user fact lives here and nowhere else: the relay keeps none.
 //
-//   account  (account scope)   the account's address, device, vault and registration receipts
+//   account  (account scope)   the account's address, device and registration receipts
 //   secret   (account scope)   the account's X25519 encryption key pair (the viewing secret)
 //   secret   (no account yet)  the key pair of a registration in flight, until it is confirmed
 //   coins    (account scope)   every coin the browser knows (StoredCoin[]), spent ones included
 //   roster   (account scope)   the device's use counter, a hint for the next signature
 //   job      (either scope)    a request in flight at the relay (resumable by its id)
 
-import type { StoredCoin } from '@mnbank/core';
+import type { StoredCoin } from '@nightmarket/core';
 
 import type { LocalStore } from '../store/store.js';
 import { recordKey, type WalletScope } from '../store/schema.js';
 
 export interface AccountRecord {
   address: string;
-  /** The device: the EOA, lowercase 0x hex. */
+  /** The device: the wallet's device key (its Solana public key), 64 lowercase hex. */
   device: string;
   network: string;
-  vault: string;
   createdAt: number;
   txs?: { waveOne: string; waveTwo: string; activation: string };
+  /** The new-account check failed when it was opened (AA 00047 P10, R2-6: it was not fresh or not
+   *  empty). Kept so the refusal holds later too: nothing is ever signed for this account. */
+  refusedAtOpen?: Array<{ code: string; message: string }>;
 }
 
 export interface SecretRecord {
@@ -34,7 +36,16 @@ export interface RosterRecord {
   useCounter: string;
 }
 
-export type JobAction = 'register' | 'withdraw' | 'append-inbox' | 'open-swap' | 'take';
+export type JobAction =
+  | 'register'
+  | 'withdraw'
+  | 'withdraw-unshielded'
+  | 'append-inbox'
+  | 'open-swap'
+  | 'take'
+  | 'demo-tokens'
+  | 'cancel-offers'
+  | 'restore-enc-key';
 
 export interface JobRecord {
   requestId: string;

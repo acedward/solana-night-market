@@ -7,7 +7,7 @@
 
 import type { HTMLAttributes } from 'react';
 
-import { formatUnits } from '@mnbank/core';
+import { formatUnits } from '@nightmarket/core';
 
 import { cx } from './format.js';
 
@@ -31,7 +31,7 @@ export function formatMoney(raw: bigint, decimals: number, f: MoneyFormat = {}):
 export interface MoneyProps extends MoneyFormat, Omit<HTMLAttributes<HTMLSpanElement>, 'children'> {
   raw: bigint;
   decimals: number;
-  /** A unit after the number, in smaller type ("USDC", "wStkA"). */
+  /** A unit after the number, in smaller type ("twUSDC", "twBTC"). */
   unit?: string;
 }
 

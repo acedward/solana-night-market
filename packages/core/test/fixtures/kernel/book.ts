@@ -1,26 +1,28 @@
 // A known offer book for the markets tests, in the exact wire shapes of the offer-files kernel
 // (`ledger-v9` @ 5d46e8d: `GET /v1/offers` rows, `/v1/pairs` rows, `/v1/chart/stats`), with the
-// stagenet registry's real colours. The staging book was empty when the shapes were captured
-// (./staging-2026-09-27/), so these rows follow the kernel's source field by field: amounts and
-// block heights as strings, `last_price` as a Postgres numeric string, stats as JSON numbers.
+// stagenet registry's real colours (the mint-test-tokens faucets, which the staging kernel lists in
+// ./staging-2026-09-27/known-tokens.json) and the stagenet default pairs (twBTC/twUSDC,
+// twETH/twUSDC, twUSDM/twUSDC, twETH/twBTC). Amounts and block heights are strings, `last_price` a
+// Postgres numeric string, stats JSON numbers, as the kernel's source serves them.
 //
 // The expected prices are written out by hand beside each scenario (never computed by the code
-// under test).
+// under test). No token is special: every pair is exercised the same way.
 
 export const COLOUR = {
-  wStkA: '5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02',
-  wStkB: 'e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588',
-  wStkC: 'db8ae472c587a0709094eeaf98b81a0d46752db1a807e77bd209814e808f19d9',
-  wUSDC: 'e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d',
-  // PR #4 @ 6c7505a (AA 00043 / 00045): listed under their own symbols, no "w".
-  TBILL: '05b32284398b1a75dac4f92dcb8802a57ce2194dd3cae781f870430c18a8a8e9',
-  TB13W: 'b3d96e9933fb4548ce8a17a63f4c92bb3894b3571873c3edcc8a08aa7ce2512b',
-  TB26W: '7b044b55c0493a67eeb16f25d3757eea07f9abaf55e374739953afd449bc3b62',
-  TB52W: '8f4798a5ee48747f37562da76ed8711ad4b4ea1ad7ac16d80eb74b92792b9ec2',
-  // Registered on the staging kernel, unknown to the bank (./staging-2026-09-27/known-tokens.json).
-  TWUSDC: 'e934b965a454ed6857080e9956ea83fb5542e0a860e96ce91daf35f5d7b02c9f',
+  twBTC: 'ad2ba014014e6ec705357be9db5d3ad6f535d4bef6576f84a461f23b313a2e8e', // 8 decimals
+  twETH: '2862f0f347068b6c4909079ab8e991067b71fe2263ef00c20f017eefb6e9477a', // 18 decimals
+  twUSDC: 'e934b965a454ed6857080e9956ea83fb5542e0a860e96ce91daf35f5d7b02c9f', // 6 decimals
+  twUSDM: '723e4cac789f6a9a39cc8eb104037ee0299e9fa7a3fcf58604cfbbc259748a87', // 6 decimals
+  // Unshielded registry tokens: held and shown, never traded.
+  utwUSDC: 'a9e63fe9160bbe0e5758b310db16644d7d147eed8757f13c05197c057538926d',
+  // A colour the market does not list (MN Bank's bridged wStkA), and NIGHT.
+  UNLISTED: '5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02',
   NIGHT: '0000000000000000000000000000000000000000000000000000000000000000',
 } as const;
+
+/** The default pairs' ids, in the list's order. */
+export const PAIR_IDS = ['twBTC/twUSDC', 'twETH/twUSDC', 'twUSDM/twUSDC', 'twETH/twBTC'] as const;
+export type PairId = (typeof PAIR_IDS)[number];
 
 export type WireLeg = { token: string; amount: string; type: 'SHIELDED' | 'UNSHIELDED' };
 export type WireOffer = {
@@ -70,59 +72,68 @@ export function offerRow(n: number, gives: WireLeg[], wants: WireLeg[]): WireOff
 
 /** The scenario book. Highest `n` first, as the kernel orders newest first. */
 export const BOOK: WireOffer[] = [
-  // wStkA, both sides (spec US3's independent test: ask 1.05, bid 0.95).
-  offerRow(1, [leg(COLOUR.wStkA, 10_000_000)], [leg(COLOUR.wUSDC, 10_500_000)]), // ask 10 @ 1.05
-  offerRow(2, [leg(COLOUR.wUSDC, 9_500_000)], [leg(COLOUR.wStkA, 10_000_000)]), // bid 10 @ 0.95
-  offerRow(3, [leg(COLOUR.wStkA, 20_000_000)], [leg(COLOUR.wUSDC, 22_000_000)]), // ask 20 @ 1.10
-  offerRow(4, [leg(COLOUR.wUSDC, 4_500_000)], [leg(COLOUR.wStkA, 5_000_000)]), // bid 5 @ 0.90
-  // wStkC, asks only, at cent prices (Offer Files 00057's ladders: about 100 stocks per USDC).
-  offerRow(5, [leg(COLOUR.wStkC, 100_000_000)], [leg(COLOUR.wUSDC, 1_040_000)]), // ask 100 @ 0.0104
-  offerRow(6, [leg(COLOUR.wStkC, 100_000_000)], [leg(COLOUR.wUSDC, 1_200_000)]), // ask 100 @ 0.012
-  // Ignored: every one of these involves wStkB, which therefore has no liquidity.
-  offerRow(7, [leg(COLOUR.wStkA, 5_000_000)], [leg(COLOUR.wStkB, 5_000_000)]), // stock-to-stock
-  offerRow(8, [leg(COLOUR.wStkB, 1_000_000), leg(COLOUR.wStkC, 1_000_000)], [leg(COLOUR.wUSDC, 2_000_000)]), // basket
-  offerRow(9, [leg(COLOUR.wStkB, 1_000_000)], [leg(COLOUR.wUSDC, 1_000_000, 'UNSHIELDED')]), // unshielded leg
-  offerRow(10, [leg(COLOUR.wStkB, 1_000_000)], [leg(COLOUR.TWUSDC, 1_000_000)]), // unknown colour
-  offerRow(11, [leg(COLOUR.NIGHT, 1_000_000, 'UNSHIELDED')], [leg(COLOUR.wUSDC, 1_000_000)]), // NIGHT, unshielded
+  // twUSDM/twUSDC, both sides (6 and 6 decimals): ask 1.05, bid 0.95.
+  offerRow(1, [leg(COLOUR.twUSDM, 10_000_000)], [leg(COLOUR.twUSDC, 10_500_000)]), // ask 10 @ 1.05
+  offerRow(2, [leg(COLOUR.twUSDC, 9_500_000)], [leg(COLOUR.twUSDM, 10_000_000)]), // bid 10 @ 0.95
+  offerRow(3, [leg(COLOUR.twUSDM, 20_000_000)], [leg(COLOUR.twUSDC, 22_000_000)]), // ask 20 @ 1.10
+  offerRow(4, [leg(COLOUR.twUSDC, 4_500_000)], [leg(COLOUR.twUSDM, 5_000_000)]), // bid 5 @ 0.90
+  // twBTC/twUSDC, asks only (8 and 6 decimals).
+  offerRow(5, [leg(COLOUR.twBTC, 50_000_000)], [leg(COLOUR.twUSDC, 30_000_000_000)]), // ask 0.5 @ 60,000
+  offerRow(6, [leg(COLOUR.twBTC, 25_000_000)], [leg(COLOUR.twUSDC, 16_250_000_000)]), // ask 0.25 @ 65,000
+  // twETH/twBTC, a bid only (18 and 8 decimals): 0.04 twBTC for 1 twETH.
+  offerRow(7, [leg(COLOUR.twBTC, 4_000_000)], [leg(COLOUR.twETH, 10n ** 18n)]), // bid 1 @ 0.04
+  // Ignored: every one of these involves twETH against twUSDC or no listed pair, so twETH/twUSDC
+  // has no liquidity.
+  offerRow(8, [leg(COLOUR.twUSDM, 5_000_000)], [leg(COLOUR.twBTC, 5_000)]), // not-a-pair (twUSDM/twBTC)
+  offerRow(9, [leg(COLOUR.twETH, 10n ** 18n), leg(COLOUR.twBTC, 1)], [leg(COLOUR.twUSDC, 2_000_000)]), // basket
+  offerRow(10, [leg(COLOUR.twETH, 10n ** 18n)], [leg(COLOUR.twUSDC, 1_000_000, 'UNSHIELDED')]), // unshielded leg
+  offerRow(11, [leg(COLOUR.twETH, 10n ** 18n)], [leg(COLOUR.UNLISTED, 1_000_000)]), // unknown colour
+  offerRow(12, [leg(COLOUR.NIGHT, 1_000_000, 'UNSHIELDED')], [leg(COLOUR.twUSDC, 1_000_000)]), // NIGHT, unshielded
 ].reverse();
 
-/** What a person computes by hand from BOOK (spec SC-002): whole USDC per whole stock. */
-export const EXPECTED = {
-  wStkA: { bestBid: '0.95', bestAsk: '1.05', bids: 2, asks: 2, last: '1.02' },
-  wStkB: { bestBid: null, bestAsk: null, bids: 0, asks: 0, last: '0.0098' }, // no liquidity, one old fill
-  wStkC: { bestBid: null, bestAsk: '0.0104', bids: 0, asks: 2, last: null },
-} as const;
+/** What a person computes by hand from BOOK: whole quote tokens per whole base token. */
+export const EXPECTED: Record<
+  PairId,
+  { bestBid: string | null; bestAsk: string | null; bids: number; asks: number; last: string | null }
+> = {
+  'twBTC/twUSDC': { bestBid: null, bestAsk: '60,000.00', bids: 0, asks: 2, last: null },
+  'twETH/twUSDC': { bestBid: null, bestAsk: null, bids: 0, asks: 0, last: '2,500.00' }, // no liquidity, one old fill
+  'twUSDM/twUSDC': { bestBid: '0.95', bestAsk: '1.05', bids: 2, asks: 2, last: '1.02' },
+  'twETH/twBTC': { bestBid: '0.04', bestAsk: null, bids: 1, asks: 0, last: null },
+};
 
-/** `GET /v1/pairs` for BOOK plus some fills, oriented by colour hex (LEAST = base):
- *  - wStkA (5eb2…) < wUSDC (e5af…): base wStkA, last_price = USDC ÷ wStkA raw = 1.02;
- *  - wUSDC (e5af…) < wStkB (e7ca…): base wUSDC, last_price = wStkB ÷ USDC raw: a fill of
- *    100 wStkB for 0.98 USDC is 100000000 ÷ 980000, which Postgres cuts at 20 decimals;
- *  - wStkC (db8a…) < wUSDC: base wStkC, never filled (only open offers). */
+/** `GET /v1/pairs` for BOOK plus some fills, oriented by colour hex (LEAST = base). Every default
+ *  pair's base sorts first, so each row's base is the pair's base:
+ *  - twUSDM (723e…) < twUSDC (e934…): last_price = twUSDC ÷ twUSDM raw = 1.02;
+ *  - twETH (2862…) < twUSDC: a fill of 1 twETH (10^18) for 2,500 twUSDC (2.5·10^9) is
+ *    2.5·10^9 ÷ 10^18 = 0.0000000025 raw, 2,500 whole;
+ *  - twBTC (ad2b…) < twUSDC: never filled (only open offers).
+ *  twETH/twBTC has no row (the kernel has never seen a fill or an offer indexed for it here). */
 export const PAIRS = [
   {
-    pair_key: `${COLOUR.wStkA}|${COLOUR.wUSDC}`,
-    base_color: COLOUR.wStkA,
-    quote_color: COLOUR.wUSDC,
+    pair_key: `${COLOUR.twUSDM}|${COLOUR.twUSDC}`,
+    base_color: COLOUR.twUSDM,
+    quote_color: COLOUR.twUSDC,
     trade_count: 3,
     last_price: '1.02000000000000000000',
     last_traded_at: '2026-09-27T11:00:00.000Z',
     open_count: 4,
   },
   {
-    pair_key: `${COLOUR.wStkC}|${COLOUR.wUSDC}`,
-    base_color: COLOUR.wStkC,
-    quote_color: COLOUR.wUSDC,
+    pair_key: `${COLOUR.twBTC}|${COLOUR.twUSDC}`,
+    base_color: COLOUR.twBTC,
+    quote_color: COLOUR.twUSDC,
     trade_count: 0,
     last_price: null,
     last_traded_at: null,
     open_count: 2,
   },
   {
-    pair_key: `${COLOUR.wUSDC}|${COLOUR.wStkB}`,
-    base_color: COLOUR.wUSDC,
-    quote_color: COLOUR.wStkB,
+    pair_key: `${COLOUR.twETH}|${COLOUR.twUSDC}`,
+    base_color: COLOUR.twETH,
+    quote_color: COLOUR.twUSDC,
     trade_count: 1,
-    last_price: '102.04081632653061224490',
+    last_price: '0.00000000250000000000',
     last_traded_at: '2026-09-27T10:00:00.000Z',
     open_count: 0,
   },
@@ -130,9 +141,9 @@ export const PAIRS = [
 
 /** The kernel's answer for a pair with no offers and no fills (./staging-2026-09-27/chart-stats-wstka-wusdc.json,
  *  captured while the staging book was empty). */
-const emptyStats = (base: string) => ({
+const emptyStats = (base: string, quote: string) => ({
   base,
-  quote: COLOUR.wUSDC,
+  quote,
   last: 0,
   change24: 0,
   high: 0,
@@ -141,14 +152,34 @@ const emptyStats = (base: string) => ({
   volume_quote: 0,
 });
 
-/** `GET /v1/chart/stats?base=<stock>&quote=<wUSDC>` per stock (JSON numbers, as trade-data.ts
- *  returns them). wStkC never filled, so the kernel reports the open-book MID (here the best ask
- *  0.0104, the only side) as `last` with zero volume: that is NOT a trade. The T-bills have no
- *  offers in this book and no fills. */
-export const STATS: Record<'wStkA' | 'wStkB' | 'wStkC' | 'TBILL' | 'TB13W' | 'TB26W' | 'TB52W', object> = {
-  wStkA: {
-    base: COLOUR.wStkA,
-    quote: COLOUR.wUSDC,
+/** `GET /v1/chart/stats?base=<base>&quote=<quote>` per pair (JSON numbers, as trade-data.ts returns
+ *  them; raw base-unit ratios). twBTC/twUSDC never filled, so the kernel reports the open-book MID
+ *  (here the best ask, 60,000 whole = 600 raw, the only side) as `last` with zero volume: that is NOT
+ *  a trade. twETH/twUSDC's fill is older than 24 h (zero volume). */
+export const STATS: Record<PairId, object> = {
+  'twBTC/twUSDC': {
+    base: COLOUR.twBTC,
+    quote: COLOUR.twUSDC,
+    last: 600,
+    change24: 0,
+    high: 600,
+    low: 600,
+    volume_base: 0,
+    volume_quote: 0,
+  },
+  'twETH/twUSDC': {
+    base: COLOUR.twETH,
+    quote: COLOUR.twUSDC,
+    last: 2.5e-9,
+    change24: 0,
+    high: 2.5e-9,
+    low: 2.5e-9,
+    volume_base: 0,
+    volume_quote: 0,
+  },
+  'twUSDM/twUSDC': {
+    base: COLOUR.twUSDM,
+    quote: COLOUR.twUSDC,
     last: 1.02,
     change24: 2,
     high: 1.02,
@@ -156,30 +187,7 @@ export const STATS: Record<'wStkA' | 'wStkB' | 'wStkC' | 'TBILL' | 'TB13W' | 'TB
     volume_base: 30000000,
     volume_quote: 30300000,
   },
-  wStkB: {
-    base: COLOUR.wStkB,
-    quote: COLOUR.wUSDC,
-    last: 0.0098,
-    change24: 0,
-    high: 0.0098,
-    low: 0.0098,
-    volume_base: 0,
-    volume_quote: 0,
-  },
-  wStkC: {
-    base: COLOUR.wStkC,
-    quote: COLOUR.wUSDC,
-    last: 0.0104,
-    change24: 0,
-    high: 0.0104,
-    low: 0.0104,
-    volume_base: 0,
-    volume_quote: 0,
-  },
-  TBILL: emptyStats(COLOUR.TBILL),
-  TB13W: emptyStats(COLOUR.TB13W),
-  TB26W: emptyStats(COLOUR.TB26W),
-  TB52W: emptyStats(COLOUR.TB52W),
+  'twETH/twBTC': emptyStats(COLOUR.twETH, COLOUR.twBTC),
 };
 
 /** The kernel's filter semantics for `GET /v1/offers?token=&direction=` (getOpenOffersPage):

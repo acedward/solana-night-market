@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# The MN Bank relay. The image holds code only: no prover keys and no secrets (mounted as files,
+# The Night Market relay. The image holds code only: no prover keys and no secrets (mounted as files,
 # see .env.example). The key volume (the compiled contracts with the relay's prover keys, plan
 # P0.5) is mounted read-only at /app/vendor/passport/contract/contracts/managed, the directory the
 # pinned Passport client imports its compiled account from, so the relay proves with the key
@@ -30,13 +30,17 @@ COPY packages/core/package.json packages/core/
 COPY packages/core/src packages/core/src
 COPY relay/package.json relay/
 COPY relay/src relay/src
-# The pinned Passport client (acedward/passport @ 51c1fb4, the vendor/passport submodule): its
-# TypeScript sources only, and an empty mount point for the key volume.
+# The pinned Passport client (acedward/passport @ 599327b, branch 00047-solana-ed25519-arm, the
+# vendor/passport submodule): its TypeScript sources only, and an empty mount point for the key
+# volume. The key volume's account module imports compact-runtime 0.20.0 through the
+# `@midnight-ntwrk/compact-runtime-0.20` alias installed above; everything else keeps 0.19.0.
 COPY vendor/passport/contract/package.json vendor/passport/contract/
 COPY vendor/passport/contract/src vendor/passport/contract/src
-# The vault v0.3.0 deposit preflight (pure, no imports), which @mnbank/core's bridge contract re-exports.
-COPY vendor/passport/contract/contracts/erc20-vault/src/preflight.ts vendor/passport/contract/contracts/erc20-vault/src/preflight.ts
-RUN mkdir -p vendor/passport/contract/contracts/managed
+# The key volume's mount point, and the relay's data dir (the demo-token claims), owned by the
+# image's user for a plain `docker run`. deploy/compose.yml mounts its relay-data volume there with
+# nocopy, after its relay-data-init service has handed the volume to RELAY_USER.
+RUN mkdir -p vendor/passport/contract/contracts/managed /var/lib/night-market \
+ && chown bun:bun /var/lib/night-market && chmod 0700 /var/lib/night-market
 ENV MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed
 USER bun
 EXPOSE 8080

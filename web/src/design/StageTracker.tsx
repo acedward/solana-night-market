@@ -1,10 +1,10 @@
-// The vertical stage tracker for long jobs (opening an account, a bridge transfer): done stages
-// in navy with a tick, the current one ringed in gold, the rest waiting in grey.
+// The vertical stage tracker for long jobs (opening an account, a withdrawal): done stages
+// in green with a tick, the current one ringed in violet, the rest waiting in grey.
 //
-//   <StageTracker label="Deposit 25.00 stkA" stages={[
+//   <StageTracker label="Withdraw 25.00 twBTC" stages={[
 //     { key: 'sent', title: 'Tokens sent', state: 'done', time: '14:06',
-//       detail: <>25.00 stkA <Hash value={tx} /></> },
-//     { key: 'final', title: 'Sepolia finality', state: 'current', detail: 'about 12 min' },
+//       detail: <>25.00 twBTC <Hash value={tx} /></> },
+//     { key: 'final', title: 'Chain finality', state: 'current', detail: 'a few blocks' },
 //     { key: 'done', title: 'Completed', state: 'pending' },
 //   ]} />
 //

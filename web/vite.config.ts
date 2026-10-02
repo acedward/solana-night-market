@@ -2,7 +2,9 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 // The web app is a static site. It bundles the browser-safe Passport client from
-// @mnbank/core/passport (one compact-runtime, plan P0.4) and nothing that needs Node.
+// @nightmarket/core/passport and nothing that needs Node. The bundle holds ONE compact-runtime:
+// 0.20.0, the compactc 0.35.0 account module's (through the `@midnight-ntwrk/compact-runtime-0.20`
+// alias; the relay's SDK keeps 0.19.0, AA 00047 B1.5).
 export default defineConfig({
   plugins: [react()],
   base: './',

@@ -1,11 +1,11 @@
 // Publishing an account's offer on the exchange (`POST /v1/offers`, `{"offer": "swapoffer1…"}`) and
-// reading an offer back, through the shared kernel client (@mnbank/core).
+// reading an offer back, through the shared kernel client (@nightmarket/core).
 //
 // A freshly proven offer spends a coin against the newest Merkle root the indexer served, and the
 // kernel may not have synced that root yet: it answers `ROOT_UNKNOWN`. That one refusal is waited
 // out (the G-TAKE gate's rule, 10 s apart); every other refusal is final and returned as is.
 
-import { KernelClient, decodeOffer, type KernelOfferStatus, type PostOfferAnswer } from '@mnbank/core';
+import { KernelClient, decodeOffer, type KernelOfferStatus, type PostOfferAnswer } from '@nightmarket/core';
 
 export interface PublishOptions {
   kernelUrl: string;

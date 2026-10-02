@@ -3,7 +3,7 @@
 // except `postOffer` (plan L-TRD: publishing an account's offer).
 //
 // It never uses `/v1/prices` or `/v1/quote` (reference prices from CoinGecko or manual rows):
-// the bank's prices come from the live offers only (spec FR-007).
+// the market's prices come from the live offers only.
 //
 // Failure handling:
 // - every request has a timeout (the body read included);
@@ -67,7 +67,7 @@ export interface OffersQuery {
 export interface OffersPage {
   offers: OfferRow[];
   nextCursor: string | null;
-  /** Rows the bank could not read (skipped, never guessed at). */
+  /** Rows the market could not read (skipped, never guessed at). */
   skipped: number;
 }
 

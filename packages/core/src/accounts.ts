@@ -26,10 +26,9 @@ export const AccountStateViewSchema = z.object({
   inboxCount: decimal,
   /** The account's encryption PUBLIC key (X25519, 64 hex). */
   encKey: z.string().regex(/^[0-9a-f]{64}$/),
-  /** The vault sealed at construction (64 hex; all zero for none). */
-  vault: z.string().regex(/^[0-9a-f]{64}$/),
-  /** The EIP-712 domain salt sealed at construction (64 hex). */
-  evmDomainSalt: z.string().regex(/^[0-9a-f]{64}$/),
+  /** The account's network salt (its sealed `evm_domain_salt`, 64 hex): every Ed25519 challenge
+   *  binds it (../passport/gated.ts `GatedContext`). */
+  networkSalt: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type AccountStateView = z.infer<typeof AccountStateViewSchema>;
 
@@ -81,15 +80,16 @@ export const RegisterPayloadSchema = z
   .strict();
 export type RegisterPayload = z.infer<typeof RegisterPayloadSchema>;
 
-/** A gated call's own Passport authorisation: the wallet's signature over the call's EIP-712
- *  digest, and the device's use counter (the rolling entry the call consumes, AUTH-9). The
- *  relay recomputes the digest from the call's arguments and the account's state, and recovers
- *  the device's public point from this signature. */
+/** A gated call's own Passport authorisation: the device's Ed25519 signature over the call's
+ *  message (built by the account arm's message builder, plan A3/A4), and the device's use counter
+ *  (the rolling entry the call consumes, AUTH-9). The relay rebuilds the message from the call's
+ *  arguments and the account's state, and checks the signature against the named device (lane B3). */
 export const PassportAuthSchema = z
   .object({
-    /** The device (the connected EOA) the call is signed by; the typed data names it. */
-    owner: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-    signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+    /** The device key (64 lowercase hex) the call is signed by. */
+    owner: z.string().regex(/^[0-9a-f]{64}$/),
+    /** The Ed25519 signature, 64 bytes (128 lowercase hex). */
+    signature: z.string().regex(/^[0-9a-f]{128}$/),
     useCounter: decimal,
   })
   .strict();
@@ -97,7 +97,7 @@ export type PassportAuth = z.infer<typeof PassportAuthSchema>;
 
 export const QualifiedCoinSchema = z.object({ nonce: hex32, color: hex32, value: decimal, mtIndex: decimal }).strict();
 
-/** `withdraw_shielded_with_evm`: pay `amount` of `color` from ONE coin (the browser's choice,
+/** The arm's shielded withdrawal: pay `amount` of `color` from ONE coin (the browser's choice,
  *  L-ACC.5) to a shielded wallet (its coin public key, plus its encryption public key so the
  *  wallet can see the coin: midnight-js refuses a recipient it cannot seal to, upstream Q42). */
 export const WithdrawPayloadSchema = z
@@ -117,32 +117,76 @@ export const WithdrawPayloadSchema = z
 export type WithdrawPayload = z.infer<typeof WithdrawPayloadSchema>;
 
 /**
- * A single-use APPEND ENTITLEMENT (security review F-B3): the bank sponsors an `append-inbox`
- * only for a coin it saw created without a correct inbox entry (a withdrawal's change, a bridge
- * withdrawal's change, a bridge coin whose entry does not describe it). The relay issues it in
+ * A single-use APPEND ENTITLEMENT (security review F-B3): the market sponsors an `append-inbox`
+ * only for a coin it saw created without a correct inbox entry (a withdrawal's change). The relay
+ * issues it in
  * that operation's result, the browser keeps it with the coin, and sends it back to file the
  * entry: `ae1.<account>.<operation id>.<expiry>.<relay MAC>`, all lowercase hex / decimal.
  */
 export const APPEND_ENTITLEMENT_PATTERN = /^ae1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9]{1,12}\.[0-9a-f]{64}$/;
 export const AppendEntitlementSchema = z.string().regex(APPEND_ENTITLEMENT_PATTERN);
 
-/** `append_inbox_with_evm`: file one 192-byte inbox entry (Q13: a withdrawal's change). */
+/** The arm's `append_inbox`: file one 192-byte inbox entry (Q13: a withdrawal's change). */
 export const AppendInboxPayloadSchema = z
   .object({
     entry: hex(192),
     authNonce: decimal,
-    /** The entitlement the bank issued for this coin (F-B3). Not part of the signed challenge (the
-     *  contract's typed data is fixed); the relay refuses an append without a valid one. */
+    /** The entitlement the market issued for this coin (F-B3). Not part of the signed challenge (the
+     *  contract's message is fixed); the relay refuses an append without a valid one. */
     entitlement: AppendEntitlementSchema.optional(),
   })
   .strict();
 export type AppendInboxPayload = z.infer<typeof AppendInboxPayloadSchema>;
 
+/**
+ * `cancel-offers` (AA 00047 P9.S, audit C6, questions Q30): end EVERY open approval of the account at
+ * once, its open offers included, by landing the arm's cheapest nonce-bumping call,
+ * `rotate_enc_key_with_ed25519`, with `newKey` = the account's CURRENT encryption key (the state
+ * does not change apart from the auth nonce). Authorised by the call's own F3 signature (one prompt);
+ * the relay also checks `newKey` is the on-chain key (lane P9.R), so the call can never move the
+ * account to another key.
+ */
+export const CancelOffersPayloadSchema = z
+  .object({
+    /** The account's encryption public key as it is on chain (64 hex). */
+    newKey: hex32,
+    /** The auth nonce the signed challenge binds. */
+    authNonce: decimal,
+  })
+  .strict();
+export type CancelOffersPayload = z.infer<typeof CancelOffersPayloadSchema>;
+
+export interface CancelOffersResult {
+  txId: string;
+}
+
+/**
+ * `restore-enc-key` (AA 00047 P10, audit round 2 R2-3, questions Q36): an account whose on-chain
+ * encryption key is no longer the one this browser holds (a page that passed a real key change off
+ * as something else, F-A2-3) gets this browser's key back, with the same circuit as `cancel-offers`,
+ * `rotate_enc_key_with_ed25519`, to ANOTHER key: the F3 v2 text reads "Rotate encryption key / New
+ * key <16 hex>". Authorised by the call's own signature (one prompt). `newKey` is the BROWSER's
+ * encryption public key and differs from the on-chain one (the same key would be a cancel).
+ */
+export const RestoreEncKeyPayloadSchema = z
+  .object({
+    /** This browser's encryption public key for the account (64 hex): the key to put back. */
+    newKey: hex32,
+    /** The auth nonce the signed challenge binds. */
+    authNonce: decimal,
+  })
+  .strict();
+export type RestoreEncKeyPayload = z.infer<typeof RestoreEncKeyPayloadSchema>;
+
+export interface RestoreEncKeyResult {
+  txId: string;
+}
+
 // ── Results (the job's public outcome) ────────────────────────────────────────
 
 export interface RegisterResult {
   account: string;
-  /** The device (the EOA), lowercase 0x hex. */
+  /** The device key (64 lowercase hex). */
   device: string;
   txs: { waveOne: string; waveTwo: string; activation: string };
   seconds: { waveOne: number; waveTwo: number; activation: number; total: number };

@@ -1,33 +1,43 @@
 // Every state-changing action the relay offers, with its lane, how it is authorised, the shape
 // of its body, and its executor.
 //
-// In P1 every executor is a stub that fails with `not-implemented`: the Passport operations are
-// behind this one interface, and the lanes fill them in (L-ACC: register, withdraw,
-// append-inbox; L-TRD: open-swap, take; L-BRG: bridge-deposit, bridge-withdraw). A lane that
-// implements a gated call's digest builder may switch its `auth` to 'passport-call' so the
-// customer signs only the contract's own typed data (one prompt per action).
+// `defaultCatalogue()` has every action with an executor that fails with `not-implemented`: that is
+// what main.ts serves when no device arm can run (no key volume). `accountCatalogue`, `withTrade`
+// and `withDemoTokens` add the executors, which are arm-agnostic given a `DeviceArm`: register and
+// demo-tokens (authorised by a RelayAction envelope in the Solana scheme, which for registration is
+// also the enrolment), and withdraw, withdraw-unshielded, append-inbox, cancel-offers, restore-enc-key,
+// open-swap and take, each authorised by the call's OWN Passport signature (`passport-call`, the F3
+// message the circuit verifies), so every action is one wallet prompt. `withRegistrationCaps` and
+// `withAccountCaps` add the admission caps (AA 00047 P9 C4; P10 R2-1).
+//
+// Lanes: every action proves on the one prover lane. `open-swap` runs on its ACCOUNT's lane and takes
+// the prover only while it proves (AA 00047 P10, R2-1): the exchange's listing wait (up to 90 s) no
+// longer holds the prover.
 
 import { z } from 'zod';
 
 import {
   AppendInboxPayloadSchema,
-  BridgeDepositPayloadSchema,
-  BridgeResumePayloadSchema,
-  BridgeWithdrawPayloadSchema,
+  CancelOffersPayloadSchema,
+  DemoTokensPayloadSchema,
   OpenSwapPayloadSchema,
   RELAY_ACTIONS,
   RegisterPayloadSchema,
+  RestoreEncKeyPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
+  WithdrawUnshieldedPayloadSchema,
   type JobLane,
   type RelayActionName,
-} from '@mnbank/core';
+} from '@nightmarket/core';
 
 import type { AuthKind } from '../auth/verifiers.js';
-import type { AdmissionCheck } from './admission.js';
-import type { BridgeService } from '../bridge/service.js';
+import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type AccountCaps } from './account-caps.js';
+import { admitAll, type AdmissionCheck } from './admission.js';
+import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
-import { openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import { expiryAdmission } from '../trade/expiry.js';
 
 export interface ActionDefinition {
   action: RelayActionName;
@@ -49,7 +59,15 @@ export interface ActionDefinition {
   implementedBy: string;
 }
 
-import { appendInboxExecutor, registerExecutor, withdrawExecutor, type AccountActionDeps } from './account-actions.js';
+import {
+  appendInboxExecutor,
+  cancelOffersExecutor,
+  registerExecutor,
+  restoreEncKeyExecutor,
+  withdrawExecutor,
+  withdrawUnshieldedExecutor,
+  type AccountActionDeps,
+} from './account-actions.js';
 
 /** Until a lane defines its action's body, any JSON object (the size limit still applies). */
 const anyObject = z.record(z.string(), z.unknown());
@@ -80,16 +98,18 @@ const def = (
 
 export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
   const list: ActionDefinition[] = [
-    def('register', 'prover', 'L-ACC', { requiresAccount: false, payload: RegisterPayloadSchema }),
-    def('withdraw', 'prover', 'L-ACC'),
-    def('append-inbox', 'prover', 'L-ACC'),
-    def('open-swap', 'prover', 'L-TRD'),
-    def('take', 'prover', 'L-TRD'),
-    def('bridge-deposit', 'deposit', 'L-BRG'),
-    def('bridge-withdraw', 'withdrawal', 'L-BRG'),
-    // A resume runs on its account's lane: its Sepolia nonce is already fixed, so it never waits
-    // for the global withdrawal lane.
-    def('bridge-resume', 'deposit', 'L-BRG'),
+    def('register', 'prover', 'B3', { requiresAccount: false, payload: RegisterPayloadSchema }),
+    def('withdraw', 'prover', 'B3'),
+    def('append-inbox', 'prover', 'B3'),
+    // On its account's lane: it takes the prover only while it proves (AA 00047 P10, R2-1).
+    def('open-swap', 'account', 'B3'),
+    def('take', 'prover', 'B3'),
+    def('withdraw-unshielded', 'prover', 'B3'),
+    def('demo-tokens', 'prover', 'B3', { payload: DemoTokensPayloadSchema }),
+    // AA 00047 P9.S (questions Q30): the site's "Cancel offer" (executor: P9.I).
+    def('cancel-offers', 'prover', 'P9.I'),
+    // AA 00047 P10 (audit round 2, R2-3): the site's "Restore my encryption key" (executor: P10.R).
+    def('restore-enc-key', 'prover', 'P10.R'),
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -97,9 +117,9 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
 }
 
 /**
- * The catalogue with plan lane L-ACC's executors: register (authorised by its RelayAction
- * signature, which is also the enrolment), and withdraw and append-inbox, each authorised by the
- * gated call's OWN Passport signature (`passport-call`), so every action is one wallet prompt.
+ * The catalogue with the account executors: register (authorised by its RelayAction envelope,
+ * which is also the enrolment), and withdraw, withdraw-unshielded and append-inbox, each authorised
+ * by the gated call's OWN Passport signature (`passport-call`), so every action is one wallet prompt.
  */
 export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, ActionDefinition> {
   const map = defaultCatalogue();
@@ -109,9 +129,36 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
   set('withdraw', {
     auth: 'passport-call',
     payload: WithdrawPayloadSchema,
-    // The recipient's encryption key is not in the contract's WithdrawShielded challenge (F-B6).
-    envelope: (p) => p.recipientEncryptionKey !== undefined,
+    // The recipient's encryption key is not in the contract's WithdrawShielded challenge (F-B6). A
+    // second signature binds it only when the deployment asks for it (questions Q13: off by default,
+    // one prompt per action).
+    ...(deps.withdrawRecipientEnvelope ? { envelope: (p) => p.recipientEncryptionKey !== undefined } : {}),
     executor: withdrawExecutor(deps),
+  });
+  set('withdraw-unshielded', {
+    auth: 'passport-call',
+    payload: WithdrawUnshieldedPayloadSchema,
+    executor: withdrawUnshieldedExecutor(deps),
+  });
+  // AA 00047 P9.S/P9.I (questions Q30): "Cancel offer" is the arm's `rotate_enc_key_with_ed25519` to
+  // the account's CURRENT key (@nightmarket/core `CancelOffersPayloadSchema`, `cancelOffersRequest`),
+  // authorised by its own F3 signature like the other gated calls; the arm's check refuses any key
+  // but the on-chain `enc_key` (relay/src/passport/ed25519-arm.ts `cancelKeepsTheKey`), and the key
+  // volume keeps the rotate prover key (relay/src/prover/required.ts).
+  set('cancel-offers', {
+    auth: 'passport-call',
+    payload: CancelOffersPayloadSchema,
+    executor: cancelOffersExecutor(deps),
+  });
+  // AA 00047 P10 (audit round 2 R2-3, questions Q36): "Restore my encryption key", the same circuit
+  // to the BROWSER's key (@nightmarket/core `RestoreEncKeyPayloadSchema`, `restoreEncKeyRequest`), for
+  // an account whose on-chain key a page changed. The arm's check refuses the on-chain key itself (that
+  // would be a cancel: relay/src/passport/ed25519-arm.ts `restoreChangesTheKey`); its own daily cap
+  // (`withAccountCaps`), never the cancels'; never refused by the failure budget.
+  set('restore-enc-key', {
+    auth: 'passport-call',
+    payload: RestoreEncKeyPayloadSchema,
+    executor: restoreEncKeyExecutor(deps),
   });
   set('append-inbox', {
     auth: 'passport-call',
@@ -124,39 +171,9 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
 }
 
 /**
- * The catalogue with plan lane L-BRG's executors added: the two bridge starts, each authorised by
- * the start's OWN Passport signature (one prompt: it binds the Sepolia transaction the MPC will
- * sign), and a resume by vault request id, authorised by a RelayAction signature (only after the
- * relay restarted; the settles it runs are permissionless and pinned to the account).
- */
-export function withBridge(
-  map: Map<RelayActionName, ActionDefinition>,
-  bridge: BridgeService,
-): Map<RelayActionName, ActionDefinition> {
-  const set = (action: RelayActionName, patch: Partial<ActionDefinition>) =>
-    map.set(action, { ...map.get(action)!, ...patch });
-  set('bridge-deposit', {
-    auth: 'passport-call',
-    payload: BridgeDepositPayloadSchema,
-    executor: bridge.depositExecutor,
-  });
-  set('bridge-withdraw', {
-    auth: 'passport-call',
-    payload: BridgeWithdrawPayloadSchema,
-    executor: bridge.withdrawExecutor,
-  });
-  // Only a device of the account may queue a resume (security review F-B2); the executor checks again.
-  set('bridge-resume', {
-    payload: BridgeResumePayloadSchema,
-    admit: bridge.admitResume,
-    executor: bridge.resumeExecutor,
-  });
-  return map;
-}
-
-/**
- * The catalogue with plan lane L-TRD's executors added: making an offer (`open-swap`) and taking
- * one (`take`), each authorised by the call's OWN OpenSwapShielded signature (one prompt).
+ * The catalogue with the trade executors added: making an offer (`open-swap`) and taking one
+ * (`take`), each authorised by the swap call's OWN signature (one prompt), and admitted only inside
+ * the call's signed expiry (AA 00047 P9, audit C6: ../trade/expiry.ts).
  */
 export function withTrade(
   map: Map<RelayActionName, ActionDefinition>,
@@ -164,7 +181,74 @@ export function withTrade(
 ): Map<RelayActionName, ActionDefinition> {
   const set = (action: RelayActionName, patch: Partial<ActionDefinition>) =>
     map.set(action, { ...map.get(action)!, ...patch });
-  set('open-swap', { auth: 'passport-call', payload: OpenSwapPayloadSchema, executor: openSwapExecutor(deps) });
-  set('take', { auth: 'passport-call', payload: TakePayloadSchema, executor: takeExecutor(deps) });
+  set('open-swap', {
+    auth: 'passport-call',
+    payload: OpenSwapPayloadSchema,
+    admit: expiryAdmission('open-swap', deps.expiry, deps.now),
+    executor: openSwapExecutor(deps),
+  });
+  // AA 00047 P11.F (R4-3): while the exchange cools down from a 429, a take is refused before any slot.
+  const takeExpiry = expiryAdmission('take', deps.expiry, deps.now);
+  set('take', {
+    auth: 'passport-call',
+    payload: TakePayloadSchema,
+    admit: deps.cooldown ? admitAll(takeExpiry, cooldownAdmission(deps.cooldown)) : takeExpiry,
+    executor: takeExecutor(deps),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with the demo-token claim (spec FR-007, ../demo/action.ts): a RelayAction envelope in
+ * the Solana scheme, admitted only for a live device of an active market account, once per key and
+ * within the daily cap.
+ */
+export function withDemoTokens(
+  map: Map<RelayActionName, ActionDefinition>,
+  demo: { admit: AdmissionCheck; executor: JobExecutor },
+): Map<RelayActionName, ActionDefinition> {
+  map.set('demo-tokens', {
+    ...map.get('demo-tokens')!,
+    payload: DemoTokensPayloadSchema,
+    admit: demo.admit,
+    executor: demo.executor,
+  });
+  return map;
+}
+
+/**
+ * The catalogue with registration capped (AA 00047 P9, audit C4: ./registration-caps.ts): a global
+ * and a per-client daily cap, and at most a few registrations queued or running at once.
+ */
+export function withRegistrationCaps(
+  map: Map<RelayActionName, ActionDefinition>,
+  caps: RegistrationCaps,
+): Map<RelayActionName, ActionDefinition> {
+  map.set('register', { ...map.get('register')!, admit: registrationAdmission(caps) });
+  return map;
+}
+
+/**
+ * The catalogue with the per-account caps (AA 00047 P10, audit round 2 R2-1: ./account-caps.ts): a
+ * make is admitted after its own checks (the signed expiry) only under the open-offer and daily-make
+ * caps; a cancel and a key restore each under their own daily cap; and (AA 00047 P11, R3-2, Q46)
+ * every sponsored withdrawal under the account's daily allowance, with one whole-coin exit per listed
+ * token past it; and (R3-7) a take only while the account's unsettled takes are under their cap.
+ */
+export function withAccountCaps(
+  map: Map<RelayActionName, ActionDefinition>,
+  caps: AccountCaps,
+): Map<RelayActionName, ActionDefinition> {
+  const add = (action: RelayActionName, check: AdmissionCheck) => {
+    const d = map.get(action)!;
+    map.set(action, { ...d, admit: d.admit ? admitAll(d.admit, check) : check });
+  };
+  add('open-swap', makeAdmission(caps));
+  add('cancel-offers', dailyAdmission(caps, 'cancels'));
+  add('restore-enc-key', dailyAdmission(caps, 'restores'));
+  add('withdraw', withdrawAdmission(caps, 'withdraw'));
+  add('withdraw-unshielded', withdrawAdmission(caps, 'withdraw-unshielded'));
+  // AA 00047 P11 (R3-7): takes refused at settlement for the maker's or the exchange's reason.
+  add('take', takeAdmission(caps));
   return map;
 }

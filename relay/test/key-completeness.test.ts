@@ -1,8 +1,7 @@
 // Plan P4-A, key-volume completeness: the relay's start-up check covers EVERY circuit it proves
-// (the account's gated calls, bridge circuits and offer circuit, the vault circuits they call, the
-// vault's own abandonDeposit, and the Signet singleton's signBidirectional), refuses to start with
-// a clear message when any key is missing or is not the deployed contract's, and the list cannot
-// silently fall behind the code.
+// (the device arm's calls and the offer circuit, ../src/passport/arm.ts), refuses to start with a
+// clear message when any key is missing, is not the deployed contract's or is not the pinned set,
+// and the list cannot silently fall behind the code.
 
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -12,20 +11,14 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { BRIDGE_CIRCUITS, SWAP_CIRCUIT, accountCircuitIds } from '../src/passport/account-shape.js';
-import { deployedVerifierKeys } from '../src/prover/deployed.js';
+import { SWAP_CIRCUIT, accountCircuitIds } from '../src/passport/account-shape.js';
+import { ARM_CIRCUITS, DEVICE_ARM } from '../src/passport/arm.js';
 import { checkKeyVolume, keyVolumeComplete, keyVolumeProblems, scanKeyTree } from '../src/prover/keys.js';
-import {
-  ACCOUNT_PROVEN_CIRCUITS,
-  RELAY_PROVEN_CIRCUITS,
-  SIGNET_PROVEN_CIRCUITS,
-  VAULT_PROVEN_CIRCUITS,
-} from '../src/prover/required.js';
+import { ACCOUNT_PROVEN_CIRCUITS, RELAY_PROVEN_CIRCUITS } from '../src/prover/required.js';
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 const SRC = here('../src');
 const CONTRACT = here('../../vendor/passport/contract');
-const VAULT = '7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -48,66 +41,37 @@ function proofCircuits(managed: string): string[] {
 }
 
 const ACCOUNT_MANAGED = join(CONTRACT, 'contracts/managed/account');
-const VAULT_MANAGED = join(CONTRACT, 'contracts/erc20-vault/managed/Erc20Vault');
-const SIGNET_MANAGED = join(CONTRACT, 'contracts/erc20-vault/managed/SignetSigner');
 
 describe('the list of circuits the relay proves', () => {
-  it('names only real proof-bearing circuits, and only account circuits an MN Bank account carries', () => {
-    const account = new Set(proofCircuits(ACCOUNT_MANAGED));
-    const vault = new Set(proofCircuits(VAULT_MANAGED));
-    const signet = new Set(proofCircuits(SIGNET_MANAGED));
+  // The pinned submodule predates the Ed25519 arm: the arm's circuits exist in the compiled account
+  // only once P6.1 points vendor/passport at Track A's branch. Until then the checks against the
+  // compiled contract are skipped, and the rest hold on the names alone.
+  const compiled = new Set(proofCircuits(ACCOUNT_MANAGED));
+  const armCompiled = compiled.has(ARM_CIRCUITS.activate);
+
+  it("names exactly the device arm's circuits and the offer circuit, all in the account shape", () => {
+    expect([...ACCOUNT_PROVEN_CIRCUITS].sort()).toEqual(Object.values(ARM_CIRCUITS).sort());
+    expect(RELAY_PROVEN_CIRCUITS).toEqual(ACCOUNT_PROVEN_CIRCUITS.map((c) => `account/${c}`));
     const shape = new Set(accountCircuitIds());
-    for (const c of ACCOUNT_PROVEN_CIRCUITS) {
-      expect(account.has(c), `account/${c} is a circuit`).toBe(true);
-      expect(shape.has(c), `account/${c} is in the MN Bank account shape`).toBe(true);
-    }
-    for (const c of VAULT_PROVEN_CIRCUITS) expect(vault.has(c), `Erc20Vault/${c}`).toBe(true);
-    for (const c of SIGNET_PROVEN_CIRCUITS) expect(signet.has(c), `SignetSigner/${c}`).toBe(true);
-    // The bridge and offer circuits are exactly the account shape's (the list spells them out, so
-    // the relay can read it without loading the Passport client).
-    for (const c of [...BRIDGE_CIRCUITS, SWAP_CIRCUIT]) expect(ACCOUNT_PROVEN_CIRCUITS).toContain(c);
-    expect(RELAY_PROVEN_CIRCUITS).toHaveLength(
-      ACCOUNT_PROVEN_CIRCUITS.length + VAULT_PROVEN_CIRCUITS.length + SIGNET_PROVEN_CIRCUITS.length,
-    );
+    for (const c of ACCOUNT_PROVEN_CIRCUITS) expect(shape.has(c), `account/${c} is in the account shape`).toBe(true);
+    expect(ACCOUNT_PROVEN_CIRCUITS).toContain(SWAP_CIRCUIT);
+    for (const c of ACCOUNT_PROVEN_CIRCUITS) expect(c).toMatch(new RegExp(`_with_${DEVICE_ARM}$`));
   });
 
-  it('covers every circuit the relay code calls by name (a new call without its key fails here)', () => {
-    const names = new Set([
-      ...proofCircuits(ACCOUNT_MANAGED).map((c) => `account/${c}`),
-      ...proofCircuits(VAULT_MANAGED).map((c) => `Erc20Vault/${c}`),
-      ...proofCircuits(SIGNET_MANAGED).map((c) => `SignetSigner/${c}`),
-    ]);
-    const listed = new Set(RELAY_PROVEN_CIRCUITS);
-    const called = new Set<string>();
+  it.skipIf(!armCompiled)('names only real proof-bearing circuits of the compiled account (P6.1)', () => {
+    for (const c of ACCOUNT_PROVEN_CIRCUITS) expect(compiled.has(c), `account/${c} is a circuit`).toBe(true);
+  });
+
+  it('no relay code names a circuit outside the arm seam: no EVM arm, no bridge, no vault', () => {
+    const forbidden =
+      /_with_evm\b|\bbridge_[a-z_]+\b|\b(startDeposit|completeDeposit|abandonDeposit|startWithdraw|completeWithdraw|refundWithdraw|signBidirectional)\b/;
     for (const file of walk(SRC)) {
-      if (file.includes('/vendor/') || file.endsWith('/prover/required.ts')) continue;
       // Drop comments: a circuit mentioned in prose is not a call.
       const code = readFileSync(file, 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/(^|[^:])\/\/.*$/gm, '$1');
-      for (const id of names) {
-        const circuit = id.split('/')[1]!;
-        if (new RegExp(`(callTx\\.|['"\`])${circuit}\\b`).test(code)) called.add(id);
-      }
+      expect(forbidden.test(code), file).toBe(false);
     }
-    const missing = [...called].filter((id) => !listed.has(id));
-    expect(missing, 'called in relay/src but missing from RELAY_PROVEN_CIRCUITS').toEqual([]);
-    // The ones reached indirectly: registration's activation (upstream client), the offer circuit.
-    expect(called.has('account/withdraw_shielded_with_evm')).toBe(true);
-    expect(called.has('Erc20Vault/abandonDeposit')).toBe(true);
-  });
-
-  it('covers every vault circuit the account calls, and the Signet circuit the vault calls', () => {
-    const account = readFileSync(join(CONTRACT, 'contracts/account.compact'), 'utf8');
-    const vault = readFileSync(join(CONTRACT, 'contracts/erc20-vault/src/erc20-vault.compact'), 'utf8');
-    const called = (src: string, circuits: string[]) => circuits.filter((c) => new RegExp(`\\.${c}\\(`).test(src));
-    const fromAccount = called(account, proofCircuits(VAULT_MANAGED));
-    const fromVault = called(vault, proofCircuits(SIGNET_MANAGED));
-    expect(fromAccount.sort()).toEqual(
-      ['completeDeposit', 'completeWithdraw', 'refundWithdraw', 'startDeposit', 'startWithdraw'].sort(),
-    );
-    for (const c of fromAccount) expect(RELAY_PROVEN_CIRCUITS).toContain(`Erc20Vault/${c}`);
-    for (const c of fromVault) expect(RELAY_PROVEN_CIRCUITS).toContain(`SignetSigner/${c}`);
   });
 });
 
@@ -115,7 +79,7 @@ describe('the list of circuits the relay proves', () => {
 function volume(
   opts: { except?: Record<string, Array<'prover' | 'verifier' | 'zkir'>>; vk?: (id: string) => string } = {},
 ) {
-  const root = mkdtempSync(join(tmpdir(), 'mnbank-vol-'));
+  const root = mkdtempSync(join(tmpdir(), 'nm-vol-'));
   dirs.push(root);
   for (const id of RELAY_PROVEN_CIRCUITS) {
     const [contract, circuit] = id.split('/') as [string, string];
@@ -139,51 +103,33 @@ describe('the key-volume check', () => {
 
     const holes = volume({
       except: {
-        'account/open_swap_shielded_with_evm': ['prover'],
-        'Erc20Vault/abandonDeposit': ['verifier', 'prover', 'zkir'],
-        'SignetSigner/signBidirectional': ['zkir'],
+        [`account/${ARM_CIRCUITS.openSwap}`]: ['prover'],
+        [`account/${ARM_CIRCUITS.appendInbox}`]: ['verifier', 'prover', 'zkir'],
+        [`account/${ARM_CIRCUITS.activate}`]: ['zkir'],
       },
     });
     const k = checkKeyVolume(holes, null, RELAY_PROVEN_CIRCUITS);
     expect(keyVolumeComplete(k)).toBe(false);
-    expect(k.missingProverKeys).toEqual(['account/open_swap_shielded_with_evm', 'Erc20Vault/abandonDeposit']);
-    expect(k.missingVerifierKeys).toEqual(['Erc20Vault/abandonDeposit']);
-    expect(k.missingZkir).toEqual(['Erc20Vault/abandonDeposit', 'SignetSigner/signBidirectional']);
+    expect(k.missingProverKeys).toEqual([`account/${ARM_CIRCUITS.appendInbox}`, `account/${ARM_CIRCUITS.openSwap}`]);
+    expect(k.missingVerifierKeys).toEqual([`account/${ARM_CIRCUITS.appendInbox}`]);
+    expect(k.missingZkir).toEqual([`account/${ARM_CIRCUITS.activate}`, `account/${ARM_CIRCUITS.appendInbox}`]);
     expect(keyVolumeProblems(k, { root: holes, pin: null })).toEqual([
-      'missing verifier keys (1): Erc20Vault/abandonDeposit',
-      'missing prover keys (1): account/open_swap_shielded_with_evm',
-      'missing ZKIR (1): SignetSigner/signBidirectional',
+      `missing verifier keys (1): account/${ARM_CIRCUITS.appendInbox}`,
+      `missing prover keys (1): account/${ARM_CIRCUITS.openSwap}`,
+      `missing ZKIR (1): account/${ARM_CIRCUITS.activate}`,
     ]);
   });
 
-  it('refuses keys that are not the deployed vault’s and singleton’s, and a fingerprint other than the pin', () => {
-    const deployed = deployedVerifierKeys('stagenet', VAULT);
-    // PR #4's record: the vault's seven circuits and the singleton's three.
-    expect(Object.keys(deployed)).toHaveLength(10);
-    expect(deployed['Erc20Vault/abandonDeposit']).toBe(
-      'b50ff3961af1dc904e5e2559a3a93f9a16abde58ea1a8154cd925562bf67a350',
-    );
-    expect(deployed['SignetSigner/signBidirectional']).toBe(
-      '101ac368e366286272dbabd81ea7ca5c192e34fc69b7a3f5159d85054625214f',
-    );
-    expect(deployedVerifierKeys('stagenet', 'ab'.repeat(32))).toEqual({});
-    expect(deployedVerifierKeys('undeployed', VAULT)).toEqual({});
-
+  it('refuses keys that are not the deployed ones, and a fingerprint other than the pin', () => {
+    const swap = `account/${ARM_CIRCUITS.openSwap}`;
+    const deployed = { [swap]: 'b5'.repeat(32) };
     const root = volume();
     const k = checkKeyVolume(root, '0'.repeat(64), RELAY_PROVEN_CIRCUITS, deployed);
-    expect(k.mismatchedVerifierKeys).toEqual([
-      'Erc20Vault/abandonDeposit',
-      'Erc20Vault/completeDeposit',
-      'Erc20Vault/completeWithdraw',
-      'Erc20Vault/refundWithdraw',
-      'Erc20Vault/startDeposit',
-      'Erc20Vault/startWithdraw',
-      'SignetSigner/signBidirectional',
-    ]);
+    expect(k.mismatchedVerifierKeys).toEqual([swap]);
     const problems = keyVolumeProblems(k, { root, pin: '0'.repeat(64), deployed });
     expect(problems[0]).toMatch(/fingerprint [0-9a-f]{64} is not RELAY_KEYS_FINGERPRINT 0{64}/);
     expect(problems).toContain(
-      "Erc20Vault/abandonDeposit: the verifier key does not match the deployed contract's (sha256 b50ff3961af1dc904e5e2559a3a93f9a16abde58ea1a8154cd925562bf67a350); the keys were built from other sources",
+      `${swap}: the verifier key does not match the deployed contract's (sha256 ${'b5'.repeat(32)}); the keys were built from other sources`,
     );
     // With the pinned fingerprint and no deployed record, the same volume passes.
     const fp = scanKeyTree(root).fingerprint;
@@ -200,14 +146,14 @@ function startRelay(
 ): Promise<{ code: number | null | 'served'; out: string }> {
   const port = 10_000 + Math.floor(Math.random() * 40_000);
   return new Promise((resolve, reject) => {
-    const tokens = join(mkdtempSync(join(tmpdir(), 'mnbank-tok-')), 'tokens.json');
+    const tokens = join(mkdtempSync(join(tmpdir(), 'nm-tok-')), 'tokens.json');
     dirs.push(join(tokens, '..'));
     writeFileSync(
       tokens,
       JSON.stringify({
         tokens: [
-          { symbol: 'tUSDC', midnightName: 'a', role: 'usdc', decimals: 6, midnightColour: 'aa'.repeat(32) },
-          { symbol: 'tSTK', midnightName: 'b', role: 'stock', decimals: 6, midnightColour: 'bb'.repeat(32) },
+          { symbol: 'tA', decimals: 6, midnightColour: 'aa'.repeat(32) },
+          { symbol: 'tB', decimals: 8, midnightColour: 'bb'.repeat(32) },
         ],
       }),
     );
@@ -258,24 +204,28 @@ function startRelay(
 
 describe('the relay at start-up (Bun)', () => {
   it('refuses to start when a circuit it proves has no key, naming it', async () => {
-    const root = volume({ except: { 'account/open_swap_shielded_with_evm': ['prover'] } });
+    const root = volume({ except: { [`account/${ARM_CIRCUITS.openSwap}`]: ['prover'] } });
     const r = await startRelay({ MIDNIGHT_MANAGED_PATH: root });
     expect(r.code).toBe(78);
     expect(r.out).toContain('the key volume is incomplete or does not match; refusing to start');
-    expect(r.out).toContain('missing prover keys (1): account/open_swap_shielded_with_evm');
+    expect(r.out).toContain(`missing prover keys (1): account/${ARM_CIRCUITS.openSwap}`);
   }, 90_000);
 
-  it('refuses to start on stagenet when the vault keys are not the deployed ones', async () => {
-    const r = await startRelay({ RELAY_NETWORK: 'stagenet', MIDNIGHT_MANAGED_PATH: volume() });
+  it('refuses to start when the key set is not the pinned one', async () => {
+    const r = await startRelay({
+      RELAY_NETWORK: 'stagenet',
+      MIDNIGHT_MANAGED_PATH: volume(),
+      RELAY_KEYS_FINGERPRINT: '0'.repeat(64),
+    });
     expect(r.code).toBe(78);
-    expect(r.out).toContain('Erc20Vault/startDeposit: the verifier key does not match the deployed contract');
+    expect(r.out).toMatch(/fingerprint [0-9a-f]{64} is not RELAY_KEYS_FINGERPRINT/);
   }, 90_000);
 
   it('with RELAY_REQUIRE_KEYS, refuses to start without a key volume or on an empty one', async () => {
     const r = await startRelay({ RELAY_REQUIRE_KEYS: 'true' });
     expect(r.code).toBe(78);
     expect(r.out).toContain('RELAY_REQUIRE_KEYS is set but MIDNIGHT_MANAGED_PATH names no key volume');
-    const empty = mkdtempSync(join(tmpdir(), 'mnbank-empty-'));
+    const empty = mkdtempSync(join(tmpdir(), 'nm-empty-'));
     dirs.push(empty);
     const e = await startRelay({ MIDNIGHT_MANAGED_PATH: empty, RELAY_REQUIRE_KEYS: 'true' });
     expect(e.code).toBe(78);
@@ -283,7 +233,7 @@ describe('the relay at start-up (Bun)', () => {
   }, 90_000);
 
   it('without it, an empty key path (the image default, nothing mounted) starts keyless and says so', async () => {
-    const empty = mkdtempSync(join(tmpdir(), 'mnbank-empty-'));
+    const empty = mkdtempSync(join(tmpdir(), 'nm-empty-'));
     dirs.push(empty);
     const r = await startRelay({ MIDNIGHT_MANAGED_PATH: empty }, 60_000, true);
     expect(r.code).toBe('served');

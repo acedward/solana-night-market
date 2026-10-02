@@ -1,5 +1,11 @@
 # Proof times and DUST per action
 
+> **MN Bank's figures (AA 00047).** These are the measurements of MN Bank, this repository's
+> origin: its EVM-arm circuits and the Sepolia bridge, which Night Market removed. They stay as the
+> reference for the relay's costs. Night Market's Ed25519-arm figures (rows, k, proof time and
+> memory on proof server 9.0.0-rc.8, and the end-to-end latency per action) come with plan step
+> P6.4.
+
 Measured on Midnight stagenet (node `2.0.0-d9729c13`, ledger 9 rc.3) and Ethereum Sepolia in
 September 2026, with the relay's pinned proof server `midnightntwrk/proof-server:9.0.0-rc.6` and a
 sponsor fee margin of 20 (Q19). Local figures come from the ledger-9 stack of the development

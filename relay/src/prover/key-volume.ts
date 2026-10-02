@@ -2,39 +2,42 @@
 // (deploy/key-volume/build.sh, relay/src/tools/key-volume.ts) runs before the relay may use a
 // freshly compiled key set, and again on every start.
 //
-// The method is G-BRIDGE's (test/gates/bridge/gate.ts `keys-verify`):
+// The checks (MN Bank's G-BRIDGE method, without its bridge half):
 //   1. every bundle's verifier keys equal its compiled `expectedVk` table (SHA-256 of each
-//      `.verifier` file). compact-runtime compares a callee module's table with the verifier keys
-//      deployed at the callee's address on every cross-contract call, so this is the table the
-//      account's bridge circuits are checked against;
-//   2. the vault's and the Signet singleton's verifier keys equal the ones DEPLOYED on the network
-//      (the indexer's contract state), circuit by circuit;
-//   3. every prover key the relay proves with is present;
-//   4. the whole verifier-key set has the pinned fingerprint (the relay's `scanKeyTree`), which
+//      `.verifier` file);
+//   2. every prover key the relay proves with is present;
+//   3. the whole verifier-key set has the pinned fingerprint (the relay's `scanKeyTree`), which
 //      ties the account's keys to the ones every live account so far was deployed with.
+// `compareDeployed` and `deployedVerifierDigests` compare a compile with a DEPLOYED contract's
+// verifier keys; lane B3 uses them for the accounts' own keys (spec FR-005).
 //
-// This module holds the pure comparisons and the file walks; the CLI does the network read.
+// This module holds the pure comparisons and the file walks.
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { RELAY_PROVEN_CIRCUITS } from './required.js';
+import { DEMO_TOKEN_PROVEN_CIRCUITS, RELAY_PROVEN_CIRCUITS } from './required.js';
 
-/** The bundles a relay key volume holds, in compile order (callees first). */
-export const KEY_VOLUME_BUNDLES = ['SignetSigner', 'SignetCircuits', 'Erc20Vault', 'account'] as const;
+/** The bundles a relay key volume holds: the Passport account (AA 00047 B1.5) and the mint-test-tokens
+ *  v2 faucet the demo-token endpoint mints from (B3; compactc 0.34.0 without zkir-v3, the stagenet
+ *  faucets' verifier keys). The account declares the ERC20 vault (and through it the Signet singleton)
+ *  as callees, so the key job still compiles them (deploy/key-volume/build.sh), but only as
+ *  compile-time inputs: the compactc 0.35.0 account module imports none of their JavaScript, and
+ *  Night Market proves none of their circuits. */
+export const KEY_VOLUME_BUNDLES = ['account', 'faucet'] as const;
 
-/** The bundles that carry keys (SignetCircuits is JavaScript only). */
-export const KEYED_BUNDLES = ['SignetSigner', 'Erc20Vault', 'account'] as const;
+/** The bundles that carry keys. */
+export const KEYED_BUNDLES = ['account', 'faucet'] as const;
 
 /**
  * The prover keys the key job keeps, as `<bundle>/<circuit>`. Everything else is pruned after
- * the compile (the account's bundle is about 7.9 GB with every key and 3.0 GB with these).
+ * the compile (the full account bundle is about 12 GB with every key).
  *
  * Every circuit the relay proves (./required.ts, which the relay's start-up check enforces), plus
- * `account/deposit_shielded`: the relay-assisted take's return leg (Q15) and the funding tools.
+ * the demo-token pack's `account/deposit_shielded` and `faucet/mint` (B3).
  */
-export const DEFAULT_KEPT_PROVERS: readonly string[] = [...RELAY_PROVEN_CIRCUITS, 'account/deposit_shielded'];
+export const DEFAULT_KEPT_PROVERS: readonly string[] = [...RELAY_PROVEN_CIRCUITS, ...DEMO_TOKEN_PROVEN_CIRCUITS];
 
 const sha256 = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
 

@@ -1,9 +1,9 @@
 {
-  "name": "@mnbank/web",
+  "name": "@nightmarket/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The MN Bank web app: a static site that holds every per-user record in the browser.",
+  "description": "The Night Market web app: a static site that holds every per-user record in the browser.",
   "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
@@ -11,12 +11,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fontsource/libre-caslon-text": "5.3.0",
-    "@fontsource/source-sans-3": "5.3.0",
-    "@mnbank/core": "workspace:*",
-    "ethers": "6.17.0",
+    "@fontsource-variable/inter": "5.3.0",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@nightmarket/core": "workspace:*",
+    "@noble/hashes": "2.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "tweetnacl": "1.0.3",
     "zod": "4.6.5"
   },
   "devDependencies": {

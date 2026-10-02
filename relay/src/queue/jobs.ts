@@ -2,16 +2,25 @@
 // browser keeps the request id and resumes by polling GET /v1/jobs/:requestId.
 //
 // Three lanes:
-//   - prover:     one job at a time across the relay. Every sponsor-paid call (register,
-//                 withdraw, append-inbox, open-swap, take) holds it for its whole run: the proof
-//                 server proves one circuit at a time (a k=18 proof needs about 8 GB), and the one
-//                 sponsor wallet balances one transaction at a time.
-//   - deposit:    one bridge deposit at a time PER ACCOUNT (they share the account's deposit
-//                 address and its nonce on Sepolia).
-//   - withdrawal: one bridge withdrawal at a time across the WHOLE relay (they share the vault's
-//                 single EVM account and its nonce).
-// A bridge job holds its lane for its whole run (about 20 minutes, mostly waiting for the MPC
-// and Sepolia finality) and takes the prover lane only around its proofs, through ctx.prove().
+//   - prover:  one job at a time across the relay. Every sponsor-paid call (register, withdraw,
+//              append-inbox, take, cancel-offers, restore-enc-key, demo-tokens) holds it for its
+//              whole run: the proof server proves one circuit at a time (a k=18 proof needs about
+//              8 GB), and the one sponsor wallet balances one transaction at a time.
+//   - account: one job at a time PER ACCOUNT, for long jobs that must not overlap on one account;
+//   - relay:   one job at a time across the WHOLE relay, for long jobs that share one resource.
+// A job on the account or relay lane holds it for its whole run and takes the prover lane only
+// around its proofs, through ctx.prove(). `open-swap` runs there (AA 00047 P10, R2-1): it holds the
+// prover only while it proves, not while the exchange lists the offer (up to 90 s).
+//
+// The prover lane is shared FAIRLY across accounts (AA 00047 P10, audit round 2 R2-1 / F-A2-1) and by
+// DEADLINE and USAGE (P11.F, audit round 4 R4-1 / F-A4-1; ./prover-lock.ts): every job, and every
+// ctx.prove() of an account- or relay-lane job, waits under its FAIR KEY (its account; a registration,
+// which has none, under its action) and its RANK (./priority.ts: takes, then makes, which carry a
+// signed deadline, then everything else; a lower rank still gets a turn after a few grants to higher
+// ones). Within a rank the key with fewer recent grants goes first, and a job waits behind at most one
+// job of each other key (with the route's one-job-per-account rule, ../actions/account-gate.ts: each
+// other account). `estimateProverWaitSeconds` tells the route when a new job would start, so a take
+// that would start too late is refused before it costs anything (../app.ts).
 //
 // When a job finishes, its payload (which can hold the coin it spends) is dropped at once; only
 // the public outcome is kept, until the TTL.
@@ -23,10 +32,12 @@
 
 import { randomBytes } from 'node:crypto';
 
-import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@mnbank/core';
+import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@nightmarket/core';
 
 import type { Logger } from '../log.js';
 import { FifoLock } from './fifo-lock.js';
+import { proverPriority } from './priority.js';
+import { ProverLock, type ProverLockOptions, type ProverRank, type ProverTicket } from './prover-lock.js';
 
 /** An error whose code and message may be shown to the customer. Anything else is reported as
  *  an internal error, and its details go to the (redacted) log only. */
@@ -52,11 +63,14 @@ export interface JobContext {
 export type JobExecutor = (payload: unknown, ctx: JobContext) => Promise<Record<string, unknown>>;
 
 export interface JobSubmission {
-  /** A route's action, or an internal job the relay runs on its own (plan P4-A: `bridge-close`). */
+  /** A route's action. */
   action: JobActionName;
   lane: JobLane;
-  /** The deposit lane's account (64 hex); ignored by the other lanes. */
+  /** The account lane's account (64 hex); for the other lanes, the job's fair key on the prover. */
   account?: string;
+  /** The key the job takes its turns on the prover lane under (default: its account; without one,
+   *  its action). */
+  fairKey?: string;
   payload: unknown;
   executor: JobExecutor;
 }
@@ -66,6 +80,13 @@ interface JobRecord {
   action: JobActionName;
   lane: JobLane;
   laneKey: string;
+  /** Its key on the prover lane. */
+  fairKey: string;
+  /** Its rank on the prover lane, and its signed deadline (./priority.ts). */
+  rank: ProverRank;
+  deadline?: number;
+  /** A running account- or relay-lane job waiting for the prover inside ctx.prove(). */
+  waitingForProver: boolean;
   state: JobState;
   stages: JobStage[];
   createdAt: number;
@@ -88,17 +109,45 @@ export interface JobQueueOptions {
   maxJobs: number;
   log: Logger;
   now?: () => number;
+  /** Milliseconds now, for the prover lane's usage window and expected holds (tests scale it). */
+  nowMs?: () => number;
+  /** The prover lane's scheduling (./prover-lock.ts; RUNBOOK section 9). */
+  prover?: Omit<ProverLockOptions, 'nowMs'>;
 }
 
 export class JobQueue {
   private readonly jobs = new Map<string, JobRecord>();
-  private readonly prover = new FifoLock();
-  private readonly withdrawal = new FifoLock();
-  private readonly deposits = new Map<string, FifoLock>();
+  private readonly prover: ProverLock;
+  private readonly relayLane = new FifoLock();
+  private readonly accounts = new Map<string, FifoLock>();
   private readonly now: () => number;
 
   constructor(private readonly options: JobQueueOptions) {
-    this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
+    const nowMs = options.nowMs ?? (options.now ? () => options.now!() * 1000 : Date.now);
+    this.now = options.now ?? (() => Math.floor(nowMs() / 1000));
+    this.prover = new ProverLock({ ...options.prover, nowMs });
+  }
+
+  /** A submission's fair key on the prover lane. */
+  private static fairKeyOf(sub: Pick<JobSubmission, 'action' | 'account' | 'fairKey'>): string {
+    const account = sub.account?.replace(/^0x/, '').toLowerCase();
+    return sub.fairKey ?? (account ? `account:${account}` : `action:${sub.action}`);
+  }
+
+  /**
+   * About how many seconds until a job like `sub`, submitted now, would START on the prover lane (it
+   * waits for the jobs ahead of it in the lane's order: ./prover-lock.ts `estimateWaitMs`). The route
+   * refuses a take that would start after its signed deadline (AA 00047 P11.F, R4-1).
+   */
+  estimateProverWaitSeconds(sub: Pick<JobSubmission, 'action' | 'account' | 'fairKey' | 'payload'>): number {
+    const p = proverPriority(sub.action, sub.payload);
+    const ms = this.prover.estimateWaitMs({
+      key: JobQueue.fairKeyOf(sub),
+      rank: p.rank,
+      ...(p.deadline !== undefined ? { deadline: p.deadline } : {}),
+      action: sub.action,
+    });
+    return Math.ceil(ms / 1000);
   }
 
   /** Queue a job; null when `maxJobs` jobs are already queued or running (finished outcomes are
@@ -107,15 +156,21 @@ export class JobQueue {
     if (this.jobs.size >= this.options.maxJobs) this.sweep();
     if (this.jobs.size >= this.options.maxJobs) this.evictFinished(this.jobs.size - this.options.maxJobs + 1);
     if (this.jobs.size >= this.options.maxJobs) return null;
-    if (sub.lane === 'deposit' && !sub.account) throw new Error('a deposit job needs its account');
+    if (sub.lane === 'account' && !sub.account) throw new Error('an account-lane job needs its account');
     const requestId = randomBytes(16).toString('hex');
     const now = this.now();
     let settle!: () => void;
+    const account = sub.account?.replace(/^0x/, '').toLowerCase();
+    const priority = proverPriority(sub.action, sub.payload);
     const rec: JobRecord = {
       requestId,
       action: sub.action,
       lane: sub.lane,
-      laneKey: sub.lane === 'deposit' ? `deposit:${sub.account!.replace(/^0x/, '').toLowerCase()}` : sub.lane,
+      laneKey: sub.lane === 'account' ? `account:${account!}` : sub.lane,
+      fairKey: JobQueue.fairKeyOf(sub),
+      rank: priority.rank,
+      ...(priority.deadline !== undefined ? { deadline: priority.deadline } : {}),
+      waitingForProver: false,
       state: 'queued',
       stages: [{ stage: 'queued', at: now }],
       createdAt: now,
@@ -147,30 +202,30 @@ export class JobQueue {
   }
 
   stats(): QueueStats {
-    let depRunning = 0;
-    let depWaiting = 0;
-    for (const lock of this.deposits.values()) {
-      depRunning += lock.running;
-      depWaiting += lock.waiting;
+    let accRunning = 0;
+    let accWaiting = 0;
+    for (const lock of this.accounts.values()) {
+      accRunning += lock.running;
+      accWaiting += lock.waiting;
     }
     return {
       jobs: this.jobs.size,
       lanes: {
         prover: { running: this.prover.running, waiting: this.prover.waiting },
-        deposit: { running: depRunning, waiting: depWaiting },
-        withdrawal: { running: this.withdrawal.running, waiting: this.withdrawal.waiting },
+        account: { running: accRunning, waiting: accWaiting },
+        relay: { running: this.relayLane.running, waiting: this.relayLane.waiting },
       },
     };
   }
 
-  /** The jobs holding and waiting for one lane (the deposit lane is per account). */
+  /** The jobs holding and waiting for one lane (the account lane is per account). */
   laneLoad(lane: JobLane, account?: string): { running: number; waiting: number } {
     const lock =
       lane === 'prover'
         ? this.prover
-        : lane === 'withdrawal'
-          ? this.withdrawal
-          : this.deposits.get(`deposit:${(account ?? '').replace(/^0x/, '').toLowerCase()}`);
+        : lane === 'relay'
+          ? this.relayLane
+          : this.accounts.get(`account:${(account ?? '').replace(/^0x/, '').toLowerCase()}`);
     return lock ? { running: lock.running, waiting: lock.waiting } : { running: 0, waiting: 0 };
   }
 
@@ -197,13 +252,13 @@ export class JobQueue {
     if (dropped > 0) this.options.log.warn('job outcomes dropped before their TTL to make room', { dropped });
   }
 
-  private laneLock(rec: JobRecord): FifoLock {
+  private laneLock(rec: JobRecord): ProverLock | FifoLock {
     if (rec.lane === 'prover') return this.prover;
-    if (rec.lane === 'withdrawal') return this.withdrawal;
-    let lock = this.deposits.get(rec.laneKey);
+    if (rec.lane === 'relay') return this.relayLane;
+    let lock = this.accounts.get(rec.laneKey);
     if (!lock) {
       lock = new FifoLock();
-      this.deposits.set(rec.laneKey, lock);
+      this.accounts.set(rec.laneKey, lock);
     }
     return lock;
   }
@@ -217,7 +272,14 @@ export class JobQueue {
   private async run(rec: JobRecord): Promise<void> {
     const log = this.options.log.child({ requestId: rec.requestId, action: rec.action, lane: rec.lane });
     const lane = this.laneLock(rec);
-    const releaseLane = await lane.acquire(rec.requestId);
+    const ticket: ProverTicket = {
+      id: rec.requestId,
+      key: rec.fairKey,
+      rank: rec.rank,
+      ...(rec.deadline !== undefined ? { deadline: rec.deadline } : {}),
+      action: rec.action,
+    };
+    const releaseLane = lane instanceof ProverLock ? await lane.acquire(ticket) : await lane.acquire(rec.requestId);
     let holdsProver = rec.lane === 'prover';
     rec.state = 'running';
     this.stage(rec, 'running');
@@ -228,7 +290,9 @@ export class JobQueue {
       prove: async <T>(fn: () => Promise<T>): Promise<T> => {
         if (holdsProver) return fn();
         this.stage(rec, 'waiting-for-prover');
-        const release = await this.prover.acquire(rec.requestId);
+        rec.waitingForProver = true;
+        const release = await this.prover.acquire(ticket);
+        rec.waitingForProver = false;
         holdsProver = true;
         try {
           this.stage(rec, 'proving');
@@ -259,12 +323,19 @@ export class JobQueue {
       rec.executor = null;
       rec.expiresAt = this.now() + this.options.ttlSeconds;
       releaseLane();
-      if (rec.lane === 'deposit' && lane.idle) this.deposits.delete(rec.laneKey);
+      if (rec.lane === 'account' && lane.idle) this.accounts.delete(rec.laneKey);
     }
   }
 
   private view(rec: JobRecord): JobView {
-    const position = rec.state === 'queued' ? this.laneLock(rec).position(rec.requestId) : undefined;
+    // A queued job's place in its lane; a running account-lane job waiting inside ctx.prove(), its
+    // place on the prover lane.
+    const position =
+      rec.state === 'queued'
+        ? this.laneLock(rec).position(rec.requestId)
+        : rec.waitingForProver
+          ? this.prover.position(rec.requestId)
+          : undefined;
     const last = rec.stages[rec.stages.length - 1];
     return {
       requestId: rec.requestId,

@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_KEPT_PROVERS,
+  KEYED_BUNDLES,
+  KEY_VOLUME_BUNDLES,
   checkExpectedVk,
   compareDeployed,
   deployedVerifierDigests,
@@ -50,11 +52,11 @@ function tree(bundles: Record<string, { circuits: string[]; provers: string[] }>
 }
 
 describe('the kept prover list', () => {
-  it('defaults to the relay set plus abandonDeposit and deposit_shielded', () => {
+  it('defaults to the relay set plus the demo pack (deposit_shielded, faucet/mint), and nothing of the bridge vault', () => {
     const kept = parseKeptProvers(undefined);
     expect(kept).toEqual([...DEFAULT_KEPT_PROVERS]);
-    expect(kept).toContain('Erc20Vault/abandonDeposit');
     expect(kept).toContain('account/deposit_shielded');
+    expect(kept.filter((k) => !k.startsWith('account/'))).toEqual(['faucet/mint']);
     expect(parseKeptProvers('  ')).toEqual([...DEFAULT_KEPT_PROVERS]);
   });
 
@@ -65,9 +67,11 @@ describe('the kept prover list', () => {
   });
 
   it('keeps every circuit the relay proves (relay/src/prover/required.ts)', () => {
-    expect(RELAY_PROVEN_CIRCUITS.length).toBe(16);
+    // AA 00047 P9.I: + rotate_enc_key_with_ed25519, the market's "Cancel all open offers" (Q30).
+    expect(RELAY_PROVEN_CIRCUITS.length).toBe(6);
+    expect(RELAY_PROVEN_CIRCUITS).toContain('account/rotate_enc_key_with_ed25519');
     for (const r of RELAY_PROVEN_CIRCUITS) expect(DEFAULT_KEPT_PROVERS).toContain(r);
-    expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 1);
+    expect(DEFAULT_KEPT_PROVERS).toHaveLength(RELAY_PROVEN_CIRCUITS.length + 2);
   });
 });
 
@@ -124,23 +128,23 @@ describe('check 2: against the deployed verifier keys', () => {
 });
 
 describe('prune, re-stamp and completeness', () => {
+  it('holds the account and the demo faucet: the callees are compile-time inputs only (B1.5, B3)', () => {
+    expect([...KEY_VOLUME_BUNDLES]).toEqual(['account', 'faucet']);
+    expect([...KEYED_BUNDLES]).toEqual(['account', 'faucet']);
+    for (const kept of DEFAULT_KEPT_PROVERS) expect(kept).toMatch(/^(account\/|faucet\/mint$)/);
+  });
+
   it('prunes every prover key not kept, re-stamps the manifest, and keeps the fingerprint', () => {
     const root = tree({
       account: { circuits: ['activate', 'withdraw', 'rotate'], provers: ['activate', 'withdraw', 'rotate'] },
-      Erc20Vault: { circuits: ['startDeposit', 'initialise'], provers: ['startDeposit', 'initialise'] },
-      SignetSigner: { circuits: ['signBidirectional'], provers: ['signBidirectional'] },
     });
     const before = scanKeyTree(root).fingerprint;
-    const kept = ['account/activate', 'account/withdraw', 'Erc20Vault/startDeposit', 'SignetSigner/signBidirectional'];
+    const kept = ['account/activate', 'account/withdraw'];
     const doomed = proversToPrune(root, kept);
-    expect(doomed.map((f) => f.slice(root.length + 1)).sort()).toEqual([
-      'Erc20Vault/keys/initialise.prover',
-      'account/keys/rotate.prover',
-    ]);
+    expect(doomed.map((f) => f.slice(root.length + 1)).sort()).toEqual(['account/keys/rotate.prover']);
     for (const f of doomed) rmSync(f);
     expect(restampManifest(join(root, 'account'))).toBe(1);
-    expect(restampManifest(join(root, 'Erc20Vault'))).toBe(1);
-    expect(restampManifest(join(root, 'SignetSigner'))).toBe(0);
+    expect(restampManifest(join(root, 'account'))).toBe(0);
     const manifest = JSON.parse(readFileSync(join(root, 'account', 'compiler', 'contract-manifest.json'), 'utf8'));
     expect(Object.keys(manifest.keys).sort()).toEqual([
       'activate.prover',

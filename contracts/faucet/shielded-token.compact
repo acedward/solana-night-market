@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma language_version 0.26;
+
+import CompactStandardLibrary;
+
+export sealed ledger _name: Opaque<"string">;
+export sealed ledger _symbol: Opaque<"string">;
+export sealed ledger _decimals: Uint<8>;
+export sealed ledger _domain: Bytes<32>;
+
+constructor(name_: Opaque<"string">, symbol_: Opaque<"string">, decimals_: Uint<8>, domain_: Bytes<32>) {
+  _name = disclose(name_);
+  _symbol = disclose(symbol_);
+  _decimals = disclose(decimals_);
+  _domain = disclose(domain_);
+}
+
+export circuit name(): Opaque<"string"> { return _name; }
+export circuit symbol(): Opaque<"string"> { return _symbol; }
+export circuit decimals(): Uint<8> { return _decimals; }
+export circuit tokenColor(): Bytes<32> { return tokenType(_domain, kernel.self()); }
+
+pure circuit recipientIsZero(recipient: Either<ZswapCoinPublicKey, ContractAddress>): Boolean {
+  return recipient.is_left
+    ? recipient.left == default<ZswapCoinPublicKey>
+    : recipient.right == default<ContractAddress>;
+}
+
+export circuit mint(
+  recipient: Either<ZswapCoinPublicKey, ContractAddress>,
+  amount: Uint<64>,
+  nonce: Bytes<32>
+): ShieldedCoinInfo {
+  assert(amount > 0, "amount must be positive");
+  assert(!recipientIsZero(recipient), "invalid recipient");
+  return mintShieldedToken(_domain, disclose(amount), disclose(nonce), disclose(recipient));
+}

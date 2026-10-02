@@ -2,7 +2,9 @@
 # The relay's prover memory check (plan 00039 P5.1b, question Q25). See test/memory/README.md.
 #
 #   test/memory/run-prover-memory.sh synthetic [harness args]   no keys, no proof server (what CI runs)
-#   test/memory/run-prover-memory.sh real [harness args]        a real k=18 proof against the pinned
+#   test/memory/run-prover-memory.sh real [harness args]        (not in this build: MN Bank's real mode
+#                                                              proved an EVM-arm call; it returns on the
+#                                                              Ed25519 arm with AA 00047 lane B3) a real k=18 proof against the pinned
 #                                                              proof server (needs KEYS_DIR)
 #   test/memory/run-prover-memory.sh down                       remove everything it started
 #
@@ -18,7 +20,7 @@
 #   BUDGET_MB    the peak anonymous memory allowed (default 768 real, 512 synthetic)
 #   PROOFS       proofs in a row (default 4)
 #   OUT_DIR      where the JSON report goes (default test-results/prover-memory)
-#   NAME         prefix of the containers, volumes and network (default mnbank-mem)
+#   NAME         prefix of the containers, volumes and network (default nightmarket-mem)
 #   KEEP         1 keeps the network, the proof server and the volumes after the run
 #   PARAMS_SEED_DIR  (real) optional directory of proof-server parameters (bls_midnight_2p*, zswap/,
 #                dust/) copied into the proof server's volume first, to skip their download
@@ -26,7 +28,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NAME="${NAME:-mnbank-mem}"
+NAME="${NAME:-nightmarket-mem}"
 BUN_IMAGE="${BUN_IMAGE:-oven/bun:1.3.11@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7}"
 PROOF_IMAGE="${PROOF_IMAGE:-midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b}"
 MEM_LIMIT="${MEM_LIMIT:-1g}"
@@ -73,7 +75,7 @@ harness() {
   else
     run+=(--network "$NET" -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro"
       -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed
-      -e MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300)
+      -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server:6300)
   fi
   mkdir -p "$OUT_DIR"
   say "$mode: $PROOFS proof(s) in a container limited to $MEM_LIMIT without swap, budget $budget MB"

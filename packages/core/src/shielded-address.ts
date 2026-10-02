@@ -38,7 +38,7 @@ export function parseShieldedAddress(text: string, network: string): ShieldedAdd
   };
 }
 
-/** Encode (tests, and showing an address the bank knows). */
+/** Encode (tests, and showing an address the market knows). */
 export function formatShieldedAddress(a: Omit<ShieldedAddress, 'network'>, network: string): string {
   const bytes = new Uint8Array(64);
   const hex = (h: string) => Uint8Array.from(h.match(/../g)!.map((b) => parseInt(b, 16)));

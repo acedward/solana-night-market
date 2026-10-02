@@ -197,8 +197,9 @@ if [[ -n "${FUND_ACCOUNT:-}" ]]; then
     -w /app "$BUN_IMAGE" bun test/stack/p6/fund-unshielded.ts 2>&1 | tee -a "$OUT/fund-unshielded.log"; then
     say "funded"
   else
+    # The flows still run (a cancel must not be skipped); the run fails at its end.
     say "funding FAILED"
-    exit 1
+    status=1
   fi
 fi
 

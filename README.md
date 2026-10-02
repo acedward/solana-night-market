@@ -39,6 +39,7 @@ into `main`, ready for review). Its limits are listed under [Known limitations](
 | P6 | Integration and stagenet acceptance: two accounts on a localnet and on stagenet (open, demo tokens, a make listed on the staging kernel, a take settled by the staging batcher, a withdrawal), a tampered proof refused by the node (`test/stack/p6/`) | done |
 | P8 | The end-user dark design | done |
 | P9–P11 | Security review rounds and their fix passes: the wallet's readable text is what the circuit enforces; the browser checks every account and decodes its coins and fills itself; the relay is bounded per account and per day | done; what remains is under [Known limitations](#known-limitations) |
+| P11.I | The stagenet re-acceptance with the current keys (`21493588…`): two new accounts opened and checked by the page, demo tokens, a make listed on the staging kernel, a take settled by the staging batcher and shown "Filled" by the page's own decode of the swap, a shielded and an unshielded withdrawal, a cancel, and the relay's refusals | done (2026-10-02) |
 
 The signing seams are `packages/core/src/signing.ts` (the device key and
 signature types), `web/src/wallet/signing.ts` (`ActionSigning`, what the browser asks the wallet
@@ -123,18 +124,19 @@ says the same in plain words.
   can call it directly, not only this market. Once it is used up, takes pause market-wide
   (`exchange-busy`) until it resets; making offers, cancelling and withdrawing keep working. Only the
   exchange's operator can change this. (Audit R4b-4; issue 00055.)
+- **An offer that can never settle.** A maker can list an offer that asks to be paid a coin its own
+  account has already received. No take of that offer can settle, and each taker who tries it uses
+  one of their 10 daily unsettled-take tries. The make caps bound how many such offers one account
+  can list, and no funds are at risk. (Audit round 4c, F-A4c-1 / F-B4c-1.)
+- **A rare race can mislabel a take.** When an account's own offer is filled at the same moment as
+  one of its takes, the relay may report the take as settled. Only the label is wrong: the account
+  really received the coin. (Audit round 4c, F-A4c-2 / F-B4c-2.)
 - **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
   failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
   for another pending claim, which is then held back for the operator. (Audit R4-7.)
 - **Proof-server memory.** The 9.0.0-rc.8 contract prover's memory grows across proofs. Run it
   with a 14 GB cap and restart it periodically while no proof runs (`deploy/RUNBOOK.md` sections 2
   and 12.1). A proof cut off fails its job, and the customer is not charged for it.
-
-**Status**
-
-- **The stagenet re-acceptance with the current keys is pending.** The full flow passed on
-  stagenet with an earlier key set, and passes on a local network with the current one
-  (`21493588…`); the stagenet run with it waits for the shared test wallet. (Questions Q34.)
 
 The question and audit numbers refer to the project's planning records.
 

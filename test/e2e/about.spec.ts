@@ -22,11 +22,12 @@ const LIMITS = [
   'busy-prover',
   'busy-takes',
   'exchange-limit',
+  'stuck-offer',
+  'take-label',
   'restarts',
   'demo-tokens',
   'one-offer',
   'your-data',
-  'stagenet-check',
 ];
 
 const VIEWPORTS = [
@@ -69,6 +70,9 @@ for (const vp of VIEWPORTS) {
       // AA 00047 P11.F2 (audit round 4b R4b-2, R4b-4): the two limits round 4b left.
       await expect(page.locator('[data-limit=busy-takes]')).toContainText('its prover is busy');
       await expect(page.locator('[data-limit=exchange-limit]')).toContainText('for everyone who uses it');
+      // AA 00047 P11.I K.7 (audit round 4c F-A4c-1 / F-B4c-1, F-A4c-2 / F-B4c-2): the two limits round 4c left.
+      await expect(page.locator('[data-limit=stuck-offer]')).toContainText('can never be filled');
+      await expect(page.locator('[data-limit=take-label]')).toContainText('Only the label is wrong');
       // Q46: no allowance is named before a customer reaches it.
       await expect(page.getByTestId('about')).not.toContainText(/allowance|withdrawals a day|\b100\b/i);
 

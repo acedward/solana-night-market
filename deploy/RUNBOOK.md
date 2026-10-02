@@ -657,9 +657,12 @@ coin of each listed token still leaves every day, so funds never get stuck.
 - A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6; questions Q28:
   the one accepted exception to the trustless relay: a relay could hide a withdrawn coin from its
   recipient's wallet scan, not take it).
-- The page reads its account from the public indexer, except which of its coins exist and which are
-  spent: the relay decodes those events, and the page keeps only what the indexer's own events carry
-  (section 16; questions Q31). A relay can still leave a coin out (hide it), never invent one.
+- The page reads its account from the public indexer, which of its coins exist and which are spent
+  included: it decodes the account's whole history itself with ledger-v9 (section 16; questions Q47
+  A). It trusts that indexer to serve the chain faithfully (it runs no light client). Without the
+  indexer's WebSocket (a `connect-src` without its `wss:` origin, a proxy), an account with more than
+  500 actions cannot be read in full: the page then says so and counts only the coins it could
+  confirm.
 - The registration caps, the per-account caps (the withdrawal allowance included) and the failure
   budget are counted in memory: a relay restart resets them (section 9).
 - The withdrawal allowance is per account (questions Q49): many accounts can each use theirs; the
@@ -830,6 +833,22 @@ browser:
   (`@midnightntwrk/ledger-v9` 1.0.0-rc.3). A coin counts only when a decoded leaf carries its full
   commitment; a withdrawal's pending change is dropped only on positive evidence; an offer is
   "Filled" only by its decoded swap transaction. The relay's Zswap report is no longer read.
+
+**What the page still takes from others** (AA 00047 P11.B, plan P11.B (3)):
+- **From the relay: nothing about coins.** The relay's `GET /v1/accounts/:a/zswap` is not read by the
+  page (it stays for other clients). What the relay can still do is unchanged: refuse or delay a
+  request (liveness), choose the recipient encryption key of a withdrawal (questions Q28, the one
+  accepted exception: it can hide a withdrawn coin from its recipient's wallet scan, not take it), and
+  issue the change's inbox entitlement. Its job results (a transaction id, "succeeded", "failed") end
+  nothing: the page decides from the chain.
+- **From the public indexer: the chain itself.** The page checks what it can: every event names its
+  own transaction, a leaf must lie in its transaction's range of the Zswap tree, and a transaction's
+  raw bytes must hash (ledger-v9's own `transactionHash`) to the one asked for. It does not verify the
+  indexer against block headers. A wrong position would only make a proof fail: the circuit checks
+  the Merkle path.
+- **Completeness**: the page concludes from what is ABSENT (a spend that never happened, a fill that
+  never came) only when its read of the history is complete through the height the account's state
+  was read at; otherwise it waits ("Ended" for an approval it cannot place yet).
 
 **ledger-v9 in the page, loaded lazily** (measured on the production build, `vite build`, 2026-10-02):
 the decoder is its own chunk, `assets/ledger-decode-<hash>.js` (173 KB, 27 KB gzipped), with

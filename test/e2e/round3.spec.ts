@@ -198,5 +198,23 @@ test.describe('Q46: the withdrawal allowance is explained only once it is used u
     );
     await expect(page.getByTestId('accounts-message')).toContainText('You can withdraw again in 10 minutes');
     await expect(page.getByTestId('whole-coin-exit')).toHaveCount(0);
+    // A private-token withdrawal refused the same way: no exit offered either.
+    await page.getByTestId('withdraw-kind-shielded').click();
+    await page.getByTestId('send-token').selectOption(COLOUR.twUSDC);
+    await page.getByTestId('send-amount').fill('100');
+    await page.getByTestId('send-recipient').fill(WALLET);
+    relay.refuseNext = {
+      status: 429,
+      code: 'withdraws-daily-cap',
+      message: 'used',
+      detail: 'whole-coin-exit-used',
+      retryAfter: 600,
+    };
+    await page.getByTestId('send-submit').click();
+    await expect(page.getByTestId('accounts-message')).toContainText(
+      'its one extra withdrawal of this token today as well',
+    );
+    await expect(page.getByTestId('whole-coin-exit')).toHaveCount(0);
+    expect(relay.refused).toEqual(['withdraw-unshielded: withdraws-daily-cap', 'withdraw: withdraws-daily-cap']);
   });
 });

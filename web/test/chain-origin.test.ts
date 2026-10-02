@@ -43,7 +43,8 @@ const codes = (c: { problems: Array<{ code: string }> }) => c.problems.map((p) =
 
 /** A stub public indexer: the account's current state, and its origin (both P11's reads and P10's). */
 async function indexer(now: Partial<AccountStateSpec>, origin: Partial<OriginSpec> = {}) {
-  let o = await originIndexer({ ...base, ...origin });
+  let spec: Partial<OriginSpec> = origin;
+  let o = await originIndexer({ ...base, ...spec });
   const queries: string[] = [];
   const state = await accountStateHex({ ...base, ...now });
   const fetchImpl = (async (_url: string, init?: RequestInit) => {
@@ -52,7 +53,7 @@ async function indexer(now: Partial<AccountStateSpec>, origin: Partial<OriginSpe
     let data = o.answer(body.query, body.variables);
     // P10's reads: the deploy's block, then the state at that block.
     if (data === undefined && body.query.includes('AccountDeploy('))
-      data = { contract: { actions: [{ transaction: { block: { height: 100 } } }] } };
+      data = { contract: { actions: spec.noDeployRecord ? [] : [{ transaction: { block: { height: 100 } } }] } };
     if (data === undefined && body.query.includes('AccountStateAt(')) data = { contract: { state: o.deployState } };
     if (data === undefined) data = { contract: { state }, block: { height: 120 } };
     return new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -61,7 +62,8 @@ async function indexer(now: Partial<AccountStateSpec>, origin: Partial<OriginSpe
     chain: new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl }),
     queries,
     /** The indexer's view of the origin changes (it catches up). */
-    async set(spec: Partial<OriginSpec>) {
+    async set(next: Partial<OriginSpec>) {
+      spec = next;
       o = await originIndexer({ ...base, ...spec });
     },
   };

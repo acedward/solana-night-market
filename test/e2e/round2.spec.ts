@@ -179,8 +179,9 @@ test.describe('R2-6: the chain view survives seeded state, fake notes and a long
   });
 
   test('an account with more transactions than the indexer’s newest page still syncs', async ({ page }) => {
-    const { indexer } = await setup(page, { seeded: true });
+    const { indexer, relay } = await setup(page, { seeded: true });
     indexer.padActions = 600; // newer than the account's own: a griefer's one-unit deposits
+    relay.zswapHistoryTooLong = true; // as the relay at b8d81e9 answers from 500 actions on (R3-5)
     await page.goto('/#account');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twBTC')).toContainText('0.10');

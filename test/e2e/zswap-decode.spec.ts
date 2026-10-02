@@ -217,7 +217,7 @@ test.describe('the account’s complete history (plan P11.B (1))', () => {
   }) => {
     const { relay, indexer } = await setup(page, { seeded: true });
     indexer.padActions = 600; // a griefer's one-unit deposits, newer than the account's own coins
-    relay.omitFromReport.add('x'); // the relay's report is not read at all (any content)
+    relay.zswapHistoryTooLong = true; // the relay at b8d81e9 refuses its own report from 500 on (R3-5)
     await page.goto('/#account');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twBTC')).toContainText('0.10');

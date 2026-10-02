@@ -173,6 +173,9 @@ export class MockRelay {
   zswapReads = 0;
   /** Leave every withdrawal's spend and change out of the `/zswap` report (R3-4). */
   omitWithdrawalsFromReport = false;
+  /** Refuse `/zswap` as the relay at `b8d81e9` does from 500 actions on (501 `history-too-long`,
+   *  audit round 3 R3-5 / F-B3-4). */
+  zswapHistoryTooLong = false;
   unshielded = new Map<string, bigint>();
   demo = { enabled: true, dailyCap: 25, remainingToday: 7, claimed: new Set<string>() };
   offerStatus: Record<string, string> = {};
@@ -719,6 +722,10 @@ export class MockRelay {
         });
       if (acct[2] === 'zswap') {
         this.zswapReads += 1;
+        if (this.zswapHistoryTooLong)
+          return json(501, {
+            error: { code: 'history-too-long', message: 'the account has 500 or more actions; paging is not implemented' },
+          });
         return json(200, {
           account: ACCOUNT,
           outputs: this.outputs.filter((o) => !this.omitFromReport.has(o.commitment)),

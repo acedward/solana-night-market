@@ -6,7 +6,14 @@
 
 import type { AccountStateView, InboxPage, UnshieldedBalancesView, ZswapActivity } from '@nightmarket/core';
 
-import { type IndexerClient, ledgerEventDecoder, zswapActivityOf, type EventDecoder } from './indexer.js';
+import {
+  accountTxViews,
+  type AccountTxView,
+  type IndexerClient,
+  ledgerEventDecoder,
+  zswapActivityOf,
+  type EventDecoder,
+} from './indexer.js';
 
 export type { AccountStateView, InboxPage, ZswapActivity };
 
@@ -133,6 +140,17 @@ export class IndexerChainReader implements ChainReader {
   async spentNullifiers(account: string): Promise<ReadonlySet<string> | null> {
     const z = await this.zswap(account);
     return z ? new Set(z.inputs.map((i) => i.nullifier.replace(/^0x/, '').toLowerCase())) : null;
+  }
+
+  /** The account's WHOLE history, each transaction decoded for the account (its calls' entry points,
+   *  its coins' leaves and spends), with the chain tip read with it (AA 00047 P11.F, audit round 4 R4-2:
+   *  a take the exchange did not settle is judged by the transaction that spent its coin or moved its
+   *  nonce, ../trade/reconcile.ts), or null when there is no such contract. */
+  async accountTxs(account: string): Promise<{ txs: AccountTxView[]; tip: number } | null> {
+    const found = await this.indexer.accountTransactions(account);
+    if (!found) return null;
+    this.decoder ??= ledgerEventDecoder();
+    return { txs: accountTxViews(account, found.txs, await this.decoder), tip: found.tip };
   }
 
   async unshielded(account: string): Promise<UnshieldedBalancesView | null> {

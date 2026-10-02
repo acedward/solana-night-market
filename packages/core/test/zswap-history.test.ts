@@ -13,6 +13,7 @@ import {
   leafOf,
   mergeAccountTxs,
   spendOf,
+  unresolvedFillCandidates,
   type AccountHistory,
   type DecodedAccountTx,
   type DecodedCall,
@@ -90,6 +91,21 @@ describe('the decoded history’s facts', () => {
       ['a', []],
       ['b', ['deposit_shielded', SWAP]],
     ]);
+  });
+});
+
+describe('unresolvedFillCandidates: a candidate whose calls were not decoded keeps an approval from "Cancelled" (R4-4)', () => {
+  const swapTx = tx('s1', { outputs: [{ commitment: W, mtIndex: '9' }], inputs: [G], entryPoints: [SWAP] });
+  const deposit = tx('d1', { outputs: [{ commitment: W, mtIndex: '9' }], entryPoints: ['deposit_shielded'] });
+
+  it('lists the swap candidates whose raw calls are not known; a decoded one, or a non-candidate, is not', () => {
+    expect(unresolvedFillCandidates({ history: history([swapTx, deposit]), want, calls: () => undefined })).toEqual([
+      's1',
+    ]);
+    expect(
+      unresolvedFillCandidates({ history: history([swapTx]), want, calls: () => [call({ address: OTHER })] }),
+    ).toEqual([]);
+    expect(unresolvedFillCandidates({ history: history([deposit]), want, calls: () => undefined })).toEqual([]);
   });
 });
 

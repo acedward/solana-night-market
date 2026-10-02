@@ -146,16 +146,16 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     await expect(page.getByTestId('my-trade-expiry')).toHaveAttribute('title', `Expires ${readable}`);
     await expect(page.getByTestId('live-offer-banner')).toContainText(`until ${readable} (the expiry you approved)`);
 
-    // A take: five minutes.
+    // A take: ten minutes (AA 00047 P11.F, R4-1: the relay's maximum, so a busy queue can still reach it).
     await page.getByTestId('trade-pair').selectOption('twETH/twBTC');
     await page.getByTestId('sell-best-bid').click();
-    await expect(page.getByTestId('take-validity')).toContainText('valid for 5 minutes');
+    await expect(page.getByTestId('take-validity')).toContainText('valid for 10 minutes');
     const t1 = nowS();
     await page.getByTestId('take-sign').click();
     await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction on Midnight');
     const takeUntil = Number(relay.signedExpiries[1]);
-    expect(takeUntil).toBeGreaterThanOrEqual(t1 + 300);
-    expect(takeUntil).toBeLessThanOrEqual(nowS() + 300);
+    expect(takeUntil).toBeGreaterThanOrEqual(t1 + 600);
+    expect(takeUntil).toBeLessThanOrEqual(nowS() + 600);
   });
 
   test('Cancel offer: one approval, the chain’s nonce moves, and only then the offer shows Cancelled', async ({

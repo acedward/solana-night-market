@@ -118,6 +118,14 @@ export interface RelayConfig {
   };
   /** The limits on an offer's or a take's signed expiry (AA 00047 P9, audit C6; ./trade/expiry.ts). */
   expiry: ExpiryLimits;
+  /** The prover lane's scheduling (AA 00047 P11.F, audit round 4 R4-1; ./queue/prover-lock.ts, RUNBOOK
+   *  section 9): how far back an account's use of the lane counts, how many grants in a row deadline-bound
+   *  jobs may take before a waiting lower rank gets a turn, and the expected hold of an action not seen
+   *  yet (the queue's estimate of when a take would start). */
+  proverLane: { usageWindowSeconds: number; burst: number; defaultHoldSeconds: number };
+  /** After the exchange's settlement service answers HTTP 429, how long the relay refuses takes before
+   *  proving them (AA 00047 P11.F, audit round 4 R4-3; ./trade/executors.ts `BatcherCooldown`). */
+  batcherBusyCooldownSeconds: number;
   /** Security review F-B6 (questions Q13): require a second signature (a Solana envelope over the
    *  whole body) for a withdrawal that names a recipient encryption key. Off by default: one wallet
    *  prompt per action, the encryption key rides the request unsigned (RUNBOOK §F-B6). */
@@ -453,6 +461,12 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         3600,
       ),
     },
+    proverLane: {
+      usageWindowSeconds: int(env.PROVER_USAGE_WINDOW_SECONDS, 3600, 'PROVER_USAGE_WINDOW_SECONDS', 60, 7 * 86_400),
+      burst: int(env.PROVER_PRIORITY_BURST, 4, 'PROVER_PRIORITY_BURST', 1, 100),
+      defaultHoldSeconds: int(env.PROVER_JOB_ESTIMATE_SECONDS, 60, 'PROVER_JOB_ESTIMATE_SECONDS', 1, 3600),
+    },
+    batcherBusyCooldownSeconds: int(env.BATCHER_BUSY_COOLDOWN_SECONDS, 300, 'BATCHER_BUSY_COOLDOWN_SECONDS', 1, 86_400),
     withdrawRecipientEnvelope: bool(env.RELAY_WITHDRAW_RECIPIENT_ENVELOPE, false, 'RELAY_WITHDRAW_RECIPIENT_ENVELOPE'),
     dataDir,
     demoTokens: {

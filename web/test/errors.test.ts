@@ -45,6 +45,14 @@ describe('the relay’s refusals, in words', () => {
     expect(t('sponsor-low', { status: 503 })).toMatch(/low on the network-fee funds \(DUST\).*paused new actions/);
     expect(t('sponsor-unavailable', { status: 503 })).toMatch(/still starting up/);
     expect(t('busy', { status: 503 })).toMatch(/at capacity/);
+    // AA 00047 P11.F (round 4): a take the prover's queue cannot reach in time (R4-1), and the exchange's
+    // settlement service cooling down from a 429 (R4-3), are refused up front, in words.
+    expect(t('prover-busy', { status: 503, retryAfterSeconds: 45 })).toBe(
+      "The market's prover is busy right now, so your request could not start before the expiry you approved. Nothing was sent; try again in 45 s and approve it once more.",
+    );
+    expect(t('exchange-busy', { status: 503, retryAfterSeconds: 600 })).toMatch(
+      /settlement service is not taking more settlements right now.*Nothing was sent.*try again in 10 minutes/,
+    );
     // Q27: a known limit, not an outage; it does not say "try again shortly".
     const history = t('history-too-long', { status: 501 });
     expect(history).toMatch(/more history than this version of Night Market can read \(more than 100,000 actions/);
@@ -138,6 +146,8 @@ describe('the relay’s refusals, in words', () => {
     expect(j('demo-tokens-settling')).toMatch(/may still land on Midnight.*not minting them again yet/);
     for (const code of ['market-unavailable', 'failure-budget', 'demo-tokens-settling'])
       expect(j(code)).not.toContain('raw relay text');
+    // AA 00047 P11.F (R4-2): the account's own offer was taken while its take was settling.
+    expect(j('take-raced')).toMatch(/One of your own offers was taken at the same moment.*does not count against you/);
   });
 
   it('words failed jobs of the exchange and the internal error', () => {

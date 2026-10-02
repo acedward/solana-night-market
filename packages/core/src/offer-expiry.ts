@@ -12,8 +12,12 @@
  *  exchange's listing and the signed expiry end together. */
 export const OFFER_LIFETIME_SECONDS = 3600;
 
-/** A take: the page signs now + this (a take settles at once or not at all). */
-export const TAKE_LIFETIME_SECONDS = 300;
+/** A take: the page signs now + this (a take settles at once or not at all). The relay's maximum
+ *  (`DEFAULT_EXPIRY_LIMITS.takeMaxLifetimeSeconds`) is the same value, so the page and the relay agree.
+ *  It was 300 s until AA 00047 P11.F (audit round 4 R4-1 / F-A4-1): a take's job must start with
+ *  `minRemainingSeconds` left, and a queue of a few minutes made every take expire before it started;
+ *  600 s leaves 540 s to reach it (and the prover lane now serves takes first). */
+export const TAKE_LIFETIME_SECONDS = 600;
 
 /** The relay's limits on a signed expiry (its configuration; these are the defaults). */
 export interface ExpiryLimits {
@@ -30,7 +34,7 @@ export interface ExpiryLimits {
 
 export const DEFAULT_EXPIRY_LIMITS: ExpiryLimits = {
   offerMaxLifetimeSeconds: OFFER_LIFETIME_SECONDS,
-  takeMaxLifetimeSeconds: 600,
+  takeMaxLifetimeSeconds: TAKE_LIFETIME_SECONDS,
   minRemainingSeconds: 60,
   clockSkewSeconds: 120,
 };

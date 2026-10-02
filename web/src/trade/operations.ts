@@ -32,6 +32,7 @@ import {
   fillCandidates,
   fillEvidence,
   historyCovers,
+  unresolvedFillCandidates,
   spendOf,
   type AccountHistory,
   type CoinInfo,
@@ -289,8 +290,10 @@ export function wantCoinOf(
  *              carries the account's own swap call receiving the wanted coin (its full commitment) and
  *              spending the approval's coin (`fillEvidence`); `settledTx` is that transaction;
  *   cancelled  the nonce moved, and the history, complete through the height the nonce was read at,
- *              holds no such transaction: it can never execute (another signed call, or "Cancel offer");
- *   ended      the nonce moved, no such transaction was read, and the history is NOT complete: it can
+ *              holds no such transaction, and every candidate's raw calls were read and decoded: it can
+ *              never execute (another signed call, or "Cancel offer");
+ *   ended      the nonce moved, no such transaction was read, and the history is NOT complete, or a
+ *              candidate fill's raw calls could not be read or decoded (AA 00047 P11.F, R4-4): it can
  *              never execute, but whether it filled is not known (decided again on the next read);
  *   expired    the nonce has not moved but its SIGNED `validUntil` passed: the circuit refuses it;
  *   live       otherwise: it can still execute, whatever the exchange or the relay says.
@@ -299,9 +302,14 @@ export function decideApproval(t: TradeRecord, chain: ChainView, now: number): T
   const { settledTx: _s, fillVerified: _v, ...open } = t;
   if (chain.authNonce > BigInt(t.authNonce)) {
     const give = chain.coins.find((c) => c.commitment === t.coin) ?? null;
-    const fill = fillEvidence({ history: chain.history, want: wantCoinOf(t), give, calls: chain.calls });
+    const want = wantCoinOf(t);
+    const fill = fillEvidence({ history: chain.history, want, give, calls: chain.calls });
     if (fill) return { ...open, status: 'filled', settledTx: fill.txHash, fillVerified: true };
-    return { ...open, status: historyCovers(chain.history, chain.stateHeight) ? 'cancelled' : 'ended' };
+    // "Cancelled" needs COMPLETE negative evidence: the history through the nonce's height, and every
+    // candidate's calls decoded (R4-4: a raw read that failed may hide the approval's own swap).
+    const unresolved = unresolvedFillCandidates({ history: chain.history, want, calls: chain.calls });
+    const negative = historyCovers(chain.history, chain.stateHeight) && unresolved.length === 0;
+    return { ...open, status: negative ? 'cancelled' : 'ended' };
   }
   const until = signedExpiryMs(t);
   return { ...open, status: until !== null && now >= until ? 'expired' : 'live' };
@@ -334,6 +342,8 @@ export async function reconcileOffers(
   const candidates = new Set(
     open.filter((t) => authNonce > BigInt(t.authNonce)).flatMap((t) => fillCandidates(synced.history, wantCoinOf(t))),
   );
+  // A candidate whose raw bytes could not be read or decoded stays unresolved (`calls` undefined): its
+  // approval is then "Ended", never "Cancelled" (R4-4).
   const calls = new Map<string, DecodedCall[]>();
   for (const hash of candidates) {
     const c = await env.chain.transactionCalls(hash).catch(() => null);

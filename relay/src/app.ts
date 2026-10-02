@@ -48,6 +48,7 @@ import { clientKey } from './client-key.js';
 import type { RelayConfig } from './config.js';
 import type { Logger } from './log.js';
 import { PublicError, type JobExecutor, type JobQueue } from './queue/jobs.js';
+import { proverPriority } from './queue/priority.js';
 import { RateLimiter } from './ratelimit.js';
 import type { SponsorSession } from './sponsor/session.js';
 
@@ -438,6 +439,34 @@ export function createApp(deps: AppDeps): Hono {
         outcome.release?.();
         ok.release?.();
       };
+
+      // AA 00047 P11.F (audit round 4 R4-1 / F-A4-1): a take or a make carries the deadline its device
+      // signed, and its job must start with `minRemainingSeconds` still left. When the prover lane would
+      // reach it too late (./queue/prover-lock.ts: takes go first, so only a crowd of takes or a long
+      // holder can do this), it is refused NOW, before any queue slot, proof or DUST, instead of expiring
+      // in the queue; nothing is charged and the customer signs again later.
+      const deadline = proverPriority(def.action, payload.data).deadline;
+      if (deadline !== undefined) {
+        const waitSeconds = deps.queue.estimateProverWaitSeconds({
+          action: def.action,
+          ...(account ? { account } : {}),
+          payload: payload.data,
+        });
+        const { minRemainingSeconds, takeMaxLifetimeSeconds, offerMaxLifetimeSeconds } = config.expiry;
+        if (now() + waitSeconds > deadline - minRemainingSeconds) {
+          giveBack();
+          slot();
+          const lifetime = def.action === 'take' ? takeMaxLifetimeSeconds : offerMaxLifetimeSeconds;
+          c.header('Retry-After', String(Math.max(1, waitSeconds - (lifetime - minRemainingSeconds))));
+          log.info('action refused', { action: def.action, code: 'prover-busy', waitSeconds });
+          return apiError(
+            c,
+            503,
+            'prover-busy',
+            `the market's prover is busy: this ${def.action === 'take' ? 'take' : 'offer'} would only start in about ${waitSeconds} s, too late for the expiry you signed. Nothing was sent; try again shortly and sign once more`,
+          );
+        }
+      }
 
       let job: ReturnType<JobQueue['submit']> = null;
       try {

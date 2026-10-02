@@ -78,7 +78,9 @@ describe('the prover lane', () => {
       payload: {},
       executor: p.executor('b'),
     })!;
-    const c = q.submit({ action: 'open-swap', lane: 'prover', payload: {}, executor: p.executor('c') })!;
+    // The same rank (no signed deadline): first in first out. Since AA 00047 P11.F (R4-1) a take or a
+    // make would go first (./prover-lane.test.ts).
+    const c = q.submit({ action: 'append-inbox', lane: 'prover', payload: {}, executor: p.executor('c') })!;
     await tick();
     expect(q.get(a.requestId)?.state).toBe('running');
     expect(q.get(b.requestId)).toMatchObject({ state: 'queued', position: 1 });

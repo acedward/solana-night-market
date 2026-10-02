@@ -4,8 +4,9 @@
 // at most `JOBS_PER_ACCOUNT` (default 1) queued-or-running jobs per account: a second request for an
 // account whose job has not finished is refused at admission (`429 account-busy`) before any queue
 // slot, proof or DUST, and its signature can be sent again once the first job ends. Together with the
-// prover lane's round-robin turns per account (../queue/fair-lock.ts) a customer's job waits behind
-// at most one job of each other account, however fast another account sends.
+// prover lane's fairness (../queue/prover-lock.ts: within a rank, a job is passed by each other key at
+// most once) a customer's job waits behind at most one job of each other account of its rank, however
+// fast another account sends; takes and makes, which carry a signed deadline, go first (P11.F, R4-1).
 //
 // The slot is taken synchronously (two racing requests cannot both pass), given back when the route
 // refuses the request after all, and otherwise when the job ends (success or failure).

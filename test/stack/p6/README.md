@@ -7,7 +7,8 @@
 | `mock-exchange.ts` | Localnet only: a kernel stand-in (stores and serves offers) and a batcher stand-in that adds DUST from its own development wallet (as `midnight-balancer` does) and submits, so a take settles on the localnet. |
 | `compose.yml`, `run-local.sh` | The localnet (lane B3's recipe) with the relay image, the key volume and the mock exchange; runs every step of `market-flows.ts`, then `tamper-live.ts`, and tears everything down. |
 | `fund-unshielded.ts`, `fund-keys.sh` | P9.I: an unshielded balance for account A. `fund-keys.sh` clones the relay's key volume and adds the account's `deposit_unshielded` prover key and its manifest entry from a full keyed build (the key job prunes both); `fund-unshielded.ts` mints a local unshielded test token (mint-test-tokens v2 `unshielded-token.compact`, deployed by `../b3/deploy-faucets.ts` with `PRIVACY=unshielded`) to a dev wallet and deposits it into A. NIGHT itself is refused by the ledger (`Custom error: 231`). |
-| `c2-live.ts` | P9.I, audit C2 at the circuit: a valid signature over the arm's own text for a withdrawal naming one token, with a malicious witness store handing the circuit another token's coin. The circuit must refuse it (`held coin colour does not match the withdrawn colour`); nothing is proven or sent. Runs with the relay stopped. |
+| P10.I steps in `market-flows.ts` | Every signed step checks the wallet's first line is `Site: <label>` (F3 v3, Q36), and each new account is checked the way the site checks it (`web/src/chain/indexer.ts` on the public indexer, the web build's pinned verifier keys). `restore` (a page rotates A's key away; the site's check fails on `enc-key` alone; "Restore my encryption key"), `p10-negatives` (Q36 at the live relay), `fairness` (R2-1: A's burst and make/cancel loop against B's withdrawals, measured in the relay's stage times), `caps` / `caps-restore` (R2-1's per-account caps with the relay recreated under `CAPS`, then the defaults). `run-local.sh` runs them as phases 2–5, with a fresh contract prover before each. |
+| `c2-live.ts` | P9.I, audit C2 at the circuit: a valid signature over the arm's own text for a withdrawal naming one token, with a malicious witness store handing the circuit another token's coin. The circuit must refuse it (`held coin colour does not match the withdrawn colour`); nothing is proven or sent. Runs with the relay stopped. P10.I adds Q36 at the circuit: an honest withdrawal signed over a bare first line (`invalid signature`) and over a leading-space label (the label-shape assert). |
 | `run-stagenet.sh` | One capped stagenet run: takes the shared funding-wallet lock (waits politely), starts rc.8 + rc.6 proof servers and the relay image against stagenet and the staging exchange, runs the chosen steps (`STEPS=open-a,demo-a`, …, `tamper`), stops the relay when the sponsor's DUST has dropped by `DUST_CAP_SPECKS` (default 100 DUST), and releases the lock. The relay's demo-token claims persist in a named volume between runs. |
 
 ```sh
@@ -53,3 +54,15 @@ Key set `efc52fbc…`, passport `b2f1847` (message format F3 v2).
 - **At the node and the circuit**: a tampered proof gets `InvalidProof`. C2 at the circuit gets `failed assert: held coin colour does not match the withdrawn colour`.
 - **The contract prover's memory grows across proofs**: after about 25 proofs a k=18 proof hit the 14 GB cap. `run-local.sh` restarts it before the relay-stopped phase.
 
+
+## Results after the round-2 fix pass (P10.I, 2026-10-02)
+
+Key set `21493588…`, passport `599327b` (message format F3 v3: the first line is `Site: <label>`). One local run, every phase, exit 0:
+
+- **Flows**: two new accounts opened (the site's own check passes on each, with the web build's pinned keys), demo tokens, a make listed with its intent TTL equal to its signed expiry, a take settled with exact balances, shielded and unshielded withdrawals, a cancel (the nonce moves, the key stays), an expired offer refused by the node.
+- **Key restore**: after a key change to another key, the site refuses the account on its encryption key alone; "Restore my encryption key" (one approval: "Rotate encryption key / New key …") puts the browser's key back, and the site accepts the account again.
+- **Q36**: the relay refuses a signature over a label equal to an action title, a leading-space label, a bare first line, and "Site: Cancel all open offers" above a real key change. The circuit refuses the bare line (`invalid signature`) and the leading-space label (its label-shape assert).
+- **R2-1 fairness**: one account bursts six makes (`202`, then `429 account-busy` ×5) and loops makes and cancels. Another account's withdrawal waits behind exactly one of its jobs: 21 s behind a make's proof, 30 s behind a cancel's.
+- **R2-1 caps** (`CAPS=2,3,2,1`): `account-busy`, `open-offers-cap`, `makes-daily-cap`, `cancels-daily-cap` and `restores-daily-cap`, each exactly one request past its cap; a relay restart resets them.
+- **SC-002**: a tampered proof gets `InvalidProof`; C2 is refused by the circuit; every P9 and P6 refusal holds.
+- The contract prover peaked at 11.94 GiB under a 12 GiB cap (one-minute samples), with no OOM.

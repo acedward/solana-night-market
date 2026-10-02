@@ -29,7 +29,9 @@ import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useActivity } from '../activity/ActivityContext.js';
 import { stageWords, type ActivityKind } from '../activity/activity.js';
+import { RestoreKeyDialog } from '../account/RestoreKeyDialog.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
+import { WholeCoinExit, type WholeCoinExitOffer } from '../account/WholeCoinExit.js';
 import { AccountCheckNotice, keyRestorable } from '../chain/AccountCheckNotice.js';
 import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import { DemoTokens } from '../demo/DemoTokens.js';
@@ -76,7 +78,7 @@ import {
 } from '../passport/operations.js';
 import { findAccount, listJobs, readCoins, readSecret } from '../passport/records.js';
 import { useRelayStatus } from '../relay/RelayStatus.js';
-import { RelayClient } from '../relay/client.js';
+import { RelayClient, RelayError } from '../relay/client.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
 import { confirmCancelsOffer as confirmOffer, reconcileFromChain } from '../trade/operations.js';
@@ -486,6 +488,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     secret?.encPublicKey ?? null,
     revision,
     (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
+    account?.txs?.waveOne ?? null,
   );
   // The holdings and Send list show only the assets the filter shows (plan 00042); what needs the
   // customer's action (an unrecorded change coin, under Pending) shows whatever it is.
@@ -583,11 +586,25 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     return confirmOffer(e, account.address, action);
   };
 
+  // AA 00047 P11 (owner decision Q46 A): the market pays for a daily allowance of withdrawals per
+  // account, and the page says NOTHING about it until the market refuses one for it (`429
+  // withdraws-daily-cap`, P11.R). Then it explains it (`relayErrorText`) and, while this token's
+  // whole-coin exit is open, offers it: one withdrawal of a WHOLE coin per token per day.
+  const [exitOffer, setExitOffer] = useState<WholeCoinExitOffer | null>(null);
+
   const send = (color: string, amount: bigint, recipient: string) =>
     run('withdraw', async (e) => {
       if (!account) return;
       if (!confirmCancelsOffer('withdraw')) return;
-      const r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
+      setExitOffer(null);
+      let r: Awaited<ReturnType<typeof withdrawToWallet>>;
+      try {
+        r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
+      } catch (err) {
+        if (err instanceof RelayError && err.code === 'withdraws-daily-cap' && err.detail === 'whole-coin-exit')
+          setExitOffer({ color, recipient });
+        throw err;
+      }
       // Whether a live offer ended is the chain's to say, not the relay's "sent" (AA 00047 P10, R2-4).
       await reconcileFromChain(e, account.address).catch(() => undefined);
       if (r.changeMismatch) {
@@ -647,7 +664,9 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     });
 
   // "Restore my encryption key" (AA 00047 P10, audit round 2 R2-3): the account's key on Midnight is no
-  // longer this browser's, while this wallet is still its one device.
+  // longer this browser's, while this wallet is still its one device. AA 00047 P11 (R3-9): explained in
+  // plain words before Phantom opens (`RestoreKeyDialog`); only its "Continue to Phantom" asks the wallet.
+  const [restoreAsked, setRestoreAsked] = useState(false);
   const restore = () =>
     run('restore-enc-key', async (e) => {
       if (!account) return;
@@ -756,12 +775,23 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                         className="gap-top"
                         data-testid="restore-key"
                         disabled={!!busy || !!spendingPaused}
-                        onClick={() => void restore()}
+                        onClick={() => setRestoreAsked(true)}
                       >
                         {busy === 'restore-enc-key' ? 'Restoring…' : 'Restore my encryption key'}
                       </Button>
                     ) : undefined
                   }
+                />
+              )}
+              {hasSecret && secret && (
+                <RestoreKeyDialog
+                  open={restoreAsked}
+                  browserKey={secret.encPublicKey}
+                  onCancel={() => setRestoreAsked(false)}
+                  onContinue={() => {
+                    setRestoreAsked(false);
+                    void restore();
+                  }}
                 />
               )}
               <div data-testid="account" data-account={account.address}>
@@ -801,6 +831,16 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                   onChange={setWithdrawKind}
                 />
               </Field>
+              {withdrawKind === 'shielded' && exitOffer && (
+                <WholeCoinExit
+                  offer={exitOffer}
+                  coins={coins}
+                  tokens={tokens}
+                  busy={!!busy}
+                  onWithdraw={(c, a, r) => void send(c, a, r)}
+                  onDismiss={() => setExitOffer(null)}
+                />
+              )}
               {withdrawKind === 'shielded' ? (
                 <SendForm
                   coins={shownCoins}

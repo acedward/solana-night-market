@@ -153,7 +153,8 @@ test.describe('R2-6: the chain view survives seeded state, fake notes and a long
     await page.getByTestId('open-account').click();
     await expect(page.getByTestId('accounts-message')).toContainText('is open');
     await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'ok');
-    expect(indexer.queries).toContain(`deployed:${'7e'.repeat(32)}`); // judged on the account as deployed
+    // Judged on the account as its deploy created it (AA 00047 P11: its origin, read from the indexer).
+    expect(indexer.queries).toContain(`origin:${'7e'.repeat(32)}`);
   });
 
   test('a just-opened account seeded with a balance that would overflow deposits is refused', async ({ page }) => {
@@ -232,6 +233,7 @@ test.describe('R2-3: "Restore my encryption key" instead of a dead end', () => {
     await expect(page.locator('[data-testid=account-check-problem][data-code="enc-key"]')).toBeVisible();
     await expect(page.getByTestId('account-check-restorable')).toBeVisible();
     await page.getByTestId('restore-key').click();
+    await page.getByTestId('restore-continue').click(); // AA 00047 P11 (R3-9): explained before Phantom
     await expect(page.getByTestId('accounts-message')).toContainText('Your encryption key is restored');
     expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([['restore-enc-key', 'ok']]);
     expect(relay.submitted[0]!.body.payload).toEqual({ newKey: mine, authNonce: '3' });
@@ -254,6 +256,7 @@ test.describe('R2-3: "Restore my encryption key" instead of a dead end', () => {
     await expect(page.getByTestId('trade-restore-key')).toBeVisible();
     await page.getByTestId('trade-restore-key').click();
     await page.getByTestId('restore-key').click();
+    await page.getByTestId('restore-continue').click(); // AA 00047 P11 (R3-9): explained before Phantom
     await expect(page.getByTestId('accounts-message')).toContainText('This market cannot restore encryption keys yet');
     expect(relay.encKey).toBe('e1'.repeat(32));
   });

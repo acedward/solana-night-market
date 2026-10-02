@@ -219,7 +219,7 @@ export async function openAccount(env: OperationEnv): Promise<AccountRecord> {
   // signed yet, sealed to the key this browser generated, on this network. The records are kept
   // either way (so nothing is lost), but an account that fails is never used: every later action
   // checks it again on the chain and refuses.
-  const check = await checkNewAccount(env, account, secret.encPublicKey);
+  const check = await checkNewAccount(env, account, secret.encPublicKey, r.txs?.waveOne ?? null);
   // R2-6: what only a NEW account must be (nothing signed yet, nothing in it) cannot be checked again
   // later, so a failure of it is kept with the account: every later action refuses it too.
   const atOpen = check.problems.filter((p) => OPEN_ONLY_CODES.includes(p.code));
@@ -261,20 +261,33 @@ export function refusalAtOpen(env: Pick<OperationEnv, 'store' | 'scope'>, accoun
 export const NEW_ACCOUNT_WAIT_MS = 90_000;
 export const NEW_ACCOUNT_POLL_MS = 3_000;
 
-/** The fresh-account check, waiting for the indexer to show the activated account. */
-async function checkNewAccount(env: OperationEnv, account: string, encPublicKey: string): Promise<AccountCheck> {
+/** The fresh-account check, waiting for the indexer to show the activated account and its deploy. */
+async function checkNewAccount(
+  env: OperationEnv,
+  account: string,
+  encPublicKey: string,
+  deployTx: string | null,
+): Promise<AccountCheck> {
   const deadline = Date.now() + NEW_ACCOUNT_WAIT_MS;
   for (;;) {
     let found: Awaited<ReturnType<AccountChain['checkAccount']>>;
     try {
-      found = await env.chain.checkAccount(account, { deviceKey: env.signing.deviceKey, encPublicKey, fresh: true });
+      found = await env.chain.checkAccount(account, {
+        deviceKey: env.signing.deviceKey,
+        encPublicKey,
+        fresh: true,
+        deployTx,
+      });
     } catch (e) {
       if (Date.now() >= deadline) throw e;
       await sleep(NEW_ACCOUNT_POLL_MS);
       continue;
     }
-    // Not on the indexer yet (no contract, or not activated yet): wait. Anything else is final.
-    const waiting = !found.state || !found.state.view.booted;
+    // Not on the indexer yet (no contract, not activated yet, or its deploy not shown yet: AA 00047
+    // P11, R3-10): wait. Anything else is final. A deploy still not shown at the deadline is NOT a
+    // refusal kept with the account (`provenance-unknown` is not an opening-only code): every later
+    // check reads it again.
+    const waiting = !found.state || !found.state.view.booted || originUnknown(found.check);
     if (!waiting || Date.now() >= deadline) return found.check;
     await sleep(NEW_ACCOUNT_POLL_MS);
   }
@@ -282,6 +295,15 @@ async function checkNewAccount(env: OperationEnv, account: string, encPublicKey:
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const low = (h: string) => h.replace(/^0x/, '').toLowerCase();
+
+/** The check could not judge the account's origin yet (the indexer shows no deploy): temporary. */
+export const originUnknown = (c: Pick<AccountCheck, 'problems'>): boolean =>
+  c.problems.some((p) => p.code === 'provenance-unknown');
+
+/** The account's deploy transaction as this browser recorded it at opening (R3-10's fallback when
+ *  the indexer has no deploy record), or null. */
+const deployTxOf = (env: Pick<OperationEnv, 'store' | 'scope'>, account: string): string | null =>
+  readAccount(env.store, env.scope, account)?.txs?.waveOne || null;
 
 /**
  * The account as the chain shows it, after the market-account check for this wallet and this
@@ -301,6 +323,7 @@ export async function verifiedAccount(
     deviceKey: env.signing.deviceKey,
     encPublicKey: secret.encPublicKey,
     ...(hint !== undefined ? { counterHint: BigInt(hint) } : {}),
+    deployTx: deployTxOf(env, account),
   });
   if (!state) throw new OperationError('Midnight has no account at this address (the indexer does not show it).');
   if (!check.ok) throw new AccountCheckError(check);
@@ -871,6 +894,7 @@ export async function restoreEncryptionKey(env: OperationEnv, account: string): 
     deviceKey: env.signing.deviceKey,
     encPublicKey: secret.encPublicKey,
     counterHint: hint,
+    deployTx: deployTxOf(env, account),
   });
   if (!state) throw new OperationError('Midnight has no account at this address (the indexer does not show it).');
   if (check.ok)

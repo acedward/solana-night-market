@@ -178,7 +178,7 @@ function gatedFacts(
               kind: 'text',
               label: 'What it does',
               value:
-                "Sets your account's encryption key back to this browser's key, so the notes your coins are filed with are sealed to you again. Like any approval, it ends every open offer.",
+                "Sets your account's encryption key back to this browser's key, so the notes your coins are filed with are sealed to you again. It never moves funds. Like any approval, it ends every open offer.",
               signed: [],
             },
             {

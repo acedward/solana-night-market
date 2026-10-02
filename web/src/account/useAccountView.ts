@@ -39,6 +39,7 @@ export function useAccountView(network: NetworkProfile, relayUrl: string) {
     secret?.encPublicKey ?? null,
     revision,
     (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
+    account?.txs?.waveOne ?? null,
   );
   const coins = useMemo(
     () => (store && scope && account ? readCoins(store, scope, account.address) : []),

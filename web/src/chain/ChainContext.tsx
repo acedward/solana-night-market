@@ -6,7 +6,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { NetworkProfile } from '@nightmarket/core';
-import type { AccountCheckProblem } from '@nightmarket/core/passport';
+import type { AccountCheck, AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { ChainReader } from './indexer.js';
 
@@ -34,11 +34,32 @@ export type AccountCheckState =
   | { status: 'failed'; problems: AccountCheckProblem[]; blockHeight: number | null }
   | { status: 'error'; message: string };
 
+/** What the page shows for a finished check (AA 00047 P11, R3-10): a check that fails ONLY because
+ *  the indexer does not show the account's deploy yet is a read error (temporary: actions wait and it
+ *  is read again), never a failed check. */
+export function checkStateOf(
+  check: AccountCheck,
+  blockHeight: number | null,
+): Exclude<AccountCheckState, { status: 'idle' } | { status: 'checking' }> {
+  if (check.ok) return { status: 'ok', blockHeight: blockHeight ?? 0 };
+  const unknown = check.problems.filter((p) => p.code === 'provenance-unknown');
+  if (unknown.length > 0 && unknown.length === check.problems.length)
+    return { status: 'error', message: unknown[0]!.message };
+  return {
+    status: 'failed',
+    problems: check.problems.filter((p) => p.code !== 'provenance-unknown'),
+    blockHeight,
+  };
+}
+
 /**
  * The market-account check of `account` for this wallet and this browser's encryption key, read
  * from the chain: again whenever `revision` changes (a store write: a finished action, an import).
  * `refusedAtOpen` is the account's kept refusal from its opening (AA 00047 P10, R2-6: not fresh or
  * not empty then), which no later read can clear: the check fails with it, whatever the chain says now.
+ * `deployTx` is the deploy transaction recorded at opening, read when the indexer has no deploy record
+ * (AA 00047 P11, R3-10); while the account's origin cannot be judged yet, the check is an `error`
+ * (actions wait and it is read again), never a refusal.
  */
 export function useAccountCheck(
   account: string | null,
@@ -46,6 +67,7 @@ export function useAccountCheck(
   encPublicKey: string | null,
   revision = 0,
   refusedAtOpen?: readonly AccountCheckProblem[] | null,
+  deployTx?: string | null,
 ): AccountCheckState & { reload: () => void } {
   const chain = useChain();
   const [state, setState] = useState<AccountCheckState>({ status: 'idle' });
@@ -60,15 +82,11 @@ export function useAccountCheck(
       () => live && !settled && setState((s) => (s.status === 'ok' ? s : { status: 'checking' })),
       0,
     );
-    chain.checkAccount(account, { deviceKey, encPublicKey }).then(
+    chain.checkAccount(account, { deviceKey, encPublicKey, deployTx: deployTx ?? null }).then(
       ({ state: s, check }) => {
         settled = true;
         if (!live) return;
-        setState(
-          check.ok
-            ? { status: 'ok', blockHeight: s?.blockHeight ?? 0 }
-            : { status: 'failed', problems: check.problems, blockHeight: s?.blockHeight ?? null },
-        );
+        setState(checkStateOf(check, s?.blockHeight ?? null));
       },
       (e: unknown) => {
         settled = true;
@@ -80,7 +98,7 @@ export function useAccountCheck(
       live = false;
       clearTimeout(t);
     };
-  }, [chain, account, deviceKey, encPublicKey, revision, tick]);
+  }, [chain, account, deviceKey, encPublicKey, revision, tick, deployTx]);
   const reload = () => setTick((n) => n + 1);
   if (account && refusedAtOpen?.length)
     return { status: 'failed', problems: [...refusedAtOpen], blockHeight: null, reload };

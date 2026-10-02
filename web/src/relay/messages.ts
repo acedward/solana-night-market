@@ -60,6 +60,13 @@ export function relayErrorText(e: {
       return `Your account has made as many offers in the last 24 hours as the market allows. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
     case 'cancels-daily-cap':
       return `Your account has cancelled as many times in the last 24 hours as the market pays for. Your open offers still stop working at the expiry you approved; you can cancel again in ${waitText(e.retryAfterSeconds)}. Nothing was sent.`;
+    // AA 00047 P11 (owner decision Q46 A; relay lane P11.R): the daily allowance of withdrawals the
+    // market pays for. Said only once the market refuses one for it; `detail` says whether this
+    // token's one whole-coin withdrawal of the day is still open.
+    case 'withdraws-daily-cap':
+      return e.detail === 'whole-coin-exit'
+        ? `The market pays the network fee for a limited number of withdrawals per account each day, and your account has used today's. Nothing was sent, and your tokens are safe in your account. You can still withdraw one whole coin of this token today (all of it, so nothing is left over), or withdraw as usual again in ${waitText(e.retryAfterSeconds)}.`
+        : `The market pays the network fee for a limited number of withdrawals per account each day. Your account has used today's, and its one extra withdrawal of this token today as well. Nothing was sent, and your tokens are safe in your account. You can withdraw again in ${waitText(e.retryAfterSeconds)}.`;
     case 'restores-daily-cap':
       return `Your account's encryption key was restored as many times in the last 24 hours as the market pays for. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
     case 'failure-budget':

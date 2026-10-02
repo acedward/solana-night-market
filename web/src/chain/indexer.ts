@@ -24,16 +24,26 @@ import { type AccountStateView, type RawAccountTx } from '@nightmarket/core';
 import {
   PINNED_ACCOUNT_KEYS,
   accountCheckText,
+  checkAccountOrigin,
   checkMarketAccount,
   decodeAccountState,
   networkSaltFor,
+  readAccountOrigin,
   type AccountChainState,
   type AccountCheck,
   type MarketAccountExpectation,
+  type OriginVerdict,
 } from '@nightmarket/core/passport';
 
-/** What the page knows to expect of its account (the rest is this build's and this network's). */
-export type AccountExpectation = Pick<MarketAccountExpectation, 'deviceKey' | 'encPublicKey' | 'fresh' | 'counterHint'>;
+/** What the page knows to expect of its account (the rest is this build's and this network's).
+ *  `deployTx`: the account's deploy transaction as this browser recorded it at opening (the wave-1
+ *  hash), read from the chain when the indexer has no deploy record (AA 00047 P11, R3-10). */
+export type AccountExpectation = Pick<
+  MarketAccountExpectation,
+  'deviceKey' | 'encPublicKey' | 'fresh' | 'counterHint'
+> & {
+  deployTx?: string | null;
+};
 
 export class ChainReadError extends Error {
   override name = 'ChainReadError';
@@ -49,16 +59,6 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const STATE_QUERY = `query AccountState($address: HexEncoded!) {
   contract(address: $address) { state }
   block { height }
-}`;
-
-/** The block the account was deployed in (AA 00047 P10, R2-6). */
-const DEPLOY_QUERY = `query AccountDeploy($address: HexEncoded!) {
-  contract(address: $address) { actions(limit: 1, type: DEPLOY) { transaction { block { height } } } }
-}`;
-
-/** The account's state as of a block: at the deploy's block, the state as DEPLOYED. */
-const STATE_AT_QUERY = `query AccountStateAt($address: HexEncoded!, $height: Int!) {
-  contract(address: $address, offset: { height: $height }) { state }
 }`;
 
 const ACTIONS_QUERY = `query AccountActions($address: HexEncoded!, $limit: Int) {
@@ -168,26 +168,34 @@ export class ChainReader {
     return { ...decodeAccountState(address, data.contract.state), blockHeight: data.block?.height ?? 0 };
   }
 
-  /** The account's state as it was DEPLOYED (the indexer's state at the deploy's block), or null when
-   *  the indexer shows no deploy. It never changes: kept once read (AA 00047 P10, R2-6). */
-  async deployedState(account: string): Promise<AccountChainState | null> {
+  /**
+   * The verdict on the account's ORIGIN (AA 00047 P11, R3-1 / R3-10; @nightmarket/core/passport
+   * `readAccountOrigin`, `checkAccountOrigin`): its deploy-time state against the constructor's, run
+   * here with this browser's encryption key and this network's salt, and every action of the account
+   * before its authority retired. A known verdict never changes (the history before a retirement is
+   * final): kept for the page's lifetime. "Not known yet" (no deploy on the indexer) is asked again
+   * next time, and never judged on the current state instead.
+   */
+  async origin(account: string, expect: Pick<AccountExpectation, 'encPublicKey' | 'deployTx'>): Promise<OriginVerdict> {
     const address = account.replace(/^0x/, '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(address)) throw new ChainReadError('That is not an account address.');
-    const known = this.deployed.get(address);
+    const key = `${address}:${expect.encPublicKey.replace(/^0x/, '').toLowerCase()}`;
+    const known = this.origins.get(key);
     if (known) return known;
-    const d = await this.graphql<{
-      contract: { actions: Array<{ transaction: { block: { height: number } } }> } | null;
-    }>(DEPLOY_QUERY, { address });
-    const height = d.contract?.actions[0]?.transaction.block.height;
-    if (height === undefined) return null;
-    const at = await this.graphql<{ contract: { state: string } | null }>(STATE_AT_QUERY, { address, height });
-    if (!at.contract?.state) return null;
-    const state = decodeAccountState(address, at.contract.state);
-    this.deployed.set(address, state);
-    return state;
+    const read = await readAccountOrigin((q, v) => this.graphql(q, v), address, { deployTx: expect.deployTx ?? null });
+    const verdict = await checkAccountOrigin(read, {
+      encPublicKey: expect.encPublicKey,
+      networkSalt: this.networkSalt,
+      verifierKeys: PINNED_ACCOUNT_KEYS.circuits,
+    });
+    if (verdict.known) {
+      if (this.origins.size >= 256) this.origins.clear();
+      this.origins.set(key, verdict);
+    }
+    return verdict;
   }
 
-  private readonly deployed = new Map<string, AccountChainState>();
+  private readonly origins = new Map<string, OriginVerdict>();
 
   /** The account's public state (what a gated call binds), or null. */
   async accountState(account: string): Promise<AccountStateView | null> {
@@ -261,8 +269,9 @@ export class ChainReader {
   /**
    * The market-account check (audit C3) on the chain's own state: the verifier keys pinned in this
    * build, the authority retired, one device and it is `deviceKey`'s, the encryption key this browser
-   * holds, this network's salt. `fresh` after a registration (first entry, nothing signed yet, and
-   * empty as deployed: its deploy-time state is read too).
+   * holds, this network's salt, the counters far from overflowing, and the account's origin (AA 00047
+   * P11, R3-1: the deploy-time state is the constructor's, nothing else wrote before the retirement;
+   * read once per page). `fresh` after a registration (first entry, nothing signed yet).
    */
   async checkAccount(
     account: string,
@@ -278,16 +287,17 @@ export class ChainReader {
           problems: [{ code: 'not-booted', message: 'There is no account at this address on Midnight (yet).' }],
         },
       };
-    // A just-opened account must start empty AS DEPLOYED (R2-6, questions Q42).
-    const deployed = expect.fresh ? await this.deployedState(account) : null;
+    // Where it came from, on every check (R3-1; R2-6's "starts empty", as deployed, is part of it).
+    const origin = await this.origin(account, expect);
+    const { deployTx: _deployTx, ...rest } = expect;
     const check = checkMarketAccount(
       state,
       {
-        ...expect,
+        ...rest,
         networkSalt: this.networkSalt,
         verifierKeys: PINNED_ACCOUNT_KEYS.circuits,
       },
-      deployed ?? undefined,
+      origin,
     );
     return { state, check };
   }

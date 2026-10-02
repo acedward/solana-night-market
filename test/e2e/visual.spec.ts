@@ -94,6 +94,15 @@ for (const vp of VIEWPORTS) {
       deviceScaleFactor: vp.touch ? 2 : 1,
     });
 
+    test('About and its known limitations (AA 00047 P11.D)', async ({ page }) => {
+      const ex = await serveExchange(page);
+      await page.goto('/#about');
+      await expect(page.getByTestId('about-limit').first()).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-about`);
+      expect(ex.external).toEqual([]);
+    });
+
     test('Account before a wallet connects', async ({ page }) => {
       const ex = await serveExchange(page);
       await page.goto('/#account');

@@ -27,7 +27,8 @@ history is this repository's `main`.
 
 ## Status
 
-Work in progress on the `00047-solana-night-market` branch (draft pull request into `main`):
+A proof of concept on Midnight stagenet, on the `00047-solana-night-market` branch (pull request
+into `main`, ready for review). Its limits are listed under [Known limitations](#known-limitations).
 
 | Step | What | State |
 |---|---|---|
@@ -36,6 +37,8 @@ Work in progress on the `00047-solana-night-market` branch (draft pull request i
 | B2 | Web: Phantom connect, account opening, the market UI, the signing screens | done (lane `00047-lane-web`) |
 | B3 | Relay: Ed25519 actions (one wallet prompt each), both proof servers, key pins, the demo-token endpoint | done (lane `00047-lane-relay`) |
 | P6 | Integration and stagenet acceptance: two accounts on a localnet and on stagenet (open, demo tokens, a make listed on the staging kernel, a take settled by the staging batcher, a withdrawal), a tampered proof refused by the node (`test/stack/p6/`) | done |
+| P8 | The end-user dark design | done |
+| P9–P11 | Security review rounds and their fix passes: the wallet's readable text is what the circuit enforces; the browser checks every account and decodes its coins and fills itself; the relay is bounded per account and per day | done; what remains is under [Known limitations](#known-limitations) |
 
 The signing seams are `packages/core/src/signing.ts` (the device key and
 signature types), `web/src/wallet/signing.ts` (`ActionSigning`, what the browser asks the wallet
@@ -48,17 +51,82 @@ to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a si
 - **Relay**: a stateless service. It proves each transaction and pays the Midnight fees from a
   sponsor wallet. It stores nothing about individual customers except which Solana keys have
   received their demo tokens (a small claims file, `deploy/RUNBOOK.md` section 7). It is not
-  trusted for state: the web app reads each account from Midnight's public indexer itself and
-  refuses one that is not the market's own or has any device besides the connected wallet
-  (`deploy/RUNBOOK.md` section 16).
+  trusted for state: the web app reads each account from Midnight's public indexer itself,
+  refuses one that is not the market's own or has any device besides the connected wallet, and
+  decodes the account's coins and fills itself (`deploy/RUNBOOK.md` section 16).
 - **Network**: Midnight stagenet, a test network.
+
+## Known limitations
+
+Night Market is a proof of concept on Midnight stagenet, a test network. It trades only free
+faucet test tokens, which have no value. These limits remain; the site's About page (`/#about`)
+says the same in plain words.
+
+**Accounts**
+
+- **A new account refused at opening stays refused, and that wallet cannot open another account on
+  this site.** The page checks every new account before anything is signed for it, and keeps a
+  refusal. Anyone can cause one by depositing into the account in the few blocks (about 3) between
+  its deploy and the retirement of its setup key; so can an honest relay that retires the key more
+  than 100 blocks after the deploy (a relay restarted between its two deploy steps, for example).
+  Nothing is lost: the account holds nothing yet. (Audit R4-6; questions Q42, Q51.)
+- **A page that proves and pays for itself can change the account's encryption key with one
+  approval.** The wallet then reads "Rotate encryption key". The market's relay only lands a change
+  back to the key the account was opened with, so such a page must prove and pay the transaction
+  itself. If it does, it can read the sealed notes filed after the change (privacy); it cannot move
+  funds, and the site offers to restore the browser's key. (R3-9; questions Q50.)
+- One live offer per account, and one coin per payment (coins are not merged).
+- All of a customer's data is in their browser; Export is the only backup.
+- Ledger-backed Phantom accounts are refused (they sign a wrapped message).
+
+**What the page trusts**
+
+- **A withdrawal's recipient encryption key is not signed.** The one approval binds the recipient,
+  the token and the amount, but not the key the recipient's wallet uses to find the coin. A
+  dishonest relay could hide a withdrawn coin from the recipient's wallet scan; it cannot redirect
+  or spend it. This is the one accepted exception to the trustless relay. (Questions Q28.)
+- **The public indexer is trusted to serve the chain faithfully.** The page reads and decodes the
+  account from Midnight's public indexer itself and checks what it can (each transaction's hash,
+  each coin's place in its transaction), but it is not a light client: it does not check the
+  indexer against block headers.
+- **Histories over 500 actions** are read past the indexer's first page through its WebSocket
+  subscription. That path runs live with small pages and is tested with recorded histories of up
+  to 1,800 actions, not with a live account past 500. (Questions Q56.)
+
+**The relay and the sponsor**
+
+- **A replay window for the relay's own sign-in message.** Opening an account and claiming demo
+  tokens use a one-time sign-in message. The relay remembers up to `AUTH_MAX_USED_NONCES`
+  (200,000) used nonces; past that it forgets the oldest, and a captured signed message could be
+  accepted again until its own expiry (at most 10 minutes). Only its signer holds it (it travels
+  over TLS), it moves no funds, and every cap still applies. (Questions Q40.)
+- **Sponsor costs.** The market pays every fee. The per-account caps (one job at a time, offers,
+  makes, cancels, key restores, 100 withdrawals a day) bound what one account costs; many accounts
+  are bounded only by the registration caps (100 new accounts a day, 3 per client address) and the
+  one prover lane. The caps and counters live in memory and reset when the relay restarts.
+  (Questions Q37, Q49; `deploy/RUNBOOK.md` section 9.)
+- **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
+  failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
+  for another pending claim, which is then held back for the operator. (Audit R4-7.)
+- **Proof-server memory.** The 9.0.0-rc.8 contract prover's memory grows across proofs. Run it
+  with a 14 GB cap and restart it periodically while no proof runs (`deploy/RUNBOOK.md` sections 2
+  and 12.1). A proof cut off fails its job, and the customer is not charged for it.
+
+**Status**
+
+- **The stagenet re-acceptance with the current keys is pending.** The full flow passed on
+  stagenet with an earlier key set, and passes on a local network with the current one
+  (`21493588…`); the stagenet run with it waits for the shared test wallet. (Questions Q34.)
+
+The question and audit numbers refer to the project's planning records.
 
 ## How this branch works
 
 `00047-solana-night-market` is the master branch of this project's single pull request into
 `main`. Work is done on short-lived branches whose temporary pull requests target this branch, and
-each is merged in with a merge commit once its checks are green. The master pull request stays a
-draft until the work is complete.
+each is merged in with a merge commit once its checks are green. The master pull request is ready
+for review. It merges after the Passport arm: acedward/passport#4, then #6, then `vendor/passport`
+is re-pinned here.
 
 ## Repository layout
 
@@ -125,7 +193,8 @@ site.
 [`deploy/.env.example`](deploy/.env.example) documents every setting (including the pinned key-set
 fingerprint and the demo-token endpoint). The operator's runbook is
 [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md); a host without Docker, [`deploy/SYSTEMD.md`](deploy/SYSTEMD.md).
-Every domain must be served over https.
+Every domain must be served over https. Before a production deployment, go through the
+[production checklist](deploy/RUNBOOK.md#production-checklist) at the top of the runbook.
 
 ## Checks and the secret scan
 

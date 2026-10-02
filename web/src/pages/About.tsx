@@ -52,6 +52,16 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: "Every action waits its turn on the market's one prover. Trades go first, and a trade that could not start before the expiry you approved is refused at once, so you can approve it again. When many accounts keep the prover busy, a withdrawal or a cancel can wait a few minutes; when the exchange stops taking settlements for the day, trades pause for a few minutes.",
   },
   {
+    id: 'busy-takes',
+    title: 'Many trades at once can make the market say "busy".',
+    text: 'When many new accounts send trades at the same moment, the market may answer that its prover is busy instead of queuing yours. Nothing is sent or charged; try again a little later.',
+  },
+  {
+    id: 'exchange-limit',
+    title: "The exchange's daily limit is shared.",
+    text: 'The test exchange settles a limited number of trades a day for everyone who uses it, not only for this market. If others use it up, trades pause here until it resets. Your coins stay where they are, and offers, cancels and withdrawals still work.',
+  },
+  {
     id: 'restarts',
     title: 'Restarts.',
     text: "The market's prover is restarted from time to time. An action caught by a restart fails without counting against you, and you can try again.",

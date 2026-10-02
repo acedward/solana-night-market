@@ -79,3 +79,58 @@ describe('judgeTake', () => {
     });
   });
 });
+
+// AA 00047 P11.F2, audit round 4b R4b-1 (F-A4b-1 MAJOR, F-B4b-1): "settled" accepted ANY transaction of
+// the account holding the take's wanted coin and a swap call, however old. A take that reuses an earlier
+// wanted coin W (the ledger never inserts the same coin twice, so it can never settle) was judged settled
+// by the OLD transaction every time: never charged, never capped. Now only the take's own settlement
+// counts: a transaction after the job's pre-proof read that spends the take's coin AND pays its want.
+describe('judgeTake: only the take’s OWN settlement is "settled" (R4b-1)', () => {
+  const other = contractCoinNullifier({ nonce: '66'.repeat(32), color: 'b2'.repeat(32), value: '9' }, ACCOUNT);
+  /** An earlier, real fill that paid the account W: auditor A's planted transaction. */
+  const oldFill = tx({ hash: 'p1', blockHeight: 90, entryPoints: [SWAP], outputs: [wanted], inputs: [other] });
+
+  it('auditor A’s scenario: a take reusing W, refused after the old fill of W, is NOT settled (the counterparty’s, capped)', () => {
+    // The probe's numbers: the old fill at 100, the take's read at 500, its coin unspent, the nonce unmoved.
+    const planted = { ...oldFill, blockHeight: 100 };
+    expect(judgeTake({ account: ACCOUNT, take, txs: [planted], startedAt: 500, ledgerNonce: 2n })).toEqual({
+      kind: 'counterparty',
+    });
+  });
+
+  it('auditor B’s scenario: an old matching wanted output, a different current input, an unchanged nonce: not settled', () => {
+    expect(judge([oldFill], 2n)).toEqual({ kind: 'counterparty' });
+    // However many such transactions the history holds.
+    expect(judge([oldFill, { ...oldFill, hash: 'p2', blockHeight: 95 }], 2n).kind).toBe('counterparty');
+  });
+
+  it('each condition is needed: later than the read, spending the take’s coin, paying its want, a swap call', () => {
+    const own = tx({ hash: 's1', entryPoints: [SWAP], outputs: [wanted], inputs: [spent] });
+    expect(judge([own], 3n)).toEqual({ kind: 'settled', txHash: 's1' });
+    // Not later than the job's read: its coin was already spent then (a race at best), never "settled".
+    expect(judge([{ ...own, blockHeight: 100 }], 3n).kind).not.toBe('settled');
+    expect(judge([{ ...own, blockHeight: 100 }], 3n)).toEqual({ kind: 'raced', txHash: 's1', by: 'coin' });
+    // Pays W after the read but spends ANOTHER coin (the account's own offer that wanted W, filled
+    // meanwhile): it moved the nonce, a race, not this take's settlement.
+    expect(judge([{ ...own, inputs: [other] }], 3n)).toEqual({ kind: 'raced', txHash: 's1', by: 'nonce' });
+    // Spends the coin but does not pay W: a race (unchanged from P11.F).
+    expect(judge([{ ...own, outputs: [] }], 3n)).toEqual({ kind: 'raced', txHash: 's1', by: 'coin' });
+    // Spends the coin and holds W but no swap call of the account: never "settled".
+    expect(judge([{ ...own, entryPoints: [] }], 3n).kind).toBe('unresolved');
+  });
+
+  it('an honest take whose settlement response was lost is still recognised: its own transaction, after the read', () => {
+    const own = tx({
+      hash: 'h1',
+      blockHeight: 104,
+      entryPoints: [SWAP],
+      outputs: ['01'.repeat(32), wanted],
+      inputs: [spent],
+    });
+    // Alongside older history that also paid the account (another want) and unrelated later deposits.
+    const history = [oldFill, tx({ hash: 'd1', blockHeight: 103, entryPoints: ['deposit_shielded'] }), own];
+    expect(judge(history, 3n)).toEqual({ kind: 'settled', txHash: 'h1' });
+    // Even when the nonce read failed.
+    expect(judge(history, null)).toEqual({ kind: 'settled', txHash: 'h1' });
+  });
+});

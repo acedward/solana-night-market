@@ -11,12 +11,15 @@
 //   - a take is signed for 600 s, the relay's maximum (packages/core TAKE_LIFETIME_SECONDS);
 //   - a take the queue cannot reach before its deadline is refused up front (`prover-busy`), before any
 //     queue slot, proof or DUST.
+// AA 00047 P11.F2, audit round 4b R4b-3 (F-A4b-3): the estimate's expected holds have a floor
+// (`PROVER_JOB_ESTIMATE_FLOOR_SECONDS`, default 45 s), so a few very short holds cannot pull them down
+// and turn an immediate `prover-busy` into a take that is admitted and then expires (A's "defeat 2").
 
 import { describe, expect, it } from 'vitest';
 
 import { TAKE_LIFETIME_SECONDS } from '@nightmarket/core';
 
-import { ProverLock, type ProverRank } from '../src/queue/prover-lock.js';
+import { DEFAULT_HOLD_FLOOR_SECONDS, ProverLock, type ProverRank } from '../src/queue/prover-lock.js';
 import { proverPriority } from '../src/queue/priority.js';
 import { testConfig } from './harness.js';
 import { CUSTOMER, CUSTOMER_ACCOUNT, laneRelay, sleep } from './lane-relay.js';
@@ -178,7 +181,7 @@ describe('passes across ranks do not count against a job (R4-1)', () => {
 describe('when would a job start? (estimate and position, R4-1)', () => {
   it('a take behind queued withdrawals is estimated to start when the holder ends; a withdrawal after them all', async () => {
     let now = 5_000_000;
-    const lock = new ProverLock({ nowMs: () => now, defaultHoldSeconds: 44 });
+    const lock = new ProverLock({ nowMs: () => now, defaultHoldSeconds: 44, holdFloorSeconds: 30 });
     for (let i = 0; i < 20; i++) await use(lock, `W${i}`, 1); // the attackers have used the lane
     const release = await lock.acquire(t('holder', 'holder', 2));
     const waits = Array.from({ length: 20 }, (_, i) => lock.acquire(t(`w${i}`, `W${i}`, 2)));
@@ -199,9 +202,9 @@ describe('when would a job start? (estimate and position, R4-1)', () => {
     expect(lock.idle).toBe(true);
   });
 
-  it('the expected hold of an action follows what its jobs actually held', async () => {
+  it('the expected hold of an action follows what its jobs actually held (above the floor)', async () => {
     let now = 0;
-    const lock = new ProverLock({ nowMs: () => now, defaultHoldSeconds: 60 });
+    const lock = new ProverLock({ nowMs: () => now, defaultHoldSeconds: 60, holdFloorSeconds: 5 });
     expect(lock.expectedHoldMs('withdraw')).toBe(60_000);
     for (let i = 0; i < 20; i++) {
       const r = await lock.acquire(t(`w${i}`, `K${i}`, 2));
@@ -214,6 +217,93 @@ describe('when would a job start? (estimate and position, R4-1)', () => {
   });
 });
 
+describe('short holds cannot pull the hold estimate down (R4b-3)', () => {
+  it('with the default floor, 20 holds of 10 ms leave a take’s expected hold at 45 s; longer holds still raise it', async () => {
+    let now = 0;
+    const lock = new ProverLock({ nowMs: () => now });
+    expect(DEFAULT_HOLD_FLOOR_SECONDS).toBe(45);
+    expect(lock.expectedHoldMs('take')).toBe(60_000); // the seed, until measured
+    for (let i = 0; i < 20; i++) {
+      const r = await lock.acquire(t(`q${i}`, `Q${i}`, 0, { deadline: 2e9 }));
+      now += 10;
+      r();
+    }
+    expect(lock.expectedHoldMs('take')).toBe(45_000);
+    // Behind 15 queued takes the estimate is still at least 15 floors (A's defeat 2: it was ≈ 0).
+    const release = await lock.acquire(t('holder', 'holder', 2));
+    const queued = Array.from({ length: 15 }, (_, i) => lock.acquire(t(`a${i}`, `A${i}`, 0, { deadline: 2e9 })));
+    expect(lock.estimateWaitMs({ key: 'C', rank: 0, action: 'take', deadline: 2e9 })).toBeGreaterThanOrEqual(
+      45_000 + 15 * 45_000,
+    );
+    release();
+    for (const q of queued) (await q)();
+    // Slow holds still raise it above the floor.
+    for (let i = 0; i < 5; i++) {
+      const r = await lock.acquire(t(`s${i}`, `S${i}`, 0, { deadline: 2e9 }));
+      now += 90_000;
+      r();
+    }
+    expect(lock.expectedHoldMs('take')).toBeGreaterThan(70_000);
+  });
+
+  it('the floor is the operator’s: a lower one lets the estimate follow a faster prover', async () => {
+    let now = 0;
+    const lock = new ProverLock({ nowMs: () => now, holdFloorSeconds: 20 });
+    for (let i = 0; i < 20; i++) {
+      const r = await lock.acquire(t(`q${i}`, `Q${i}`, 0, { deadline: 2e9 }));
+      now += 25_000;
+      r();
+    }
+    expect(lock.expectedHoldMs('take')).toBeGreaterThan(25_000);
+    expect(lock.expectedHoldMs('take')).toBeLessThan(25_100);
+  });
+
+  it('A’s defeat 2 at the route: after 20 quick takes, a customer’s take behind a crowd of takes is refused prover-busy at once, not admitted to expire', async () => {
+    let holdRelease: () => void = () => {};
+    const held = new Promise<void>((r) => (holdRelease = r));
+    const r = laneRelay({
+      proofMs: 1,
+      listingMs: 1,
+      withdrawMs: 1,
+      signerOf: () => CUSTOMER,
+      executors: {
+        'withdraw-unshielded': async (_p, ctx) => ctx.prove(async () => (await held, { txId: 'u' })),
+      },
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const takeOf = (i: number) => ({ ...r.take(i), validUntil: String(now + TAKE_LIFETIME_SECONDS) });
+    // 20 quick takes from fresh accounts (each holds the lane for about a millisecond).
+    for (let i = 0; i < 20; i++) {
+      const s = await r.post('take', account(100 + i), takeOf(100 + i), CUSTOMER);
+      expect(s.status).toBe(202);
+      await r.settle(s.id);
+    }
+    // The customer has used the lane twice this hour.
+    for (let i = 0; i < 2; i++) {
+      const s = await r.post('take', CUSTOMER_ACCOUNT, takeOf(200 + i), CUSTOMER);
+      await r.settle(s.id);
+    }
+    // A withdrawal holds the prover; then a crowd of takes from fresh accounts queues.
+    const holder = await r.post(
+      'withdraw-unshielded',
+      account(300),
+      { recipient: 'aa'.repeat(32), color: 'bb'.repeat(32), amount: '1', authNonce: '0' },
+      CUSTOMER,
+    );
+    expect(holder.status).toBe(202);
+    await sleep(5);
+    const crowd: Array<{ status: number; id?: string | undefined }> = [];
+    for (let i = 0; i < 15; i++) crowd.push(await r.post('take', account(400 + i), takeOf(400 + i), CUSTOMER));
+    const customer = await r.post('take', CUSTOMER_ACCOUNT, takeOf(500), CUSTOMER);
+    expect(customer).toMatchObject({ status: 503, code: 'prover-busy' });
+    // The crowd itself is refused once it reaches past the deadline: at most (540 − 60) / 45 + 1 admitted.
+    expect(crowd.filter((c) => c.status === 202).length).toBeLessThanOrEqual(11);
+    holdRelease();
+    await r.settle(holder.id);
+    for (const c of crowd) if (c.id) await r.settle(c.id);
+  });
+});
+
 describe('a take is signed for the relay’s maximum (R4-1)', () => {
   it('TAKE_LIFETIME_SECONDS is the relay’s default maximum, 600 s', () => {
     expect(TAKE_LIFETIME_SECONDS).toBe(600);
@@ -221,12 +311,22 @@ describe('a take is signed for the relay’s maximum (R4-1)', () => {
   });
 
   it('the prover lane settings are configurable, with their defaults', () => {
-    expect(testConfig().proverLane).toEqual({ usageWindowSeconds: 3600, burst: 4, defaultHoldSeconds: 60 });
+    expect(testConfig().proverLane).toEqual({
+      usageWindowSeconds: 3600,
+      burst: 4,
+      defaultHoldSeconds: 60,
+      holdFloorSeconds: 45,
+    });
     expect(
-      testConfig({ PROVER_USAGE_WINDOW_SECONDS: '600', PROVER_PRIORITY_BURST: '2', PROVER_JOB_ESTIMATE_SECONDS: '45' })
-        .proverLane,
-    ).toEqual({ usageWindowSeconds: 600, burst: 2, defaultHoldSeconds: 45 });
+      testConfig({
+        PROVER_USAGE_WINDOW_SECONDS: '600',
+        PROVER_PRIORITY_BURST: '2',
+        PROVER_JOB_ESTIMATE_SECONDS: '45',
+        PROVER_JOB_ESTIMATE_FLOOR_SECONDS: '20',
+      }).proverLane,
+    ).toEqual({ usageWindowSeconds: 600, burst: 2, defaultHoldSeconds: 45, holdFloorSeconds: 20 });
     expect(() => testConfig({ PROVER_PRIORITY_BURST: '0' })).toThrow(/PROVER_PRIORITY_BURST/);
+    expect(() => testConfig({ PROVER_JOB_ESTIMATE_FLOOR_SECONDS: '0' })).toThrow(/PROVER_JOB_ESTIMATE_FLOOR_SECONDS/);
   });
 });
 

@@ -144,6 +144,8 @@ import nacl from 'tweetnacl';
 import { ChainReader, indexerWsUrlFor } from '../../../web/src/chain/indexer.js';
 // AA 00047 P11.I: the page's own operations, headless (./page.ts), and a third party (./third-party.ts).
 import { IndexerClient, accountTxViews, ledgerEventDecoder } from '../../../relay/src/chain/indexer.js';
+import { assertCoinUnspentAt } from '../../../relay/src/chain/coin-spend.js';
+import { IndexerChainReader } from '../../../relay/src/chain/reader.js';
 import { judgeTake } from '../../../relay/src/trade/reconcile.js';
 import {
   JobFailedError,
@@ -155,6 +157,7 @@ import {
 } from '../../../web/src/passport/operations.js';
 import { readCoins } from '../../../web/src/passport/records.js';
 import { RelayClient, RelayError } from '../../../web/src/relay/client.js';
+import { jobErrorText } from '../../../web/src/relay/messages.js';
 import { reconcileOffers, wantCoinOf } from '../../../web/src/trade/operations.js';
 import { putTrade, readTrades, type TradeRecord } from '../../../web/src/trade/records.js';
 import { headlessPage, type HeadlessPage } from './page.js';
@@ -813,8 +816,10 @@ async function book() {
 }
 
 /** B signs a take of exactly offer `o` (B gives what A wants, wants what A gives; one prompt). With
- *  `pick`, B pays from the coin it picks among ALL its coins (spent ones included: R3-7's negative). */
-async function signTake(o: OfferRec, pick?: (coins: Coins) => StoredCoin | undefined) {
+ *  `pick`, B pays from the coin it picks among ALL its coins (spent ones included: R3-7's negative).
+ *  With `wantNonce`, B asks to be paid a coin with that nonce instead of a fresh one (R4b-1's negative:
+ *  a script, not the page, which always draws a fresh one). */
+async function signTake(o: OfferRec, pick?: (coins: Coins) => StoredCoin | undefined, wantNonce?: string) {
   const before = { A: await settledCoins('A'), B: await settledCoins('B') };
   const { s, coins } = before.B;
   const giveColor = o.wantColor;
@@ -823,7 +828,11 @@ async function signTake(o: OfferRec, pick?: (coins: Coins) => StoredCoin | undef
     ? pick(coins)
     : coins.find((c) => !c.spent && c.mtIndex !== null && c.color === giveColor && BigInt(c.value) >= giveAmount);
   if (!held) throw new Error(`B holds no ${sym(giveColor)} coin of at least ${giveAmount}`);
-  const want = { nonce: freshWantNonce(), color: hexToBytes(o.giveColor, 32), value: BigInt(o.giveAmount) };
+  const want = {
+    nonce: wantNonce ? hexToBytes(wantNonce, 32) : freshWantNonce(),
+    color: hexToBytes(o.giveColor, 32),
+    value: BigInt(o.giveAmount),
+  };
   const heldQ = {
     nonce: hexToBytes(held.nonce, 32),
     color: hexToBytes(held.color, 32),
@@ -1007,6 +1016,114 @@ async function reconcileStep() {
     throw new Error(`B's take is not judged its own settlement: ${json(v('B'))}`);
   if (v('A').kind !== 'raced' || v('A').txHash !== settledHash || v('A').by !== 'coin')
     throw new Error(`A's spent offer coin is not judged a race: ${json(v('A'))}`);
+
+  // P11.F2 (audit round 4b R4b-1, auditor B's regression on the real indexer): a NEW take of B that asks
+  // to be paid the coin W its take WAS paid, from a different, unspent coin, signed at B's current nonce,
+  // refused by the exchange after a read at the current tip. P11.F judged it 'settled' by the old swap;
+  // only the take's own settlement counts now, so it is the counterparty's (and an unsettled take). The
+  // relay's pre-proof read over the same indexer refuses it before any proof ('want-reused').
+  const b = state.B.account!;
+  const pgB = page('B');
+  const recB = readTrades(pgB.store, pgB.scope, b).find((t) => t.offerId === o.offerId && t.role === 'take')!;
+  const W = wantCoinOf(recB);
+  const { coins: coinsB } = await settledCoins('B');
+  const current = coinsB.find(
+    (c) => !c.spent && c.mtIndex !== null && c.commitment !== recB.coin && c.color === o.wantColor,
+  );
+  if (!current) throw new Error(`B holds no other unspent ${sym(o.wantColor)} coin for the reuse check`);
+  const currentCoin = { nonce: current.nonce, color: current.color, value: current.value };
+  const readB = await client.accountTransactions(b);
+  const txsB = accountTxViews(b, readB!.txs, decode);
+  const nonceB = BigInt((await http<{ authNonce: string }>(`/v1/accounts/${b}/state`)).body.authNonce);
+  const reuse = judgeTake({
+    account: b,
+    take: { coin: currentCoin, want: W, authNonce: nonceB.toString(10) },
+    txs: txsB,
+    startedAt: readB!.tip,
+    ledgerNonce: nonceB,
+  });
+  const reader = new IndexerChainReader(async () => null, client, decode);
+  const preProof = (want: typeof W) =>
+    assertCoinUnspentAt(reader, b, currentCoin, want).then(
+      (tip) => ({ refused: false as const, tip }),
+      (e: unknown) => ({ refused: true as const, code: (e as { code?: string }).code ?? String(e) }),
+    );
+  const reusePre = await preProof(W);
+  const freshPre = await preProof({ ...W, nonce: 'f2'.repeat(32) });
+  out.reuse = {
+    want: W.nonce,
+    coin: current.commitment,
+    tip: readB!.tip,
+    verdict: reuse,
+    preProof: reusePre,
+    freshPreProof: freshPre,
+  };
+  say(
+    `B reuses its paid coin W from another coin: judgeTake → ${json(reuse)}; the pre-proof read → ${json(reusePre)} (a fresh want: ${json(freshPre)})`,
+  );
+  put('reconcile', out);
+  if (reuse.kind !== 'counterparty') throw new Error(`a take reusing W is not the counterparty's: ${json(reuse)}`);
+  if (!reusePre.refused || reusePre.code !== 'want-reused')
+    throw new Error(`the pre-proof read does not refuse a reused want: ${json(reusePre)}`);
+  if (freshPre.refused) throw new Error(`the pre-proof read refuses a fresh want: ${json(freshPre)}`);
+}
+
+/**
+ * P11.F2 (audit round 4b R4b-1, auditor A's attack, live on the real relay): A lists a second offer like
+ * the first, and B (a script holding B's key, not the page) signs a take of it asking to be paid the coin
+ * W its first take was paid. The ledger could never settle it. The relay refuses it in the job, before
+ * any proof or exchange request (`want-reused`, charged to B's failure budget): nothing moves, and the
+ * offer stays listed.
+ */
+async function wantReusedStep() {
+  const o1 = state.offer;
+  if (!o1) throw new Error('no settled take recorded (run make, take and reconcile first)');
+  step('want-reused (P11.F2, R4b-1): B takes a NEW offer of A asking to be paid the coin it was already paid');
+  const b = state.B.account!;
+  const pgB = page('B');
+  const recB = readTrades(pgB.store, pgB.scope, b).find((t) => t.offerId === o1.offerId && t.role === 'take');
+  if (!recB) throw new Error("B's first take is not recorded");
+  const W = wantCoinOf(recB);
+  const m = await signMake(MAKE_LIFETIME);
+  const made = await postMake('open-swap A (2)', m);
+  if (!made.offer) throw new Error(`A's second offer failed: ${JSON.stringify(made.t.job.error)}`);
+  const o2 = made.offer;
+  if (W.color !== o2.giveColor.replace(/^0x/, '').toLowerCase() || W.value !== o2.giveAmount)
+    throw new Error(`the second offer does not give W's colour and amount: ${json({ W, o2 })}`);
+  const { before, auth, body } = await signTake(o2, undefined, W.nonce);
+  const r = await post('take', body);
+  const out: Record<string, unknown> = {
+    offer2: o2.offerId,
+    want: W.nonce,
+    walletText: auth.text,
+    admission: { status: r.status, code: r.body.error?.code },
+  };
+  put('wantReused', out);
+  if (r.status !== 202 || !r.body.job)
+    throw new Error(`the take was refused at admission: ${r.status} ${json(r.body)}`);
+  const t = await waitJob(r.body.job, 'take B (reused want)');
+  Object.assign(out, { state: t.job.state, seconds: t.seconds, stages: t.stages, error: t.job.error });
+  out.pageText = t.job.error ? jobErrorText(t.job.error, '') : null;
+  const after = { A: await settledCoins('A'), B: await settledCoins('B') };
+  out.balancesUnchanged =
+    json(balances(after.A.coins)) === json(balances(before.A.coins)) &&
+    json(balances(after.B.coins)) === json(balances(before.B.coins));
+  out.nonces = {
+    before: { A: before.A.s.authNonce, B: before.B.s.authNonce },
+    after: { A: after.A.s.authNonce, B: after.B.s.authNonce },
+  };
+  out.kernel = await kernelView(o2.offerId, o2.giveColor);
+  say(`the job: ${t.job.state} ${json(t.job.error)}; the page says: ${String(out.pageText)}`);
+  say(
+    `balances unchanged: ${String(out.balancesUnchanged)}; nonces ${json(out.nonces)}; the exchange: ${json(out.kernel)}`,
+  );
+  put('wantReused', out);
+  if (t.job.state !== 'failed' || t.job.error?.code !== 'want-reused')
+    throw new Error(`the reused-want take was not refused want-reused: ${json(t.job.error)}`);
+  if (t.stages.some((s) => s.stage === 'proving' || s.stage === 'merged' || s.stage === 'settled'))
+    throw new Error(`the reused-want take reached the prover or the exchange: ${json(t.stages)}`);
+  if (!out.balancesUnchanged) throw new Error('coins moved');
+  if (before.B.s.authNonce !== after.B.s.authNonce) throw new Error("B's nonce moved");
 }
 
 async function recipientKeys() {
@@ -2891,6 +3008,9 @@ async function main() {
         break;
       case 'reconcile':
         await reconcileStep();
+        break;
+      case 'want-reused':
+        await wantReusedStep();
         break;
       case 'withdraw':
         await withdraw();

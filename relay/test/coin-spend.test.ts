@@ -19,8 +19,9 @@ import {
 } from '@nightmarket/core';
 
 import { accountOffer, walletOffer, type FakeTx } from '../../test/gates/take/fake-tx.js';
+import { AccountCaps } from '../src/actions/account-caps.js';
 import { defaultCatalogue, withTrade } from '../src/actions/catalogue.js';
-import { FailureBudget, isCounterpartyCode } from '../src/actions/failure-budget.js';
+import { FailureBudget, countsAgainstBudget, isCounterpartyCode } from '../src/actions/failure-budget.js';
 import { withdrawExecutor } from '../src/actions/account-actions.js';
 import { guarded } from '../src/app.js';
 import { DigestReplayGuard } from '../src/auth/verifiers.js';
@@ -465,6 +466,152 @@ describe('take: a settlement refusal is reconciled against the chain before anyo
     expect(err).toBeInstanceOf(PublicError);
     expect((err as PublicError).code).toBe('exchange-error');
     expect(reads).toBe(1);
+  });
+});
+
+// AA 00047 P11.F2, audit round 4b R4b-1 (F-A4b-1 MAJOR, F-B4b-1): a take that reused an earlier wanted
+// coin W was proven, refused by the ledger (the same coin can never be inserted twice), and then judged
+// "settled" by the OLD transaction that paid W: the job succeeded, nothing was charged and the
+// unsettled-take cap never bound, so one account could spend the exchange's shared 1,000 settlements a
+// day and trip the relay-wide 429 pause for everyone. Now such a take is refused BEFORE its proof
+// (`want-reused`, charged: no honest page sends one), and a reconcile that does run counts only the take's
+// own settlement (a transaction after the job's read that spends its coin and pays its want).
+describe('take: a take that reuses a coin the account already received (R4b-1)', () => {
+  const otherCoin = { nonce: '66'.repeat(32), color: QUOTE, value: '9' };
+  /** An earlier, real fill that paid the account W (the wanted coin the take signs again). */
+  const oldFill = (height = 90) =>
+    tx({
+      hash: 'a0'.repeat(32),
+      blockHeight: height,
+      entryPoints: [SWAP],
+      outputs: [wantedLeaf],
+      inputs: [nf(otherCoin)],
+    });
+
+  async function guardedRun(o: Parameters<typeof takeRun>[0], failures: FailureBudget, caps?: AccountCaps) {
+    const r = takeRun(o);
+    const owner = r.signer.deviceKey;
+    const admitted = caps?.admitTake(ACCOUNT);
+    if (admitted && !admitted.ok) return { r, out: { ok: false as const, code: admitted.code }, owner };
+    const out = await guarded(r.exec, {
+      action: 'take',
+      owner,
+      account: ACCOUNT,
+      failures,
+      ...(admitted?.ok && admitted.finished ? { finished: admitted.finished } : {}),
+    })(r.payload, r.c).then(
+      (v) => ({ ok: true as const, v }),
+      (e: unknown) => ({ ok: false as const, code: (e as PublicError).code }),
+    );
+    return { r, out, owner };
+  }
+
+  it('auditor A’s scenario: refused BEFORE proving (want-reused), nothing sent to the exchange, the approval given back, charged; past the budget the account is refused', async () => {
+    const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
+    const codes: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const { r, out } = await guardedRun({ coins: historyReader([oldFill(100)], 500) }, failures);
+      expect(out.ok).toBe(false);
+      codes.push((out as { code: string }).code);
+      expect(r.prove).not.toHaveBeenCalled();
+      expect(r.batcher).not.toHaveBeenCalled();
+      expect(r.c.proofs).toBe(0);
+      if (i < 5) expect(r.release).toHaveBeenCalled();
+    }
+    expect(codes).toEqual([
+      'want-reused',
+      'want-reused',
+      'want-reused',
+      'want-reused',
+      'want-reused',
+      'failure-budget',
+    ]);
+    expect(failures.check('ff'.repeat(32), ACCOUNT).ok).toBe(false); // the account's budget is spent
+    expect(countsAgainstBudget(new PublicError('want-reused', 'x'), false)).toBe(true);
+    expect(countsAgainstBudget(new PublicError('coin-spent', 'x'), false)).toBe(false); // the rule stays for the rest
+    expect(isCounterpartyCode('want-reused')).toBe(false);
+  });
+
+  it('auditor B’s scenario, reached by the reconcile (the indexer showed the old fill only after the job’s read): a batcher 500 is NOT a success, and counts toward the unsettled-take allowance', async () => {
+    let now = 1_000_000;
+    const caps = new AccountCaps({
+      maxOpenOffers: 3,
+      makesPerDay: 20,
+      cancelsPerDay: 5,
+      restoresPerDay: 3,
+      unsettledTakesPerDay: 10,
+      now: () => now,
+    });
+    const failures = new FailureBudget({ perOwner: 5, perAccount: 5, now: () => now });
+    const outs: Array<string | true> = [];
+    for (let i = 0; i < 11; i++) {
+      const coins = historyReader([], 100);
+      const { out, r } = await guardedRun(
+        {
+          coins,
+          batcher: () => json(500, { success: false, error: 'internal' }),
+          // The old matching wanted output, a different input, the nonce unchanged.
+          onBatcher: () => coins.txs.push(oldFill(90)),
+        },
+        failures,
+        caps,
+      );
+      outs.push(out.ok ? true : out.code);
+      if (i < 10) expect(r.prove).toHaveBeenCalledOnce();
+      now += 60;
+    }
+    expect(outs).toEqual([...Array.from({ length: 10 }, () => 'exchange-error'), 'takes-unsettled-cap']);
+    expect(caps.usedToday(ACCOUNT, 'unsettled')).toBe(10);
+  });
+
+  it('an honest take whose settlement response was lost is still a success, by its own transaction', async () => {
+    for (const batcher of [
+      () => json(500, { success: false, error: 'internal' }),
+      () => json(200, { success: true }), // answered without the transaction's hash
+    ]) {
+      // The account was paid ANOTHER coin before (so this take is not refused before proving).
+      const coins = historyReader([tx({ ...oldFill(40), outputs: ['01'.repeat(32)] })], 100);
+      const r = takeRun({
+        coins,
+        batcher,
+        onBatcher: () => {
+          coins.txs.push(tx({ hash: 'ab'.repeat(32), blockHeight: 102, entryPoints: [SWAP], outputs: [], inputs: [] }));
+          coins.txs.push(
+            tx({
+              hash: 'ac'.repeat(32),
+              blockHeight: 103,
+              entryPoints: [SWAP],
+              outputs: [wantedLeaf],
+              inputs: [nf(take.coin)],
+            }),
+          );
+          coins.tip = 104;
+        },
+      });
+      await expect(r.exec(r.payload, r.c)).resolves.toMatchObject({ txHash: 'ac'.repeat(32), offerId: OFFER_ID });
+      expect(r.c.stages).toContain('settled');
+    }
+  });
+
+  it('an honest re-send of a take that landed meets coin-spent first, never want-reused (not charged)', async () => {
+    const landed = tx({
+      hash: 'ad'.repeat(32),
+      blockHeight: 99,
+      entryPoints: [SWAP],
+      outputs: [wantedLeaf],
+      inputs: [nf(take.coin)],
+    });
+    const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
+    const { r, out, owner } = await guardedRun({ coins: historyReader([landed], 100) }, failures);
+    expect(out).toEqual({ ok: false, code: 'coin-spent' });
+    expect(r.prove).not.toHaveBeenCalled();
+    expect(failures.failures(owner)).toBe(0);
+  });
+
+  it('a take with a fresh want proves and settles as before, whatever the account was paid earlier', async () => {
+    const fresh = takeRun({ coins: historyReader([tx({ ...oldFill(90), outputs: ['02'.repeat(32)] })], 100) });
+    await expect(fresh.exec(fresh.payload, fresh.c)).resolves.toMatchObject({ txHash: 'aa'.repeat(32) });
+    expect(fresh.prove).toHaveBeenCalledOnce();
   });
 });
 

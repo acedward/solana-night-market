@@ -15,7 +15,10 @@
 //   - an INFRASTRUCTURE crash: the proof server, the node or the indexer failed or was unreachable
 //     (plan R7: the prover is restarted when its memory runs out), which the relay reports to the
 //     customer as `market-unavailable`;
-//   - refusals before any proof (they cost nothing).
+//   - refusals before any proof (they cost nothing), except `PRE_PROOF_REQUESTER_FAULTS` (AA 00047 P11.F2,
+//     audit round 4b R4b-1, questions Q63): a take that asks to be paid a coin its account already
+//     received (`want-reused`) could never settle, and no honest page sends one, so it is charged even
+//     though it is refused before its proof (else a script could repeat it for free).
 // The budget is checked at admission AND again when the job reaches its lane (F-B2-3: jobs queued
 // before the fifth failure must not still run after it; the refused job's reservations are given
 // back). Withdrawals, unshielded withdrawals, cancels and key restores are NEVER refused by it
@@ -41,6 +44,10 @@ export const MARKET_SIDE_FAILURES: ReadonlySet<string> = new Set([
  *  was taken), never the requester's (AA 00047 P10, F-A2-2). Every `take-*` code is one too: the merge
  *  refusing the maker's offer. */
 export const COUNTERPARTY_FAILURES: ReadonlySet<string> = new Set(['exchange-error', 'take-refused', 'offer-gone']);
+
+/** Refusals before any proof that still count against the requester (AA 00047 P11.F2, R4b-1): requests
+ *  no honest page sends. */
+export const PRE_PROOF_REQUESTER_FAULTS: ReadonlySet<string> = new Set(['want-reused']);
 
 /** The actions the budget never refuses (AA 00047 P10, R2-2): taking funds out and ending approvals. */
 export const BUDGET_EXEMPT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
@@ -172,8 +179,8 @@ export function isNotRequesterCode(code: string): boolean {
 
 /** Whether a job's error counts against the caller's budget (see the header). */
 export function countsAgainstBudget(error: unknown, proved: boolean): boolean {
-  if (!proved) return false;
   const e = error as { name?: unknown; code?: unknown } | null;
+  if (!proved) return e?.name === 'PublicError' && typeof e.code === 'string' && PRE_PROOF_REQUESTER_FAULTS.has(e.code);
   // A PublicError is the relay's own verdict: its code says whose failure it is.
   if (e?.name === 'PublicError' && typeof e.code === 'string') return !isNotRequesterCode(e.code);
   return !isInfrastructureFailure(error);

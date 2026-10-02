@@ -150,6 +150,16 @@ describe('the relay’s refusals, in words', () => {
     expect(j('take-raced')).toMatch(/One of your own offers was taken at the same moment.*does not count against you/);
   });
 
+  it('words a take that reuses a coin the account already received (AA 00047 P11.F2, R4b-1: want-reused)', () => {
+    const t = jobErrorText({ code: 'want-reused', message: 'raw relay text' }, 'fallback');
+    expect(t).toMatch(
+      /^This take asked to be paid a coin your account has already received once, so it could never settle\./,
+    );
+    expect(t).toMatch(/Nothing was proven or sent, and it counts as a failed request\./);
+    expect(t).toMatch(/Take again from this page: it asks for a new coin every time\.$/);
+    expect(t).not.toContain('raw relay text');
+  });
+
   it('words failed jobs of the exchange and the internal error', () => {
     expect(
       jobErrorText(

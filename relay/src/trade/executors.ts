@@ -21,9 +21,11 @@
 // proves) and repeat the failure for free. So:
 //   - BEFORE proving, the coin the call spends is checked unspent on chain (../chain/coin-spend.ts:
 //     its nullifier against the account's whole history): `coin-spent`, nothing proven (make and
-//     take alike);
+//     take alike); a take whose WANTED coin the account already received is refused too (`want-reused`,
+//     AA 00047 P11.F2, audit round 4b R4b-1: it could never settle; the requester's, charged);
 //   - AFTER a settlement refusal, the relay reconciles against the chain (AA 00047 P11.F, audit round 4
-//     R4-2: ./reconcile.ts): the take's own settlement on chain → the job SUCCEEDS; its coin spent, or
+//     R4-2: ./reconcile.ts): the take's own settlement on chain (since P11.F2: a transaction after the
+//     job's pre-proof read that spends the take's coin AND pays its wanted coin) → the job SUCCEEDS; its coin spent, or
 //     its nonce moved, by another SWAP of the account (its own offer filled meanwhile) → `take-raced`,
 //     not charged; by a non-swap call of the account → `coin-spent` / `stale-authorisation`, the
 //     taker's, charged; nothing that explains it (the indexer may lag) → never the taker's. Only a
@@ -169,7 +171,8 @@ export interface TakeSide {
 
 /**
  * A take the batcher refused, reconciled against the chain (AA 00047 P11, R3-7; P11.F, R4-2:
- * ./reconcile.ts): `{ settled }` when the take's own settlement is on chain (the job succeeds), else the
+ * ./reconcile.ts): `{ settled }` when the take's own settlement is on chain (the job succeeds; since
+ * P11.F2, R4b-1: a transaction after `startedAt` that spends the take's coin and pays its wanted coin), else the
  * job's error: `coin-spent` / `stale-authorisation` (the taker's own non-swap call; charged),
  * `take-raced` (the account's own offer filled meanwhile; not charged), or the counterparty's code
  * (`exchange-error`, `take-refused`; not charged), which is also what an UNRESOLVED outcome gets: when the
@@ -403,11 +406,13 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
     const offer = await callOf(deps, check);
     // R3-7: the taker's coin must be unspent BEFORE any proof (a spent coin still proves membership).
     // R4-2: the read's chain tip is kept, so a refusal is judged by what landed after it.
+    // R4b-1: the coin the take asks to be paid must be new to the account (`want-reused` otherwise).
     let startedAt: number | null = null;
     if (deps.coins) {
       const coins = deps.coins;
+      const wanted = { nonce: p.wantNonce, color: p.wantColor, value: p.wantAmount };
       startedAt = await withReplayRelease(deps, check.digestHex, () =>
-        assertCoinUnspentAt(coins, check.account, p.coin),
+        assertCoinUnspentAt(coins, check.account, p.coin, wanted),
       );
     }
     const prove = deps.prove ?? proveGuaranteedOffer;

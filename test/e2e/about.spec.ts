@@ -20,6 +20,8 @@ const LIMITS = [
   'sign-in',
   'fees',
   'busy-prover',
+  'busy-takes',
+  'exchange-limit',
   'restarts',
   'demo-tokens',
   'one-offer',
@@ -64,6 +66,9 @@ for (const vp of VIEWPORTS) {
       ).toEqual(LIMITS);
       await expect(page.locator('[data-limit=refused-account]')).toContainText('cannot open another account here');
       await expect(page.locator('[data-limit=withdraw-key]')).toContainText('could hide a coin, not take it');
+      // AA 00047 P11.F2 (audit round 4b R4b-2, R4b-4): the two limits round 4b left.
+      await expect(page.locator('[data-limit=busy-takes]')).toContainText('its prover is busy');
+      await expect(page.locator('[data-limit=exchange-limit]')).toContainText('for everyone who uses it');
       // Q46: no allowance is named before a customer reaches it.
       await expect(page.getByTestId('about')).not.toContainText(/allowance|withdrawals a day|\b100\b/i);
 

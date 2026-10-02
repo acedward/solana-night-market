@@ -9,9 +9,14 @@
 //     the coin when the offer paid from the same one.
 // Now the relay reads the account's decoded history again (its calls' entry points, its coins' leaves
 // and spends: ../chain/indexer.ts `accountTxViews`) and judges by the transaction:
-//   settled      a transaction holds the take's WANTED coin (its full commitment for this account: the
-//                fresh nonce the device signed) and a swap call of the account: the take settled, the
-//                job succeeds;
+//   settled      a transaction LATER than the job's pre-proof read (`startedAt`) with a swap call of the
+//                account that both SPENDS the take's coin (its nullifier) and PAYS the take's WANTED
+//                coin (its full commitment for this account: the nonce the device signed): the take's own
+//                settlement, the job succeeds (AA 00047 P11.F2, audit round 4b R4b-1 / F-A4b-1, F-B4b-1:
+//                P11.F accepted ANY transaction holding the wanted coin, however old, so a take that
+//                reused an earlier wanted coin, which the ledger can never settle again, was judged
+//                settled every time: never charged, never capped. Such a take is now refused before
+//                its proof, `want-reused`: ../chain/coin-spend.ts);
 //   raced        the coin was spent, or the nonce first moved after the job started, by ANOTHER swap of
 //                the account (its own offer filled): not the taker's doing, never charged;
 //   taker        the coin was spent, or the nonce first moved, by a non-swap call of the account (a
@@ -46,17 +51,24 @@ export function judgeTake(args: {
   /** The account's decoded history, read after the refusal. */
   txs: readonly AccountTxView[];
   /** The chain tip the job's pre-proof read covered: only a later transaction can have moved the nonce
-   *  during the take (the job checked the nonce when it started). */
+   *  during the take (the job checked the nonce when it started), or be the take's own settlement. */
   startedAt: number;
   /** The account's auth nonce on chain now (null: not read). */
   ledgerNonce: bigint | null;
 }): TakeVerdict {
   const account = args.account.replace(/^0x/, '').toLowerCase();
   const wanted = contractCoinCommitment(args.take.want, account);
-  const settled = args.txs.find((t) => t.outputs.includes(wanted) && t.entryPoints.some(isSwap));
+  const nullifier = contractCoinNullifier(args.take.coin, account);
+  // R4b-1: only the take's OWN settlement: after the attempt began, spending its coin, paying its want.
+  const settled = args.txs.find(
+    (t) =>
+      t.blockHeight > args.startedAt &&
+      t.inputs.includes(nullifier) &&
+      t.outputs.includes(wanted) &&
+      t.entryPoints.some(isSwap),
+  );
   if (settled) return { kind: 'settled', txHash: settled.hash };
 
-  const nullifier = contractCoinNullifier(args.take.coin, account);
   const spender = args.txs.find((t) => t.inputs.includes(nullifier));
   if (spender) {
     if (spender.entryPoints.some(isSwap)) return { kind: 'raced', txHash: spender.hash, by: 'coin' };

@@ -33,7 +33,11 @@ MARGIN="${SPONSOR_FEE_BLOCKS_MARGIN:-5}"
 PREFIX="${PREFIX:-aa00047-p6-stg-$RANDOM}"
 NET="$PREFIX-net"
 RELAY_DATA_VOLUME="${RELAY_DATA_VOLUME:-aa00047-p6-relay-data}"
-KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f}"
+KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e}"
+# Memory caps (a shared host): the contract prover peaks near 9.4 GiB on a k=18 proof.
+PS8_MEM_LIMIT="${PS8_MEM_LIMIT:-14g}"
+PS_MEM_LIMIT="${PS_MEM_LIMIT:-6g}"
+RELAY_MEM_LIMIT="${RELAY_MEM_LIMIT:-8g}"
 mkdir -p "$OUT" "$STATE_DIR" && chmod 700 "$STATE_DIR"
 say() { printf '== [%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -95,9 +99,9 @@ trap teardown EXIT
 take_lock
 
 docker network create "$NET" >/dev/null
-docker run -d --name "$PREFIX-ps8" --network "$NET" --network-alias proof-server-contracts --memory 14g \
+docker run -d --name "$PREFIX-ps8" --network "$NET" --network-alias proof-server-contracts --memory "$PS8_MEM_LIMIT" \
   -e PORT=6300 -e MIDNIGHT_PP=/params -v "$PS8_PARAMS:/params" midnightntwrk/proof-server:9.0.0-rc.8 >/dev/null
-docker run -d --name "$PREFIX-ps6" --network "$NET" --network-alias proof-server-dust --memory 6g \
+docker run -d --name "$PREFIX-ps6" --network "$NET" --network-alias proof-server-dust --memory "$PS_MEM_LIMIT" \
   -e PORT=6300 -e MIDNIGHT_PP=/params -v "$PS_PARAMS:/params" \
   midnightntwrk/proof-server@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b >/dev/null
 docker volume create "$RELAY_DATA_VOLUME" >/dev/null
@@ -130,7 +134,7 @@ relay_up() {
     -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" \
     --mount "type=bind,source=$SEED_FILE,target=/run/secrets/sponsor-seed,readonly" \
     -v "$RELAY_DATA_VOLUME:/var/lib/night-market" \
-    --memory 8g "$RELAY_IMAGE" >/dev/null
+    --memory "$RELAY_MEM_LIMIT" "$RELAY_IMAGE" >/dev/null
   say "relay starting on 127.0.0.1:$RELAY_PORT"
   local h=""
   for _ in $(seq 1 200); do

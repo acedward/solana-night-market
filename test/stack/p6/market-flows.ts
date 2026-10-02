@@ -30,6 +30,26 @@
 //                       (expiry-too-far), a B′ display mismatch (another site label for the same call),
 //                       a C2 colour mismatch (a valid signature over a withdrawal naming twBTC, paid
 //                       from a twUSDC coin), and a cancel for a key that is not the account's
+// AA 00047 P10.I (the round-2 fix pass: F3 v3's "Site: " line, R2-1 caps and fairness, R2-3 restore)
+// adds:
+//   (every signed step) the wallet's first line must be exactly "Site: <label>" (questions Q36), and
+//                       each account is checked the way the SITE checks it: the site's own chain
+//                       reader (web/src/chain/indexer.ts) on the public indexer, with the verifier
+//                       keys pinned in the web build (`open-*` with `fresh`: R2-6, empty as deployed)
+//   restore             a page rotates A's key away (one real key-change prompt, sent as
+//                       `restore-enc-key` to a key this browser does not hold): the site's check then
+//                       fails on `enc-key` alone; "Restore my encryption key" (one prompt: "Rotate
+//                       encryption key / New key <this browser's>") puts it back and the check passes
+//   p10-negatives       Q36 at the live relay, no transaction: a valid signature over a first line whose
+//                       label equals an action title, over a leading-space label, over a bare first
+//                       line without "Site: ", and "Site: Cancel all open offers" above a real key change
+//   fairness            R2-1 on the real relay: A sends a burst of makes, then loops makes and cancels
+//                       as fast as the relay answers; B's withdrawals (sent while A's make proves, and
+//                       while A's cancel proves) must wait behind at most ONE of A's jobs
+//   caps                R2-1's per-account caps on B (the relay restarted with CAPS, e.g. "2,3,2,1" =
+//                       open offers, makes/day, cancels/day, restores/day): account-busy, open-offers,
+//                       makes-daily, cancels-daily and restores-daily, each 429 exactly past its cap
+//   caps-restore        after a relay restart (the counters live in memory): B's key restored
 //
 // State that must survive between runs (the two device seeds, the accounts' inbox keys, the
 // withdrawal recipient's seed) lives in $STATE_DIR/state.json (mode 600, never printed). Public
@@ -78,11 +98,17 @@ import {
   predictChangeCoin,
   pureCircuits,
   renderEd25519Message,
+  restoreEncKeyRequest,
+  siteLine,
+  isRenderableLabel,
   withdrawRequest,
   withdrawUnshieldedRequest,
 } from '@nightmarket/core/passport';
 import { solanaEnvelopeMessage, solanaEnvelopeText } from '@nightmarket/core/solana-auth';
 import nacl from 'tweetnacl';
+
+// The SITE's own chain reader (AA 00047 P9.S/P10.S): what the page believes about an account.
+import { ChainReader } from '../../../web/src/chain/indexer.js';
 
 const RELAY = process.env.RELAY_URL ?? 'http://relay:8080';
 const NETWORK = (process.env.NETWORK ?? 'undeployed') as NetworkName;
@@ -203,6 +229,15 @@ const step = (s: string) => process.stdout.write(`\n== ${new Date().toISOString(
 const say = (s: string) => process.stdout.write(`   ${s}\n`);
 const indent = (t: string) => t.split('\n').join('\n      ');
 
+/** F3 v3 (P10.C, questions Q36): every account message's first line is exactly "Site: <label>". */
+const SITE_LINE = siteLine(NETWORK);
+function siteLineOf(text: string): string {
+  const first = text.split('\n')[0]!.trimEnd();
+  if (first !== SITE_LINE)
+    throw new Error(`the wallet's first line is ${JSON.stringify(first)}, not ${JSON.stringify(SITE_LINE)}`);
+  return first;
+}
+
 // ── the wallets (throwaway keys; Phantom's scheme) ──────────────────────────
 function wallet(p: Party) {
   const kp = nacl.sign.keyPair.fromSeed(hexToBytes(p.seed, 32));
@@ -278,6 +313,42 @@ async function readState(account: string) {
   const zswap = (await http<ZswapActivity>(API_PATHS.accountZswap(account))).body;
   return { s, inbox, zswap };
 }
+/** The SITE's check of an account (web/src/chain/indexer.ts `checkAccount`, with the web build's pinned
+ *  verifier keys): read straight from the public indexer, never through the relay. With `until`, it is
+ *  read again (every 3 s, up to `tries`) until `until` holds, as the page waits for the chain. */
+const siteChain = new ChainReader({ indexerUrl: INDEXER_URL, networkId: PROFILE.midnightNetworkId });
+async function siteCheck(
+  who: 'A' | 'B',
+  opts: { fresh?: boolean; until?: (c: { ok: boolean; codes: string[] }) => boolean; tries?: number } = {},
+) {
+  const read = async () => {
+    const { state: st, check } = await siteChain.checkAccount(state[who].account!, {
+      deviceKey: W[who].signer.deviceKey,
+      encPublicKey: state[who].encPublic,
+      ...(opts.fresh ? { fresh: true } : {}),
+    });
+    return {
+      ok: check.ok,
+      codes: check.problems.map((p) => p.code),
+      problems: check.problems.map((p) => ({
+        code: p.code,
+        message: p.message,
+        ...(p.detail ? { detail: p.detail } : {}),
+      })),
+      useCounter: check.useCounter?.toString(10) ?? null,
+      onChain: st
+        ? { encKey: st.view.encKey, authNonce: st.view.authNonce, blockHeight: st.blockHeight, inbox: st.inbox.length }
+        : null,
+    };
+  };
+  let c = await read();
+  for (let i = 0; opts.until && !opts.until(c) && i < (opts.tries ?? 30); i++) {
+    await new Promise((r) => setTimeout(r, 3_000));
+    c = await read();
+  }
+  return c;
+}
+
 type Coins = ReturnType<typeof reconcileCoins>;
 async function coinsOf(who: 'A' | 'B', previous: Coins = []) {
   const p = state[who];
@@ -402,6 +473,13 @@ async function open(who: 'A' | 'B') {
   out.txs = await landed(t.txs);
   put(`open${who}`, out);
   say(`account ${state[who].account}`);
+  // AA 00047 P10.I: the site's opening check on the chain (P9.S, R2-6 / Q42): the web build's pinned
+  // verifier keys, the authority retired, one device and it is this wallet's (first entry), this
+  // browser's encryption key, this network's salt, nothing signed yet, and EMPTY as deployed.
+  out.siteCheck = await siteCheck(who, { fresh: true, until: (c) => c.ok });
+  put(`open${who}`, out);
+  say(`the site's opening check: ${json(out.siteCheck)}`);
+  if (!(out.siteCheck as { ok: boolean }).ok) throw new Error(`the site refuses the new account ${who}`);
   if (who === 'A') {
     const replay = await post('register', { payload: reg, auth: { message: env.message, signature: env.signature } });
     out.replayedEnvelope = { status: replay.status, code: replay.body.error?.code, detail: replay.body.error?.detail };
@@ -459,14 +537,14 @@ async function demo(who: 'A' | 'B') {
   put(`demo${who}`, out);
 }
 
-/** A signs one make: GIVE_AMOUNT of its GIVE token for WANT_AMOUNT of WANT, valid `lifetime` seconds
- *  (or exactly `validUntil`), paid from one coin (one wallet prompt). Nothing is sent. */
-async function signMake(lifetime: number, validUntil?: string) {
-  const { s, coins } = await settledCoins('A');
+/** `who` (A by default) signs one make: GIVE_AMOUNT of its GIVE token for WANT_AMOUNT of WANT, valid
+ *  `lifetime` seconds (or exactly `validUntil`), paid from one coin (one wallet prompt). Nothing is sent. */
+async function signMake(lifetime: number, validUntil?: string, who: 'A' | 'B' = 'A') {
+  const { s, coins } = await settledCoins(who);
   const held = coins.find(
     (c) => !c.spent && c.mtIndex !== null && c.color === giveToken!.midnightColour && BigInt(c.value) >= GIVE_AMOUNT,
   );
-  if (!held) throw new Error(`A holds no ${GIVE_SYMBOL} coin of at least ${GIVE_AMOUNT}`);
+  if (!held) throw new Error(`${who} holds no ${GIVE_SYMBOL} coin of at least ${GIVE_AMOUNT}`);
   const want = { nonce: freshWantNonce(), color: hexToBytes(wantToken!.midnightColour, 32), value: WANT_AMOUNT };
   const heldQ = {
     nonce: hexToBytes(held.nonce, 32),
@@ -475,7 +553,7 @@ async function signMake(lifetime: number, validUntil?: string) {
     mt_index: BigInt(held.mtIndex!),
   };
   const entries = await offerInboxEntriesPortable(
-    hexToBytes(state.A.encPublic, 32),
+    hexToBytes(state[who].encPublic, 32),
     want,
     predictChangeCoin(heldQ, GIVE_AMOUNT),
   );
@@ -493,13 +571,14 @@ async function signMake(lifetime: number, validUntil?: string) {
     authNonce: s.authNonce,
   };
   const { call, coin } = openSwapArgs(payload);
-  const auth = await W.A.device.signOffer(ctxOf(s), call, coin, useCounter('A', s));
-  return { s, coins, held, payload, auth };
+  const auth = await W[who].device.signOffer(ctxOf(s), call, coin, useCounter(who, s));
+  return { who, s, coins, held, payload, auth };
 }
 
-/** Post A's signed make and wait for it; returns the job and the listed offer. */
+/** Post a signed make and wait for it; returns the job and the listed offer. */
 async function postMake(label: string, m: Awaited<ReturnType<typeof signMake>>) {
   say(`the wallet shows:\n      ${indent(m.auth.text)}`);
+  siteLineOf(m.auth.text);
   const body = { account: m.s.account, payload: m.payload, passportAuth: passportAuthOf(m.auth) };
   const r = await post('open-swap', body);
   if (r.status !== 202 || !r.body.job) throw new Error(`open-swap refused: ${r.status} ${JSON.stringify(r.body)}`);
@@ -558,6 +637,7 @@ async function make() {
     result: t.job.result,
     error: t.job.error,
     walletText: m.auth.text,
+    siteLine: siteLineOf(m.auth.text),
     validUntil: m.payload.validUntil,
     lifetimeSeconds: MAKE_LIFETIME,
     balancesBefore: balances(m.coins),
@@ -696,6 +776,7 @@ async function take() {
   step(`take: B takes A's offer ${o.offerId} (one wallet prompt)`);
   const { before, auth, body } = await signTake(o);
   say(`the wallet shows:\n      ${indent(auth.text)}`);
+  siteLineOf(auth.text);
   const r = await post('take', body);
   if (r.status !== 202 || !r.body.job) throw new Error(`take refused: ${r.status} ${JSON.stringify(r.body)}`);
   const t = await waitJob(r.body.job, 'take B');
@@ -834,6 +915,7 @@ async function withdraw() {
   };
   const auth = await W.A.device.sign(ctxOf(s), withdrawRequest(payload), useCounter('A', s));
   say(`the wallet shows:\n      ${indent(auth.text)}`);
+  siteLineOf(auth.text);
   const passportAuth = passportAuthOf(auth);
   const r = await post('withdraw', { account: s.account, payload, passportAuth });
   if (r.status !== 202 || !r.body.job) throw new Error(`withdraw refused: ${r.status} ${JSON.stringify(r.body)}`);
@@ -1109,6 +1191,7 @@ async function withdrawUnshielded() {
   };
   const auth = await W.A.device.sign(ctxOf(s), withdrawUnshieldedRequest(payload), useCounter('A', s));
   say(`the wallet shows:\n      ${indent(auth.text)}`);
+  siteLineOf(auth.text);
   const passportAuth = passportAuthOf(auth);
   const r = await post('withdraw-unshielded', { account: s.account, payload, passportAuth });
   if (r.status !== 202 || !r.body.job)
@@ -1157,6 +1240,7 @@ async function cancelAll(who: 'A' | 'B') {
   const payload = { newKey: s.encKey, authNonce: s.authNonce };
   const auth = await W[who].device.sign(ctxOf(s), cancelOffersRequest(payload), useCounter(who, s));
   say(`the wallet shows:\n      ${indent(auth.text)}`);
+  siteLineOf(auth.text);
   const passportAuth = passportAuthOf(auth);
   const r = await post('cancel-offers', { account: s.account, payload, passportAuth });
   if (r.status !== 202 || !r.body.job) throw new Error(`cancel-offers refused: ${r.status} ${JSON.stringify(r.body)}`);
@@ -1380,6 +1464,469 @@ function c2Signature(who: 'A' | 'B', s: AccountStateView, p: Parameters<typeof w
   };
 }
 
+// ── AA 00047 P10.I: the round-2 fix pass on the stack ────────────────────────
+
+type Reply = { status: number; code?: string; detail?: string; message?: string };
+const reply = (r: { status: number; body: Answer }): Reply => ({
+  status: r.status,
+  ...(r.body.error?.code ? { code: r.body.error.code } : {}),
+  ...(r.body.error?.detail ? { detail: r.body.error.detail } : {}),
+  ...(r.body.error?.message ? { message: r.body.error.message } : {}),
+});
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** `restore-enc-key` for `who` to `newKey` (one prompt), from the CHAIN's view of the account (the site
+ *  signs from the indexer, never the relay); waits until the chain shows the key. */
+async function restoreTo(who: 'A' | 'B', newKey: string, label: string) {
+  const account = state[who].account!;
+  const view = (await siteChain.accountState(account))!;
+  const payload = { newKey, authNonce: view.authNonce };
+  const auth = await W[who].device.sign(ctxOf(view), restoreEncKeyRequest(payload), useCounter(who, view));
+  say(`the wallet shows:\n      ${indent(auth.text)}`);
+  const lines = auth.text.split('\n');
+  const passportAuth = passportAuthOf(auth);
+  const r = await post('restore-enc-key', { account, payload, passportAuth });
+  const out: Record<string, unknown> = {
+    label,
+    walletText: auth.text,
+    siteLine: siteLineOf(auth.text),
+    walletSaysRotate:
+      lines[1]!.trimEnd() === 'Rotate encryption key' && lines[2]!.startsWith(`New key ${newKey.slice(0, 16)}`),
+    admission: reply(r),
+    encKeyBefore: view.encKey,
+  };
+  if (r.status !== 202 || !r.body.job) return out;
+  const t = await waitJob(r.body.job, `restore-enc-key ${who} (${label})`);
+  Object.assign(out, { state: t.job.state, seconds: t.seconds, stages: t.stages, error: t.job.error });
+  if (t.job.state !== 'succeeded') return out;
+  out.txs = await landed([String((t.job.result as { txId: string }).txId)]);
+  let now = await siteChain.accountState(account);
+  for (let i = 0; i < 30 && now?.encKey !== newKey; i++) {
+    await sleepMs(3_000);
+    now = await siteChain.accountState(account);
+  }
+  out.encKeyAfter = now?.encKey ?? null;
+  out.chainShowsNewKey = now?.encKey === newKey;
+  out.authNonce = { before: view.authNonce, after: now?.authNonce ?? null };
+  const late = await post('restore-enc-key', { account, payload, passportAuth });
+  out.replayAfterLanding = reply(late);
+  return out;
+}
+
+async function restoreStep() {
+  step('restore (R2-3): a page rotates A’s key away; the site refuses on enc-key alone; "Restore my encryption key"');
+  const out: Record<string, unknown> = { checkBefore: await siteCheck('A') };
+  put('restore', out);
+  if (!(out.checkBefore as { ok: boolean }).ok) throw new Error('the site does not accept A before the restore step');
+  const before = balances((await settledCoins('A')).coins);
+  // 1. The attack: a page gets the wallet to sign a REAL key change to a key this browser does not hold.
+  //    The relay cannot tell (it refuses only the on-chain key itself); the circuit renders the truth:
+  //    "Rotate encryption key / New key <other>".
+  const away = bytesToHex(generateEncKeyPairPortable().publicKey);
+  out.away = await restoreTo('A', away, 'a page rotates the key away');
+  put('restore', out);
+  const a = out.away as { chainShowsNewKey?: boolean; walletSaysRotate: boolean };
+  if (!a.chainShowsNewKey || !a.walletSaysRotate) throw new Error(`the key change did not land: ${json(a)}`);
+  // 2. The site refuses the account now, on the encryption key ALONE (`restorableCheck`).
+  out.checkAfterAttack = await siteCheck('A');
+  const c1 = out.checkAfterAttack as { ok: boolean; codes: string[] };
+  out.restorable = !c1.ok && c1.codes.length === 1 && c1.codes[0] === 'enc-key';
+  put('restore', out);
+  if (!out.restorable) throw new Error(`the site's check is not "enc-key alone": ${json(c1)}`);
+  // 3. "Restore my encryption key": this browser's key back (one prompt).
+  out.restore = await restoreTo('A', state.A.encPublic, 'restore my encryption key');
+  put('restore', out);
+  const r = out.restore as { chainShowsNewKey?: boolean; walletSaysRotate: boolean };
+  if (!r.chainShowsNewKey || !r.walletSaysRotate) throw new Error(`the restore did not land: ${json(r)}`);
+  out.checkAfterRestore = await siteCheck('A', { until: (c) => c.ok });
+  if (!(out.checkAfterRestore as { ok: boolean }).ok) throw new Error('the site still refuses A after the restore');
+  // 4. A restore to the key already on chain is a cancel in disguise: refused (it must not escape the
+  //    cancels' daily cap), before any proof.
+  const view = (await siteChain.accountState(state.A.account!))!;
+  const same = { newKey: view.encKey, authNonce: view.authNonce };
+  const sameAuth = await W.A.device.sign(ctxOf(view), restoreEncKeyRequest(same), useCounter('A', view));
+  out.restoreToTheSameKey = reply(
+    await post('restore-enc-key', { account: view.account, payload: same, passportAuth: passportAuthOf(sameAuth) }),
+  );
+  if ((out.restoreToTheSameKey as Reply).status === 202) throw new Error('a restore to the on-chain key was admitted');
+  // 5. Nothing lost: the coins sealed to this browser's key still open, the balances are unchanged.
+  out.balancesBefore = before;
+  out.balancesAfter = balances((await settledCoins('A')).coins);
+  out.balancesUnchanged = json(out.balancesAfter) === json(before);
+  say(`restore: ${json({ restorable: out.restorable, after: out.checkAfterRestore, same: out.restoreToTheSameKey })}`);
+  put('restore', out);
+  if (!out.balancesUnchanged) throw new Error('the balances changed across the key restore');
+}
+
+/** A valid signature by `who` over `bytes` (the wallet signs whatever it is shown). */
+function signBytes(who: 'A' | 'B', bytes: Uint8Array, counter: bigint) {
+  const kp = nacl.sign.keyPair.fromSeed(hexToBytes(state[who].seed, 32));
+  return {
+    owner: W[who].signer.deviceKey,
+    signature: bytesToHex(nacl.sign.detached(bytes, kp.secretKey)),
+    useCounter: counter.toString(10),
+  };
+}
+const ascii = (t: string) => Uint8Array.from([...t].map((c) => c.charCodeAt(0)));
+
+async function p10Negatives() {
+  step('p10-negatives (Q36): first lines the circuit never renders for this market, at the live relay');
+  const cases: Record<string, unknown> = {};
+  const refused = (name: string, r: Reply, extra: Record<string, unknown> = {}) => {
+    cases[name] = { ...r, ...extra };
+    say(`${name} → ${r.status} ${r.code ?? ''} ${r.detail ?? ''}`);
+    if (r.status === 202) throw new Error(`NEGATIVE ACCEPTED: ${name}`);
+  };
+  const { s, coins } = await settledCoins('A');
+  const usdc = coins.find((c) => !c.spent && c.mtIndex !== null && c.color === wantToken!.midnightColour);
+  if (!usdc) throw new Error('A holds no spendable twUSDC coin for the negatives');
+  const r0 = await recipientKeys();
+  const wd = {
+    recipient: r0.coinPublicKey,
+    recipientEncryptionKey: r0.encryptionPublicKey,
+    color: usdc.color,
+    amount: '1000000',
+    coin: { nonce: usdc.nonce, color: usdc.color, value: usdc.value, mtIndex: usdc.mtIndex! },
+    authNonce: s.authNonce,
+  };
+  const counter = useCounter('A', s);
+  const honest = await W.A.device.sign(ctxOf(s), withdrawRequest(wd), counter);
+  cases.honestFirstLine = siteLineOf(honest.text);
+  const rest = honest.text.split('\n').slice(1).join('\n');
+  const label = marketLabel(NETWORK);
+  const variants: [string, string, string][] = [
+    // A label that reads as an enforced line: the client renders it (it is a valid label), the circuit
+    // would show "Site: Withdraw shielded"; the market's relay and page use only their own label.
+    [
+      'label = an action title ("Site: Withdraw shielded")',
+      'Withdraw shielded',
+      `Site: ${'Withdraw shielded'.padEnd(24)}\n${rest}`,
+    ],
+    // A label pushed off the marker: the client and the circuit refuse to render it at all.
+    ['leading-space label ("Site:  Night Market …")', ` ${label}`, `Site: ${` ${label}`.padEnd(24)}\n${rest}`],
+    // F3 v2's layout: the label as a bare first line, no "Site: " (6 bytes shorter).
+    ['bare first line (no "Site: ")', label, `${label.padEnd(24)}\n${rest}`],
+  ];
+  for (const [name, lbl, text] of variants) {
+    const auth = signBytes('A', ascii(text), counter);
+    refused(name, reply(await post('withdraw', { account: s.account, payload: wd, passportAuth: auth })), {
+      firstLine: text.split('\n')[0],
+      clientRendersTheLabel: isRenderableLabel(lbl),
+    });
+  }
+  // The attack Q36 closes: "Cancel all open offers" as the LABEL above a real key change.
+  const other = bytesToHex(generateEncKeyPairPortable().publicKey);
+  const rot = { newKey: other, authNonce: s.authNonce };
+  const honestRot = await W.A.device.sign(ctxOf(s), restoreEncKeyRequest(rot), counter);
+  const restRot = honestRot.text.split('\n').slice(1).join('\n');
+  const fake = `Site: ${'Cancel all open offers'.padEnd(24)}\n${restRot}`;
+  refused(
+    'a real key change under the label "Cancel all open offers"',
+    reply(
+      await post('restore-enc-key', {
+        account: s.account,
+        payload: rot,
+        passportAuth: signBytes('A', ascii(fake), counter),
+      }),
+    ),
+    { walletWouldShow: fake.split('\n').slice(0, 3) },
+  );
+  // Nothing moved: the nonce and the key are as before.
+  const after = (await siteChain.accountState(s.account))!;
+  cases.unchanged = { authNonce: after.authNonce === s.authNonce, encKey: after.encKey === s.encKey };
+  put('p10Negatives', cases);
+  if (after.authNonce !== s.authNonce || after.encKey !== s.encKey)
+    throw new Error('a Q36 negative changed the account');
+}
+
+/** The prover hold of a finished job, in the relay's own stage times (Unix seconds): a prover-lane job
+ *  holds it from `running` to its end; an account-lane job (a make) from `proving` to `proven`. */
+function proverHold(v: JobView): { start: number; end: number } | null {
+  const at = (name: string) => v.stages.find((x) => x.stage === name)?.at;
+  if (v.lane === 'prover') {
+    const start = at('running');
+    const end = v.stages.find((x) => x.stage === 'succeeded' || x.stage === 'failed')?.at;
+    return start !== undefined && end !== undefined ? { start, end } : null;
+  }
+  const start = at('proving');
+  if (start === undefined) return null;
+  const end = at('proven') ?? v.stages.find((x) => x.stage === 'failed' || x.stage === 'succeeded')?.at ?? v.updatedAt;
+  return { start, end };
+}
+const jobView = async (id: string) => (await http<{ job: JobView }>(API_PATHS.job(id))).body.job;
+
+async function fairness() {
+  step('fairness (R2-1): A bursts makes, then loops makes and cancels; B withdraws twice meanwhile');
+  const out: Record<string, unknown> = {};
+  put('fairness', out);
+  const jobsA: { id: string; action: string; postedAt: string }[] = [];
+  const triesA: Record<string, number> = {};
+  let current: { id: string; action: string } | null = null;
+  const count = (r: Reply) => {
+    const k = `${r.status}${r.code ? ` ${r.code}` : ''}`;
+    triesA[k] = (triesA[k] ?? 0) + 1;
+  };
+  // A's next request, signed against the account's state at the time (a cancel re-affirms its key).
+  const buildA = async (kind: 'make' | 'cancel') => {
+    if (kind === 'make') {
+      const m = await signMake(900);
+      return {
+        action: 'open-swap' as const,
+        body: { account: m.s.account, payload: m.payload, passportAuth: passportAuthOf(m.auth) },
+      };
+    }
+    const { s } = await coinsOf('A');
+    const payload = { newKey: s.encKey, authNonce: s.authNonce };
+    const auth = await W.A.device.sign(ctxOf(s), cancelOffersRequest(payload), useCounter('A', s));
+    return {
+      action: 'cancel-offers' as const,
+      body: { account: s.account, payload, passportAuth: passportAuthOf(auth) },
+    };
+  };
+  // 1. The auditor's burst: six makes back to back.
+  const burst = [];
+  for (let i = 0; i < 6; i++) burst.push(await buildA('make'));
+  const burstReplies: Reply[] = [];
+  for (const b of burst) {
+    const r = await post(b.action, b.body);
+    burstReplies.push(reply(r));
+    count(reply(r));
+    if (r.status === 202 && r.body.job) {
+      current = { id: r.body.job.requestId, action: b.action };
+      jobsA.push({ ...current, postedAt: new Date().toISOString() });
+    }
+  }
+  out.burst = burstReplies;
+  say(`A's burst of 6 makes → ${burstReplies.map((r) => `${r.status}${r.code ? ` ${r.code}` : ''}`).join(', ')}`);
+  // 2. The loop: as fast as the relay answers (once a second), make and cancel in turn.
+  let stop = false;
+  let kind: 'make' | 'cancel' = 'cancel';
+  let pending: Awaited<ReturnType<typeof buildA>> | null = null;
+  const loop = (async () => {
+    while (!stop) {
+      try {
+        pending ??= await buildA(kind);
+        const r = await post(pending.action, pending.body);
+        count(reply(r));
+        if (r.status === 202 && r.body.job) {
+          current = { id: r.body.job.requestId, action: pending.action };
+          jobsA.push({ ...current, postedAt: new Date().toISOString() });
+          kind = kind === 'make' ? 'cancel' : 'make';
+          pending = null;
+        } else if (r.status !== 429) {
+          pending = null; // stale (the nonce moved): sign again
+        }
+      } catch (e) {
+        const k = `error ${String((e as Error).message).slice(0, 60)}`;
+        triesA[k] = (triesA[k] ?? 0) + 1;
+        pending = null;
+      }
+      await sleepMs(1_000);
+    }
+  })();
+  // B's withdrawal of its smallest spendable coin (whole: no change), sent when `when` holds for A's
+  // current job.
+  const customer = async (label: string, when: (v: JobView) => boolean) => {
+    for (let i = 0; i < 600; i++) {
+      if (current) {
+        const v = await jobView(current.id);
+        if (v && when(v)) break;
+      }
+      await sleepMs(500);
+    }
+    const { s, coins } = await settledCoins('B');
+    // B's largest coin of the GIVE token is kept for the caps phase's makes.
+    const spendable = coins.filter((c) => !c.spent && c.mtIndex !== null);
+    const reserve = spendable
+      .filter((c) => c.color === giveToken!.midnightColour && BigInt(c.value) >= GIVE_AMOUNT)
+      .sort((x, y) => (BigInt(x.value) > BigInt(y.value) ? -1 : 1))[0];
+    const coin = spendable
+      .filter((c) => c.nonce !== reserve?.nonce)
+      .sort((x, y) => (BigInt(x.value) < BigInt(y.value) ? -1 : 1))[0];
+    if (!coin) throw new Error('B holds no coin to withdraw');
+    const rk = await recipientKeys();
+    const payload = {
+      recipient: rk.coinPublicKey,
+      recipientEncryptionKey: rk.encryptionPublicKey,
+      color: coin.color,
+      amount: coin.value,
+      coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex! },
+      authNonce: s.authNonce,
+    };
+    const auth = await W.B.device.sign(ctxOf(s), withdrawRequest(payload), useCounter('B', s));
+    siteLineOf(auth.text);
+    const aheadAt = current ? { ...current, view: await jobView(current.id) } : null;
+    const r = await post('withdraw', { account: s.account, payload, passportAuth: passportAuthOf(auth) });
+    if (r.status !== 202 || !r.body.job) throw new Error(`B's withdrawal refused: ${json(reply(r))}`);
+    const t = await waitJob(r.body.job, `withdraw B (${label})`);
+    return {
+      label,
+      requestId: r.body.job.requestId,
+      token: sym(coin.color),
+      amount: coin.value,
+      aJobWhenSent: aheadAt ? { id: aheadAt.id, action: aheadAt.action, stage: aheadAt.view?.stage } : null,
+      state: t.job.state,
+      seconds: t.seconds,
+      txs: t.job.state === 'succeeded' ? await landed([String((t.job.result as { txId: string }).txId)]) : [],
+    };
+  };
+  const rounds = [];
+  rounds.push(await customer('while A’s make proves', (v) => v.action === 'open-swap' && v.stage === 'proving'));
+  rounds.push(await customer('while A’s cancel proves', (v) => v.action === 'cancel-offers' && v.state === 'running'));
+  stop = true;
+  await loop;
+  // Let A's last job end, so the next phase starts from an idle relay.
+  if (current) await waitJob((await jobView(current.id))!, `A's last job (${current.action})`);
+  // 3. The measure, in the relay's own stage times: for each B withdrawal, A's jobs that held the
+  //    prover while it waited (held when it arrived, or started before it).
+  const viewsA = await Promise.all(jobsA.map(async (j) => ({ ...j, view: await jobView(j.id) })));
+  const holdsA = viewsA.map((j) => ({
+    id: j.id,
+    action: j.action,
+    state: j.view?.state,
+    hold: j.view ? proverHold(j.view) : null,
+  }));
+  const measured = [];
+  for (const rd of rounds) {
+    const v = (await jobView(rd.requestId))!;
+    const arrived = v.createdAt;
+    const started = v.stages.find((x) => x.stage === 'running')?.at ?? null;
+    const held = holdsA.filter((h) => h.hold && started !== null && h.hold.start <= arrived && h.hold.end > arrived);
+    const after = holdsA.filter((h) => h.hold && started !== null && h.hold.start > arrived && h.hold.start < started);
+    measured.push({
+      ...rd,
+      arrivedAt: arrived,
+      startedAt: started,
+      waitedSeconds: started === null ? null : started - arrived,
+      heldAtArrival: held.map((h) => `${h.action} ${h.id.slice(0, 8)}`),
+      startedAfterArrival: after.map((h) => `${h.action} ${h.id.slice(0, 8)}`),
+      aJobsAhead: held.length + after.length,
+      pass: started !== null && held.length + after.length <= 1,
+    });
+  }
+  Object.assign(out, { attempts: triesA, jobsA: holdsA, rounds: measured });
+  out.pass = measured.every((m) => m.pass && m.state === 'succeeded');
+  say(
+    `fairness: ${json(measured.map((m) => ({ label: m.label, aJobsAhead: m.aJobsAhead, waited: m.waitedSeconds })))}`,
+  );
+  say(`A's attempts: ${json(triesA)}`);
+  put('fairness', out);
+  if (!out.pass) throw new Error(`fairness FAILED: ${json(measured)}`);
+}
+
+/** The caps the relay runs with in the `caps` phase: CAPS="open,makes,cancels,restores". */
+const CAPS = (process.env.CAPS ?? '2,3,2,1').split(',').map((x) => Number(x));
+
+async function caps() {
+  const [open, makes, cancels, restores] = CAPS as [number, number, number, number];
+  step(`caps (R2-1) on B: open offers ${open}, makes/day ${makes}, cancels/day ${cancels}, restores/day ${restores}`);
+  if (open !== 2 || makes !== 3 || cancels !== 2 || restores !== 1)
+    throw new Error('the caps step is written for CAPS=2,3,2,1');
+  const out: Record<string, unknown> = { caps: { open, makes, cancels, restores } };
+  const seq: Record<string, unknown>[] = [];
+  const record = (what: string, r: Reply, extra: Record<string, unknown> = {}) => {
+    seq.push({ what, ...r, ...extra });
+    say(`${what} → ${r.status} ${r.code ?? ''}`);
+    out.sequence = seq;
+    put('caps', out);
+  };
+  const expect = (what: string, r: Reply, status: number, code?: string) => {
+    if (r.status !== status || (code !== undefined && r.code !== code))
+      throw new Error(`${what}: expected ${status}${code ? ` ${code}` : ''}, got ${json(r)}`);
+  };
+  const makeB = async () => {
+    const m = await signMake(900, undefined, 'B');
+    siteLineOf(m.auth.text);
+    return { account: m.s.account, payload: m.payload, passportAuth: passportAuthOf(m.auth) };
+  };
+  const finish = async (r: { status: number; body: Answer }, label: string) => {
+    if (r.status !== 202 || !r.body.job) return null;
+    const t = await waitJob(r.body.job, label);
+    if (t.job.state !== 'succeeded') throw new Error(`${label} failed: ${json(t.job.error)}`);
+    return t;
+  };
+  const cancelB = async () => {
+    const { s } = await coinsOf('B');
+    const payload = { newKey: s.encKey, authNonce: s.authNonce };
+    const auth = await W.B.device.sign(ctxOf(s), cancelOffersRequest(payload), useCounter('B', s));
+    return { account: s.account, payload, passportAuth: passportAuthOf(auth) };
+  };
+  const nonceMoves = async (before: string) => {
+    for (let i = 0; i < 30; i++) {
+      const v = (await coinsOf('B')).s;
+      if (v.authNonce !== before) return;
+      await sleepMs(3_000);
+    }
+    throw new Error('B’s nonce did not move');
+  };
+  // 1. One job per account: a second make while the first runs → account-busy.
+  const m1 = await post('open-swap', await makeB());
+  record('make 1', reply(m1));
+  expect('make 1', reply(m1), 202);
+  const m2body = await makeB();
+  const busy = await post('open-swap', m2body);
+  record('make 2 while make 1 runs', reply(busy));
+  expect('make 2 while make 1 runs', reply(busy), 429, 'account-busy');
+  await finish(m1, 'make 1 B');
+  const m2 = await post('open-swap', m2body);
+  record('make 2 (after make 1)', reply(m2));
+  expect('make 2', reply(m2), 202);
+  await finish(m2, 'make 2 B');
+  // 2. Open offers: two live → a third is refused.
+  const m3 = await post('open-swap', await makeB());
+  record('make 3 with 2 offers live', reply(m3));
+  expect('make 3', reply(m3), 429, 'open-offers-cap');
+  // 3. A cancel ends them (the nonce moves): a make is admitted again, the third of the day.
+  const n0 = (await coinsOf('B')).s.authNonce;
+  const c1 = await post('cancel-offers', await cancelB());
+  record('cancel 1', reply(c1));
+  expect('cancel 1', reply(c1), 202);
+  await finish(c1, 'cancel 1 B');
+  await nonceMoves(n0);
+  const m3b = await post('open-swap', await makeB());
+  record('make 3 after the cancel', reply(m3b));
+  expect('make 3 after the cancel', reply(m3b), 202);
+  await finish(m3b, 'make 3 B');
+  // 4. Makes a day: the fourth is refused (one offer live: under the open-offer cap).
+  const m4 = await post('open-swap', await makeB());
+  record('make 4 (3 made today)', reply(m4));
+  expect('make 4', reply(m4), 429, 'makes-daily-cap');
+  // 5. Cancels a day: the second is admitted, the third refused.
+  const n1 = (await coinsOf('B')).s.authNonce;
+  const c2 = await post('cancel-offers', await cancelB());
+  record('cancel 2', reply(c2));
+  expect('cancel 2', reply(c2), 202);
+  await finish(c2, 'cancel 2 B');
+  await nonceMoves(n1);
+  const c3 = await post('cancel-offers', await cancelB());
+  record('cancel 3 (2 today)', reply(c3));
+  expect('cancel 3', reply(c3), 429, 'cancels-daily-cap');
+  // 6. Restores a day (their own count: the cancels are used up, a restore is still admitted).
+  const away = bytesToHex(generateEncKeyPairPortable().publicKey);
+  const rs1 = await restoreTo('B', away, 'restores cap: 1st (a page rotates B’s key away)');
+  record('restore 1 (to another key)', rs1.admission as Reply, { chainShowsNewKey: rs1.chainShowsNewKey });
+  expect('restore 1', rs1.admission as Reply, 202);
+  if (!rs1.chainShowsNewKey) throw new Error('B’s key change did not land');
+  out.checkAfterAttack = await siteCheck('B');
+  const rs2 = await restoreTo('B', state.B.encPublic, 'restores cap: 2nd');
+  record('restore 2 (1 today)', rs2.admission as Reply);
+  expect('restore 2', rs2.admission as Reply, 429, 'restores-daily-cap');
+  out.pass = true;
+  put('caps', out);
+}
+
+/** After the relay restarted (the counters live in memory, RUNBOOK section 9): B's key back. */
+async function capsRestore() {
+  step('caps-restore: after a relay restart the restore cap is reset; B restores its key');
+  const out: Record<string, unknown> = { checkBefore: await siteCheck('B') };
+  out.restore = await restoreTo('B', state.B.encPublic, 'restore after the relay restart');
+  const r = out.restore as { admission: Reply; chainShowsNewKey?: boolean };
+  out.checkAfter = await siteCheck('B', { until: (c) => c.ok });
+  put('capsRestore', out);
+  if (r.admission.status !== 202 || !r.chainShowsNewKey || !(out.checkAfter as { ok: boolean }).ok)
+    throw new Error(`B's restore failed: ${json(out)}`);
+}
+
 async function main() {
   const health = (await http('/health')).body;
   run.healthBefore = health;
@@ -1425,6 +1972,21 @@ async function main() {
         break;
       case 'p9-negatives':
         await p9Negatives();
+        break;
+      case 'restore':
+        await restoreStep();
+        break;
+      case 'p10-negatives':
+        await p10Negatives();
+        break;
+      case 'fairness':
+        await fairness();
+        break;
+      case 'caps':
+        await caps();
+        break;
+      case 'caps-restore':
+        await capsRestore();
         break;
       default:
         throw new Error(`unknown step ${st}`);

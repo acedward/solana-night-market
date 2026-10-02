@@ -5,7 +5,8 @@
 // account queued, and a customer's withdrawal sent after them waited for all five (about 314 s at
 // stagenet scale). Now:
 //   - one queued-or-running job per account (`429 account-busy`: ../src/actions/account-gate.ts);
-//   - the prover lane is shared round-robin across accounts (../src/queue/fair-lock.ts);
+//   - the prover lane is shared round-robin across accounts (P10's fair-lock; since P11.F
+//     ../src/queue/prover-lock.ts keeps that bound within each rank: ./prover-lane.test.ts);
 //   - a make waits for its listing on its account's lane, not holding the prover;
 // so another account's withdrawal waits behind at most ONE job of an account that loops makes and
 // cancels. The per-account caps (open offers, makes, cancels a day) are ./account-caps.test.ts.
@@ -14,16 +15,18 @@ import { describe, expect, it } from 'vitest';
 
 import { defaultCatalogue, withTrade } from '../src/actions/catalogue.js';
 import { AccountGate } from '../src/actions/account-gate.js';
-import { FairLock } from '../src/queue/fair-lock.js';
+import { ProverLock } from '../src/queue/prover-lock.js';
 import { JobQueue, type JobExecutor } from '../src/queue/jobs.js';
 import { silentLog, testConfig } from './harness.js';
 import { ATTACKER, ATTACKER_ACCOUNT, CUSTOMER, CUSTOMER_ACCOUNT, laneRelay, sleep } from './lane-relay.js';
 
-describe('FairLock (unit)', () => {
+const w = (id: string, key = '') => ({ id, key, rank: 2 as const, action: 'withdraw' });
+
+describe('ProverLock keeps the round-robin bound of P10 (unit; one rank, equal use)', () => {
   it('serves keys round-robin, each key first in first out', async () => {
-    const lock = new FairLock();
+    const lock = new ProverLock();
     const order: string[] = [];
-    const release = await lock.acquire('holder', 'h');
+    const release = await lock.acquire(w('holder', 'h'));
     const waits = [
       ['a1', 'A'],
       ['a2', 'A'],
@@ -32,7 +35,7 @@ describe('FairLock (unit)', () => {
       ['c1', 'C'],
       ['b2', 'B'],
     ].map(([id, key]) =>
-      lock.acquire(id!, key!).then((r) => {
+      lock.acquire(w(id!, key!)).then((r) => {
         order.push(id!);
         r();
       }),
@@ -53,10 +56,10 @@ describe('FairLock (unit)', () => {
   });
 
   it('with one key it is a plain FIFO lock', async () => {
-    const lock = new FairLock();
+    const lock = new ProverLock();
     const order: string[] = [];
-    const release = await lock.acquire('x');
-    const all = ['1', '2', '3'].map((id) => lock.acquire(id).then((r) => (order.push(id), r())));
+    const release = await lock.acquire(w('x'));
+    const all = ['1', '2', '3'].map((id) => lock.acquire(w(id)).then((r) => (order.push(id), r())));
     release();
     await Promise.all(all);
     expect(order).toEqual(['1', '2', '3']);

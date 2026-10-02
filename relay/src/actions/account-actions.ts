@@ -20,7 +20,7 @@ import {
 } from '@nightmarket/core';
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
-import { assertCoinUnspent, type SpendReader } from '../chain/coin-spend.js';
+import { withdrawSpendCheck, type SpendReader } from '../chain/coin-spend.js';
 import type { AppendEntitlements } from './entitlements.js';
 import type { Logger } from '../log.js';
 import type { DeviceArm, GatedAction } from '../passport/arm.js';
@@ -252,10 +252,16 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
         throw new PublicError('unauthorised', "the recipient is not the one the device's relay envelope names");
       }
     }
-    // AA 00047 P11 (R3-7): a spent coin still proves membership; refuse it before the proof.
+    // AA 00047 P11 (R3-7): a spent coin still proves membership; refuse it before the proof. When the
+    // history cannot be read (P11.F, R4-5: a history too long to stream in time), the withdrawal goes
+    // ahead unchecked: the ledger refuses a double spend anyway, and funds must always be able to leave.
     if (deps.coins) {
       const coins = deps.coins;
-      await runGated(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, p.coin));
+      const checked = await runGated(deps, check.digestHex, () => withdrawSpendCheck(coins, check.account, p.coin));
+      if (checked === 'unchecked') {
+        ctx.log.warn('the spent-coin check was skipped: the account history could not be read');
+        ctx.stage('spend-check-skipped');
+      }
     }
     return runGated(deps, check.digestHex, () =>
       ctx.prove(() =>

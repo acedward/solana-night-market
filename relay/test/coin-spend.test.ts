@@ -10,22 +10,37 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { contractCoinNullifier, encodeOffer, type OpenSwapPayload, type TakePayload } from '@nightmarket/core';
+import {
+  contractCoinCommitment,
+  contractCoinNullifier,
+  encodeOffer,
+  type OpenSwapPayload,
+  type TakePayload,
+} from '@nightmarket/core';
 
 import { accountOffer, walletOffer, type FakeTx } from '../../test/gates/take/fake-tx.js';
-import { FailureBudget } from '../src/actions/failure-budget.js';
+import { defaultCatalogue, withTrade } from '../src/actions/catalogue.js';
+import { FailureBudget, isCounterpartyCode } from '../src/actions/failure-budget.js';
 import { withdrawExecutor } from '../src/actions/account-actions.js';
 import { guarded } from '../src/app.js';
 import { DigestReplayGuard } from '../src/auth/verifiers.js';
 import { coinSpent, type SpendReader } from '../src/chain/coin-spend.js';
+import type { AccountTxView } from '../src/chain/indexer.js';
 import type { PassportRuntime } from '../src/passport/runtime.js';
 import { PublicError, type JobContext } from '../src/queue/jobs.js';
 import type { SponsorSession } from '../src/sponsor/session.js';
 import type { ProvenAccountOffer } from '../src/trade/account-offer.js';
-import { attributeSettlementRefusal, openSwapExecutor, takeExecutor, type TradeDeps } from '../src/trade/executors.js';
+import {
+  BatcherCooldown,
+  attributeSettlementRefusal,
+  cooldownAdmission,
+  openSwapExecutor,
+  takeExecutor,
+  type TradeDeps,
+} from '../src/trade/executors.js';
 import { describeTx } from '../src/trade/tx-structure.js';
 import { callSigner, fakeAccountRuntime, testArm } from './fake-arm.js';
-import { silentLog } from './harness.js';
+import { silentLog, testConfig } from './harness.js';
 import { ATTACKER, ATTACKER_ACCOUNT, laneRelay } from './lane-relay.js';
 
 const ACCOUNT = '5e'.repeat(32);
@@ -241,62 +256,194 @@ describe('take: the taker’s coin is checked unspent BEFORE any proof (F-B3-6)'
   });
 });
 
-describe('take: a settlement refusal is attributed to the right party (F-B3-6)', () => {
-  it('the taker’s coin spent by the time the batcher refused → coin-spent, charged to the taker', async () => {
-    const coins = reader();
-    const r = takeRun({
+// AA 00047 P11.F, audit round 4 R4-2 (F-B4-2, F-A4-3): round 3 charged the taker for ANY spent coin or
+// moved nonce after a refusal, so an honest taker was charged when its take had landed after all, or
+// when its own offer was taken at the same moment. Now the refusal is judged by the transaction.
+/** A reader of the account's decoded history (entry points, leaves, spends); `txs` and `tip` can change
+ *  between reads. */
+function historyReader(txs: AccountTxView[] = [], tip = 100) {
+  const r = {
+    reads: 0,
+    txs,
+    tip,
+    spentNullifiers: async (account: string) =>
+      account === ACCOUNT ? new Set(r.txs.flatMap((t) => [...t.inputs])) : null,
+    accountTxs: async (account: string) => {
+      r.reads++;
+      return account === ACCOUNT ? { txs: [...r.txs], tip: r.tip } : null;
+    },
+  };
+  return r;
+}
+const SWAP = 'open_swap_shielded_with_ed25519';
+const wantedLeaf = contractCoinCommitment(
+  { nonce: take.wantNonce, color: take.wantColor, value: take.wantAmount },
+  ACCOUNT,
+);
+const tx = (o: Partial<AccountTxView> & { hash: string }): AccountTxView => ({
+  blockHeight: 101,
+  entryPoints: [],
+  outputs: [],
+  inputs: [],
+  ...o,
+});
+
+describe('take: a settlement refusal is reconciled against the chain before anyone is blamed (R4-2)', () => {
+  async function run(o: Parameters<typeof takeRun>[0]) {
+    const r = takeRun(o);
+    const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
+    const owner = r.signer.deviceKey;
+    const ends: Array<{ code?: string; requesterFault: boolean }> = [];
+    const out = await guarded(r.exec, {
+      action: 'take',
+      owner,
+      account: ACCOUNT,
+      failures,
+      finished: (e) => ends.push({ requesterFault: e.requesterFault, ...(e.code ? { code: e.code } : {}) }),
+    })(r.payload, r.c).then(
+      (v) => ({ ok: true as const, v }),
+      (e: unknown) => ({ ok: false as const, code: (e as PublicError).code }),
+    );
+    return { r, out, charged: failures.failures(owner), ends };
+  }
+
+  it('the take landed although the batcher failed: the job SUCCEEDS with its settlement, nothing charged', async () => {
+    const coins = historyReader();
+    const { r, out, charged } = await run({
       coins,
       batcher: () => json(500, { success: false, error: 'internal' }),
-      onBatcher: () => coins.spent.add(nf(take.coin)), // spent meanwhile (e.g. its own offer was taken)
+      onBatcher: () => {
+        coins.txs.push(
+          tx({ hash: 'ab'.repeat(32), entryPoints: [SWAP], outputs: [wantedLeaf], inputs: [nf(take.coin)] }),
+        );
+        coins.tip = 101;
+      },
     });
-    const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
-    const owner = r.signer.deviceKey;
-    await expect(
-      guarded(r.exec, { action: 'take', owner, account: ACCOUNT, failures })(r.payload, r.c),
-    ).rejects.toMatchObject({ code: 'coin-spent' });
-    expect(r.prove).toHaveBeenCalledOnce();
-    expect(failures.failures(owner)).toBe(1);
+    expect(out).toMatchObject({ ok: true, v: { txHash: 'ab'.repeat(32), offerId: OFFER_ID } });
+    expect(r.c.stages).toContain('settled');
+    expect(charged).toBe(0);
   });
 
-  it('the taker’s account moved past the signed nonce → stale-authorisation, charged to the taker', async () => {
+  it('the coin spent by the account’s OWN offer being taken meanwhile: take-raced, not charged (but an unsettled take)', async () => {
+    const coins = historyReader();
+    const { out, charged, ends } = await run({
+      coins,
+      batcher: () => json(500, { success: false, error: 'internal' }),
+      onBatcher: () =>
+        coins.txs.push(
+          tx({ hash: 'cc'.repeat(32), entryPoints: [SWAP], outputs: ['99'.repeat(32)], inputs: [nf(take.coin)] }),
+        ),
+    });
+    expect(out).toEqual({ ok: false, code: 'take-raced' });
+    expect(charged).toBe(0);
+    expect(ends).toEqual([{ code: 'take-raced', requesterFault: false }]);
+    expect(isCounterpartyCode('take-raced')).toBe(true); // bounded by takes-unsettled-cap
+  });
+
+  it('the coin spent by the account’s own WITHDRAWAL (sent elsewhere): coin-spent, charged to the taker', async () => {
+    const coins = historyReader();
+    const { out, charged } = await run({
+      coins,
+      batcher: () => json(500, { success: false, error: 'internal' }),
+      onBatcher: () =>
+        coins.txs.push(
+          tx({ hash: 'dd'.repeat(32), entryPoints: ['withdraw_shielded_with_ed25519'], inputs: [nf(take.coin)] }),
+        ),
+    });
+    expect(out).toEqual({ ok: false, code: 'coin-spent' });
+    expect(charged).toBe(1);
+  });
+
+  it('the nonce moved by the account’s own offer being taken (another coin): take-raced, not charged', async () => {
+    const coins = historyReader();
     const nonce = { value: 2n };
-    const r = takeRun({
-      coins: reader(),
+    const { out, charged } = await run({
+      coins,
       nonce,
       batcher: () => json(400, { success: false, error: 'Custom error: 138' }),
-      onBatcher: () => (nonce.value = 3n),
+      onBatcher: () => {
+        nonce.value = 3n;
+        coins.txs.push(
+          tx({ hash: 'ee'.repeat(32), entryPoints: [SWAP], outputs: ['98'.repeat(32)], inputs: ['97'.repeat(32)] }),
+        );
+      },
     });
-    const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
-    const owner = r.signer.deviceKey;
-    await expect(
-      guarded(r.exec, { action: 'take', owner, account: ACCOUNT, failures })(r.payload, r.c),
-    ).rejects.toMatchObject({ code: 'stale-authorisation' });
-    expect(failures.failures(owner)).toBe(1);
+    expect(out).toEqual({ ok: false, code: 'take-raced' });
+    expect(charged).toBe(0);
   });
 
-  it('otherwise the refusal stays the maker’s or the exchange’s: exchange-error / take-refused, never charged', async () => {
+  it('the nonce moved by the account’s own cancel or key change: stale-authorisation, charged to the taker', async () => {
+    const coins = historyReader();
+    const nonce = { value: 2n };
+    const { out, charged } = await run({
+      coins,
+      nonce,
+      batcher: () => json(400, { success: false, error: 'Custom error: 138' }),
+      onBatcher: () => {
+        nonce.value = 3n;
+        coins.txs.push(tx({ hash: 'ef'.repeat(32), entryPoints: ['rotate_enc_key_with_ed25519'] }));
+      },
+    });
+    expect(out).toEqual({ ok: false, code: 'stale-authorisation' });
+    expect(charged).toBe(1);
+  });
+
+  it('UNRESOLVED is never the taker’s: a moved nonce no transaction explains yet, a deposit, or one from before the take', async () => {
+    for (const later of [
+      [] as AccountTxView[], // the indexer has not shown it yet
+      [tx({ hash: 'f1'.repeat(32), entryPoints: ['deposit_shielded'] })], // a deposit does not move the nonce
+      [tx({ hash: 'f2'.repeat(32), blockHeight: 100, entryPoints: ['rotate_enc_key_with_ed25519'] })], // before the job's read
+    ]) {
+      const coins = historyReader();
+      const nonce = { value: 2n };
+      const { out, charged } = await run({
+        coins,
+        nonce,
+        batcher: () => json(500, { success: false, error: 'internal' }),
+        onBatcher: () => {
+          nonce.value = 3n;
+          coins.txs.push(...later);
+        },
+      });
+      expect(out).toEqual({ ok: false, code: 'exchange-error' });
+      expect(charged).toBe(0);
+    }
+  });
+
+  it('a reader that gives no history cannot name the spending transaction: never charged (round 3 charged coin-spent)', async () => {
+    const coins = reader();
+    const { out, charged } = await run({
+      coins,
+      batcher: () => json(500, { success: false, error: 'internal' }),
+      onBatcher: () => coins.spent.add(nf(take.coin)),
+    });
+    expect(out).toEqual({ ok: false, code: 'exchange-error' });
+    expect(charged).toBe(0);
+  });
+
+  it('a refusal with the coin unspent and the nonce unmoved stays the counterparty’s; a 429 the exchange’s', async () => {
     for (const [status, code] of [
       [500, 'exchange-error'],
       [400, 'take-refused'],
       [429, 'exchange-busy'],
     ] as const) {
-      const r = takeRun({ coins: reader(), batcher: () => json(status, { success: false, error: 'x' }) });
-      const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
-      const owner = r.signer.deviceKey;
-      await expect(
-        guarded(r.exec, { action: 'take', owner, account: ACCOUNT, failures })(r.payload, r.c),
-      ).rejects.toMatchObject({ code });
-      expect(failures.failures(owner)).toBe(0);
+      const { out, charged } = await run({
+        coins: historyReader(),
+        batcher: () => json(status, { success: false, error: 'x' }),
+      });
+      expect(out).toEqual({ ok: false, code });
+      expect(charged).toBe(0);
     }
   });
 
-  it('a chain read that fails during attribution leaves the counterparty’s code (never charged on a guess)', async () => {
+  it('a chain read that fails while reconciling leaves the counterparty’s code (never charged on a guess)', async () => {
     let reads = 0;
     const err = await attributeSettlementRefusal(
       {
         log: silentLog(),
         coins: {
-          spentNullifiers: async () => {
+          spentNullifiers: async () => new Set<string>(),
+          accountTxs: async () => {
             reads++;
             throw new Error('down');
           },
@@ -304,13 +451,71 @@ describe('take: a settlement refusal is attributed to the right party (F-B3-6)',
       },
       { ledgerState: async () => null } as never,
       ACCOUNT,
-      { coin: take.coin, authNonce: '2' },
+      {
+        coin: take.coin,
+        wantColor: take.wantColor,
+        wantAmount: take.wantAmount,
+        wantNonce: take.wantNonce,
+        authNonce: '2',
+      },
+      100,
       500,
       undefined,
     );
     expect(err).toBeInstanceOf(PublicError);
-    expect(err.code).toBe('exchange-error');
+    expect((err as PublicError).code).toBe('exchange-error');
     expect(reads).toBe(1);
+  });
+});
+
+// AA 00047 P11.F, audit round 4 R4-3 (F-B4-3): a proved take that met the exchange's 429 was charged to
+// nobody and could be repeated; now a 429 starts a cooldown during which no take is proven.
+describe('take: after the exchange’s 429, takes pause before proving (R4-3)', () => {
+  it('the next take is refused before any proof (exchange-busy, the approval given back) until the cooldown ends', async () => {
+    let now = 1_000_000;
+    const cooldown = new BatcherCooldown(300, () => now);
+    const first = takeRun({ coins: historyReader(), batcher: () => json(429, { success: false, error: 'cap' }) });
+    first.deps.cooldown = cooldown;
+    await expect(first.exec(first.payload, first.c)).rejects.toMatchObject({ code: 'exchange-busy' });
+    expect(first.prove).toHaveBeenCalledOnce();
+    expect(cooldown.remaining()).toBe(300);
+
+    const again = takeRun({ coins: historyReader(), batcher: () => json(429, { success: false, error: 'cap' }) });
+    again.deps.cooldown = cooldown;
+    now += 100;
+    await expect(again.exec(again.payload, again.c)).rejects.toMatchObject({ code: 'exchange-busy' });
+    expect(again.prove).not.toHaveBeenCalled();
+    expect(again.batcher).not.toHaveBeenCalled();
+    expect(again.release).toHaveBeenCalled();
+
+    now += 201; // the cooldown is over: takes are proven again
+    const later = takeRun({ coins: historyReader() });
+    later.deps.cooldown = cooldown;
+    await expect(later.exec(later.payload, later.c)).resolves.toMatchObject({ txHash: 'aa'.repeat(32) });
+  });
+
+  it('the exchange’s own Retry-After lengthens the pause (up to a day); the route refuses takes meanwhile (503, Retry-After)', async () => {
+    let now = 2_000_000;
+    const cooldown = new BatcherCooldown(300, () => now);
+    const r = takeRun({
+      coins: historyReader(),
+      batcher: () =>
+        new Response(JSON.stringify({ success: false }), { status: 429, headers: { 'retry-after': '900' } }),
+    });
+    r.deps.cooldown = cooldown;
+    await expect(r.exec(r.payload, r.c)).rejects.toMatchObject({ code: 'exchange-busy' });
+    expect(cooldown.remaining()).toBe(900);
+    const admit = withTrade(defaultCatalogue(), r.deps).get('take')!.admit!;
+    const refused = await admit({
+      account: ACCOUNT,
+      payload: { validUntil: String(Math.floor(Date.now() / 1000) + 600) },
+      signer: 'x',
+    });
+    expect(refused).toMatchObject({ ok: false, status: 503, code: 'exchange-busy', retryAfterSeconds: 900 });
+    now += 901;
+    expect(await cooldownAdmission(cooldown)({ payload: {}, signer: 'x' })).toEqual({ ok: true });
+    expect(testConfig().batcherBusyCooldownSeconds).toBe(300);
+    expect(testConfig({ BATCHER_BUSY_COOLDOWN_SECONDS: '60' }).batcherBusyCooldownSeconds).toBe(60);
   });
 });
 
@@ -365,6 +570,67 @@ describe('make and shielded withdrawal: the coin is checked unspent BEFORE any p
     expect(c.proofs).toBe(0);
     expect(withWallet).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalled();
+  });
+
+  // AA 00047 P11.F, audit round 4 R4-5 (F-A4-4): an account whose history cannot be read in time (a
+  // griefer's deposits) used to have every shielded withdrawal refused (`chain-unavailable`).
+  it('a withdrawal whose history cannot be read goes ahead unchecked (the ledger refuses a double spend anyway)', async () => {
+    const w = callSigner();
+    const payload = {
+      recipient: 'dd'.repeat(32),
+      color: BASE,
+      amount: '1',
+      coin: { nonce: '56'.repeat(32), color: BASE, value: '9', mtIndex: '3' },
+      authNonce: '2',
+    };
+    const withWallet = vi.fn(async () => {
+      throw new Error('the proof would run here');
+    });
+    const exec = withdrawExecutor({
+      runtime: () => fakeRuntime(w),
+      arm: testArm,
+      sponsor: { withWallet } as never,
+      network: 'stagenet',
+      replay: new DigestReplayGuard(3600),
+      entitlements: {} as never,
+      log: silentLog(),
+      coins: {
+        spentNullifiers: async () => {
+          throw new Error('history stream timed out after 120 s');
+        },
+      },
+    });
+    const c = ctx();
+    await expect(
+      exec({ ...payload, account: ACCOUNT, passportAuth: w.passportAuth('withdraw', ACCOUNT, payload) }, c),
+    ).rejects.toThrow('the proof would run here');
+    expect(c.proofs).toBe(1);
+    expect(withWallet).toHaveBeenCalledOnce();
+    expect(c.stages).toContain('spend-check-skipped');
+  });
+
+  it('a trade whose history cannot be read is still refused for now (chain-unavailable, tried again later)', async () => {
+    const w = callSigner();
+    const prove = vi.fn();
+    const exec = openSwapExecutor({
+      runtime: () => fakeRuntime(w),
+      arm: testArm,
+      sponsor,
+      kernelUrl: 'http://kernel.test',
+      batcherUrl: 'http://batcher.test',
+      replay: new DigestReplayGuard(3600),
+      log: silentLog(),
+      prove: prove as never,
+      coins: {
+        spentNullifiers: async () => {
+          throw new Error('history stream timed out after 120 s');
+        },
+      },
+    });
+    await expect(
+      exec({ ...make, account: ACCOUNT, passportAuth: w.passportAuth('open-swap', ACCOUNT, make as never) }, ctx()),
+    ).rejects.toMatchObject({ code: 'chain-unavailable' });
+    expect(prove).not.toHaveBeenCalled();
   });
 });
 

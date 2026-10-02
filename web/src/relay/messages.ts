@@ -80,6 +80,11 @@ export function relayErrorText(e: {
       return `Several of your takes in the last 24 hours could not be settled by the exchange, so the market is pausing new takes from your account. Try again in ${waitText(e.retryAfterSeconds, 'a day')}; your other actions still work, and nothing was sent.`;
     case 'coin-spent':
       return COIN_SPENT;
+    // AA 00047 P11.F (audit round 4, R4-1 / R4-3): refused up front, before anything runs.
+    case 'prover-busy':
+      return `The market's prover is busy right now, so your request could not start before the expiry you approved. Nothing was sent; try again in ${waitText(e.retryAfterSeconds, 'a minute')} and approve it once more.`;
+    case 'exchange-busy':
+      return `The exchange's settlement service is not taking more settlements right now (it allows a limited number a day). Nothing was sent and your coins did not move; try again in ${waitText(e.retryAfterSeconds, 'a few minutes')}.`;
     case 'restores-daily-cap':
       return `Your account's encryption key was restored as many times in the last 24 hours as the market pays for. Try again in ${waitText(e.retryAfterSeconds)}; nothing was sent.`;
     case 'failure-budget':
@@ -143,6 +148,9 @@ export function jobErrorText(error: { code: string; message: string } | undefine
     // AA 00047 P11 (relay lane P11.R, R3-7): the coin was spent before anything was proven.
     case 'coin-spent':
       return COIN_SPENT;
+    // AA 00047 P11.F (R4-2): the account's own offer was taken while this take was settling.
+    case 'take-raced':
+      return 'One of your own offers was taken at the same moment, so this take could no longer settle. It does not count against you: refresh your balances and take again.';
     case 'demo-tokens-settling':
       return 'An earlier delivery of your demo tokens may still land on Midnight, so the market is not minting them again yet. Refresh in a few minutes; it does not count against you.';
     default:

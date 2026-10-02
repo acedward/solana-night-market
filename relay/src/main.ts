@@ -48,6 +48,7 @@ import { PassportRuntime, PassportRuntimeError } from './passport/runtime.js';
 import { JobQueue } from './queue/jobs.js';
 import { FacadeSponsorSession, openFacadeWallet } from './sponsor/facade.js';
 import { DisabledSponsorSession, type SponsorSession } from './sponsor/session.js';
+import { BatcherCooldown } from './trade/executors.js';
 import { RELAY_VERSION } from './version.js';
 
 /** How often /health re-scans the read-only key volume (security review F-B1). */
@@ -263,10 +264,13 @@ async function main(): Promise<void> {
     isListedColour: (colour) => config.tokens.byColour(colour) !== undefined,
   });
   const accountGate = new AccountGate(config.limits.jobsPerAccount);
+  // AA 00047 P11.F (audit round 4 R4-1): the prover lane serves takes, then makes, then the rest, the
+  // least recent users first, and estimates when a take would start (./queue/prover-lock.ts).
   const queue = new JobQueue({
     ttlSeconds: config.limits.jobTtlSeconds,
     maxJobs: config.limits.maxJobs,
     log: log.child({ component: 'queue' }),
+    prover: config.proverLane,
   });
   let batcherRefusal: { httpStatus: number; at: number } | null = null;
   const health = healthCollector({
@@ -312,6 +316,8 @@ async function main(): Promise<void> {
           batcherTarget: config.network.zswap.batcherTarget,
           replay,
           expiry: config.expiry,
+          // AA 00047 P11.F (R4-3): after the exchange's 429, takes pause before proving.
+          cooldown: new BatcherCooldown(config.batcherBusyCooldownSeconds),
           log: log.child({ component: 'trade' }),
           ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
           onBatcherRefusal: (httpStatus) => {

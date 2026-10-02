@@ -10,6 +10,7 @@ import {
   AccountHistoryTooLongError,
   IndexerClient,
   IndexerError,
+  accountTxViews,
   zswapActivityOf,
   type DecodedEvent,
   type RawActionTx,
@@ -93,6 +94,53 @@ describe('IndexerClient.accountTransactions', () => {
     expect(r?.txs.map((t) => [t.hash, t.blockHeight])).toEqual([
       ['a', 5],
       ['b', 9],
+    ]);
+  });
+
+  // AA 00047 P11.F (R4-2): each call's entry point, so a refused take can be judged by its transaction.
+  it('keeps the entry points of the account’s calls per transaction; decoded views keep the account’s leaves and spends', async () => {
+    const action = (
+      hash: string,
+      height: number,
+      entryPoint: string | null,
+      events: Array<{ id: number; raw: string }>,
+    ) => ({
+      __typename: entryPoint ? 'ContractCall' : 'ContractDeploy',
+      ...(entryPoint ? { entryPoint } : {}),
+      transaction: { hash, block: { height }, zswapLedgerEvents: events },
+    });
+    const c = new IndexerClient({
+      indexerUrl: 'http://indexer',
+      fetchImpl: fakeFetch({
+        data: {
+          contract: {
+            actions: [
+              action('t2', 9, 'open_swap_shielded_with_ed25519', [{ id: 4, raw: 'e4' }]),
+              action('t2', 9, 'deposit_shielded', [{ id: 4, raw: 'e4' }]),
+              action('t1', 5, null, [
+                { id: 1, raw: 'e1' },
+                { id: 3, raw: 'e3' },
+              ]),
+            ],
+          },
+          block: { height: 11 },
+        },
+      }),
+    });
+    const r = await c.accountTransactions(ME);
+    expect(r?.txs.map((t) => [t.hash, t.entryPoints])).toEqual([
+      ['t1', []],
+      ['t2', ['open_swap_shielded_with_ed25519', 'deposit_shielded']],
+    ]);
+    expect(accountTxViews(ME, r!.txs, decode)).toEqual([
+      { hash: 't1', blockHeight: 5, entryPoints: [], outputs: ['01'.repeat(32)], inputs: [] },
+      {
+        hash: 't2',
+        blockHeight: 9,
+        entryPoints: ['open_swap_shielded_with_ed25519', 'deposit_shielded'],
+        outputs: [],
+        inputs: ['04'.repeat(32)],
+      },
     ]);
   });
 

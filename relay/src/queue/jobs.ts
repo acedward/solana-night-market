@@ -12,11 +12,15 @@
 // around its proofs, through ctx.prove(). `open-swap` runs there (AA 00047 P10, R2-1): it holds the
 // prover only while it proves, not while the exchange lists the offer (up to 90 s).
 //
-// The prover lane is shared ROUND-ROBIN across accounts (AA 00047 P10, audit round 2 R2-1 / F-A2-1;
-// ./fair-lock.ts): every job, and every ctx.prove() of an account- or relay-lane job, waits under its
-// FAIR KEY (its account; a registration, which has none, under its action), and the keys take turns.
-// With the route's one-job-per-account rule (../actions/account-gate.ts), a job of one account waits
-// behind at most one job of each other account that has work waiting.
+// The prover lane is shared FAIRLY across accounts (AA 00047 P10, audit round 2 R2-1 / F-A2-1) and by
+// DEADLINE and USAGE (P11.F, audit round 4 R4-1 / F-A4-1; ./prover-lock.ts): every job, and every
+// ctx.prove() of an account- or relay-lane job, waits under its FAIR KEY (its account; a registration,
+// which has none, under its action) and its RANK (./priority.ts: takes, then makes, which carry a
+// signed deadline, then everything else; a lower rank still gets a turn after a few grants to higher
+// ones). Within a rank the key with fewer recent grants goes first, and a job waits behind at most one
+// job of each other key (with the route's one-job-per-account rule, ../actions/account-gate.ts: each
+// other account). `estimateProverWaitSeconds` tells the route when a new job would start, so a take
+// that would start too late is refused before it costs anything (../app.ts).
 //
 // When a job finishes, its payload (which can hold the coin it spends) is dropped at once; only
 // the public outcome is kept, until the TTL.
@@ -31,8 +35,9 @@ import { randomBytes } from 'node:crypto';
 import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@nightmarket/core';
 
 import type { Logger } from '../log.js';
-import { FairLock } from './fair-lock.js';
 import { FifoLock } from './fifo-lock.js';
+import { proverPriority } from './priority.js';
+import { ProverLock, type ProverLockOptions, type ProverRank, type ProverTicket } from './prover-lock.js';
 
 /** An error whose code and message may be shown to the customer. Anything else is reported as
  *  an internal error, and its details go to the (redacted) log only. */
@@ -75,8 +80,11 @@ interface JobRecord {
   action: JobActionName;
   lane: JobLane;
   laneKey: string;
-  /** Its key on the round-robin prover lane. */
+  /** Its key on the prover lane. */
   fairKey: string;
+  /** Its rank on the prover lane, and its signed deadline (./priority.ts). */
+  rank: ProverRank;
+  deadline?: number;
   /** A running account- or relay-lane job waiting for the prover inside ctx.prove(). */
   waitingForProver: boolean;
   state: JobState;
@@ -101,17 +109,45 @@ export interface JobQueueOptions {
   maxJobs: number;
   log: Logger;
   now?: () => number;
+  /** Milliseconds now, for the prover lane's usage window and expected holds (tests scale it). */
+  nowMs?: () => number;
+  /** The prover lane's scheduling (./prover-lock.ts; RUNBOOK section 9). */
+  prover?: Omit<ProverLockOptions, 'nowMs'>;
 }
 
 export class JobQueue {
   private readonly jobs = new Map<string, JobRecord>();
-  private readonly prover = new FairLock();
+  private readonly prover: ProverLock;
   private readonly relayLane = new FifoLock();
   private readonly accounts = new Map<string, FifoLock>();
   private readonly now: () => number;
 
   constructor(private readonly options: JobQueueOptions) {
-    this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
+    const nowMs = options.nowMs ?? (options.now ? () => options.now!() * 1000 : Date.now);
+    this.now = options.now ?? (() => Math.floor(nowMs() / 1000));
+    this.prover = new ProverLock({ ...options.prover, nowMs });
+  }
+
+  /** A submission's fair key on the prover lane. */
+  private static fairKeyOf(sub: Pick<JobSubmission, 'action' | 'account' | 'fairKey'>): string {
+    const account = sub.account?.replace(/^0x/, '').toLowerCase();
+    return sub.fairKey ?? (account ? `account:${account}` : `action:${sub.action}`);
+  }
+
+  /**
+   * About how many seconds until a job like `sub`, submitted now, would START on the prover lane (it
+   * waits for the jobs ahead of it in the lane's order: ./prover-lock.ts `estimateWaitMs`). The route
+   * refuses a take that would start after its signed deadline (AA 00047 P11.F, R4-1).
+   */
+  estimateProverWaitSeconds(sub: Pick<JobSubmission, 'action' | 'account' | 'fairKey' | 'payload'>): number {
+    const p = proverPriority(sub.action, sub.payload);
+    const ms = this.prover.estimateWaitMs({
+      key: JobQueue.fairKeyOf(sub),
+      rank: p.rank,
+      ...(p.deadline !== undefined ? { deadline: p.deadline } : {}),
+      action: sub.action,
+    });
+    return Math.ceil(ms / 1000);
   }
 
   /** Queue a job; null when `maxJobs` jobs are already queued or running (finished outcomes are
@@ -125,12 +161,15 @@ export class JobQueue {
     const now = this.now();
     let settle!: () => void;
     const account = sub.account?.replace(/^0x/, '').toLowerCase();
+    const priority = proverPriority(sub.action, sub.payload);
     const rec: JobRecord = {
       requestId,
       action: sub.action,
       lane: sub.lane,
       laneKey: sub.lane === 'account' ? `account:${account!}` : sub.lane,
-      fairKey: sub.fairKey ?? (account ? `account:${account}` : `action:${sub.action}`),
+      fairKey: JobQueue.fairKeyOf(sub),
+      rank: priority.rank,
+      ...(priority.deadline !== undefined ? { deadline: priority.deadline } : {}),
       waitingForProver: false,
       state: 'queued',
       stages: [{ stage: 'queued', at: now }],
@@ -213,7 +252,7 @@ export class JobQueue {
     if (dropped > 0) this.options.log.warn('job outcomes dropped before their TTL to make room', { dropped });
   }
 
-  private laneLock(rec: JobRecord): FairLock | FifoLock {
+  private laneLock(rec: JobRecord): ProverLock | FifoLock {
     if (rec.lane === 'prover') return this.prover;
     if (rec.lane === 'relay') return this.relayLane;
     let lock = this.accounts.get(rec.laneKey);
@@ -233,8 +272,14 @@ export class JobQueue {
   private async run(rec: JobRecord): Promise<void> {
     const log = this.options.log.child({ requestId: rec.requestId, action: rec.action, lane: rec.lane });
     const lane = this.laneLock(rec);
-    const releaseLane =
-      lane instanceof FairLock ? await lane.acquire(rec.requestId, rec.fairKey) : await lane.acquire(rec.requestId);
+    const ticket: ProverTicket = {
+      id: rec.requestId,
+      key: rec.fairKey,
+      rank: rec.rank,
+      ...(rec.deadline !== undefined ? { deadline: rec.deadline } : {}),
+      action: rec.action,
+    };
+    const releaseLane = lane instanceof ProverLock ? await lane.acquire(ticket) : await lane.acquire(rec.requestId);
     let holdsProver = rec.lane === 'prover';
     rec.state = 'running';
     this.stage(rec, 'running');
@@ -246,7 +291,7 @@ export class JobQueue {
         if (holdsProver) return fn();
         this.stage(rec, 'waiting-for-prover');
         rec.waitingForProver = true;
-        const release = await this.prover.acquire(rec.requestId, rec.fairKey);
+        const release = await this.prover.acquire(ticket);
         rec.waitingForProver = false;
         holdsProver = true;
         try {

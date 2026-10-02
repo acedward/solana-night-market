@@ -36,7 +36,7 @@ import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type A
 import { admitAll, type AdmissionCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
-import { openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
 import { expiryAdmission } from '../trade/expiry.js';
 
 export interface ActionDefinition {
@@ -187,10 +187,12 @@ export function withTrade(
     admit: expiryAdmission('open-swap', deps.expiry, deps.now),
     executor: openSwapExecutor(deps),
   });
+  // AA 00047 P11.F (R4-3): while the exchange cools down from a 429, a take is refused before any slot.
+  const takeExpiry = expiryAdmission('take', deps.expiry, deps.now);
   set('take', {
     auth: 'passport-call',
     payload: TakePayloadSchema,
-    admit: expiryAdmission('take', deps.expiry, deps.now),
+    admit: deps.cooldown ? admitAll(takeExpiry, cooldownAdmission(deps.cooldown)) : takeExpiry,
     executor: takeExecutor(deps),
   });
   return map;

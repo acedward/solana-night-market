@@ -225,6 +225,19 @@ export function fillEvidence(args: {
 }
 
 /**
+ * The fill candidates of an approval whose raw calls could NOT be read or decoded (AA 00047 P11.F,
+ * audit round 4 R4-4 / F-B4-1): any such candidate may be the approval's own swap, so the page may not
+ * call the approval "Cancelled" (only "Ended": it can never execute, how it ended is not known yet).
+ */
+export function unresolvedFillCandidates(args: {
+  history: AccountHistory;
+  want: CoinInfo;
+  calls: (txHash: string) => readonly DecodedCall[] | undefined;
+}): string[] {
+  return fillCandidates(args.history, args.want).filter((hash) => args.calls(hash) === undefined);
+}
+
+/**
  * Merge transaction lists (by hash; a later copy of a transaction adds the entry points an earlier
  * partial read missed), oldest first.
  */

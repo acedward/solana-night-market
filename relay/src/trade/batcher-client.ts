@@ -35,6 +35,8 @@ export interface BatcherResult {
   body: unknown;
   /** The error text, when there is one. */
   error?: string;
+  /** The service's Retry-After, in seconds, when it sent one (a 429: AA 00047 P11.F, R4-3). */
+  retryAfterSeconds?: number;
   inputChars: number;
 }
 
@@ -87,9 +89,11 @@ export async function submitToBatcher(s: BatcherSubmission): Promise<BatcherResu
   const b = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
   const ok = res.ok && b.success === true;
   const hash = b.transactionHash ?? b.txHash;
+  const retryAfter = /^\s*(\d{1,6})\s*$/.exec(res.headers.get('retry-after') ?? '')?.[1];
   return {
     ok,
     httpStatus: res.status,
+    ...(retryAfter !== undefined ? { retryAfterSeconds: Number(retryAfter) } : {}),
     ...(typeof hash === 'string' && hash ? { transactionHash: hash } : {}),
     body: parsed,
     ...(ok ? {} : { error: errorOf(parsed) ?? `HTTP ${res.status}` }),

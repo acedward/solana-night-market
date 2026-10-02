@@ -22,26 +22,36 @@
 //   - BEFORE proving, the coin the call spends is checked unspent on chain (../chain/coin-spend.ts:
 //     its nullifier against the account's whole history): `coin-spent`, nothing proven (make and
 //     take alike);
-//   - AFTER a settlement refusal, the relay looks at the taker's side first: its coin spent meanwhile
-//     → `coin-spent`, its account's auth nonce moved (another of its approvals landed) →
-//     `stale-authorisation`; both are the taker's and are charged. Only otherwise is the refusal the
-//     maker's or the exchange's (not charged), and those are bounded per account by
-//     `TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY` (../actions/account-caps.ts `admitTake`).
+//   - AFTER a settlement refusal, the relay reconciles against the chain (AA 00047 P11.F, audit round 4
+//     R4-2: ./reconcile.ts): the take's own settlement on chain → the job SUCCEEDS; its coin spent, or
+//     its nonce moved, by another SWAP of the account (its own offer filled meanwhile) → `take-raced`,
+//     not charged; by a non-swap call of the account → `coin-spent` / `stale-authorisation`, the
+//     taker's, charged; nothing that explains it (the indexer may lag) → never the taker's. Only a
+//     refusal with the coin unspent and the nonce unmoved is the maker's or the exchange's (not
+//     charged); those, and `take-raced`, are bounded per account by `TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY`
+//     (../actions/account-caps.ts `admitTake`).
+//
+// The exchange's HTTP 429 (its daily settlement cap) is the market's, never charged; so that proved
+// takes cannot be repeated against it for free (AA 00047 P11.F, R4-3 / F-B4-3), a 429 starts a COOLDOWN
+// (`BatcherCooldown`, `BATCHER_BUSY_COOLDOWN_SECONDS`): until it ends, takes are refused at admission and
+// at job start, before any proof (`exchange-busy`).
 
 import type { ExpiryLimits, OpenSwapResult, TakeResult } from '@nightmarket/core';
 
+import type { AdmissionCheck } from '../actions/admission.js';
 import type { DigestReplayGuard } from '../auth/verifiers.js';
 import type { Logger } from '../log.js';
 import type { DeviceArm, TradeAction, TradeCheckOk } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
-import { assertCoinUnspent, coinSpent, type SpendReader } from '../chain/coin-spend.js';
+import { assertCoinUnspent, assertCoinUnspentAt, type SpendReader } from '../chain/coin-spend.js';
 import { PublicError, type JobContext, type JobExecutor } from '../queue/jobs.js';
 import type { SponsorSession } from '../sponsor/session.js';
 import { AccountOfferError, proveGuaranteedOffer, type AccountOfferCall } from './account-offer.js';
 import { assertSignedExpiryOpen } from './expiry.js';
 import { fetchOfferBytes, publishOffer, waitOfferStatus } from './publish.js';
+import { judgeTake, type TakeVerdict } from './reconcile.js';
 import { TakeRefusal, checkMakerOffer, mergeForSettlement, submitSettlement } from './settle.js';
 
 export interface TradeDeps {
@@ -71,8 +81,57 @@ export interface TradeDeps {
   /** For tests: Unix seconds now. */
   now?: () => number;
   /** The spent coins of an account (AA 00047 P11, R3-7): a call's coin is checked unspent before its
-   *  proof, and a refused take is attributed. Absent: no check (tests of other behaviour). */
+   *  proof, and a refused take is reconciled (P11.F, R4-2). Absent: no check (tests of other behaviour). */
   coins?: SpendReader;
+  /** The pause after the exchange's HTTP 429 (AA 00047 P11.F, R4-3). Absent: none. */
+  cooldown?: BatcherCooldown;
+}
+
+/**
+ * After the exchange's settlement service answers HTTP 429 (its request cap), takes are refused BEFORE
+ * they are proven for `seconds` (or the service's own Retry-After, when longer, up to a day): a proved
+ * take that meets the cap costs the prover and is charged to nobody, so it must not be repeatable for
+ * free (AA 00047 P11.F, audit round 4 R4-3 / F-B4-3). Relay-wide: the cap is the exchange's, for everyone.
+ */
+export class BatcherCooldown {
+  private until = 0;
+  constructor(
+    private readonly seconds: number,
+    private readonly now: () => number = () => Math.floor(Date.now() / 1000),
+  ) {}
+
+  /** Seconds left of the pause (0: none). */
+  remaining(): number {
+    return Math.max(0, this.until - this.now());
+  }
+
+  /** Start (or extend) the pause after a 429. */
+  trip(retryAfterSeconds?: number): void {
+    const s = Math.max(this.seconds, Math.min(retryAfterSeconds ?? 0, 86_400));
+    this.until = Math.max(this.until, this.now() + s);
+  }
+}
+
+function cooldownError(seconds: number): PublicError {
+  return new PublicError(
+    'exchange-busy',
+    `the exchange's settlement service turned takes away a moment ago (HTTP 429: it allows a limited number a day), so the market is not proving takes for about ${seconds} s. Nothing was proven or sent and your coins did not move; try again then`,
+  );
+}
+
+/** A take's admission while the exchange is cooling down (R4-3): refused before any queue slot. */
+export function cooldownAdmission(cooldown: BatcherCooldown): AdmissionCheck {
+  return async () => {
+    const left = cooldown.remaining();
+    if (left <= 0) return { ok: true };
+    return {
+      ok: false,
+      status: 503,
+      code: 'exchange-busy',
+      reason: cooldownError(left).message,
+      retryAfterSeconds: left,
+    };
+  };
 }
 
 /**
@@ -99,41 +158,83 @@ export function batcherRefusalError(httpStatus: number, error: string | undefine
   );
 }
 
+/** The take's side of a reconcile: what it paid with, what it wanted, the nonce it was signed at. */
+export interface TakeSide {
+  coin: { nonce: string; color: string; value: string };
+  wantColor: string;
+  wantAmount: string;
+  wantNonce: string;
+  authNonce: string;
+}
+
 /**
- * A take the batcher refused, attributed (AA 00047 P11, R3-7): the TAKER's fault when its own coin is
- * spent by now (`coin-spent`) or its account moved past the signed nonce (`stale-authorisation`), both
- * charged to it; otherwise the maker's or the exchange's (`exchange-error`, `take-refused`; not
- * charged). A 429 is the exchange's cap. When the chain cannot be read, the refusal stays the
- * counterparty's (never charge on a guess).
+ * A take the batcher refused, reconciled against the chain (AA 00047 P11, R3-7; P11.F, R4-2:
+ * ./reconcile.ts): `{ settled }` when the take's own settlement is on chain (the job succeeds), else the
+ * job's error: `coin-spent` / `stale-authorisation` (the taker's own non-swap call; charged),
+ * `take-raced` (the account's own offer filled meanwhile; not charged), or the counterparty's code
+ * (`exchange-error`, `take-refused`; not charged), which is also what an UNRESOLVED outcome gets: when the
+ * history cannot be read, or a reader gives none, or nothing in it explains the refusal, the taker is
+ * never charged. A 429 is the exchange's cap. `startedAt` is the chain tip the job's pre-proof read
+ * covered (null: no such read).
  */
 export async function attributeSettlementRefusal(
   deps: Pick<TradeDeps, 'coins' | 'log'>,
   rt: Pick<PassportRuntime, 'ledgerState'>,
   account: string,
-  taker: { coin: { nonce: string; color: string; value: string }; authNonce: string },
+  taker: TakeSide,
+  startedAt: number | null,
   httpStatus: number,
   error: string | undefined,
-): Promise<PublicError> {
+): Promise<{ settled: string } | PublicError> {
   const counterparty = batcherRefusalError(httpStatus, error);
   if (httpStatus === 429) return counterparty;
-  try {
-    if (deps.coins && (await coinSpent(deps.coins, account, taker.coin))) {
-      return new PublicError(
-        'coin-spent',
-        'the exchange did not settle the take: the coin it pays with was already spent on Midnight. Refresh your balances and take again with another coin',
-      );
+  let verdict: TakeVerdict = { kind: 'unresolved', why: 'the relay reads no account history' };
+  const coins = deps.coins;
+  if (coins?.accountTxs && startedAt !== null) {
+    try {
+      const [found, ledger] = await Promise.all([coins.accountTxs(account), rt.ledgerState(account)]);
+      verdict = found
+        ? judgeTake({
+            account,
+            take: {
+              coin: taker.coin,
+              want: { nonce: taker.wantNonce, color: taker.wantColor, value: taker.wantAmount },
+              authNonce: taker.authNonce,
+            },
+            txs: found.txs,
+            startedAt,
+            ledgerNonce: ledger ? ledger.auth_nonce : null,
+          })
+        : { kind: 'unresolved', why: 'the account is not on chain' };
+    } catch (e) {
+      deps.log.warn('a refused take could not be reconciled (chain read failed)', { error: e });
+      verdict = { kind: 'unresolved', why: 'the chain could not be read' };
     }
-    const ledger = await rt.ledgerState(account);
-    if (ledger && ledger.auth_nonce !== BigInt(taker.authNonce)) {
-      return new PublicError(
-        'stale-authorisation',
-        'the exchange did not settle the take: another approval of your account landed first, so this one can no longer settle. Take again and sign once more',
-      );
-    }
-  } catch (e) {
-    deps.log.warn('a refused take could not be attributed (chain read failed)', { error: e });
   }
-  return counterparty;
+  switch (verdict.kind) {
+    case 'settled':
+      return { settled: verdict.txHash };
+    case 'raced':
+      return new PublicError(
+        'take-raced',
+        'the exchange did not settle the take: one of your own offers was taken at the same moment, which moved your account on, so this take could no longer settle. It does not count against you; refresh your balances and take again',
+      );
+    case 'taker':
+      return verdict.code === 'coin-spent'
+        ? new PublicError(
+            'coin-spent',
+            'the exchange did not settle the take: the coin it pays with was already spent on Midnight. Refresh your balances and take again with another coin',
+          )
+        : new PublicError(
+            'stale-authorisation',
+            'the exchange did not settle the take: another approval of your account landed first, so this one can no longer settle. Take again and sign once more',
+          );
+    case 'unresolved':
+      deps.log.info('a refused take is not the taker’s fault (unresolved)', { why: verdict.why });
+      return counterparty;
+    case 'counterparty':
+      return counterparty;
+  }
 }
 
 const seconds = (ms: number) => Math.round(ms / 100) / 10;
@@ -268,6 +369,12 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'take', raw, ctx);
     const p = check.payload as TradeCheckOk<'take'>['payload'];
+    // R4-3: while the exchange's settlement service is cooling down from a 429, nothing is proven.
+    const cooling = deps.cooldown?.remaining() ?? 0;
+    if (cooling > 0) {
+      deps.replay.release(check.digestHex);
+      throw cooldownError(cooling);
+    }
     const give = { colour: p.giveColor, amount: BigInt(p.giveAmount) };
     const want = { colour: p.wantColor, amount: BigInt(p.wantAmount) };
 
@@ -295,9 +402,13 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
 
     const offer = await callOf(deps, check);
     // R3-7: the taker's coin must be unspent BEFORE any proof (a spent coin still proves membership).
+    // R4-2: the read's chain tip is kept, so a refusal is judged by what landed after it.
+    let startedAt: number | null = null;
     if (deps.coins) {
       const coins = deps.coins;
-      await withReplayRelease(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, p.coin));
+      startedAt = await withReplayRelease(deps, check.digestHex, () =>
+        assertCoinUnspentAt(coins, check.account, p.coin),
+      );
     }
     const prove = deps.prove ?? proveGuaranteedOffer;
     return withReplayRelease(deps, check.digestHex, () =>
@@ -342,15 +453,30 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
                 "the exchange's settlement service could not be reached or did not answer in time. Refresh the book: if your take settled after all, your balances show it",
               );
             });
-            if (!b.ok || !b.transactionHash) {
+            let txHash = b.transactionHash;
+            if (!b.ok || !txHash) {
               deps.log.warn('the batcher refused a take', { status: b.httpStatus, error: b.error });
               deps.onBatcherRefusal?.(b.httpStatus);
-              throw await attributeSettlementRefusal(deps, rt, check.account, p, b.httpStatus, b.error);
+              if (b.httpStatus === 429) deps.cooldown?.trip(b.retryAfterSeconds);
+              const judged = await attributeSettlementRefusal(
+                deps,
+                rt,
+                check.account,
+                p,
+                startedAt,
+                b.httpStatus,
+                b.error,
+              );
+              if (judged instanceof PublicError) throw judged;
+              // R4-2: the take settled after all (the batcher failed after submitting it): a success.
+              txHash = judged.settled;
+              ctx.stage('settled', { tx: txHash, offerId: p.offerId, reconciled: 'chain' });
+            } else {
+              ctx.stage('settled', { tx: txHash, offerId: p.offerId });
             }
-            ctx.stage('settled', { tx: b.transactionHash, offerId: p.offerId });
             const result: TakeResult = {
               offerId: p.offerId,
-              txHash: b.transactionHash,
+              txHash,
               proveSeconds: seconds(taker.proveMs),
               cost: {
                 blockUsage: settlement.cost.enforced!.blockUsage,

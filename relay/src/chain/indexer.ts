@@ -21,6 +21,10 @@
 // subscribes only from the block after the cached history, or not at all when the newest page
 // already overlaps it. The indexer indexes whole finalised blocks, so a block it has served does not
 // change. `AccountHistoryTooLongError` remains for an account past `maxHistoryActions` (100,000).
+//
+// Each action also names its entry point when it is a call (AA 00047 P11.F, audit round 4 R4-2): a take
+// the exchange did not settle is judged by the transaction that spent its coin or moved its account's
+// nonce (../trade/reconcile.ts), and only the account's own calls in it say whose that was.
 
 import type { OwnedInput, OwnedOutput, ZswapActivity } from '@nightmarket/core';
 
@@ -44,6 +48,7 @@ export class AccountHistoryTooLongError extends IndexerError {
 const ACTIONS_QUERY = `query AccountActions($address: HexEncoded!, $limit: Int) {
   contract(address: $address) {
     actions(limit: $limit) {
+      __typename ... on ContractCall { entryPoint }
       transaction { hash block { height } zswapLedgerEvents { id raw } }
     }
   }
@@ -53,6 +58,7 @@ const ACTIONS_QUERY = `query AccountActions($address: HexEncoded!, $limit: Int) 
 /** Every action of the account from a block height on, oldest first (indexer API v4). */
 export const HISTORY_SUBSCRIPTION = `subscription AccountHistory($address: HexEncoded!, $offset: BlockOffset) {
   contractActions(address: $address, offset: $offset) {
+    __typename ... on ContractCall { entryPoint }
     transaction { hash block { height } zswapLedgerEvents { id raw } }
   }
 }`;
@@ -61,6 +67,8 @@ export const HISTORY_SUBSCRIPTION = `subscription AccountHistory($address: HexEn
 export const INDEXER_PAGE_LIMIT = 500;
 
 interface ActionTxWire {
+  /** The call's entry point (a ContractCall); absent for a deploy or a maintenance update. */
+  entryPoint?: string | null;
   transaction: {
     hash: string;
     block: { height: number };
@@ -72,6 +80,8 @@ export interface RawActionTx {
   hash: string;
   blockHeight: number;
   events: Array<{ id: number; raw: string }>;
+  /** The entry points of the account's calls in this transaction (AA 00047 P11.F, R4-2). */
+  entryPoints?: string[];
 }
 
 export interface IndexerClientOptions {
@@ -199,8 +209,14 @@ export class IndexerClient {
 
 function addTx(into: Map<string, RawActionTx>, a: ActionTxWire): void {
   const t = a.transaction;
-  if (!into.has(t.hash))
-    into.set(t.hash, { hash: t.hash, blockHeight: t.block.height, events: t.zswapLedgerEvents ?? [] });
+  let tx = into.get(t.hash);
+  if (!tx) {
+    tx = { hash: t.hash, blockHeight: t.block.height, events: t.zswapLedgerEvents ?? [], entryPoints: [] };
+    into.set(t.hash, tx);
+  }
+  // A transaction with several calls of the account is several actions: keep each one's entry point.
+  const eps = (tx.entryPoints ??= []);
+  if (typeof a.entryPoint === 'string' && a.entryPoint && !eps.includes(a.entryPoint)) eps.push(a.entryPoint);
 }
 
 const sorted = (m: Map<string, RawActionTx>): RawActionTx[] =>
@@ -224,6 +240,40 @@ export async function ledgerEventDecoder(): Promise<EventDecoder> {
 }
 
 const norm = (h: string | undefined) => (h ?? '').replace(/^0x/, '').toLowerCase();
+
+/** One of the account's transactions, decoded: its calls' entry points, the leaves of the account's
+ *  coins it inserted (full commitments) and the nullifiers of the account's coins it spent. */
+export interface AccountTxView {
+  hash: string;
+  blockHeight: number;
+  entryPoints: readonly string[];
+  outputs: readonly string[];
+  inputs: readonly string[];
+}
+
+/** The account's transactions, decoded for the account (AA 00047 P11.F, R4-2), oldest first. */
+export function accountTxViews(account: string, txs: readonly RawActionTx[], decode: EventDecoder): AccountTxView[] {
+  const me = norm(account);
+  const seenEvents = new Set<number>();
+  return txs.map((tx) => {
+    const outputs: string[] = [];
+    const inputs: string[] = [];
+    for (const ev of [...tx.events].sort((a, b) => a.id - b.id)) {
+      if (seenEvents.has(ev.id)) continue;
+      seenEvents.add(ev.id);
+      const d = decode(ev.raw);
+      if (d.tag === 'zswapOutput' && 'commitment' in d && norm(d.contract) === me) outputs.push(norm(d.commitment));
+      else if (d.tag === 'zswapInput' && 'nullifier' in d && norm(d.contract) === me) inputs.push(norm(d.nullifier));
+    }
+    return {
+      hash: norm(tx.hash),
+      blockHeight: tx.blockHeight,
+      entryPoints: [...(tx.entryPoints ?? [])],
+      outputs,
+      inputs,
+    };
+  });
+}
 
 /** Keep the account's own leaves and spends from its transactions' events. */
 export function zswapActivityOf(

@@ -343,11 +343,12 @@ describe('take an offer (L-TRD.2)', () => {
     expect(signed).toEqual(['authorise:take']);
     const [sub] = relay.submitted;
     expect(sub!.action).toBe('take');
-    // A take signs a SHORT expiry (five minutes): nobody can hold it as a free option (audit C6).
+    // A take signs a SHORT expiry (ten minutes): nobody can hold it as a free option (audit C6).
     const nowS = Math.floor(Date.now() / 1000);
     const until = Number((sub!.request.payload as { validUntil: string }).validUntil);
-    expect(until).toBeGreaterThan(nowS + 290);
-    expect(until).toBeLessThanOrEqual(nowS + 300);
+    // Signed for TAKE_LIFETIME_SECONDS, 600 s since AA 00047 P11.F (R4-1; it was 300 s).
+    expect(until).toBeGreaterThan(nowS + 590);
+    expect(until).toBeLessThanOrEqual(nowS + 600);
     expect(sub!.request.payload).toMatchObject({
       offerId: 'e1'.repeat(32),
       giveColor: QUOTE.midnightColour,
@@ -685,6 +686,11 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
         0,
       ).status,
     ).toBe('ended');
+    // R4-4 (AA 00047 P11.F): even with the history COMPLETE, a candidate swap whose raw calls were not
+    // read may be this approval's own fill: ended, never cancelled.
+    expect(
+      decideApproval(t, view({ authNonce: 5n, txs: [tx('swap', ['open_swap_shielded_with_ed25519'])] }), 0).status,
+    ).toBe('ended');
     // Signed "never" (an older record): no expiry from time.
     const { validUntil: _v, ...never } = t;
     expect(decideApproval(never, view({ authNonce: 4n }), 9e15).status).toBe('live');
@@ -754,6 +760,34 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
     (e.chain as FakeChain).complete = true;
     const [filled] = await reconcileOffers(e, ACCOUNT, null);
     expect(filled).toMatchObject({ status: 'filled', settledTx: 'swap-tx' });
+  });
+
+  // R4-4 (AA 00047 P11.F, F-B4-1): a fill candidate whose raw calls could not be decoded.
+  it('R4-4: shows Ended, never Cancelled, though the history is complete; decided Filled once its calls are read', async () => {
+    const { relay, e, pk } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    await executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'swap-tx');
+    const chain = e.chain as FakeChain;
+    chain.failCalls.add('swap-tx'); // the raw read fails (or the bytes do not decode)
+    const [ended] = await reconcileOffers(e, ACCOUNT, null);
+    expect(ended).toMatchObject({ status: 'ended' });
+    expect(ended!.settledTx).toBeUndefined();
+    chain.failCalls.delete('swap-tx');
+    const [filled] = await reconcileOffers(e, ACCOUNT, null);
+    expect(filled).toMatchObject({ status: 'filled', settledTx: 'swap-tx', fillVerified: true });
+  });
+
+  it('R4-4: a cancel with no unread candidate is still Cancelled', async () => {
+    const { relay, e } = await setup();
+    relay.results['open-swap'] = listed;
+    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
+    relay.results['cancel-offers'] = { txId: 'c1'.repeat(32) };
+    relay.afterJob['cancel-offers'] = () => {
+      relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
+    };
+    (e.chain as FakeChain).failCalls.add('unrelated-tx'); // a failing read of a non-candidate changes nothing
+    expect((await cancelOffers(e, ACCOUNT)).cancelled).toBe(1);
   });
 });
 

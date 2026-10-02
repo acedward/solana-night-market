@@ -126,8 +126,12 @@ export class FakeChain implements AccountChain {
     return [...out.values()];
   }
 
+  /** Transactions whose raw bytes the indexer will not serve or that do not decode (AA 00047 P11.F, R4-4). */
+  failCalls = new Set<string>();
+
   async transactionCalls(hash: string): Promise<DecodedCall[] | null> {
     this.reads.push(`calls:${hash}`);
+    if (this.failCalls.has(hash)) throw new Error('the indexer did not serve the transaction’s bytes');
     return this.source.txCalls?.get(hash) ?? null;
   }
 

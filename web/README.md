@@ -107,7 +107,7 @@ Portfolio says what it found (`src/chain/AccountCheckNotice.tsx`). The nonce, th
 inbox and the public balances come from the same read. A Content-Security-Policy must allow the
 indexer in `connect-src` (`deploy/RUNBOOK.md` section 16).
 
-Offers sign a real expiry (one hour; a take five minutes) and can be cancelled ("Cancel offer": one
+Offers sign a real expiry (one hour; a take ten minutes) and can be cancelled ("Cancel offer": one
 approval that moves the account's nonce, questions Q30); a withdrawal's change is computed in the page
 (questions Q28 A).
 

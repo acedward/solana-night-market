@@ -26,6 +26,14 @@ describe('checkSignedExpiry', () => {
     expect(TAKE_LIFETIME_SECONDS).toBeLessThanOrEqual(L.takeMaxLifetimeSeconds);
   });
 
+  it("a take is signed for the relay's whole maximum, 600 s: 540 s for the queue to reach it (AA 00047 P11.F, R4-1)", () => {
+    // Round 4 (F-A4-1): signed for 300 s, a take had to start within 240 s, and six accounts' queued
+    // withdrawals were enough to make it expire. The page and the relay now agree on the maximum.
+    expect(TAKE_LIFETIME_SECONDS).toBe(600);
+    expect(L.takeMaxLifetimeSeconds).toBe(TAKE_LIFETIME_SECONDS);
+    expect(TAKE_LIFETIME_SECONDS - L.minRemainingSeconds).toBeGreaterThanOrEqual(540);
+  });
+
   it('refuses an expiry already past, or too close to complete (the minimum left is inclusive)', () => {
     expect(checkSignedExpiry('open-swap', String(NOW - 1), NOW)).toMatchObject({
       code: 'expired',

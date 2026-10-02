@@ -105,6 +105,13 @@ says the same in plain words.
   are bounded only by the registration caps (100 new accounts a day, 3 per client address) and the
   one prover lane. The caps and counters live in memory and reset when the relay restarts.
   (Questions Q37, Q49; `deploy/RUNBOOK.md` section 9.)
+- **One prover for the whole market.** Every action waits its turn on one proof server. Takes go
+  first, then makes, and a take or make the queue cannot start before its signed expiry is refused
+  at once (`prover-busy`). Withdrawals, cancels and the other actions wait behind at most one job of
+  each other account (the least recent users first), so a flood from many accounts can delay them
+  by minutes, never stop them; after the exchange's settlement service answers HTTP 429 (its daily
+  cap), takes pause for 5 minutes (`exchange-busy`). (Audit R4-1, R4-3; questions Q59, Q61;
+  `deploy/RUNBOOK.md` section 9.)
 - **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
   failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
   for another pending claim, which is then held back for the operator. (Audit R4-7.)

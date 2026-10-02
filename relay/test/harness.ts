@@ -80,12 +80,23 @@ export function harness(
     scheme?: RelayActionScheme | null;
     /** The failure budget (AA 00047 P9 C4 / P10 R2-2); none unless given. */
     failures?: FailureBudget;
+    /** The job queue (AA 00047 P11.F: a scaled clock); a new one unless given. */
+    queue?: JobQueue;
+    /** The route's clock (Unix seconds); the system clock unless given. */
+    now?: () => number;
   } = {},
 ) {
   const config = opts.config ?? testConfig();
   const log = silentLog();
   const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
-  const queue = new JobQueue({ ttlSeconds: config.limits.jobTtlSeconds, maxJobs: config.limits.maxJobs, log });
+  const queue =
+    opts.queue ??
+    new JobQueue({
+      ttlSeconds: config.limits.jobTtlSeconds,
+      maxJobs: config.limits.maxJobs,
+      log,
+      prover: config.proverLane,
+    });
   const catalogue = opts.catalogue ?? defaultCatalogue();
   const health = async (): Promise<HealthResponse> => ({
     status: 'ok',
@@ -118,6 +129,7 @@ export function harness(
     ...(opts.failures ? { failures: opts.failures } : {}),
     ...(opts.scheme === null ? {} : { scheme: opts.scheme ?? testScheme }),
     clientAddress: () => '198.51.100.7',
+    ...(opts.now ? { now: opts.now } : {}),
   });
   return { app, config, log, nonces, queue, catalogue };
 }

@@ -2756,13 +2756,24 @@ async function largeHistory() {
   const times: number[] = [];
   const junk = () => new Uint8Array(randomBytes(192));
   const deposit = async () => {
-    const r = await tp.depositShielded(
-      account,
-      { nonce: bytesToHex(new Uint8Array(randomBytes(32))), color: token.midnightColour, value: 1n },
-      junk(),
-    );
-    times.push(r.seconds);
+    // A long series: a prover restarted from outside (rc.8's memory, plan R7) fails one call; retry it.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await tp.depositShielded(
+          account,
+          { nonce: bytesToHex(new Uint8Array(randomBytes(32))), color: token.midnightColour, value: 1n },
+          junk(),
+        );
+        times.push(r.seconds);
+        return;
+      } catch (e) {
+        if (attempt >= 3) throw e;
+        say(`deposit failed (${String((e as Error)?.message ?? e).slice(0, 160)}); retrying in 15 s`);
+        await sleepMs(15_000);
+      }
+    }
   };
+
   const t0 = Date.now();
   for (let i = 0; i < n; i++) await deposit();
   const measured = (Date.now() - t0) / 1000;

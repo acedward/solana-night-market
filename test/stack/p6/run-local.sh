@@ -37,7 +37,7 @@
 # AA 00047 P11.F (the round-4 follow-up) adds `reconcile` to phase 1, after the take: the relay's
 # reader (each call's entry point) and its refused-take judge (`judgeTake`, R4-2) on the real indexer.
 # The smoke of record ran phase 1 alone (STEPS2..6 empty, SKIP_TAMPER=1) on the relay image built
-# from the lane.
+# from the lane; an empty STEPS2 now skips phase 2 as the other phases' empty STEPS do (it used `:-`).
 #
 #   KEYS_DIR=~/.cache/aa-00047/b3-keys RELAY_IMAGE=aa00047-p6/relay:<sha> APP_VOLUME=<check volume> \
 #   OUT=<dir> PS_PARAMS=<dir> PS8_PARAMS=<dir> RELAY_KEYS_FINGERPRINT=<pin> test/stack/p6/run-local.sh
@@ -60,7 +60,7 @@ export INDEXER_IMAGE="${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc
 export RELAY_KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-}"
 export DEMO_TOKENS_PATH="${DEMO_TOKENS_PATH:-direct}"
 STEPS="${STEPS:-open-a,open-b,origin,history,demo-a,demo-b,make,take,reconcile,withdraw}"
-STEPS2="${STEPS2:-withdraw-unshielded,make-x,coin-spent,plant,cancel,bomb}"
+STEPS2="${STEPS2-withdraw-unshielded,make-x,coin-spent,plant,cancel,bomb}"
 STEPS2B="${STEPS2B-p10-negatives,restore,omitted-spend,expired,p9-negatives,negatives,history}"
 STEPS3="${STEPS3-fairness}"
 STEPS4="${STEPS4-caps,withdraw-cap}"

@@ -943,13 +943,14 @@ async function take() {
   say(`the page decides: ${json(out.pageDecides)}`);
   put('take', out);
   const pd = out.pageDecides as Record<string, { status: string; fillVerified?: boolean; settledTx?: string }>;
+  // The batcher reports the settlement's identifier; the page names the transaction by its hash.
+  const settledHash = String((out.tx as { hash: string | null }[])[0]?.hash ?? '')
+    .replace(/^0x/, '')
+    .toLowerCase();
+  out.settledHash = settledHash;
   for (const w of ['A', 'B'])
-    if (
-      pd[w]!.status !== 'filled' ||
-      !pd[w]!.fillVerified ||
-      pd[w]!.settledTx !== txHash.replace(/^0x/, '').toLowerCase()
-    )
-      throw new Error(`the page does not show ${w}'s approval Filled by the swap ${txHash}: ${json(pd[w])}`);
+    if (pd[w]!.status !== 'filled' || !pd[w]!.fillVerified || !settledHash || pd[w]!.settledTx !== settledHash)
+      throw new Error(`the page does not show ${w}'s approval Filled by the swap ${settledHash}: ${json(pd[w])}`);
   say(`balances before ${JSON.stringify(out.balancesBefore)}`);
   say(`balances after  ${JSON.stringify(out.balancesAfter)} (exact: ${String(out.balancesExact)})`);
   const got = after.A.coins.find((c) => !c.spent && c.color === o.wantColor && BigInt(c.value) === wantAmt);

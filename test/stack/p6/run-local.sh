@@ -39,6 +39,11 @@
 # The smoke of record ran phase 1 alone (STEPS2..6 empty, SKIP_TAMPER=1) on the relay image built
 # from the lane; an empty STEPS2 now skips phase 2 as the other phases' empty STEPS do (it used `:-`).
 #
+# AA 00047 P11.F2 (the round-4b fix, R4b-1) extends `reconcile` (a NEW take of B reusing the coin W it was
+# paid, from another coin, after the current tip: not 'settled', and the relay's pre-proof read refuses
+# it) and adds `want-reused` to phase 1, after it: A lists a second offer, and B's take of it asking to be
+# paid W again is refused by the real relay before any proof, with nothing moved.
+#
 #   KEYS_DIR=~/.cache/aa-00047/b3-keys RELAY_IMAGE=aa00047-p6/relay:<sha> APP_VOLUME=<check volume> \
 #   OUT=<dir> PS_PARAMS=<dir> PS8_PARAMS=<dir> RELAY_KEYS_FINGERPRINT=<pin> test/stack/p6/run-local.sh
 #
@@ -59,7 +64,7 @@ export PS8_PARAMS="${PS8_PARAMS:?writable proof-server params dir (rc.8)}"
 export INDEXER_IMAGE="${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc.3}"
 export RELAY_KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-}"
 export DEMO_TOKENS_PATH="${DEMO_TOKENS_PATH:-direct}"
-STEPS="${STEPS:-open-a,open-b,origin,history,demo-a,demo-b,make,take,reconcile,withdraw}"
+STEPS="${STEPS:-open-a,open-b,origin,history,demo-a,demo-b,make,take,reconcile,want-reused,withdraw}"
 STEPS2="${STEPS2-withdraw-unshielded,make-x,coin-spent,plant,cancel,bomb}"
 STEPS2B="${STEPS2B-p10-negatives,restore,omitted-spend,expired,p9-negatives,negatives,history}"
 STEPS3="${STEPS3-fairness}"

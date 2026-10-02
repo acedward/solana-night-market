@@ -112,6 +112,17 @@ says the same in plain words.
   by minutes, never stop them; after the exchange's settlement service answers HTTP 429 (its daily
   cap), takes pause for 5 minutes (`exchange-busy`). (Audit R4-1, R4-3; questions Q59, Q61;
   `deploy/RUNBOOK.md` section 9.)
+- **A crowd of takes can make the market answer "busy".** Among takes, the accounts that used the
+  prover least in the last hour go first. So a crowd of takes from fresh accounts (about 15 waiting at
+  once) gets a customer's take refused at once (`prover-busy`): nothing is sent or charged, and the
+  customer tries again shortly. Each take in such a crowd needs a funded account, a live offer and a
+  coin, and refused ones count toward that account's daily limits; keeping it up takes about 80
+  accounts in rotation. (Audit R4b-2.)
+- **The exchange's daily allowance is shared.** The staging exchange's settlement service (its
+  batcher) settles a limited number of takes a day (1,000) for all its clients together, and anyone
+  can call it directly, not only this market. Once it is used up, takes pause market-wide
+  (`exchange-busy`) until it resets; making offers, cancelling and withdrawing keep working. Only the
+  exchange's operator can change this. (Audit R4b-4; issue 00055.)
 - **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
   failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
   for another pending claim, which is then held back for the operator. (Audit R4-7.)

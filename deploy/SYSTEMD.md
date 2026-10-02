@@ -131,6 +131,13 @@ timer and its service are in section 8.
   BATCHER_BUSY_COOLDOWN_SECONDS=300
   ```
 
+  The round-4b fix (AA 00047 P11.F2) adds one more (RUNBOOK section 9: the floor under the prover
+  lane's hold estimate); the default needs no change on stagenet:
+
+  ```ini
+  PROVER_JOB_ESTIMATE_FLOOR_SECONDS=45
+  ```
+
   `AUTH_MAX_NONCES` and `AUTH_MAX_NONCES_PER_CLIENT` are no longer read: remove them. Behind nginx,
   `RELAY_TRUST_PROXY=true` (as in MN Bank's guide) is what lets the per-client caps see the
   customer's address (an IPv6 customer is counted per /64). The new key set

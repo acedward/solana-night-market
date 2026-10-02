@@ -62,6 +62,16 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: 'The test exchange settles a limited number of trades a day for everyone who uses it, not only for this market. If others use it up, trades pause here until it resets. Your coins stay where they are, and offers, cancels and withdrawals still work.',
   },
   {
+    id: 'stuck-offer',
+    title: 'An offer that can never be filled.',
+    text: 'Someone can list an offer that asks for a coin their own account has already received. No trade of it can go through, and each try at it counts as one of your daily trades that did not settle. Nothing of yours is lost.',
+  },
+  {
+    id: 'take-label',
+    title: 'A rare wrong label on a trade.',
+    text: 'If your own offer is filled at the very moment you take another one, the market may show your take as settled. Only the label is wrong: the coin you asked for really reached your account.',
+  },
+  {
     id: 'restarts',
     title: 'Restarts.',
     text: "The market's prover is restarted from time to time. An action caught by a restart fails without counting against you, and you can try again.",
@@ -80,11 +90,6 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     id: 'your-data',
     title: 'Your data lives only in this browser.',
     text: 'Export it on Your data after every change: without it, clearing this browser loses the key that finds your coins.',
-  },
-  {
-    id: 'stagenet-check',
-    title: 'A final check is still to come.',
-    text: "The full flow worked on Midnight stagenet with an earlier version of the account's keys. The same check with the current keys is still to be run.",
   },
 ];
 

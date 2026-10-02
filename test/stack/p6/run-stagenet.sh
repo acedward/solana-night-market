@@ -19,6 +19,15 @@
 # to 5 (the declared fee is the estimate x 1.046^margin, and the ledger consumes all of it).
 # STEPS=tamper stops the relay and runs tamper-live.ts (a tampered proof; nothing lands; HONEST=1
 # submits the same call untampered as the control, which lands and pays its fee).
+#
+# AA 00047 P11.I K.7 (the stagenet re-acceptance): every container is named $PREFIX-* and memory-capped
+# (FLOWS_MEM_LIMIT, default 4g, for the flows and tamper containers too). With FUND_ACCOUNT set, the
+# account is given an UNSHIELDED balance BEFORE the relay opens the wallet (one wallet process per
+# seed): fund-unshielded.ts, with the seed file's wallet as the funder, mints FUND_AMOUNT of the
+# unshielded faucet MINT_FAUCET's token (its compiled bundle MINT_BUNDLE_DIR, mounted at
+# /app/.ufaucet, a directory that must exist in APP_VOLUME) to the funder and deposits it into the
+# account (FUND_KEYS_DIR holds the account's deposit_unshielded prover key). UNSHIELDED_COLOUR and
+# UNSHIELDED_AMOUNT are passed to the flows (`withdraw-unshielded`).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -38,6 +47,7 @@ KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-21493588f30536e0f409dcf79deea54878f0
 PS8_MEM_LIMIT="${PS8_MEM_LIMIT:-14g}"
 PS_MEM_LIMIT="${PS_MEM_LIMIT:-6g}"
 RELAY_MEM_LIMIT="${RELAY_MEM_LIMIT:-8g}"
+FLOWS_MEM_LIMIT="${FLOWS_MEM_LIMIT:-4g}"
 mkdir -p "$OUT" "$STATE_DIR" && chmod 700 "$STATE_DIR"
 say() { printf '== [%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -89,7 +99,7 @@ teardown() {
   # The contract prover's request log: every /prove with its duration (SC-004).
   docker logs "$PREFIX-ps8" >"$OUT/proof-server-rc8.log" 2>&1
   docker logs "$PREFIX-ps6" 2>&1 | tail -100 >"$OUT/proof-server-rc6.tail.log"
-  docker rm -f "$PREFIX-relay" "$PREFIX-ps8" "$PREFIX-ps6" >/dev/null 2>&1
+  docker rm -f "$PREFIX-relay" "$PREFIX-ps8" "$PREFIX-ps6" "$PREFIX-flows" "$PREFIX-fund" "$PREFIX-tamper" >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   release_lock
   say "torn down $PREFIX"
@@ -172,6 +182,27 @@ for s in "${STEP_LIST[@]}"; do
   if [[ "$s" == tamper ]]; then TAMPER=1; else FLOW_STEPS+=("$s"); fi
 done
 
+# The unshielded balance for `withdraw-unshielded`, before the relay opens the same wallet.
+if [[ -n "${FUND_ACCOUNT:-}" ]]; then
+  : "${FUND_KEYS_DIR:?}" "${MINT_BUNDLE_DIR:?}" "${MINT_FAUCET:?}" "${FUND_COLOUR:?}"
+  say "funding account $FUND_ACCOUNT with ${FUND_AMOUNT:-5000000} of ${FUND_COLOUR:0:8}… (faucet ${MINT_FAUCET:0:8}…)"
+  if docker run --rm --name "$PREFIX-fund" --network "$NET" --memory "$FLOWS_MEM_LIMIT" -v "$APP_VOLUME:/app:ro" \
+    -v "$FUND_KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$MINT_BUNDLE_DIR:/app/.ufaucet:ro" \
+    --mount "type=bind,source=$SEED_FILE,target=/run/secrets/sponsor-seed,readonly" \
+    -e FUNDER_SEED_FILE=/run/secrets/sponsor-seed -e FUND_NETWORK=stagenet -e FUND_ACCOUNT="$FUND_ACCOUNT" \
+    -e FUND_COLOUR="$FUND_COLOUR" -e FUND_AMOUNT="${FUND_AMOUNT:-5000000}" -e FUND_FEE_BLOCKS_MARGIN="$MARGIN" \
+    -e MINT_FAUCET="$MINT_FAUCET" -e MINT_BUNDLE=/app/.ufaucet \
+    -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-contracts:6300 \
+    -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server-dust:6300 \
+    -w /app "$BUN_IMAGE" bun test/stack/p6/fund-unshielded.ts 2>&1 | tee -a "$OUT/fund-unshielded.log"; then
+    say "funded"
+  else
+    # The flows still run (a cancel must not be skipped); the run fails at its end.
+    say "funding FAILED"
+    status=1
+  fi
+fi
+
 if ((${#FLOW_STEPS[@]} > 0)); then
   relay_up
   START_DUST="$(dust_now)"
@@ -196,12 +227,13 @@ if ((${#FLOW_STEPS[@]} > 0)); then
   ) &
   WATCH_PID=$!
   flow_steps="$(IFS=,; echo "${FLOW_STEPS[*]}")"
-  if docker run --rm --network "$NET" -v "$APP_VOLUME:/app:ro" \
+  if docker run --rm --name "$PREFIX-flows" --memory "$FLOWS_MEM_LIMIT" --network "$NET" -v "$APP_VOLUME:/app:ro" \
     -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$STATE_DIR:/state" -v "$OUT:/out" \
     -e RELAY_URL=http://relay:8080 -e NETWORK=stagenet -e STATE_DIR=/state -e OUT=/out -e STEPS="$flow_steps" \
     ${GIVE_AMOUNT:+-e GIVE_AMOUNT="$GIVE_AMOUNT"} ${WANT_AMOUNT:+-e WANT_AMOUNT="$WANT_AMOUNT"} \
     ${MAKE_LIFETIME:+-e MAKE_LIFETIME="$MAKE_LIFETIME"} ${CANCEL_MAKE_LIFETIME:+-e CANCEL_MAKE_LIFETIME="$CANCEL_MAKE_LIFETIME"} \
     -e CANCEL_TAKE_CHECK="${CANCEL_TAKE_CHECK:-0}" \
+    ${UNSHIELDED_COLOUR:+-e UNSHIELDED_COLOUR="$UNSHIELDED_COLOUR"} ${UNSHIELDED_AMOUNT:+-e UNSHIELDED_AMOUNT="$UNSHIELDED_AMOUNT"} \
     -w /app "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"; then
     say "flows PASS ($flow_steps)"
   else
@@ -229,7 +261,7 @@ fi
 
 if [[ "$TAMPER" == 1 ]]; then
   docker stop "$PREFIX-relay" >/dev/null 2>&1 || true
-  if docker run --rm --network "$NET" -v "$APP_VOLUME:/app:ro" \
+  if docker run --rm --name "$PREFIX-tamper" --memory "$FLOWS_MEM_LIMIT" --network "$NET" -v "$APP_VOLUME:/app:ro" \
     -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$STATE_DIR:/state:ro" -v "$OUT:/out" \
     --mount "type=bind,source=$SEED_FILE,target=/run/secrets/sponsor-seed,readonly" \
     -e NETWORK=stagenet -e STATE_DIR=/state -e OUT=/out -e WHO="${TAMPER_WHO:-B}" \

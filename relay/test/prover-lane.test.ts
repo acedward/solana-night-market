@@ -107,6 +107,15 @@ describe('within a rank, accounts with fewer recent jobs go first (R4-1)', () =>
     await use(lock, 'X', 2);
     const order = await served(lock, [t('x', 'X', 0, { deadline: 1000 }), t('y', 'Y', 0, { deadline: 9000 })]);
     expect(order).toEqual(['y', 'x']);
+    // With equal use, the earlier signed deadline goes first, then arrival.
+    const fresh = new ProverLock();
+    expect(
+      await served(fresh, [
+        t('late', 'L', 0, { deadline: 9000 }),
+        t('soon', 'S', 0, { deadline: 1000 }),
+        t('none', 'N', 0),
+      ]),
+    ).toEqual(['soon', 'late', 'none']);
   });
 
   it('use is counted over a window: older grants are forgotten', async () => {

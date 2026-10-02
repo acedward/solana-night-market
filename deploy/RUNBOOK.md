@@ -564,7 +564,7 @@ value; request bodies are never logged).
 
 | Limit | Value | Effect |
 |---|---|---|
-| Proofs | one at a time, market-wide, taken in turns per account | Every signed action proves on the one prover lane; others queue, and the page shows the position. The lane is shared **round-robin across accounts**, and each account has at most `JOBS_PER_ACCOUNT` (1) job queued or running (`429 account-busy`, Retry-After 30), so a customer waits behind at most one job of each other account with work waiting. A make holds the prover only while it proves: it waits for the exchange to list it (up to 90 s) on its own account's lane. A demo-token pack holds the prover for all its tokens (about 20 s per token on `direct`, 40 s on `via-sponsor`, measured locally). |
+| Proofs | one at a time, market-wide: **takes first, then makes, then the rest**; within each, the least recent users first, in turns per account | Every signed action proves on the one prover lane; others queue, and the page shows the position. Since AA 00047 P11.F (audit round 4 R4-1, questions Q59) the lane serves the jobs that carry a signed deadline first: takes, then makes; then withdrawals, change filings, cancels, key restores, registrations and demo tokens. A lower rank with work waiting still gets a turn after `PROVER_PRIORITY_BURST` (4) grants in a row to higher ranks. Within a rank the account with the fewest lane jobs in the last `PROVER_USAGE_WINDOW_SECONDS` (3,600) goes first, and a job is passed by each other account of its rank at most once (so it waits behind at most one job of each other account with work waiting, as with round-robin). Each account has at most `JOBS_PER_ACCOUNT` (1) job queued or running (`429 account-busy`, Retry-After 30). **A take or a make that the queue would only reach after its signed expiry leaves too little time (60 s) is refused at once**, before any proof or DUST (`503 prover-busy`, Retry-After): the relay runs the lane's order over the waiting jobs with each action's average hold (`PROVER_JOB_ESTIMATE_SECONDS`, 60, until measured). A make holds the prover only while it proves: it waits for the exchange to list it (up to 90 s) on its own account's lane. A demo-token pack holds the prover for all its tokens (about 20 s per token on `direct`, 40 s on `via-sponsor`, measured locally). |
 | Batcher | 1,000 requests per 24 hours per IP per target, and 1,000 for all clients together | Every take the relay settles is one request, so at most 1,000 takes a day. |
 | Kernel | 600 requests per minute per IP | Browsers read prices directly; the relay posts offers. |
 | Relay, per client address | reads 240/min, `/health` 60/min, nonces 30/min, actions 10/min; actions per Solana key 5/min | `RATE_LIMIT_*`. A client address is an IPv4 address (`CLIENT_IPV4_PREFIX` 32) or an IPv6 address's **/64** (`CLIENT_IPV6_PREFIX` 64): one customer line usually owns a whole /64, so every per-client cap (these, the nonces, the registration caps) counts it once. |
@@ -573,7 +573,8 @@ value; request bodies are never logged).
 | Failed jobs | 5 per Solana key and 5 per account a day (`FAILURE_BUDGET_PER_OWNER_PER_DAY`, `FAILURE_BUDGET_PER_ACCOUNT_PER_DAY`) | A job that fails after it started proving FOR A REASON THE REQUESTER CAUSED counts (a circuit refusal, the node refusing the transaction). Not counted: the market's own failures (no keys, the exchange unreachable or at its cap), a counterparty's (a take of an offer its maker cancelled or let expire: `exchange-error`, `take-refused`, `take-*`, `offer-gone`) and the infrastructure's (the proof server, the node or the indexer failed: the customer sees `market-unavailable`). Past the budget: `429 failure-budget` until the oldest failure is a day old. It is checked at admission, when the job reaches its lane and when it first reaches the prover; a job refused there proves nothing and gives back what its request claimed. **Withdrawals, unshielded withdrawals, cancels and key restores are never refused by it.** Questions Q38. |
 | Per account | 1 job queued or running (`JOBS_PER_ACCOUNT`); 3 offers that may still settle (`OFFERS_MAX_OPEN_PER_ACCOUNT`); 20 makes (`MAKES_PER_ACCOUNT_PER_DAY`), 5 cancels (`CANCELS_PER_ACCOUNT_PER_DAY`) and 3 key restores (`RESTORES_PER_ACCOUNT_PER_DAY`) in any rolling 24 hours | `429 account-busy`, `open-offers-cap`, `makes-daily-cap`, `cancels-daily-cap`, `restores-daily-cap`, with Retry-After. An offer stops counting at its signed expiry, when the account's nonce moves past it (a cancel, a withdrawal), when its job fails, or when the exchange says it was taken or ended. A daily charge is given back when the job failed before proving or not by the requester. See the numbers below; questions Q37. |
 | Withdrawals per account (owner decision Q46 A at 100; audit round 3 R3-2) | 100 sponsored withdrawals in any rolling 24 hours (`WITHDRAWS_DAILY_CAP`), shielded and unshielded together; past it, **one whole-coin withdrawal per listed token** in any rolling 24 hours | `429 withdraws-daily-cap`, Retry-After, `detail` `whole-coin-exit` (this token's exit is still open: a shielded withdrawal of a whole coin, `amount` = the coin's value, no change; or any unshielded withdrawal of the token, which never makes change) or `whole-coin-exit-used` (used in the last 24 hours, or the market does not list the token). The page says nothing about the allowance until it sees this code (Q46). Charges are given back like the other caps. See the numbers below; questions Q49. |
-| Unsettled takes per account (audit round 3 R3-7) | 10 takes in any rolling 24 hours (`TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY`) that were proven and then refused for a reason the relay could not pin on the taker (the maker's or the exchange's) | `429 takes-unsettled-cap`, Retry-After; only takes wait, never charged to the failure budget. Before proving, a make's, take's or shielded withdrawal's coin is checked unspent on chain (`coin-spent`, nothing proven); a refused take whose own coin is spent by then (`coin-spent`) or whose account moved past the signed nonce (`stale-authorisation`) is the taker's and is charged. Each unsettled take costs a proof and one of the batcher's 1,000 settlements a day. |
+| Unsettled takes per account (audit round 3 R3-7) | 10 takes in any rolling 24 hours (`TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY`) that were proven and then refused for a reason the relay could not pin on the taker (the maker's or the exchange's, or the taker's own offer taken at the same moment: `take-raced`) | `429 takes-unsettled-cap`, Retry-After; only takes wait, never charged to the failure budget. Before proving, a make's, take's or shielded withdrawal's coin is checked unspent on chain (`coin-spent`, nothing proven); when the account's history cannot be read, a trade waits (`chain-unavailable`, not charged) but a **withdrawal goes ahead unchecked** (the ledger refuses a double spend anyway; audit round 4 R4-5). A refused take is **reconciled against the chain** (audit round 4 R4-2, questions Q60): its own settlement there → it succeeded after all; its coin spent, or its nonce moved, by another swap of the account (its own offer taken meanwhile) → `take-raced`, not charged; by a withdrawal, a cancel or a key change of the account → `coin-spent` / `stale-authorisation`, the taker's, charged; nothing that explains it yet → never the taker's. Each unsettled take costs a proof and one of the batcher's 1,000 settlements a day. |
+| The exchange's 429 (audit round 4 R4-3) | after the settlement service answers HTTP 429, no take is proven for `BATCHER_BUSY_COOLDOWN_SECONDS` (300), or for the service's own Retry-After when longer (at most a day) | `503 exchange-busy`, Retry-After, at admission and when a queued take starts, before any proof; never charged. At most one proof per pause is spent against the exchange's cap, market-wide (questions Q61). |
 | Offer and take expiry | a make at most 3,600 s ahead, a take 600 s, at least 60 s left | Section 6. |
 | Demo tokens | once per key; `DEMO_TOKENS_DAILY_CAP` a day; 3 failed deliveries | Section 7. |
 | Change re-filing (`append-inbox`) | only against the relay's single-use entitlement for that change, at most `APPEND_INBOX_MAX_PER_ACCOUNT_PER_DAY` (20) a day per account | The entitlement key derives from the sponsor seed: a new sponsor seed voids entitlements already issued. |
@@ -610,6 +611,25 @@ With the defaults:
 - the sponsor pays for at most 5 cancels and 3 key restores per account a day. Accounts accumulate
   (at most 100 new ones a day, 3 per client address), so the worst case is (accounts) × 8 small
   transactions a day: watch the sponsor's DUST (section 4.5) and lower the caps if a pattern shows.
+
+**Why the prover lane serves takes first** (audit round 4 R4-1: F-A4-1, MAJOR for a public site;
+questions Q59). A take must start with 60 s of its signed expiry left, and round-robin turns put it
+behind one job of every other account with work waiting: auditor A's probe showed six accounts, each
+with one 44 s withdrawal queued (well under every per-account cap; accounts are free to open), made
+every customer's take expire before it started, so no trade could settle. With the defaults (the
+probe adapted to the new lane, `evidence/00047-mn-bank-solana/p11f/probe/`):
+
+- a take is signed for 600 s (it was 300 s: `TAKE_LIFETIME_SECONDS`, the relay's maximum) and goes
+  ahead of every withdrawal: behind 10 or 20 accounts' queued withdrawals it starts after about 43 s,
+  the withdrawal that held the prover (before: 440 s and 880 s, expired); every withdrawal is still
+  served;
+- a customer's withdrawal goes ahead of accounts that keep the lane busy: with 10 or 20 accounts
+  looping withdrawals for a while, it starts after about one job (44 s; before: up to 10 or 20 jobs);
+- a flood of makes (deadline-bound) never starves withdrawals: one gets a turn after 4 makes (the
+  probe: about 80 s);
+- a signed deadline never jumps the queue on its own (a requester chooses it): recent use decides
+  first within a rank;
+- a take the queue cannot reach in time is refused at once (`prover-busy`) instead of expiring.
 
 **Why the withdrawal numbers, and the sponsor's worst case per day** (audit round 3 R3-2: F-B3-1
 MAJOR, F-A3-4; owner decision Q46 A at 100; questions Q49). A withdrawal is the one sponsor-paid action
@@ -651,7 +671,7 @@ coin of each listed token still leaves every day, so funds never get stuck.
   account. The page computes the change itself; a market that reports another one is named.
 - **Your browser checks your account on Midnight itself** (section 16): an account that is not this
   market's own, or that has any device besides your wallet, is refused, and nothing is signed for it.
-- **Offers expire**: an offer can be taken for one hour after you approve it (a take for five
+- **Offers expire**: an offer can be taken for one hour after you approve it (a take for ten
   minutes), whoever holds the approval. **Cancel offer** ends it sooner (one approval, one
   transaction).
 - **Demo tokens**: once per wallet. These are test networks and test tokens.
@@ -739,6 +759,16 @@ build's pinned keys are unchanged, so existing accounts keep working. Deploy tog
   500 actions over `MIDNIGHT_INDEXER_WS_URL` (the profile's by default: no change unless you moved
   the indexer);
 - `CONTRACT_PROOF_SERVER_MEM_LIMIT=14g` and the periodic prover restart (section 12.1).
+
+**Round 4 follow-up (AA 00047 P11.F): no rekey, nothing breaking.** The relay's prover lane serves
+takes, then makes, then the rest (section 9), refuses a take the queue cannot reach in time
+(`503 prover-busy`), pauses takes after the exchange's 429 (`503 exchange-busy`), reconciles a refused
+take against the chain (`take-raced`), and lets a withdrawal through when the account's history cannot
+be read; the page signs takes for 600 s (it was 300 s) and shows "Ended", not "Cancelled", while a
+possible fill's transaction could not be read. Deploy the relay and the web together. The new relay
+settings (section 9; `deploy/.env.example`; the defaults need no change): `PROVER_USAGE_WINDOW_SECONDS=3600`,
+`PROVER_PRIORITY_BURST=4`, `PROVER_JOB_ESTIMATE_SECONDS=60`, `BATCHER_BUSY_COOLDOWN_SECONDS=300`. If you
+lowered `TAKE_MAX_LIFETIME_SECONDS` below 600, raise it back: the page now signs takes for 600 s.
 
 **BREAKING: the round-2 security fix pass** (AA 00047 P10; `vendor/passport` `b2f1847` → `599327b`).
 Every account message's first line is now `Site: <label>` (message format F3 v3, questions Q36), so

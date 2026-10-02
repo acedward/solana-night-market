@@ -102,6 +102,16 @@ does not use Docker.
   TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY=10
   ```
 
+  The round-4 follow-up (AA 00047 P11.F) adds four more (RUNBOOK section 9: the prover lane's order
+  and the pause after the exchange's 429); the defaults need no change:
+
+  ```ini
+  PROVER_USAGE_WINDOW_SECONDS=3600
+  PROVER_PRIORITY_BURST=4
+  PROVER_JOB_ESTIMATE_SECONDS=60
+  BATCHER_BUSY_COOLDOWN_SECONDS=300
+  ```
+
   `AUTH_MAX_NONCES` and `AUTH_MAX_NONCES_PER_CLIENT` are no longer read: remove them. Behind nginx,
   `RELAY_TRUST_PROXY=true` (as in MN Bank's guide) is what lets the per-client caps see the
   customer's address (an IPv6 customer is counted per /64). The new key set

@@ -124,7 +124,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
 });
 
 test.describe('offers sign a real expiry, and can be cancelled (audit C6, questions Q30)', () => {
-  test('a make signs now + one hour and shows it; a take signs now + five minutes', async ({ page }) => {
+  test('a make signs now + one hour and shows it; a take signs now + ten minutes', async ({ page }) => {
     const { phantom, relay } = await setup(page, { seeded: true });
     await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
     await connectPhantom(page);

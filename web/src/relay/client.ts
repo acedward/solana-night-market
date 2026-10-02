@@ -1,7 +1,7 @@
-// The browser's client for the Night Market relay: nonces, the one action route, job polling (the
-// browser keeps the request id, so a job resumes after a reload, Q5), and the one chain read the
-// browser cannot do itself (the account's decoded Zswap events, questions Q31). Every response is
-// validated against the shared schemas.
+// The browser's client for the Night Market relay: nonces, the one action route and job polling (the
+// browser keeps the request id, so a job resumes after a reload, Q5). Every response is validated
+// against the shared schemas. Since AA 00047 P11.B (questions Q47 A, superseding Q31) the page
+// decodes the account's Zswap activity itself; `zswap` below is kept but the page never calls it.
 //
 // The account's state, inbox and public balances are NOT read here (AA 00047 P9.S, questions Q26:
 // the relay is trustless): the page reads them from the public indexer (../chain/indexer.ts). The
@@ -129,8 +129,8 @@ export class RelayClient {
     return h.data;
   }
 
-  /** The account's Zswap leaves and spends, as the relay decodes the ledger's events: the page keeps
-   *  only what the public indexer's own events carry (@nightmarket/core `checkZswapActivity`, Q31). */
+  /** The account's Zswap leaves and spends, as the relay decodes the ledger's events. NOT used by the
+   *  page since AA 00047 P11.B: it decodes the account's history itself (../chain/history.ts, Q47 A). */
   async zswap(account: string): Promise<ZswapActivity> {
     return ZswapActivitySchema.parse(await this.call(API_PATHS.accountZswap(account)));
   }

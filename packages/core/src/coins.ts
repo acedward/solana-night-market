@@ -84,7 +84,7 @@ export function contractCoinNullifier(coin: CoinInfo, contractAddress: string): 
   return contractCoinHash(NULLIFIER_DOMAIN, coin, contractAddress);
 }
 
-// ── Chain facts the relay serves (public) ─────────────────────────────────────
+// ── Chain facts (public; the browser decodes them itself, AA 00047 P11.B) ─────────
 
 /** A leaf the ledger inserted for a coin owned by the account. */
 export interface OwnedOutput {
@@ -152,67 +152,99 @@ export interface ReconcileInput {
   previous: readonly StoredCoin[];
 }
 
-const coinKey = (c: Pick<CoinInfo, 'nonce' | 'color'>) => `${normaliseHex32(c.color)}:${normaliseHex32(c.nonce)}`;
-
 /**
  * Rebuild the account's coin list from chain facts and what the browser already knew.
  *
- * - Every coin found in the inbox is kept, with `inInbox`.
+ * AA 00047 P11.B (audit round 3 R3-3, F-B3-2; questions Q47 A): a coin is identified by its FULL
+ * commitment (nonce, colour, value, and this account as its owner), recomputed here from the coin
+ * itself, never by its colour and nonce alone and never taken from a stored field. So:
+ *
+ * - Every coin found in the inbox is kept, with `inInbox`. Two notes describing the same coin are one
+ *   coin; two notes with the same colour and nonce but another value are two coins, each confirmed
+ *   only by its own leaf (a counterfeit note never takes over a genuine coin, and never removes it).
  * - Every coin the browser knew without an inbox entry (a withdrawal's change, Q13) is kept.
- * - Each coin's `mtIndex` is the position of the leaf whose commitment equals the coin's own:
- *   exact, never a guess. A coin whose leaf is not (yet) reported keeps `mtIndex: null` and
- *   cannot be spent until it is.
- * - A coin whose nullifier the ledger reports is marked spent.
+ * - Each coin's `mtIndex` (and `createdTx`) is the position of the leaf whose commitment equals the
+ *   coin's own, from `outputs` (the browser's own decode of the account's ledger events): exact,
+ *   never a guess, never inherited from another note, a stored field or an earlier read. A coin whose
+ *   leaf is not in `outputs` has `mtIndex: null`: not in a balance and not spendable (R2-6).
+ * - A coin whose nullifier `inputs` carries is marked spent, with the spending transaction. A coin the
+ *   browser itself set aside (`spent` without a chain spend: a payment it sent) stays set aside until
+ *   the reconciliation of that payment releases it (web/src/passport/operations.ts).
  */
 export function reconcileCoins(input: ReconcileInput): StoredCoin[] {
   const account = normaliseHex32(input.account);
-  const leaves = new Map(input.outputs.map((o) => [normaliseHex32(o.commitment), o]));
+  const leaves = new Map<string, OwnedOutput>();
+  for (const o of input.outputs) {
+    const c = normaliseHex32(o.commitment);
+    if (!leaves.has(c)) leaves.set(c, o); // a commitment is inserted once; the first leaf is the one
+  }
   const spends = new Map(input.inputs.map((i) => [normaliseHex32(i.nullifier), i]));
-  const byKey = new Map<string, StoredCoin>();
+  const byCommitment = new Map<string, StoredCoin>();
 
   const settle = (c: StoredCoin): StoredCoin => {
-    const leaf = leaves.get(c.commitment);
+    const commitment = contractCoinCommitment(c, account);
+    const leaf = leaves.get(commitment);
     const spend = spends.get(contractCoinNullifier(c, account));
+    const { createdTx: _created, spentTx: _spentTx, ...rest } = c;
     return {
-      ...c,
-      mtIndex: leaf ? leaf.mtIndex : c.mtIndex,
+      ...rest,
+      commitment,
+      mtIndex: leaf ? leaf.mtIndex : null,
       ...(leaf ? { createdTx: leaf.txHash } : {}),
       spent: !!spend || c.spent,
-      ...(spend ? { spentTx: spend.txHash } : {}),
+      ...(spend ? { spentTx: spend.txHash } : c.spent && c.spentTx ? { spentTx: c.spentTx } : {}),
     };
   };
 
-  for (const p of input.previous) byKey.set(coinKey(p), settle({ ...p }));
+  for (const p of input.previous) {
+    const coin: CoinInfo = {
+      nonce: normaliseHex32(p.nonce),
+      color: normaliseHex32(p.color),
+      value: BigInt(p.value).toString(10),
+    };
+    const settled = settle({ ...p, ...coin });
+    const known = byCommitment.get(settled.commitment);
+    // The same coin twice in the stored list (an older page keyed coins otherwise): one record.
+    byCommitment.set(
+      settled.commitment,
+      known ? { ...settled, ...known, spent: known.spent || settled.spent } : settled,
+    );
+  }
   for (const c of input.inbox) {
     const coin: CoinInfo = {
       nonce: normaliseHex32(c.nonce),
       color: normaliseHex32(c.color),
       value: BigInt(c.value).toString(10),
     };
-    const key = coinKey(coin);
-    const known = byKey.get(key);
-    byKey.set(
-      key,
+    const commitment = contractCoinCommitment(coin, account);
+    const known = byCommitment.get(commitment);
+    if (known?.inInbox) continue; // the same coin, already described by an earlier note
+    byCommitment.set(
+      commitment,
       settle({
+        ...(known ?? {}),
         ...coin,
-        mtIndex: known?.mtIndex ?? null,
-        commitment: contractCoinCommitment(coin, account),
+        mtIndex: null,
+        commitment,
         origin: known?.origin ?? 'inbox',
         inInbox: true,
         inboxIndex: c.inboxIndex,
         spent: known?.spent ?? false,
-        ...(known?.createdTx ? { createdTx: known.createdTx } : {}),
         ...(known?.spentTx ? { spentTx: known.spentTx } : {}),
       }),
     );
   }
-  return [...byKey.values()].sort((a, b) =>
+  return [...byCommitment.values()].sort((a, b) =>
     a.color === b.color
       ? BigInt(b.value) > BigInt(a.value)
         ? 1
         : BigInt(b.value) < BigInt(a.value)
           ? -1
-          : 0
+          : a.commitment < b.commitment
+            ? -1
+            : a.commitment > b.commitment
+              ? 1
+              : 0
       : a.color < b.color
         ? -1
         : 1,
@@ -262,8 +294,8 @@ export interface ColourHolding {
 /**
  * Whether the CHAIN confirms a coin (AA 00047 P10, audit round 2 R2-6 / F-A2-4): its leaf, the
  * commitment the browser computes from the coin itself, is among the account's outputs that the
- * public indexer's own raw events carry (@nightmarket/core `checkZswapActivity`, Q31), which is what
- * gives it a position. An inbox note is NOT proof: anyone can file one with `deposit_shielded` (and a
+ * browser decoded itself from the public indexer's ledger events (AA 00047 P11.B, questions Q47 A;
+ * ./zswap-check.ts), which is what gives it a position. An inbox note is NOT proof: anyone can file one with `deposit_shielded` (and a
  * deployer can seed them), describing a coin that exists nowhere. Only confirmed coins count toward a
  * balance or can pay.
  */

@@ -40,6 +40,9 @@ export interface TradeRecord {
   kernelStatus?: string;
   /** The settling transaction, once known. */
   settledTx?: string;
+  /** Set when the fill was proven by the decoded swap transaction itself (AA 00047 P11.B, R3-6): only
+   *  such a fill is final; any other "filled" is decided again. */
+  fillVerified?: true;
   checkedAt?: number;
 }
 

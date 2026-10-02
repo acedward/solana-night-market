@@ -27,6 +27,13 @@
 // and a relay can lie the ways round 2 found: report a call done that it never landed (`fakeSuccess`),
 // land a call and report it failed (`landButFail`), settle the maker's offer it holds when asked to
 // cancel (`settleOnCancel`), or file a note in the inbox for a coin that exists nowhere (`fakeNote`).
+//
+// AA 00047 P11.B (questions Q47 A): the chain also keeps every transaction of the account with its
+// height, the entry points of the account's calls in it, and, for a swap, its raw bytes built by
+// ledger-v9 itself (./ledger-tx.ts), so the mock indexer serves the account's history the way the
+// Midnight indexer does and the page decodes it for real. Round 3's attacks: a real coin deposited
+// with an approval's wanted nonce, its note filed (`plantWantedCoin`, R3-6), and a relay report that
+// leaves a spend or a leaf out (`omitFromReport`, R3-4; the page no longer reads that report).
 
 import { randomBytes } from 'node:crypto';
 
@@ -54,6 +61,7 @@ import { solanaRelayActionScheme } from '../../packages/core/src/solana-auth.js'
 import type { TokenRegistry } from '../../packages/core/src/tokens/registry.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { healthBody } from './errors-fixtures.js';
+import { rawTxWithCalls, type MockCall } from './ledger-tx.js';
 
 export const RELAY = 'http://relay.test';
 export const ACCOUNT = '7e'.repeat(32);
@@ -159,6 +167,21 @@ export class MockRelay {
   entries: string[] = [];
   outputs: Array<{ commitment: string; mtIndex: string; txHash: string; blockHeight: number }> = [];
   inputs: Array<{ nullifier: string; txHash: string; blockHeight: number }> = [];
+  /** Every transaction of the account, by hash: its height and order, the entry points of the account's
+   *  calls in it, and (a swap) its calls and raw bytes (AA 00047 P11.B). */
+  readonly chainTxs = new Map<
+    string,
+    { height: number; id: number; entryPoints: string[]; calls: MockCall[]; raw?: string }
+  >();
+  /** Commitments and nullifiers the relay's own `/zswap` report leaves out (R3-4). */
+  readonly omitFromReport = new Set<string>();
+  /** How often the page asked the relay for its Zswap report (AA 00047 P11.B: never). */
+  zswapReads = 0;
+  /** Leave every withdrawal's spend and change out of the `/zswap` report (R3-4). */
+  omitWithdrawalsFromReport = false;
+  /** Refuse `/zswap` as the relay at `b8d81e9` does from 500 actions on (501 `history-too-long`,
+   *  audit round 3 R3-5 / F-B3-4). */
+  zswapHistoryTooLong = false;
   unshielded = new Map<string, bigint>();
   demo = { enabled: true, dailyCap: 25, remainingToday: 7, claimed: new Set<string>() };
   offerStatus: Record<string, string> = {};
@@ -200,6 +223,52 @@ export class MockRelay {
     return this.tx.toString(16).padStart(64, '0');
   }
 
+  /** Register a transaction of the account (its height is fixed the first time) and a call in it. */
+  recordTx(hash: string, entryPoint: string | null, extra: { calls?: MockCall[]; raw?: string } = {}) {
+    const t = this.chainTxs.get(hash) ?? {
+      height: 10 + this.chainTxs.size,
+      id: 1_000 + this.chainTxs.size,
+      entryPoints: [],
+      calls: [],
+    };
+    if (entryPoint) t.entryPoints.push(entryPoint);
+    if (extra.calls) t.calls.push(...extra.calls);
+    if (extra.raw) t.raw = extra.raw;
+    this.chainTxs.set(hash, t);
+    return t;
+  }
+
+  private heightOf(txHash: string) {
+    return this.recordTx(txHash, null).height;
+  }
+
+  /** A swap transaction (a take, or the maker's offer settled by someone): the account's
+   *  `open_swap_shielded_with_ed25519` call receiving the wanted coin (and the change) and spending the
+   *  paying coin, as ledger-v9 serialises it; its hash is the ledger's own. */
+  private async swapTx(p: {
+    want: { nonce: string; color: string; value: bigint };
+    coin: { nonce: string; color: string; value: string };
+    change: { nonce: string; color: string; value: bigint } | null;
+  }) {
+    const commit = (c: { nonce: string; color: string; value: bigint | string }) =>
+      contractCoinCommitment({ nonce: c.nonce, color: c.color, value: c.value.toString() }, ACCOUNT);
+    const call: MockCall = {
+      address: ACCOUNT,
+      entryPoint: 'open_swap_shielded_with_ed25519',
+      receives: [commit(p.want), ...(p.change ? [commit(p.change)] : [])],
+      nullifiers: [contractCoinNullifier(p.coin, ACCOUNT)],
+    };
+    const { hash, raw } = await rawTxWithCalls([call]);
+    this.recordTx(hash, call.entryPoint, { calls: [call], raw });
+    return hash;
+  }
+
+  /** R3-6: someone deposits a REAL coin carrying an approval's wanted nonce (colour and value of their
+   *  choice) and files its note sealed to the account: a leaf and a note, in a deposit, not a swap. */
+  async plantWantedCoin(c: Coin) {
+    await this.deposit([c]);
+  }
+
   /** A note in the account's inbox for a coin that exists nowhere (anyone can file one with
    *  `deposit_shielded`, R2-6): sealed to the account's key, no Zswap leaf. */
   async fakeNote(c: Coin) {
@@ -217,6 +286,7 @@ export class MockRelay {
   async deposit(coins: Coin[], txHash = this.nextTx()) {
     if (!this.encKey) throw new Error('no account yet');
     for (const c of coins) {
+      this.recordTx(txHash, 'deposit_shielded');
       const sealed = await sealEntryPortable(hexToBytes(this.encKey, 32), {
         nonce: hexToBytes(c.nonce, 32),
         color: hexToBytes(c.color, 32),
@@ -232,12 +302,12 @@ export class MockRelay {
       commitment: contractCoinCommitment({ nonce: c.nonce, color: c.color, value: c.value.toString() }, ACCOUNT),
       mtIndex: String(100 + this.outputs.length),
       txHash,
-      blockHeight: 10 + this.outputs.length,
+      blockHeight: this.heightOf(txHash),
     });
   }
 
   private spend(c: { nonce: string; color: string; value: string }, txHash: string) {
-    this.inputs.push({ nullifier: contractCoinNullifier(c, ACCOUNT), txHash, blockHeight: 50 + this.inputs.length });
+    this.inputs.push({ nullifier: contractCoinNullifier(c, ACCOUNT), txHash, blockHeight: this.heightOf(txHash) });
   }
 
   private deviceEntry(counter: bigint): string {
@@ -351,14 +421,11 @@ export class MockRelay {
   }
 
   /** The maker's offer this relay holds (the last make), settled by someone: what the chain shows. */
-  private async settleHeldOffer(tx: string) {
+  private async settleHeldOffer() {
     const make = [...this.submitted].reverse().find((x) => x.action === 'open-swap');
     if (!make) return;
     const m = (make.body.payload ?? {}) as Record<string, string> & { coin?: Record<string, string> };
     const coin = m.coin!;
-    this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
-    this.entries.push(m.wantEntry!);
-    this.output({ nonce: m.wantNonce!, color: m.wantColor!, value: BigInt(m.wantAmount!) }, tx);
     const change = predictChangeCoin(
       {
         nonce: hexToBytes(coin.nonce!, 32),
@@ -368,6 +435,15 @@ export class MockRelay {
       },
       BigInt(m.giveAmount!),
     );
+    const want = { nonce: m.wantNonce!, color: m.wantColor!, value: BigInt(m.wantAmount!) };
+    const tx = await this.swapTx({
+      want,
+      coin: { nonce: coin.nonce!, color: coin.color!, value: coin.value! },
+      change: change ? { nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value } : null,
+    });
+    this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
+    this.entries.push(m.wantEntry!);
+    this.output(want, tx);
     if (change) {
       this.entries.push(m.changeEntry!);
       this.output({ nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value }, tx);
@@ -419,6 +495,7 @@ export class MockRelay {
       }
       case 'withdraw': {
         const coin = p.coin!;
+        this.recordTx(tx, 'withdraw_shielded_with_ed25519');
         this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
         // The change the contract's sendShielded makes (what lands on chain).
         const made = predictWithdrawChange(
@@ -427,6 +504,18 @@ export class MockRelay {
         );
         const change = made ? { nonce: made.nonce, color: made.color, value: BigInt(made.value) } : null;
         if (change) this.output(change, tx);
+        if (this.omitWithdrawalsFromReport) {
+          this.omitFromReport.add(
+            contractCoinNullifier({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, ACCOUNT),
+          );
+          if (change)
+            this.omitFromReport.add(
+              contractCoinCommitment(
+                { nonce: change.nonce, color: change.color, value: change.value.toString() },
+                ACCOUNT,
+              ),
+            );
+        }
         const reported = change && this.misreportChange ? { ...change, nonce: 'c4'.repeat(32) } : change;
         this.authNonce += 1n;
         this.useCounter += 1n;
@@ -446,8 +535,9 @@ export class MockRelay {
           };
           return;
         }
-        if (this.settleOnCancel) await this.settleHeldOffer(tx);
+        if (this.settleOnCancel) await this.settleHeldOffer();
         else {
+          this.recordTx(tx, 'rotate_enc_key_with_ed25519');
           this.authNonce += 1n;
           this.useCounter += 1n;
         }
@@ -464,6 +554,7 @@ export class MockRelay {
           return;
         }
         this.encKey = p.newKey!;
+        this.recordTx(tx, 'rotate_enc_key_with_ed25519');
         this.authNonce += 1n;
         this.useCounter += 1n;
         s.stages = ['proving', 'submitted'];
@@ -471,6 +562,7 @@ export class MockRelay {
         return;
       }
       case 'append-inbox': {
+        this.recordTx(tx, 'append_inbox_with_ed25519');
         this.entries.push(p.entry!);
         this.authNonce += 1n;
         this.useCounter += 1n;
@@ -480,6 +572,7 @@ export class MockRelay {
       }
       case 'withdraw-unshielded': {
         const held = this.unshielded.get(p.color!) ?? 0n;
+        this.recordTx(tx, 'withdraw_unshielded_with_ed25519');
         this.unshielded.set(p.color!, held - BigInt(p.amount!));
         this.authNonce += 1n;
         this.useCounter += 1n;
@@ -504,10 +597,6 @@ export class MockRelay {
       }
       case 'take': {
         const coin = p.coin!;
-        this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
-        // The wanted coin and the predicted change, each with the inbox entry the browser sealed.
-        this.entries.push(p.wantEntry!);
-        this.output({ nonce: p.wantNonce!, color: p.wantColor!, value: BigInt(p.wantAmount!) }, tx);
         const change = predictChangeCoin(
           {
             nonce: hexToBytes(coin.nonce!, 32),
@@ -517,16 +606,29 @@ export class MockRelay {
           },
           BigInt(p.giveAmount!),
         );
+        const want = { nonce: p.wantNonce!, color: p.wantColor!, value: BigInt(p.wantAmount!) };
+        // The settlement: a swap transaction of ledger-v9's own making, under its own hash.
+        const swap = await this.swapTx({
+          want,
+          coin: { nonce: coin.nonce!, color: coin.color!, value: coin.value! },
+          change: change
+            ? { nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value }
+            : null,
+        });
+        this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, swap);
+        // The wanted coin and the predicted change, each with the inbox entry the browser sealed.
+        this.entries.push(p.wantEntry!);
+        this.output(want, swap);
         if (change) {
           this.entries.push(p.changeEntry!);
-          this.output({ nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value }, tx);
+          this.output({ nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value }, swap);
         }
         this.authNonce += 1n;
         this.useCounter += 1n;
         s.stages = ['offer-checked', 'proving', 'merged', 'settled'];
         s.result = {
           offerId: p.offerId,
-          txHash: tx,
+          txHash: swap,
           proveSeconds: 36,
           cost: { blockUsage: '30000', computeTimePs: '1', readTimePs: '1', feesSpecks: '1' },
           path: 'batcher',
@@ -627,14 +729,23 @@ export class MockRelay {
           entries: this.lies ? [] : this.entries,
           total: this.lies ? 0 : this.entries.length,
         });
-      if (acct[2] === 'zswap')
+      if (acct[2] === 'zswap') {
+        this.zswapReads += 1;
+        if (this.zswapHistoryTooLong)
+          return json(501, {
+            error: {
+              code: 'history-too-long',
+              message: 'the account has 500 or more actions; paging is not implemented',
+            },
+          });
         return json(200, {
           account: ACCOUNT,
-          outputs: this.outputs,
-          inputs: this.inputs,
+          outputs: this.outputs.filter((o) => !this.omitFromReport.has(o.commitment)),
+          inputs: this.inputs.filter((i) => !this.omitFromReport.has(i.nullifier)),
           transactions: this.outputs.length,
           blockHeight: 99,
         });
+      }
       return json(200, {
         account: ACCOUNT,
         balances: [...this.unshielded]

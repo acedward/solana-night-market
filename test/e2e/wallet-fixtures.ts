@@ -8,14 +8,21 @@ import type { Page } from '@playwright/test';
 
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { encodeRecord, recordKey } from '../../web/src/store/schema.js';
-import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
+import { INDEXER, INDEXER_OVERRIDE, INDEXER_WS, MockIndexer } from './mock-indexer.js';
 import { installMockPhantom, type MockPhantom } from './mock-phantom.js';
 import { ACCOUNT, DEMO_PACK, MockRelay, RELAY } from './mock-relay.js';
 import { seedRecords, serveExchange } from './visual-fixtures.js';
 
 export async function setup(
   page: Page,
-  opts: { walletTimeoutSeconds?: number; injected?: boolean; standard?: boolean; seeded?: boolean } = {},
+  opts: {
+    walletTimeoutSeconds?: number;
+    injected?: boolean;
+    standard?: boolean;
+    seeded?: boolean;
+    /** Leave the indexer's WebSocket unrouted (Playwright's routing bypasses a page's CSP). */
+    noWsRoute?: boolean;
+  } = {},
 ) {
   const ex = await serveExchange(page);
   const phantom = await installMockPhantom(page, {
@@ -26,6 +33,8 @@ export async function setup(
   const indexer = new MockIndexer(relay);
   await page.route(`${RELAY}/**`, (r) => relay.handle(r));
   await page.route(INDEXER, (r) => indexer.handle(r));
+  // The account's history past the newest page streams over the indexer's WebSocket (AA 00047 P11.B).
+  if (!opts.noWsRoute) await page.routeWebSocket(INDEXER_WS, (ws) => indexer.handleWs(ws));
   await page.route('**/config.json', (r) =>
     r.fulfill({
       json: {

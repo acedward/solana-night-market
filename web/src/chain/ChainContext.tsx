@@ -8,13 +8,19 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { NetworkProfile } from '@nightmarket/core';
 import type { AccountCheck, AccountCheckProblem } from '@nightmarket/core/passport';
 
-import { ChainReader } from './indexer.js';
+import { ChainReader, indexerWsUrlOf } from './indexer.js';
 
 const Ctx = createContext<ChainReader | null>(null);
 
 export function ChainProvider({ network, children }: { network: NetworkProfile; children: ReactNode }) {
   const reader = useMemo(
-    () => new ChainReader({ indexerUrl: network.midnight.indexerUrl, networkId: network.midnightNetworkId }),
+    () =>
+      new ChainReader({
+        indexerUrl: network.midnight.indexerUrl,
+        // The account's history past the indexer's newest page is streamed (AA 00047 P11.B).
+        indexerWsUrl: indexerWsUrlOf(network.midnight),
+        networkId: network.midnightNetworkId,
+      }),
     [network],
   );
   return <Ctx.Provider value={reader}>{children}</Ctx.Provider>;

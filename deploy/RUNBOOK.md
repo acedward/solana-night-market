@@ -657,9 +657,12 @@ coin of each listed token still leaves every day, so funds never get stuck.
 - A withdrawal's recipient encryption key is unsigned by default (section 6, F-B6; questions Q28:
   the one accepted exception to the trustless relay: a relay could hide a withdrawn coin from its
   recipient's wallet scan, not take it).
-- The page reads its account from the public indexer, except which of its coins exist and which are
-  spent: the relay decodes those events, and the page keeps only what the indexer's own events carry
-  (section 16; questions Q31). A relay can still leave a coin out (hide it), never invent one.
+- The page reads its account from the public indexer, which of its coins exist and which are spent
+  included: it decodes the account's whole history itself with ledger-v9 (section 16; questions Q47
+  A). It trusts that indexer to serve the chain faithfully (it runs no light client). Without the
+  indexer's WebSocket (a `connect-src` without its `wss:` origin, a proxy), an account with more than
+  500 actions cannot be read in full: the page then says so and counts only the coins it could
+  confirm.
 - The registration caps, the per-account caps (the withdrawal allowance included) and the failure
   budget are counted in memory: a relay restart resets them (section 9).
 - The withdrawal allowance is per account (questions Q49): many accounts can each use theirs; the
@@ -823,9 +826,37 @@ browser:
   account is checked as soon as the relay reports it open (at its first entry, nothing signed yet).
 - **The auth nonce, the device counter, the inbox and the public (unshielded) balances** every
   signature and every balance rests on come from the same read, not from the relay.
-- **Which coins exist and which are spent** come from the ledger's Zswap events, which only the relay
-  decodes (the browser bundle carries no ledger-v9); the page keeps a reported coin or spend only when
-  one of the account's transactions, as the indexer lists it, carries it (questions Q31).
+- **Which coins exist and which are spent** the page decodes ITSELF (AA 00047 P11.B, questions Q47 A,
+  which supersedes Q31): it reads the account's complete history from the indexer (the newest 500
+  actions over HTTP, anything older through the indexer's `contractActions` subscription over its
+  WebSocket) and decodes every transaction's ledger events with ledger-v9's own WebAssembly
+  (`@midnightntwrk/ledger-v9` 1.0.0-rc.3). A coin counts only when a decoded leaf carries its full
+  commitment; a withdrawal's pending change is dropped only on positive evidence; an offer is
+  "Filled" only by its decoded swap transaction. The relay's Zswap report is no longer read.
+
+**What the page still takes from others** (AA 00047 P11.B, plan P11.B (3)):
+- **From the relay: nothing about coins.** The relay's `GET /v1/accounts/:a/zswap` is not read by the
+  page (it stays for other clients). What the relay can still do is unchanged: refuse or delay a
+  request (liveness), choose the recipient encryption key of a withdrawal (questions Q28, the one
+  accepted exception: it can hide a withdrawn coin from its recipient's wallet scan, not take it), and
+  issue the change's inbox entitlement. Its job results (a transaction id, "succeeded", "failed") end
+  nothing: the page decides from the chain.
+- **From the public indexer: the chain itself.** The page checks what it can: every event names its
+  own transaction, a leaf must lie in its transaction's range of the Zswap tree, and a transaction's
+  raw bytes must hash (ledger-v9's own `transactionHash`) to the one asked for. It does not verify the
+  indexer against block headers. A wrong position would only make a proof fail: the circuit checks
+  the Merkle path.
+- **Completeness**: the page concludes from what is ABSENT (a spend that never happened, a fill that
+  never came) only when its read of the history is complete through the height the account's state
+  was read at; otherwise it waits ("Ended" for an approval it cannot place yet).
+
+**ledger-v9 in the page, loaded lazily** (measured on the production build, `vite build`, 2026-10-02):
+the decoder is its own chunk, `assets/ledger-decode-<hash>.js` (173 KB, 27 KB gzipped), with
+`assets/midnight_ledger_wasm_v9_bg-<hash>.wasm` (10.3 MB, 4.7 MB gzipped; nginx gzips
+`application/wasm` and caches `/assets/` for 30 days). Only the Portfolio and Trade pages fetch them,
+on their first walk of the account; the Markets page never does (`test/e2e/zswap-decode.spec.ts`).
+The main bundle is unchanged in kind (1.27 MB, 285 KB gzipped, with the contract runtime's 1.4 MB
+WebAssembly). A visitor who opens the Portfolio downloads about 5 MB more, once.
 
 **Re-pin the web build with the key set.** When the relay's key set changes (a new `vendor/passport`
 pin), regenerate the pinned digests from the new key volume and rebuild the web image, or the page
@@ -838,13 +869,20 @@ deployment can point it elsewhere with a mounted `config.json`:
 The stagenet indexer answers any origin (CORS `*`).
 
 **The Content-Security-Policy** (`WEB_CONTENT_SECURITY_POLICY`). Its `connect-src` must name the
-indexer, or the page cannot check any account (it then says so and signs nothing). The value below is
-tested (`test/e2e/chain.spec.ts`, with the test's own origins in place of these):
+indexer, or the page cannot check any account (it then says so and signs nothing), AND, since AA 00047
+P11.B, the indexer's WebSocket endpoint (`wss://…`): a browser does not let an `https://` source
+cover a `wss://` connection (checked in Chromium), and without it an account with more than 500
+actions cannot be read in full (the page then says "could not read your account's whole history" and
+counts only what it could confirm). The value below is tested (`test/e2e/chain.spec.ts` and
+`test/e2e/zswap-decode.spec.ts`, with the tests' own origins in place of these):
 
 ```
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
 ```
 
-`'wasm-unsafe-eval'` is for the contract runtime's WebAssembly (the arm's message builder and the
-account decoder). The relay is the same-origin `/relay` here; a relay on another origin
-(`WEB_RELAY_URL`) and an indexer set in `config.json` must be added to `connect-src`.
+`'wasm-unsafe-eval'` is for WebAssembly: the contract runtime's (the arm's message builder and the
+account decoder) and ledger-v9's (the history decoder, AA 00047 P11.B; no new directive was needed
+for it). The relay is the same-origin `/relay` here; a relay on another origin (`WEB_RELAY_URL`) and an
+indexer set in `config.json` must be added to `connect-src` (the indexer with both its `https:` and
+its `wss:` endpoint; a `config.json` that moves only `indexerUrl` gets the WebSocket at the same host
+and path plus `/ws`).

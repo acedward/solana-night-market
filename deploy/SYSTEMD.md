@@ -53,11 +53,32 @@ does not use Docker.
   SPONSOR_TOOL_RELAY_HEALTH_URL=http://127.0.0.1:8080/health
   RELAY_DATA_DIR=/var/lib/nightmarket/data
   MIDNIGHT_PP=/var/lib/nightmarket/zk-params
-  PASSPORT_COMMIT=b2f1847271435d37c441966271aa8e20c9b09ecf
+  PASSPORT_COMMIT=599327b918b55afc95d6c98a89bcd15f4e8b0d53
   ```
 
   The single-server `MIDNIGHT_PROOF_SERVER_URL` of MN Bank is refused by the relay (exit 78), and
   every `SEPOLIA_*`, `BRIDGE_*`, `STALE_CLOSE_*` and `VAULT_GAS_*` line is gone.
+- `/etc/nightmarket/relay.env` is a copy of `deploy/.env.example` with the operator's values, as
+  in MN Bank's guide. The round-2 fix pass (AA 00047 P10) added settings to it; copy them over on an
+  upgrade (their meaning and numbers: `deploy/RUNBOOK.md` section 9):
+
+  ```ini
+  JOBS_PER_ACCOUNT=1
+  OFFERS_MAX_OPEN_PER_ACCOUNT=3
+  MAKES_PER_ACCOUNT_PER_DAY=20
+  CANCELS_PER_ACCOUNT_PER_DAY=5
+  RESTORES_PER_ACCOUNT_PER_DAY=3
+  CLIENT_IPV6_PREFIX=64
+  CLIENT_IPV4_PREFIX=32
+  AUTH_MAX_USED_NONCES=200000
+  DEMO_TOKENS_PENDING_SETTLE_SECONDS=14400
+  ```
+
+  `AUTH_MAX_NONCES` and `AUTH_MAX_NONCES_PER_CLIENT` are no longer read: remove them. Behind nginx,
+  `RELAY_TRUST_PROXY=true` (as in MN Bank's guide) is what lets the per-client caps see the
+  customer's address (an IPv6 customer is counted per /64). The new key set
+  (`RELAY_KEYS_FINGERPRINT=21493588…5c5e`), the web build (its pinned account keys) and these
+  settings deploy together (RUNBOOK section 12.2, "BREAKING: the round-2 security fix pass").
 - `sudo install -d -m 700 -o nightmarket -g nightmarket /var/lib/nightmarket/data` (the demo-token
   claims; back it up). It must belong to the relay unit's `User=`. Compose does this with its
   `relay-data-init` service; a native host does it once here. If you change the unit's user later,
@@ -67,7 +88,7 @@ does not use Docker.
 
 The same oneshot unit, with `TimeoutStartSec=2h` and `MemoryMax=12G`. It now also compiles the
 demo-token faucet (seconds) and checks its `mint` key against the deployed faucets. A good run ends
-with `verdict VERIFIED (fingerprint efc52fbc…ef7f)`, and the set is 2.5 GB. To import a set built
+with `verdict VERIFIED (fingerprint 21493588…5c5e)`, and the set is 2.5 GB. To import a set built
 elsewhere, put `KEYS_IMPORT_DIR=<dir holding account/>` in `native.env` for the first run (the job
 copies only the kept prover keys).
 

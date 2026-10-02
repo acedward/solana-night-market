@@ -6,7 +6,7 @@
 // shows the base units and the full token id, and the site's reading ("This site labels it:
 // 10.000000 twUSDC") marked as the site's. Recipients and deadlines are shown in full too.
 //
-// Every value here comes from the pinned F3 v2 client itself (vendor/passport @ b2f1847:
+// Every value here comes from the pinned F3 v3 client itself (vendor/passport @ 599327b:
 // `renderUnits`, `renderSiteLabel`, `tokenDisplayFor`, `renderDeadline`), with the same token
 // resolver the message builder uses (`ed25519TokenResolver`), so the panel and the wallet's text
 // cannot drift apart. And each fact names the LINES of the wallet's text it stands for (`signed`):
@@ -16,7 +16,8 @@
 // bound by the message's digest, not by a readable line, and the panel says so.
 //
 // The lines must be there IN ORDER (AA 00047 P10, audit round 2 R2-9): the operation line is the
-// text's second line (its first is the site's label, never matched), and every fact's lines follow
+// text's second line (its first is the site line, "Site: <label>" in F3 v3, which ./signing.ts
+// requires exactly), and every fact's lines follow
 // it in the order the panel lists them, so a swap's "This site labels it:" line for what it gives is
 // the one after the give's token line, not the get's.
 

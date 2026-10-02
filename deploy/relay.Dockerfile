@@ -30,7 +30,7 @@ COPY packages/core/package.json packages/core/
 COPY packages/core/src packages/core/src
 COPY relay/package.json relay/
 COPY relay/src relay/src
-# The pinned Passport client (acedward/passport @ b2f1847, branch 00047-solana-ed25519-arm, the
+# The pinned Passport client (acedward/passport @ 599327b, branch 00047-solana-ed25519-arm, the
 # vendor/passport submodule): its TypeScript sources only, and an empty mount point for the key
 # volume. The key volume's account module imports compact-runtime 0.20.0 through the
 # `@midnight-ntwrk/compact-runtime-0.20` alias installed above; everything else keeps 0.19.0.

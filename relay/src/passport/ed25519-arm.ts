@@ -27,8 +27,9 @@
 // Track A's client loads the compiled account module (in a deployment, the key volume's), so it is
 // imported here at run time only: a relay without a key volume still starts and serves reads.
 //
-// The message is format F3 v2 (vendor/passport @ b2f1847, AA 00047 P9.C; questions Q25 B′, Q32):
-// every amount shows its exact base units and its full 64-hex token id, and the site's name and
+// The message is format F3 v3 (vendor/passport @ 599327b, AA 00047 P9.C and P10.C; questions Q25 B′,
+// Q32, Q36): the first line is "Site: " + the market's label (the circuit fixes the prefix); every
+// amount shows its exact base units and its full 64-hex token id, and the site's name and
 // decimals only on a line marked as the site's label ("This site labels it: …", from
 // `ed25519TokenResolver`, the client's own `isRenderableTokenDisplay` rule); an offer's deadline
 // reads as a UTC date and time. The relay renders it through core's `ed25519DeviceForCheck`, so it
@@ -41,8 +42,8 @@
 // other mismatch. `restore-enc-key` (AA 00047 P10, audit round 2 R2-3) is the same circuit to ANOTHER
 // key, the one the customer's browser holds: the check refuses the on-chain key itself (a cancel in
 // disguise, which must not escape the cancels' daily cap), and the rebuilt message reads "Rotate
-// encryption key / New key <16 hex>". The first line's text is the vendored client's (TODO(P10.I):
-// P10.C's Q36 site prefix arrives with the re-pin; nothing here renders it).
+// encryption key / New key <16 hex>". The first line's text is the vendored client's ("Site: <label>",
+// F3 v3, questions Q36); nothing here renders it.
 
 import { createHash } from 'node:crypto';
 
@@ -136,7 +137,7 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
       account,
       authNonce: ledger.auth_nonce,
       networkSalt: hex(Uint8Array.from(ledger.evm_domain_salt)),
-      // F3 v2: the arm's rotate_enc_key renders the cancel from the account's current key.
+      // F3 (v2 on): the arm's rotate_enc_key renders the cancel from the account's current key.
       encKey: hex(Uint8Array.from(ledger.enc_key)),
     });
     const counter = BigInt(passport.useCounter);

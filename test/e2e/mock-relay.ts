@@ -171,6 +171,8 @@ export class MockRelay {
   readonly omitFromReport = new Set<string>();
   /** How often the page asked the relay for its Zswap report (AA 00047 P11.B: never). */
   zswapReads = 0;
+  /** Leave every withdrawal's spend and change out of the `/zswap` report (R3-4). */
+  omitWithdrawalsFromReport = false;
   unshielded = new Map<string, bigint>();
   demo = { enabled: true, dailyCap: 25, remainingToday: 7, claimed: new Set<string>() };
   offerStatus: Record<string, string> = {};
@@ -490,6 +492,18 @@ export class MockRelay {
         );
         const change = made ? { nonce: made.nonce, color: made.color, value: BigInt(made.value) } : null;
         if (change) this.output(change, tx);
+        if (this.omitWithdrawalsFromReport) {
+          this.omitFromReport.add(
+            contractCoinNullifier({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, ACCOUNT),
+          );
+          if (change)
+            this.omitFromReport.add(
+              contractCoinCommitment(
+                { nonce: change.nonce, color: change.color, value: change.value.toString() },
+                ACCOUNT,
+              ),
+            );
+        }
         const reported = change && this.misreportChange ? { ...change, nonce: 'c4'.repeat(32) } : change;
         this.authNonce += 1n;
         this.useCounter += 1n;

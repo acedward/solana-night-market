@@ -16,6 +16,8 @@ import type { AccountCheck } from '@nightmarket/core/passport';
 
 import type { AccountChain, AccountOnChain, AccountExpectation } from '../src/chain/indexer.js';
 
+const PREFIX = Buffer.from('midnight:event[v14]:').toString('hex');
+
 export interface FakeChainSource {
   state: AccountStateView | null;
   entries: Array<string | null>;
@@ -100,6 +102,27 @@ export class FakeChain implements AccountChain {
       throughHeight: this.throughHeight,
       ...(this.complete ? {} : { gap: 'the stream was refused' }),
     };
+  }
+
+  /**
+   * NOT part of the page's chain since AA 00047 P11.B: the pre-P11.B page read the account's
+   * transactions as raw events and checked the RELAY's report against them (Q31, Q43). Kept only so
+   * the same tests run against that page for the fail-before evidence (plan P11.B (4)).
+   */
+  async accountTransactions(
+    account: string,
+  ): Promise<Array<{ hash: string; blockHeight: number; events: Array<{ id: number; raw: string }> }>> {
+    this.reads.push(`txs:${account}`);
+    const out = new Map<string, { hash: string; blockHeight: number; events: Array<{ id: number; raw: string }> }>();
+    let id = 0;
+    const add = (txHash: string, blockHeight: number, value: string) => {
+      const t = out.get(txHash) ?? { hash: txHash, blockHeight, events: [] };
+      if (!this.hidden.has(value)) t.events.push({ id: id++, raw: `${PREFIX}0800${account}${value}00` });
+      out.set(txHash, t);
+    };
+    for (const o of this.source.zswapActivity.outputs) add(o.txHash, o.blockHeight, o.commitment);
+    for (const i of this.source.zswapActivity.inputs) add(i.txHash, i.blockHeight, i.nullifier);
+    return [...out.values()];
   }
 
   async transactionCalls(hash: string): Promise<DecodedCall[] | null> {

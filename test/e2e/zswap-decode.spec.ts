@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
 
+import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
+import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { INDEXER, INDEXER_WS } from './mock-indexer.js';
 import { connectPhantom } from './mock-phantom.js';
 import { RELAY } from './mock-relay.js';
@@ -224,5 +226,103 @@ test.describe('the account’s complete history (plan P11.B (1))', () => {
     expect(indexer.byHash).toEqual([]); // nothing read by a hash someone named
     expect(relay.zswapReads).toBe(0); // the relay's Zswap report was never asked for
     await expect(page.getByTestId('history-incomplete')).toHaveCount(0);
+  });
+});
+
+// ── Round 3's attacks on the page's view of the account (audit R3-3, R3-4, R3-6), end to end ──────
+
+const myMake = (page: Page) => page.locator('[data-testid=my-trade][data-role=make]');
+
+/** Make an offer on twBTC/twUSDC (sell 0.05 twBTC at 60,000): live and listed. */
+async function makeAnOffer(page: Page) {
+  await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+  await connectPhantom(page);
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
+  await page.getByTestId('side-sell').click();
+  await page.getByTestId('make-quantity').fill('0.05');
+  await page.getByTestId('make-price').fill('60000');
+  await page.getByTestId('make-sign').click();
+  await expect(page.getByTestId('live-offer-banner')).toBeVisible();
+  await expect(myMake(page)).toHaveAttribute('data-state', 'live');
+}
+
+/** The settling transaction the page recorded for its offer (from its own records). */
+const recordedSettlement = (page: Page) =>
+  page.evaluate(() => {
+    for (const v of Object.values(localStorage)) {
+      const m = /"settledTx":"([0-9a-f]+)"/.exec(String(v));
+      if (m && String(v).includes('"role":"make"')) return m[1];
+    }
+    return null;
+  });
+
+test.describe('round 3’s attacks, against the page’s own decode', () => {
+  test('R3-3: a counterfeit note with a real coin’s colour and nonce adds nothing and takes nothing over', async ({
+    page,
+  }) => {
+    const { relay } = await setup(page, { seeded: true });
+    // The seeded 0.1 twBTC coin's colour and nonce (wallet-fixtures: nonce 0xa1…), claiming 5,000 twBTC.
+    await relay.fakeNote({ nonce: 'a1'.repeat(32), color: COLOUR.twBTC, value: 500_000_000_000n });
+    await page.goto('/#account');
+    await connectPhantom(page);
+    await expect(portfolioRow(page, 'twBTC').getByTestId('passport-amount')).toHaveAttribute('data-raw', '10000000');
+    await expect(portfolioRow(page, 'twBTC').getByTestId('passport-largest')).toHaveAttribute('data-raw', '10000000');
+    await expect(page.getByTestId('unconfirmed-notes')).toHaveAttribute('data-count', '1');
+  });
+
+  test('R3-4: a withdrawal the relay lands, reports failed, and leaves out of its report is confirmed from the chain', async ({
+    page,
+  }) => {
+    const { relay } = await setup(page, { seeded: true });
+    relay.landButFail.add('withdraw');
+    relay.omitWithdrawalsFromReport = true; // the input's spend and the change's leaf: hidden
+    await page.goto('/#account');
+    await connectPhantom(page);
+    await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
+    await page.getByTestId('withdraw-kind-shielded').click();
+    await page.getByTestId('send-token').selectOption(COLOUR.twUSDC);
+    await page.getByTestId('send-amount').fill('100');
+    await page
+      .getByTestId('send-recipient')
+      .fill(
+        formatShieldedAddress({ coinPublicKey: '44'.repeat(32), encryptionPublicKey: '55'.repeat(32) }, 'stagenet'),
+      );
+    await page.getByTestId('send-submit').click();
+    await expect(page.getByTestId('accounts-message')).toContainText('The prover crashed');
+    await page.reload();
+    await connectPhantom(page);
+    // The chain (decoded here) shows the 1,000 spent and the 900 of change: never the 1,000 again.
+    await expect(portfolioRow(page, 'twUSDC').getByTestId('passport-amount')).toHaveAttribute('data-raw', '900000000');
+    await expect(page.getByTestId('pending-change')).toHaveCount(0);
+    expect(relay.zswapReads).toBe(0);
+  });
+
+  test('R3-6: a real coin someone deposits with the offer’s wanted nonce never makes the cancelled offer Filled', async ({
+    page,
+  }) => {
+    const { relay } = await setup(page, { seeded: true });
+    await makeAnOffer(page);
+    const make = relay.submitted.find((s) => s.action === 'open-swap')!.body.payload as {
+      wantNonce: string;
+      wantColor: string;
+      wantAmount: string;
+    };
+    // The relay saw the wanted coin; an attacker pays for it and files its note, in a deposit.
+    await relay.plantWantedCoin({ nonce: make.wantNonce, color: make.wantColor, value: BigInt(make.wantAmount) });
+    await page.getByTestId('cancel-offer').click();
+    await expect(page.getByTestId('trade-message')).toContainText('Cancelled: your offer can no longer be taken');
+    await expect(myMake(page)).toHaveAttribute('data-state', 'cancelled');
+    expect(await recordedSettlement(page)).toBeNull();
+  });
+
+  test('R3-6: the maker’s offer settled by someone is Filled by its decoded swap transaction', async ({ page }) => {
+    const { relay, indexer } = await setup(page, { seeded: true });
+    await makeAnOffer(page);
+    relay.settleOnCancel = true; // asked to cancel, this relay settles the offer it holds instead
+    await page.getByTestId('cancel-offer').click();
+    await expect(myMake(page)).toHaveAttribute('data-state', 'filled');
+    const swapTx = [...relay.chainTxs.entries()].find(([, t]) => t.raw)![0];
+    expect(await recordedSettlement(page)).toBe(swapTx);
+    expect(indexer.byHash).toContain(swapTx); // its raw bytes were read and decoded
   });
 });

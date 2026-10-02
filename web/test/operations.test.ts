@@ -142,9 +142,15 @@ class FakeRelay {
   }
   /** How often the page asked for the relay's Zswap report (AA 00047 P11.B: never). */
   zswapReads = 0;
+  /** Leaves and spends a lying relay leaves out of its report (R3-4). */
+  readonly omitFromReport = new Set<string>();
   async zswap() {
     this.zswapReads += 1;
-    return this.zswapActivity;
+    return {
+      ...this.zswapActivity,
+      outputs: this.zswapActivity.outputs.filter((o) => !this.omitFromReport.has(o.commitment)),
+      inputs: this.zswapActivity.inputs.filter((i) => !this.omitFromReport.has(i.nullifier)),
+    };
   }
 }
 
@@ -876,7 +882,8 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
     const paidFrom = { nonce: '02'.repeat(32), color: COLOUR, value: '40000000' };
     const change = predictWithdrawChange(paidFrom, 30_000_000n)!;
     const changeCommitment = contractCoinCommitment(change, ACCOUNT);
-    // It landed, and the account moved on (nonce 8). The chain carries the spend and the change's leaf.
+    // It landed, and the account moved on (nonce 8). The chain carries the spend and the change's leaf;
+    // the relay's own report leaves both out (which made the pre-P11.B page drop the record).
     relay.state!.authNonce = '8';
     relay.zswapActivity.outputs.push({ commitment: changeCommitment, mtIndex: '300', txHash: 'wd9', blockHeight: 5 });
     relay.zswapActivity.inputs.push({
@@ -884,6 +891,8 @@ describe('the inbox walk and the gated calls (L-ACC.2 to L-ACC.5)', () => {
       txHash: 'wd9',
       blockHeight: 5,
     });
+    relay.omitFromReport.add(changeCommitment);
+    relay.omitFromReport.add(contractCoinNullifier(paidFrom, ACCOUNT));
     const r = await syncAccount(e, ACCOUNT);
     const kept = r.coins.find((c) => c.commitment === changeCommitment)!;
     expect(kept).toMatchObject({ mtIndex: '300', value: '10000000' });

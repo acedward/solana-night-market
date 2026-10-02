@@ -125,12 +125,14 @@ says the same in plain words.
   (`exchange-busy`) until it resets; making offers, cancelling and withdrawing keep working. Only the
   exchange's operator can change this. (Audit R4b-4; issue 00055.)
 - **An offer that can never settle.** A maker can list an offer that asks to be paid a coin its own
-  account has already received. No take of that offer can settle, and each taker who tries it uses
-  one of their 10 daily unsettled-take tries. The make caps bound how many such offers one account
-  can list, and no funds are at risk. (Audit round 4c, F-A4c-1 / F-B4c-1.)
+  account has already received (the `want-reused` check covers takes only). No take of that offer
+  can settle, and each taker who tries it uses one of their 10 daily unsettled-take tries and one of
+  the exchange's settlements. The make caps (20 a day) bound how many such offers one account can
+  list, and no funds are at risk. (Audit R4c-1.)
 - **A rare race can mislabel a take.** When an account's own offer is filled at the same moment as
-  one of its takes, the relay may report the take as settled. Only the label is wrong: the account
-  really received the coin. (Audit round 4c, F-A4c-2 / F-B4c-2.)
+  one of its own takes (the same coin and the same wanted coin), the relay may report the take as
+  settled. Only the label is wrong: the account really received the coin. The page never makes such
+  a pair. (Audit R4c-2.)
 - **The `via-sponsor` demo-token path** (not the default; `direct` is): a delivery resumed after a
   failure deposits from the sponsor's pooled balance of that token, so it can take a coin minted
   for another pending claim, which is then held back for the operator. (Audit R4-7.)

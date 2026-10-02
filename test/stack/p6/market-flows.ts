@@ -479,7 +479,9 @@ async function open(who: 'A' | 'B') {
   out.siteCheck = await siteCheck(who, { fresh: true, until: (c) => c.ok });
   put(`open${who}`, out);
   say(`the site's opening check: ${json(out.siteCheck)}`);
-  if (!(out.siteCheck as { ok: boolean }).ok) throw new Error(`the site refuses the new account ${who}`);
+  // Recorded and the run goes on (the other steps do not depend on it); the run fails at its end.
+  if (!(out.siteCheck as { ok: boolean }).ok)
+    softFail(`the site refuses the new account ${who}: ${json(out.siteCheck)}`);
   if (who === 'A') {
     const replay = await post('register', { payload: reg, auth: { message: env.message, signature: env.signature } });
     out.replayedEnvelope = { status: replay.status, code: replay.body.error?.code, detail: replay.body.error?.detail };
@@ -654,6 +656,15 @@ async function make() {
 }
 
 const json = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString(10) : x));
+
+/** A failed check that does not stop the run: recorded, and the run fails at its end. */
+const softFailures: string[] = [];
+function softFail(msg: string) {
+  softFailures.push(msg);
+  run.softFailures = softFailures;
+  save();
+  say(`CHECK FAILED (the run goes on): ${msg}`);
+}
 
 /** The exchange's own view of an offer: its detail (legs as the kernel decoded them), whether the
  *  public book lists it (paging the offers that give its token), and its status. */
@@ -1999,6 +2010,7 @@ async function main() {
   run.finishedAt = new Date().toISOString();
   record.accounts = { A: state.A.account ?? null, B: state.B.account ?? null };
   save();
+  if (softFailures.length) throw new Error(`${softFailures.length} check(s) failed: ${softFailures.join(' | ')}`);
   step('done');
 }
 

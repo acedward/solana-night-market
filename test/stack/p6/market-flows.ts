@@ -143,7 +143,8 @@ import nacl from 'tweetnacl';
 // The SITE's own chain reader (AA 00047 P9.S/P10.S): what the page believes about an account.
 import { ChainReader, indexerWsUrlFor } from '../../../web/src/chain/indexer.js';
 // AA 00047 P11.I: the page's own operations, headless (./page.ts), and a third party (./third-party.ts).
-import { IndexerClient } from '../../../relay/src/chain/indexer.js';
+import { IndexerClient, accountTxViews, ledgerEventDecoder } from '../../../relay/src/chain/indexer.js';
+import { judgeTake } from '../../../relay/src/trade/reconcile.js';
 import {
   JobFailedError,
   pendingChanges,
@@ -154,7 +155,7 @@ import {
 } from '../../../web/src/passport/operations.js';
 import { readCoins } from '../../../web/src/passport/records.js';
 import { RelayClient, RelayError } from '../../../web/src/relay/client.js';
-import { reconcileOffers } from '../../../web/src/trade/operations.js';
+import { reconcileOffers, wantCoinOf } from '../../../web/src/trade/operations.js';
 import { putTrade, readTrades, type TradeRecord } from '../../../web/src/trade/records.js';
 import { headlessPage, type HeadlessPage } from './page.js';
 import { BOMB_ROUND, openThirdParty, type StackToken, type ThirdParty } from './third-party.js';
@@ -958,6 +959,54 @@ async function take() {
   saveState();
   put('take', out);
   if (!out.balancesExact) throw new Error('the balances did not move by exactly the legs');
+}
+
+/**
+ * P11.F (audit round 4 R4-2): the relay's reconcile of a refused take, over the REAL localnet indexer.
+ * The relay's reader (now with each call's entry point) and `judgeTake` on the transactions the take
+ * left: B's take is its own settlement ('settled', the job would succeed); A's offer coin, spent by
+ * that swap, is a race for any other approval A had in flight ('raced': never charged).
+ */
+async function reconcileStep() {
+  const o = state.offer;
+  const settledHash = String((record.take as { settledHash?: string } | undefined)?.settledHash ?? '');
+  if (!o || !settledHash) throw new Error('no settled take recorded (run make and take first)');
+  step('reconcile (P11.F, R4-2): the relay judges a refused take by its transaction, on the localnet indexer');
+  const decode = await ledgerEventDecoder();
+  const client = new IndexerClient({ indexerUrl: INDEXER_URL, indexerWsUrl: INDEXER_WS_URL });
+  const out: Record<string, unknown> = { settledHash };
+  const settledAt = Number((record.take as { tx?: Array<{ block: number | null }> }).tx?.[0]?.block ?? 0);
+  for (const [who, role] of [
+    ['B', 'take'],
+    ['A', 'make'],
+  ] as const) {
+    const account = state[who].account!;
+    const pg = page(who);
+    const rec = readTrades(pg.store, pg.scope, account).find((t) => t.offerId === o.offerId && t.role === role)!;
+    const coin = readCoins(pg.store, pg.scope, account).find((c) => c.commitment === rec.coin)!;
+    const read = await client.accountTransactions(account);
+    const txs = accountTxViews(account, read!.txs, decode);
+    const swapTx = txs.find((t) => t.hash === settledHash);
+    const nonce = BigInt((await http<{ authNonce: string }>(`/v1/accounts/${account}/state`)).body.authNonce);
+    // B: its own take. A: another approval A could have had in flight, paying with the SAME coin as its
+    // offer and wanting a fresh coin, signed at the nonce before the swap.
+    const want = who === 'B' ? wantCoinOf(rec) : { nonce: 'f1'.repeat(32), color: wantCoinOf(rec).color, value: '1' };
+    const verdict = judgeTake({
+      account,
+      take: { coin: { nonce: coin.nonce, color: coin.color, value: coin.value }, want, authNonce: rec.authNonce },
+      txs,
+      startedAt: settledAt - 1,
+      ledgerNonce: nonce,
+    });
+    out[who] = { entryPoints: swapTx?.entryPoints ?? null, verdict, txs: txs.length };
+    say(`${who}: the swap's calls of the account ${json(swapTx?.entryPoints)}; judgeTake → ${json(verdict)}`);
+  }
+  put('reconcile', out);
+  const v = (who: string) => (out[who] as { verdict: { kind: string; txHash?: string; by?: string } }).verdict;
+  if (v('B').kind !== 'settled' || v('B').txHash !== settledHash)
+    throw new Error(`B's take is not judged its own settlement: ${json(v('B'))}`);
+  if (v('A').kind !== 'raced' || v('A').txHash !== settledHash || v('A').by !== 'coin')
+    throw new Error(`A's spent offer coin is not judged a race: ${json(v('A'))}`);
 }
 
 async function recipientKeys() {
@@ -2839,6 +2888,9 @@ async function main() {
         break;
       case 'take':
         await take();
+        break;
+      case 'reconcile':
+        await reconcileStep();
         break;
       case 'withdraw':
         await withdraw();

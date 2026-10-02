@@ -8,18 +8,18 @@
 
 export const PINNED_ACCOUNT_KEYS = {
   /** The relay key volume's fingerprint these were taken from (RELAY_KEYS_FINGERPRINT). */
-  keySet: 'efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f',
+  keySet: '21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e',
   /** The acedward/passport commit the key set was compiled from. */
-  passportCommit: 'b2f1847271435d37c441966271aa8e20c9b09ecf',
+  passportCommit: '599327b918b55afc95d6c98a89bcd15f4e8b0d53',
   circuits: {
     activate_initial_device_with_ed25519: '883151b8b20534627a7938624f2f8f681ab659673cc43d22ddbfd0e4848c8110',
-    append_inbox_with_ed25519: 'd13f69820546291f7afa916d7d4bd2bb630efaeeac330ce9fadd93541f403701',
+    append_inbox_with_ed25519: 'cf025f6a1f8e597b7b40d93ea6f3b7a9c8c55141d7e42e8e1854ab166d73376f',
     deposit_shielded: '6761a2e9cb905a115e7705b63b7df57b3c14dfa39fa48411ff6f512b8ff916b3',
     deposit_unshielded: '3deb950234a50b1515d496d687bd173118cf2e7461ab02d63270dbbd5ac5a973',
-    open_swap_shielded_with_ed25519: '4794a0e3c6c87da4a5b49fc1a4502691ba452bbb9460cd246e569da14fb72eeb',
-    rotate_enc_key_with_ed25519: 'd3c0cfb87d19be79cfb62e8aedb2d2009ace4f9f7e76e30d20a7de4ad933babe',
-    withdraw_shielded_to_contract_with_ed25519: '4ed29c43fb52744927830cbbe0bf33bb9d50722ae268806f10292ded8057e34b',
-    withdraw_shielded_with_ed25519: '41a81b9255b57127555534026491d345aba6998f3497b6b79fbce3bf7c7fc316',
-    withdraw_unshielded_with_ed25519: '7123727581e745741349fff384b9aec0308a93363bac6db262781098a9361a52',
+    open_swap_shielded_with_ed25519: '8ba4a638edd1e8b8bfb9c53b98740c61e8a3cf7c6eca461b22490f8a7b695b7e',
+    rotate_enc_key_with_ed25519: 'ecfe247a69dbd96e2fdadfb2d9fd569add3a3bd26a0f2341e35293dfb7006bbe',
+    withdraw_shielded_to_contract_with_ed25519: '42deca485cee46f0ba4134a067057878bd016362adcd952e574445460242ca0e',
+    withdraw_shielded_with_ed25519: '0af6b9754da02f4b9dd919e5127de96b7d8a44ff318f23b3f4ed6429ad21ed91',
+    withdraw_unshielded_with_ed25519: '2ee9cef2664825260653525f689ed4b79ffa3b5b4a2b1443338a41e65785503b',
   },
 } as const;

@@ -115,10 +115,10 @@ test('make an offer and take one: each ONE approval of the readable swap text th
   await expect(page.getByTestId('my-offers-off-chain')).toContainText('listed on the market, not on-chain');
   expect(phantom.requests).toHaveLength(1);
   const make = lines(phantom.requests[0]!.text);
-  // The arm's 24-character label field, after the client's fixed "Site: " from F3 v3 on (P10.C,
-  // questions Q36): "Site: Night Market - stagenet ". TODO(P10.I): pinned at F3 v2 the prefix is still
-  // empty; the re-pin makes it "Site: ".
-  expect(make[0]).toBe(`${SITE_LINE_PREFIX}Night Market - stagenet `);
+  // The arm's 24-character label field, after the client's fixed "Site: " (F3 v3, P10.C, questions
+  // Q36; pinned by P10.I): "Site: Night Market - stagenet ".
+  expect(SITE_LINE_PREFIX).toBe('Site: ');
+  expect(make[0]).toBe('Site: Night Market - stagenet ');
   expect(make[1]).toBe('Swap offer');
   // F3 v2 (questions Q25 B′, Q32): the enforced base units and full token ids, the site's reading as
   // its label (trailing spaces pad each field to a fixed width).

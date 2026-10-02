@@ -25,6 +25,7 @@ import {
   SITE_LINE_PREFIX,
   siteLine,
   PASSPORT_CLIENT_COMMIT,
+  ED25519_SITE_PREFIX,
   assertDeviceKeyDecodes,
   assertSafeEd25519Message,
   callContext,
@@ -34,6 +35,7 @@ import {
   ed25519DeviceOf,
   ed25519SignatureHex,
   ed25519TokenResolver,
+  isRenderableLabel,
   isRenderableTokenDisplay,
   marketLabel,
   openSwapArgs,
@@ -75,10 +77,37 @@ describe('what the browser and the relay agree on', () => {
     for (const n of NETWORK_NAMES) expect(marketLabel(n)).toMatch(LABEL_RULE);
     for (const bad of ['', ' Night Market', 'Night  Market', 'Night Market ', 'Night\tMarket'])
       expect(LABEL_RULE.test(bad)).toBe(false);
-    expect(siteLine('stagenet')).toBe(`${SITE_LINE_PREFIX}Night Market - stagenet`);
-    // TODO(P10.I): pinned at F3 v2 (`b2f1847`) the prefix is empty; at the re-pin (F3 v3, `599327b`)
-    // it is the client's `ED25519_SITE_PREFIX`, and this reads "Site: Night Market - stagenet".
-    expect(SITE_LINE_PREFIX).toBe((ED25519_MESSAGE_FORMAT as string) === 'F3 v3' ? 'Site: ' : '');
+    // Pinned at F3 v3 (passport `599327b`, P10.I): the prefix is the client's `ED25519_SITE_PREFIX`.
+    expect(ED25519_MESSAGE_FORMAT).toBe('F3 v3');
+    expect(SITE_LINE_PREFIX).toBe('Site: ');
+    expect(SITE_LINE_PREFIX).toBe(ED25519_SITE_PREFIX);
+    expect(siteLine('stagenet')).toBe('Site: Night Market - stagenet');
+    expect(siteLine('undeployed')).toBe('Site: Night Market - local');
+  });
+
+  it('the market’s label rule is the pinned client’s own (`isRenderableLabel`, the circuit’s rule)', () => {
+    for (const n of NETWORK_NAMES) expect(isRenderableLabel(marketLabel(n))).toBe(true);
+    // The client and the market agree on every case P10.C's parity corpus names.
+    for (const label of [
+      'Night Market - stagenet',
+      'Cancel all open offers',
+      'a',
+      '',
+      ' ',
+      ' Night Market',
+      '   Night Market',
+      'Night  Market',
+      'Night\tMarket',
+      'Night\u007fMarket',
+      'Night Märket',
+      'Night\nMarket',
+      'Night\u0000Market',
+    ])
+      expect([label, isRenderableLabel(label)]).toEqual([label, LABEL_RULE.test(label)]);
+    // Trailing spaces are the padding the circuit adds, which the client accepts; the market's labels
+    // carry none (LABEL_RULE is stricter there, never looser).
+    expect(isRenderableLabel('Night Market ')).toBe(true);
+    expect(LABEL_RULE.test('Night Market ')).toBe(false);
   });
 
   it('the token display: symbol and decimals from the registry; an unrenderable symbol shows as unknown', () => {
@@ -106,7 +135,7 @@ describe('what the browser and the relay agree on', () => {
   });
 
   it('the pinned client is Track A’s branch head', () => {
-    expect(PASSPORT_CLIENT_COMMIT).toBe('b2f1847271435d37c441966271aa8e20c9b09ecf');
+    expect(PASSPORT_CLIENT_COMMIT).toBe('599327b918b55afc95d6c98a89bcd15f4e8b0d53');
   });
 });
 
@@ -121,12 +150,10 @@ describe('a gated call: the wallet signs the readable message, the relay re-chec
     const auth = await device.sign(callContext(ctx), withdraw, 3n);
     expect(asked).toHaveLength(1);
     const text = new TextDecoder().decode(asked[0]);
-    // F3 v2 (questions Q25 B′, Q32): the enforced base units and the full token id, then the site's
-    // name and decimals marked as the site's label.
-    // TODO(P10.I): F3 v3 (P10.C, Q36) puts "Site: " before the label; the client's prefix is used here
-    // (empty while pinned at F3 v2).
+    // F3 v3 (questions Q25 B′, Q32, Q36): the site line "Site: <label>", then the enforced base units
+    // and the full token id, then the site's name and decimals marked as the site's label.
     expect(text.split('\n').slice(0, 7)).toEqual([
-      `${SITE_LINE_PREFIX}Night Market - stagenet `,
+      'Site: Night Market - stagenet ',
       'Withdraw shielded',
       `Base units ${'10000000'.padEnd(24)}`,
       `Token ${twUSDC}`,

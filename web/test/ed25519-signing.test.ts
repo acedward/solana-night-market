@@ -66,9 +66,10 @@ describe('ed25519ActionSigning (the browser side of the arm)', () => {
     const signing = ed25519ActionSigning(signer, display);
     expect(signing.deviceKey).toBe(signer.deviceKey);
     const { text } = signing.preview(ctx, gated);
-    // F3 v3 (P10.C, questions Q36): "Site: Night Market - stagenet " (the client's prefix + the padded
-    // label). TODO(P10.I): pinned at F3 v2 the prefix is still empty; the re-pin makes it "Site: ".
-    expect(text.startsWith(`${SITE_LINE_PREFIX}Night Market - stagenet \nWithdraw shielded\n`)).toBe(true);
+    // F3 v3 (P10.C, questions Q36; pinned by P10.I): "Site: Night Market - stagenet " (the client's
+    // fixed prefix + the padded label).
+    expect(SITE_LINE_PREFIX).toBe('Site: ');
+    expect(text.startsWith('Site: Night Market - stagenet \nWithdraw shielded\n')).toBe(true);
     expect(asked).toHaveLength(0);
     const auth = await signing.authorise(ctx, gated, 4n);
     expect(asked).toHaveLength(1);

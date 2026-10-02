@@ -11,7 +11,7 @@
 //     request), yielding the circuit's trailing authorisation arguments;
 //   - the device a registration enrols.
 //
-// B1.5 typed the seam with Track A's client (vendor/passport, now @ b2f1847): a check's `auth` is Track A's
+// B1.5 typed the seam with Track A's client (vendor/passport, now @ 599327b): a check's `auth` is Track A's
 // `Ed25519Authorisation` and a registration's device its `Ed25519Device`. `./ed25519-arm.ts` is the
 // arm (lane B3): it rebuilds each call's F3 message from the call's arguments and the account's
 // state and verifies the wallet's signature over it, the same signature the circuit verifies, so

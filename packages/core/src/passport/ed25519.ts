@@ -37,10 +37,10 @@ import {
   type Ed25519SignatureArg,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519.js';
 import {
+  ED25519_SITE_PREFIX,
   isRenderableTokenDisplay,
   type EdTokenResolver,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
-import * as edMessage from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
 import { marketLabel } from '../market-label.js';
 
 export {
@@ -65,11 +65,13 @@ export {
   ED25519_MESSAGE_BYTES,
   ED25519_MESSAGE_FORMAT,
   ED25519_SITE_BYTES,
+  ED25519_SITE_PREFIX,
   ED25519_SYMBOL_BYTES,
   ED25519_UNITS_BYTES,
   UNKNOWN_TOKEN,
   assertSafeEd25519Message,
   ed25519PossessionMessage,
+  isRenderableLabel,
   isRenderableTokenDisplay,
   parsesAsSolanaTransaction,
   renderDeadline,
@@ -96,18 +98,18 @@ export { MARKET_LABELS, marketLabel } from '../market-label.js';
 
 /**
  * The fixed text the pinned client's renderer (and the circuit) puts in front of the label on the
- * first line (AA 00047 P10, questions Q36): `'Site: '` from F3 v3 on (passport `599327b`,
- * `ED25519_SITE_PREFIX`), none in F3 v2 (`b2f1847`, pinned until P10.I re-pins). Read from the
- * client itself, so the re-pin needs no change here.
+ * first line (AA 00047 P10, questions Q36): `'Site: '` in F3 v3 (passport `599327b`,
+ * `ED25519_SITE_PREFIX`; P10.I re-pinned to it). Taken from the client itself, so the page, the
+ * relay and the circuit cannot disagree on it.
  */
-export const SITE_LINE_PREFIX: string = (edMessage as { ED25519_SITE_PREFIX?: string }).ED25519_SITE_PREFIX ?? '';
+export const SITE_LINE_PREFIX: string = ED25519_SITE_PREFIX;
 
 /** The first line of every account call's message on `network`, trailing spaces trimmed: what the
  *  signing gate requires exactly (R2-9, Q36), e.g. "Site: Night Market - stagenet" in F3 v3. */
 export const siteLine = (network: NetworkName): string => `${SITE_LINE_PREFIX}${marketLabel(network)}`;
 
 /**
- * How the arm labels a token (its symbol and decimals), from the market's registry: the F3 v2 wallet
+ * How the arm labels a token (its symbol and decimals), from the market's registry: the F3 wallet
  * line "This site labels it: <amount> <symbol>" (questions Q25 B′, Q32). The base units and the full
  * token id are shown whatever this says. A display the circuit cannot render (the client's own
  * `isRenderableTokenDisplay`: a symbol of 1..8 printable characters WITHOUT a space, decimals 0..18)

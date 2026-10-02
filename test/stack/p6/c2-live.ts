@@ -11,6 +11,13 @@
 // (market-flows.ts `p9-negatives`); this script goes around both, the way a malicious relay or page
 // would, straight to the account's circuit through the relay's own runtime.
 //
+// AA 00047 P10.I adds questions Q36 at the circuit (F3 v3, passport 599327b): an HONEST withdrawal of
+// the same coin (its own token, an honest witness store), signed over a first line the circuit never
+// renders: (1) the bare label without "Site: " (F3 v2's layout) must fail `invalid signature`; (2) a
+// label pushed off the marker by a leading space must fail the circuit's label-shape assert (`display:
+// the site label must be printable words with single spaces`) before any signature check. Neither is
+// proven or sent (`Q36_CASES=0` skips them).
+//
 // It opens the sponsor wallet (the providers need one), so the relay must be stopped (one wallet
 // process per seed). It needs the coin market-flows.ts recorded in state.json (`c2Coin`).
 //
@@ -220,9 +227,104 @@ async function main() {
       if (!/held coin colour does not match/.test(msg)) process.exitCode = 1;
     }
     result.seconds = (Date.now() - t0) / 1000;
+    say(`outcome: ${String(result.outcome)}`);
+
+    // Q36 at the circuit: an honest call (the coin's own token, an honest store) under first lines the
+    // circuit never renders. Each must fail in the circuit, before any proof.
+    if (process.env.Q36_CASES !== '0') {
+      const honestColor = coin.color;
+      const honestChallenge = (pureCircuits as unknown as Record<string, (...a: unknown[]) => Uint8Array>)
+        .challenge_withdraw_shielded_with_ed25519!(
+        { bytes: ctx.contractAddress },
+        pk,
+        ctx.evmDomainSalt,
+        { bytes: recipient },
+        honestColor,
+        amount,
+        coin,
+        ctx.authNonce,
+      );
+      const label = marketLabel(NETWORK);
+      const honest = renderEd25519Message(
+        {
+          contractAddress: ctx.contractAddress,
+          authNonce: ctx.authNonce,
+          challenge: honestChallenge,
+          label,
+          tokens: ed25519TokenResolver(tokens),
+        },
+        { op: 'withdrawShielded', recipient, color: honestColor, amount },
+      );
+      const rest = honest.text.split('\n').slice(1).join('\n');
+      const ascii = (t: string) => Uint8Array.from([...t].map((c) => c.charCodeAt(0)));
+      const spaced = ` ${label}`;
+      const q36 = [
+        {
+          name: 'bare first line (no "Site: ")',
+          text: `${label.padEnd(24)}\n${rest}`,
+          show: honest.show,
+          expect: /invalid signature/,
+        },
+        {
+          name: 'leading-space label ("Site:  Night Market …")',
+          text: `Site: ${spaced.padEnd(24)}\n${rest}`,
+          // The display input the page would pass for that label (the client itself refuses to build it).
+          show: { ...honest.show, label: [...spaced.padEnd(24)].map((c) => BigInt(c.charCodeAt(0))) },
+          expect: /display: the site label must be printable words with single spaces/,
+        },
+      ];
+      const honestStore = (await rt.client.account.CustodyAccount.connect(providers, rt.compiledAccount(), account, {
+        ...rt.client.witnesses.emptyCoinStore(),
+        coins: {
+          [coinRec.color]: {
+            nonceHex: coinRec.nonce,
+            colorHex: coinRec.color,
+            value: coinRec.value,
+            mtIndex: coinRec.mtIndex,
+          },
+        },
+      })) as { handle: { callTx: Record<string, (...a: unknown[]) => Promise<unknown>> } };
+      const cases: Record<string, unknown>[] = [];
+      for (const c of q36) {
+        const bytes = ascii(c.text);
+        const s = nacl.sign.detached(bytes, kp.secretKey);
+        const rec: Record<string, unknown> = {
+          name: c.name,
+          firstLine: c.text.split('\n')[0],
+          signatureVerifies: nacl.sign.detached.verify(bytes, s, kp.publicKey),
+        };
+        const q0 = Date.now();
+        try {
+          await honestStore.handle.callTx['withdraw_shielded_with_ed25519']!(
+            { bytes: recipient },
+            honestColor,
+            amount,
+            pk,
+            counter,
+            decodeEd25519Signature(s),
+            c.show,
+          );
+          rec.outcome = 'ACCEPTED (this is a failure)';
+          process.exitCode = 1;
+        } catch (e) {
+          const chain: string[] = [];
+          for (let x: unknown = e, i = 0; x && i < 8; x = (x as { cause?: unknown }).cause, i++) {
+            chain.push(String((x as Error)?.message ?? x));
+          }
+          const msg = `${chain.join(' <- ')}\n${String((e as Error)?.stack ?? e)}`;
+          rec.refusedAsExpected = c.expect.test(msg);
+          rec.outcome = rec.refusedAsExpected ? `REFUSED by the circuit: ${c.expect.source}` : 'REFUSED (other)';
+          rec.error = msg.slice(0, 1500);
+          if (!rec.refusedAsExpected) process.exitCode = 1;
+        }
+        rec.seconds = (Date.now() - q0) / 1000;
+        say(`Q36 ${c.name}: ${String(rec.outcome)}`);
+        cases.push(rec);
+      }
+      result.q36 = cases;
+    }
     const l2 = await rt.ledgerState(account);
     result.authNonce = { before: l.auth_nonce, after: l2?.auth_nonce ?? null };
-    say(`outcome: ${String(result.outcome)}`);
   } finally {
     result.finishedAt = new Date().toISOString();
     save();

@@ -15,6 +15,14 @@
 # Then STEPS2 (an unshielded withdrawal, cancel, an expired offer, the P9 refusals, the P6 refusals),
 # and with the relay stopped c2-live.ts (audit C2 at the circuit) after tamper-live.ts.
 #
+# AA 00047 P10.I extends it (the round-2 fix pass): STEPS2 adds the Q36 refusals (`p10-negatives`) and
+# the key restore (`restore`); STEPS3 (`fairness`) runs the R2-1 probe on the real relay; STEPS4
+# (`caps`) runs with the relay recreated under lowered per-account caps (CAPS=2,3,2,1: open offers,
+# makes/day, cancels/day, restores/day) and STEPS5 (`caps-restore`) after recreating it with the
+# defaults (the counters live in memory). The contract prover is restarted, relay stopped, before
+# every phase (rc.8's memory grows across proofs, plan R7); c2-live.ts adds Q36 at the circuit. Every
+# container has a memory cap (*_MEM_LIMIT, compose.yml); $OUT/mem.log samples the stack's use.
+#
 #   KEYS_DIR=~/.cache/aa-00047/b3-keys RELAY_IMAGE=aa00047-p6/relay:<sha> APP_VOLUME=<check volume> \
 #   OUT=<dir> PS_PARAMS=<dir> PS8_PARAMS=<dir> RELAY_KEYS_FINGERPRINT=<pin> test/stack/p6/run-local.sh
 #
@@ -36,7 +44,11 @@ export INDEXER_IMAGE="${INDEXER_IMAGE:-midnightntwrk/indexer-standalone:4.4.0-rc
 export RELAY_KEYS_FINGERPRINT="${RELAY_KEYS_FINGERPRINT:-}"
 export DEMO_TOKENS_PATH="${DEMO_TOKENS_PATH:-direct}"
 STEPS="${STEPS:-open-a,open-b,demo-a,demo-b,make,take,withdraw}"
-STEPS2="${STEPS2:-withdraw-unshielded,cancel,expired,p9-negatives,negatives}"
+STEPS2="${STEPS2:-withdraw-unshielded,cancel,p10-negatives,restore,expired,p9-negatives,negatives}"
+STEPS3="${STEPS3-fairness}"
+STEPS4="${STEPS4-caps}"
+STEPS5="${STEPS5-caps-restore}"
+CAPS="${CAPS:-2,3,2,1}"
 export MAKE_LIFETIME="${MAKE_LIFETIME:-900}"
 FUND_KEYS_DIR="${FUND_KEYS_DIR:-$KEYS_DIR}"
 
@@ -60,8 +72,10 @@ printf '%064x\n' "${FUNDER_SEED_N:-1}" >"$RUN_DIR/funder.seed"
 chmod 600 "$RUN_DIR/sponsor.seed" "$RUN_DIR/batcher.seed" "$RUN_DIR/funder.seed"
 
 dc() { docker compose -f "$HERE/compose.yml" "$@"; }
+MEM_PID=""
 teardown() {
   set +e
+  [[ -n "$MEM_PID" ]] && kill "$MEM_PID" 2>/dev/null
   dc --profile relay logs --no-color relay >"$OUT/relay.log" 2>&1
   dc --profile relay logs --no-color kernel >"$OUT/mock-exchange.log" 2>&1
   dc logs --no-color proof-server-rc8 2>&1 | tail -200 >"$OUT/proof-server-rc8.tail.log"
@@ -76,6 +90,12 @@ trap teardown EXIT
 
 echo "run-local: $COMPOSE_PROJECT_NAME (node :$NODE_PORT, indexer :$INDEXER_PORT, relay :$RELAY_PORT)"
 dc up -d node indexer proof-server proof-server-rc8
+# The stack's memory, once a minute (the host is shared: plan "Docker").
+(while :; do
+  { date -u +%FT%TZ; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep "^$COMPOSE_PROJECT_NAME"; } >>"$OUT/mem.log" 2>&1
+  sleep 60
+done) &
+MEM_PID=$!
 for i in $(seq 1 120); do
   curl -sf "http://127.0.0.1:$INDEXER_PORT/api/v4/graphql" -H 'content-type: application/json' \
     -d '{"query":"{ block { height } }"}' | grep -q '"height"' && break
@@ -122,12 +142,41 @@ done
 curl -s "http://127.0.0.1:$RELAY_PORT/health" >"$OUT/health.json" || true
 echo "run-local: relay up (DEMO_TOKENS_PATH=$DEMO_TOKENS_PATH)"
 
+relay_ready() {
+  for i in $(seq 1 100); do
+    curl -sf "http://127.0.0.1:$RELAY_PORT/health" | grep -q '"synced":true' && return 0
+    sleep 3
+  done
+  echo "run-local: the relay is not ready"
+  return 1
+}
+# A fresh contract prover (the relay stopped first: nothing in flight). rc.8's memory grows across
+# proofs (P9.I local run 3: OOM-killed at 14 GB after about 25).
+fresh_prover() {
+  dc logs --no-color proof-server-rc8 2>&1 | tail -100 >"$OUT/proof-server-rc8.before-restart-$1.log"
+  dc restart proof-server-rc8 >/dev/null
+  for i in $(seq 1 30); do
+    docker run --rm --network "${COMPOSE_PROJECT_NAME}_default" "$BUN_IMAGE" bun -e \
+      "const r = await fetch('http://proof-server-rc8:6300/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" \
+      >/dev/null 2>&1 && break
+    sleep 2
+  done
+  echo "run-local: fresh contract prover ($1)"
+}
+# Recreate the relay container (new settings); its log so far is kept first.
+relay_recreate() { # <name>
+  dc --profile relay logs --no-color relay >"$OUT/relay-$1.log" 2>&1 || true
+  dc --profile relay up -d --no-deps --force-recreate relay >/dev/null
+  relay_ready
+  echo "run-local: relay recreated ($1)"
+}
+
 status=0
 flows() { # <steps>
   bun_run -v "$RUN_DIR:/run/nm:ro" -v "$STATE_DIR:/state" -v "$OUT:/out" -e RELAY_URL=http://relay:8080 \
     -e NETWORK=undeployed -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out \
     -e KERNEL_URL=http://kernel:9999 -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS="$1" \
-    -e MAKE_LIFETIME="$MAKE_LIFETIME" ${UNSHIELDED_COLOUR:+-e UNSHIELDED_COLOUR="$UNSHIELDED_COLOUR"} \
+    -e MAKE_LIFETIME="$MAKE_LIFETIME" -e CAPS="$CAPS" ${UNSHIELDED_COLOUR:+-e UNSHIELDED_COLOUR="$UNSHIELDED_COLOUR"} \
     "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
 }
 if flows "$STEPS"; then
@@ -154,6 +203,8 @@ if [[ "$status" == 0 && -n "$STEPS2" ]]; then
       echo "run-local: unshielded funding FAILED"
       status=1
     fi
+    # P10.I: a fresh contract prover for the next phase, while the relay is stopped.
+    [[ "${FUNDER_SEED_N:-1}" == 1 ]] && fresh_prover phase2
     if [[ "${FUNDER_SEED_N:-1}" == 1 ]]; then
       dc --profile relay start relay >/dev/null
       for i in $(seq 1 100); do
@@ -168,6 +219,48 @@ if [[ "$status" == 0 && -n "$STEPS2" ]]; then
       echo "run-local: market flows PASS ($STEPS2)"
     else
       echo "run-local: market flows FAILED ($STEPS2)"
+      status=1
+    fi
+  fi
+fi
+
+# P10.I, R2-1 on the real relay: the fairness probe on a fresh prover.
+if [[ "$status" == 0 && -n "$STEPS3" ]]; then
+  dc --profile relay stop relay >/dev/null
+  fresh_prover phase3
+  dc --profile relay start relay >/dev/null
+  relay_ready
+  if flows "$STEPS3"; then
+    echo "run-local: market flows PASS ($STEPS3)"
+  else
+    echo "run-local: market flows FAILED ($STEPS3)"
+    status=1
+  fi
+fi
+
+# P10.I, R2-1's per-account caps: the relay recreated with lowered caps, then with the defaults (the
+# counters live in memory: a restart resets them).
+if [[ "$status" == 0 && -n "$STEPS4" ]]; then
+  IFS=, read -r CAP_OFFERS_MAX_OPEN CAP_MAKES_PER_DAY CAP_CANCELS_PER_DAY CAP_RESTORES_PER_DAY <<<"$CAPS"
+  dc --profile relay stop relay >/dev/null
+  fresh_prover phase4
+  CAP_OFFERS_MAX_OPEN=$CAP_OFFERS_MAX_OPEN CAP_MAKES_PER_DAY=$CAP_MAKES_PER_DAY \
+    CAP_CANCELS_PER_DAY=$CAP_CANCELS_PER_DAY CAP_RESTORES_PER_DAY=$CAP_RESTORES_PER_DAY relay_recreate phase3
+  docker inspect "$(dc --profile relay ps -q relay)" --format '{{range .Config.Env}}{{println .}}{{end}}' |
+    grep -E '^(OFFERS_MAX_OPEN|MAKES|CANCELS|RESTORES)_PER' >"$OUT/caps-env.txt" || true
+  if flows "$STEPS4"; then
+    echo "run-local: market flows PASS ($STEPS4)"
+  else
+    echo "run-local: market flows FAILED ($STEPS4)"
+    status=1
+  fi
+  if [[ -n "$STEPS5" ]]; then
+    dc --profile relay stop relay >/dev/null
+    relay_recreate phase4
+    if flows "$STEPS5"; then
+      echo "run-local: market flows PASS ($STEPS5)"
+    else
+      echo "run-local: market flows FAILED ($STEPS5)"
       status=1
     fi
   fi

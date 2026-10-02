@@ -99,9 +99,10 @@ describe('decodeAccountState (the indexer’s serialised ContractState, decoded 
     const s = decodeAccountState(f.account, f.state);
     // Deployed by the market on 2026-09-30 with the PREVIOUS key set (a627edb1…, vendor/passport
     // 451f761): authority retired, one device. AA 00047 P9.I re-pinned the build to the P9.C set
-    // (efc52fbc…, b2f1847: F3 v2, C2, no device management), so this build REFUSES it: the gated
-    // circuits and the offer have other verifier keys, and the device pair is an extra operation.
-    // Old accounts cannot be used with this build (the BREAKING note).
+    // (efc52fbc…, b2f1847: F3 v2, C2, no device management) and P10.I to the P10.C set (21493588…,
+    // 599327b: F3 v3, the "Site: " line), so this build REFUSES it: the gated circuits and the offer
+    // have other verifier keys, and the device pair is an extra operation. Old accounts cannot be
+    // used with this build (the BREAKING note).
     expect(compareVerifierKeys(s.operations, PINNED_ACCOUNT_KEYS.circuits)).toEqual({
       equal: false,
       missing: [],

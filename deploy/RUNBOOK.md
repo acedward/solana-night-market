@@ -258,8 +258,8 @@ job builds that set once and proves it is the right one before anything else sta
 1. Checks its pinned inputs: compactc 0.35.0 and 0.34.0 (release archives, SHA-256 checked when
    the image is built), compact-runtime 0.20.0 (the account module's only runtime),
    `@sig-net/midnight` 0.23.0, `account.compact` with SHA-256
-   `682d9274efbfbca66a6d2d49f4a52edbfdfa61d84e53b595e0fb4948c616cfe3` (acedward/passport @
-   `b2f1847`, the Ed25519 arm with the P9.C fix pass), and the vendored faucet `contracts/faucet/shielded-token.compact`
+   `03bbd3d8ad978d6c49a573ad84d27325be95115b81a1b2d4ab829f2ecb50e6fe` (acedward/passport @
+   `599327b`, the Ed25519 arm with the P9.C and P10.C fix passes), and the vendored faucet `contracts/faucet/shielded-token.compact`
    with SHA-256 `1dca131a…89bd` (effectstream/mint-test-tokens @ `a51cf3a`,
    `contracts/faucet/PROVENANCE.md`).
 2. Compiles the account's callees (compile-time inputs, never installed), then the account with
@@ -277,7 +277,7 @@ job builds that set once and proves it is the right one before anything else sta
      `append_inbox_with_ed25519`, `rotate_enc_key_with_ed25519` (the "Cancel all open offers"
      call), `open_swap_shielded_with_ed25519`, `deposit_shielded`, and `faucet/mint`;
    - the fingerprint over all verifier keys equals `RELAY_KEYS_FINGERPRINT`
-     (**`efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f`**).
+     (**`21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e`**).
 6. Installs the set into the volume and writes the report `.night-market-keys.json`.
 
 Any failure exits non-zero, and Compose then does not start the relay or the web site. On later
@@ -299,7 +299,7 @@ The end of a good run:
 
 ```
 key-volume: faucet done in … s (mint verifier key = the deployed one)
-key-volume: verdict VERIFIED (fingerprint efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f)
+key-volume: verdict VERIFIED (fingerprint 21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e)
 key-volume: OK: key volume installed and verified in … s (2.5G)
 ```
 
@@ -322,8 +322,8 @@ On a small server, build the account bundle on a bigger machine (any keyed compa
 of the pinned `account.compact`, for example the Passport repository's
 `npm run compile:account`) and import it. The job copies only the prover keys it keeps (about
 2.3 GB instead of 12), compiles the faucet itself, and runs exactly the same checks: an imported
-set is **not trusted**. The pinned fingerprint was produced this way (2026-10-01, in 6 s, from the
-Passport repository's full keyed build of `b2f1847`).
+set is **not trusted**. The pinned fingerprint was produced this way (2026-10-02, in 13 s, from the
+Passport repository's full keyed build of `b4964e3`, whose `account.compact` is `599327b`'s).
 
 ```sh
 cat > deploy/compose.import.yml <<'EOF'
@@ -341,7 +341,8 @@ docker compose -f deploy/compose.yml -f deploy/compose.import.yml up keys
 
 **One wallet prompt per action.** Every account call (a withdrawal, an unshielded withdrawal, an
 inbox append, an offer, a take, a cancel) is authorised by the Solana wallet's signature over the
-call's readable message (format F3 v2, questions Q25 B′ and Q32: the market's label, the operation,
+call's readable message (format F3 v3, questions Q25 B′, Q32 and Q36: the site line "Site: " + the
+market's label (the circuit fixes the "Site: ", so a label can never pose as one of the lines below), the operation,
 each amount's exact base units and full 64-hex token id, then the site's name and decimals on a
 line that says they are only the site's label, the recipient's fingerprint, an offer's expiry as a
 UTC date and time, the account and its nonce, and the digest). It is the same
@@ -651,6 +652,20 @@ compiler, the faucet source, the kept keys), it builds again first: stop the rel
 disk free (section 2), and run `up keys` attached. Rebuild and restart the web and the relay
 **together** when the token list or the message format changes.
 
+**BREAKING: the round-2 security fix pass** (AA 00047 P10; `vendor/passport` `b2f1847` → `599327b`).
+Every account message's first line is now `Site: <label>` (message format F3 v3, questions Q36), so
+the six signed circuits (the five gated calls and the offer) were rekeyed: the key set is now
+`21493588…5c5e` (was `efc52fbc…ef7f`), and six of the nine digests the web build pins changed (the
+activation and both deposits kept theirs). Deploy together, in one step: the relay's key volume
+(`up keys` with the new `RELAY_KEYS_FINGERPRINT`), the web image (its pinned account keys) and the
+relay settings this release adds to `deploy/.env.example` (`JOBS_PER_ACCOUNT`,
+`OFFERS_MAX_OPEN_PER_ACCOUNT`, `MAKES_PER_ACCOUNT_PER_DAY`, `CANCELS_PER_ACCOUNT_PER_DAY`,
+`RESTORES_PER_ACCOUNT_PER_DAY`, `CLIENT_IPV6_PREFIX`, `CLIENT_IPV4_PREFIX`, `AUTH_MAX_USED_NONCES`,
+`DEMO_TOKENS_PENDING_SETTLE_SECONDS`; section 9; `AUTH_MAX_NONCES` and `AUTH_MAX_NONCES_PER_CLIENT`
+are no longer read). Accounts opened under the P9 set (`b2f1847`) cannot be used with it (the relay
+and the page refuse them as "not a Night Market account"); withdraw from them with the previous
+release first.
+
 **BREAKING: the P9 security fix pass** (AA 00047 P9; `vendor/passport` `451f761` → `b2f1847`). The
 message format (F3 v2), the account's circuits (no device management) and so every verifier key
 changed: the key set is now `efc52fbc…ef7f` (was `a627edb1…da92`). Deploy together, in one step:
@@ -712,8 +727,8 @@ operator. A batcher that answers 429 means its daily cap: takes resume when the 
 | DUST prover | `midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b` |
 | Data-volume init | `busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e` |
 | Compact compilers | compactc 0.35.0 (`0.35.0 (debb05f94 2026-09-29)`, the account, `--feature-zkir-v3`) and 0.34.0 (the account's callees and the faucet); archive SHA-256s in `scripts/fetch-compactc.sh` |
-| Passport sources | `vendor/passport` = acedward/passport @ `b2f1847271435d37c441966271aa8e20c9b09ecf` (branch `00047-solana-ed25519-arm`); `account.compact` SHA-256 `682d9274efbfbca66a6d2d49f4a52edbfdfa61d84e53b595e0fb4948c616cfe3` |
-| Key set fingerprint | `efc52fbc1aa2a8cb22327b1c55c820c83b2ded2e383d9ca3afeaab666e6bef7f` (account 40 + faucet 5 verifier keys; the web build pins the same set) |
+| Passport sources | `vendor/passport` = acedward/passport @ `599327b918b55afc95d6c98a89bcd15f4e8b0d53` (branch `00047-solana-ed25519-arm`); `account.compact` SHA-256 `03bbd3d8ad978d6c49a573ad84d27325be95115b81a1b2d4ab829f2ecb50e6fe` |
+| Key set fingerprint | `21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e` (account 40 + faucet 5 verifier keys; the web build pins the same set) |
 | Faucet | mint-test-tokens v2 `shielded-token.compact` @ `a51cf3a` (SHA-256 `1dca131a…89bd`); `mint` verifier key SHA-256 `4bbbb047b2f10bc57e4fafd9537b2dcac9290d9a2f7560a9e670f96a8452794a` |
 | SDK set | `@midnightntwrk/ledger-v9` 1.0.0-rc.3, midnight-js 5.0.0-beta.7, compact-js 2.5.5-rc.8, wallet-sdk-facade 5.0.0-beta.2, compact-runtime 0.19.0 (the SDK) and 0.20.0 (the account module only) |
 | Tokens (stagenet, mint-test-tokens registry @ `a51cf3a`) | shielded twUSDC (6) faucet `11e406f1…`, twUSDM (6) `6f6dacef…`, twBTC (8) `a112d24a…`, twETH (18) `a9ea4f52…`; unshielded utwUSDC (6) `473e8354…`, utwBTC (8) `2e962ef4…` (`packages/core/src/tokens/mint-test-tokens/`) |

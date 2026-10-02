@@ -7,7 +7,8 @@
 # Every host port is bound to 127.0.0.1 and chosen by the caller. Never run two of these at once on
 # one host (memory: a k=18 proof peaks near 9.4 GiB in rc.8). Every container has a memory cap (the
 # *_MEM_LIMIT variables; AA 00047 P10.I: a shared host). The relay's per-account caps come from CAP_*
-# (run-local.sh's caps phase lowers them; the defaults are the relay's own).
+# (run-local.sh's caps phase lowers them; the defaults are the relay's own), and WITHDRAWS_DAILY_CAP
+# from CAP_WITHDRAWS_PER_DAY (AA 00047 P11.I).
 services:
   node:
     # midnight-node 2.0.0-rc.4 multiarch index; reports 2.0.0-d9729c13, stagenet's build.
@@ -118,6 +119,8 @@ services:
       MAKES_PER_ACCOUNT_PER_DAY: '${CAP_MAKES_PER_DAY:-20}'
       CANCELS_PER_ACCOUNT_PER_DAY: '${CAP_CANCELS_PER_DAY:-5}'
       RESTORES_PER_ACCOUNT_PER_DAY: '${CAP_RESTORES_PER_DAY:-3}'
+      # AA 00047 P11.I: the sponsored-withdrawal allowance (Q46; run-local.sh lowers it in the caps phase).
+      WITHDRAWS_DAILY_CAP: '${CAP_WITHDRAWS_PER_DAY:-100}'
       LOG_LEVEL: info
     volumes:
       - '${KEYS_DIR:?}:/app/vendor/passport/contract/contracts/managed:ro'

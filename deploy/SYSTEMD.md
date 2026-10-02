@@ -74,6 +74,15 @@ does not use Docker.
   DEMO_TOKENS_PENDING_SETTLE_SECONDS=14400
   ```
 
+  The round-3 fix pass (AA 00047 P11) adds two more (RUNBOOK section 9), and the relay now reads an
+  account's history past 500 actions over the indexer's WebSocket (`MIDNIGHT_INDEXER_WS_URL`, the
+  network profile's by default):
+
+  ```ini
+  WITHDRAWS_DAILY_CAP=100
+  TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY=10
+  ```
+
   `AUTH_MAX_NONCES` and `AUTH_MAX_NONCES_PER_CLIENT` are no longer read: remove them. Behind nginx,
   `RELAY_TRUST_PROXY=true` (as in MN Bank's guide) is what lets the per-client caps see the
   customer's address (an IPv6 customer is counted per /64). The new key set

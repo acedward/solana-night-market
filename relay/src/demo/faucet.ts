@@ -17,7 +17,9 @@
 //     call's Zswap offer as the single output;
 //   - `via-sponsor`: the faucet mints to the sponsor wallet's coin key, the wallet sees the coin,
 //     then the sponsor deposits a coin of that colour into the account with `deposit_shielded`
-//     (two transactions per token; the way any third party funds an account).
+//     (two transactions per token; the way any third party funds an account). The mint's
+//     confirmation is recorded as its own stage (`minted`), apart from the deposit (AA 00047 P11, audit
+//     round 3 R3-8): a resumed claim after a confirmed mint deposits only (`resume`).
 // Either way the inbox entry is sealed to the account's own encryption key (MIP-0012 §6.2), so the
 // account's owner finds the coin, and the sponsor pays the DUST.
 
@@ -26,7 +28,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { Logger } from '../log.js';
-import type { BeforeSubmit } from './action.js';
+import { DemoMintUnclearError, type BeforeSubmit } from './action.js';
 import type { PassportProviders, PassportRuntime } from '../passport/runtime.js';
 import type { RelayWalletProvider, SponsorWalletHandle } from '../passport/wallet-provider.js';
 import { verifierDigests } from '../prover/key-volume.js';
@@ -168,7 +170,12 @@ export class DemoFaucets {
     return mintTx;
   }
 
-  /** `via-sponsor`: mint to the sponsor wallet, wait for the coin, deposit it into the account. */
+  /**
+   * `via-sponsor`: mint to the sponsor wallet, wait for the coin, record the confirmed mint (`minted`,
+   * R3-8), deposit it into the account. With `resume` (the mint already landed in an earlier attempt)
+   * only the deposit is made, from the sponsor's balance of the token; when the sponsor does not hold
+   * enough of it the state is unclear, and a DemoMintUnclearError says so (the token is quarantined).
+   */
   async viaSponsor(o: {
     wallet: SponsorWalletHandle;
     account: string;
@@ -176,9 +183,24 @@ export class DemoFaucets {
     item: ResolvedPackItem;
     stage: (name: string, detail?: Record<string, string>) => void;
     beforeSubmit?: BeforeSubmit;
+    resume?: { mintTx?: string };
   }): Promise<MintOutcome> {
-    const mintTx = await this.mintToSponsor(o);
     const amount = BigInt(o.item.amount);
+    let mintTx: string | undefined;
+    if (o.resume) {
+      mintTx = o.resume.mintTx;
+      const held = await shieldedBalance(o.wallet, o.item.colour);
+      if (held < amount) {
+        throw new DemoMintUnclearError(
+          `the sponsor holds ${held} of the ${amount} base units minted earlier (mint ${mintTx ?? 'unknown'})`,
+        );
+      }
+      o.stage('deposit-resumed', { symbol: o.item.symbol, ...(mintTx ? { tx: mintTx } : {}) });
+    } else {
+      mintTx = await this.mintToSponsor(o);
+      // The mint is confirmed (the sponsor holds the coin): from here on, never mint it again (R3-8).
+      o.beforeSubmit?.({ stage: 'minted', mintTx });
+    }
     const base = await this.rt.providers(o.wallet);
     const { sealEntryPortable } = await import('@nightmarket/core/passport');
     const coin = { nonce: new Uint8Array(randomBytes(32)), color: unhex(o.item.colour), value: amount };
@@ -196,11 +218,12 @@ export class DemoFaucets {
     ).CustodyAccount.connect(base, this.rt.compiledAccount(), o.account)) as {
       depositShielded(c: unknown, e: Uint8Array): Promise<{ txId: string }>;
     };
-    // The deposit files `entry` into the account's inbox: how an interrupted deposit is found (R2-7).
-    o.beforeSubmit?.({ stage: 'deposit', entry });
+    // The deposit files `entry` into the account's inbox: how an interrupted deposit is found (R2-7);
+    // it keeps the confirmed mint's id, so a resumed claim deposits again and never mints (R3-8).
+    o.beforeSubmit?.({ stage: 'deposit', entry, ...(mintTx ? { mintTx } : {}) });
     const dep = await custody.depositShielded(coin, entry);
     o.stage('deposited', { symbol: o.item.symbol, tx: dep.txId });
-    return { mint: mintTx, deposit: dep.txId };
+    return { ...(mintTx ? { mint: mintTx } : {}), deposit: dep.txId };
   }
 
   /** `direct`: the faucet's mint to the account and the account's deposit, in ONE transaction. */

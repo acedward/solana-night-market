@@ -158,6 +158,13 @@ export class FailureBudget {
   }
 }
 
+/** Whether a job error code is a counterparty's (the maker's or the exchange's settlement refusal, an
+ *  offer gone, the merge refusing the maker's offer): never charged, but bounded per account by the
+ *  unsettled-take cap (AA 00047 P11, R3-7: ./account-caps.ts `admitTake`). */
+export function isCounterpartyCode(code: string): boolean {
+  return COUNTERPARTY_FAILURES.has(code) || code.startsWith('take-');
+}
+
 /** Whether a job error code is the market's, a counterparty's, or an infrastructure failure's. */
 export function isNotRequesterCode(code: string): boolean {
   return MARKET_SIDE_FAILURES.has(code) || COUNTERPARTY_FAILURES.has(code) || code.startsWith('take-');

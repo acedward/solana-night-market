@@ -132,6 +132,8 @@ interface FakeAccount {
   salt: string;
   /** The account's encryption key on chain (its ledger `enc_key`). */
   encKey: string;
+  /** The key the account was opened with (its deploy state's `enc_key`; AA 00047 P11, R3-9). */
+  openingKey?: string;
   authNonce: bigint;
   devices: Set<string>;
 }
@@ -157,6 +159,10 @@ function runtimeOf(...accounts: FakeAccount[]): PassportRuntime {
         },
       };
       return ledger as AccountLedger;
+    },
+    openingEncKey: async (address: string) => {
+      const a = byAddress.get(address);
+      return a ? unhex(a.openingKey ?? a.encKey) : null;
     },
   } as unknown as PassportRuntime;
 }
@@ -548,8 +554,9 @@ describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key
   it('accepts a restore the wallet signed as "Rotate encryption key / New key …" for the browser’s key', async () => {
     const owner = wallet();
     const a = accountOf(owner); // a page changed the on-chain key: it is not the browser's
-    const rt = runtimeOf(a);
     const browserKey = hex(randomBytes(32));
+    a.openingKey = browserKey; // the browser's key is the one the account was opened with (P11, R3-9)
+    const rt = runtimeOf(a);
     const p = restore(a, browserKey);
     const r = await arm.checkGatedCall(
       rt,
@@ -585,8 +592,9 @@ describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key
   it('a cancel’s signature cannot pass as a restore, nor a restore’s as a cancel (other bytes)', async () => {
     const owner = wallet();
     const a = accountOf(owner);
-    const rt = runtimeOf(a);
     const browserKey = hex(randomBytes(32));
+    a.openingKey = browserKey; // the account's opening key (P11, R3-9): only this one is restored
+    const rt = runtimeOf(a);
     // The wallet signed a restore; the relay is asked to treat it as a cancel to the same key.
     const restoreAuth = await browserGated(owner, a, restoreEncKeyRequest(restore(a, browserKey)));
     expect(
@@ -624,6 +632,67 @@ describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key
     expect(def.lane).toBe('prover');
     const ctx = { log: { info: () => {} } } as never;
     await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
+  });
+});
+
+describe('AA 00047 P11: restore-enc-key lands only the account’s OPENING key (audit round 3 R3-9 / F-A3-5)', () => {
+  const restore = (a: FakeAccount, newKey: string): RestoreEncKeyPayload => ({
+    newKey,
+    authNonce: String(a.authNonce),
+  });
+
+  it('a page that talked the wallet into "Rotate encryption key" for the page’s OWN key cannot have the market land it', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    a.openingKey = hex(randomBytes(32)); // the browser's key, which the account was opened with
+    const rt = runtimeOf(a);
+    const pagesKey = hex(randomBytes(32)); // the page holds this key's secret: a proof of possession would pass
+    const p = restore(a, pagesKey);
+    // A genuine signature over exactly this rotation (the wallet approved it).
+    const passportAuth = await browserGated(owner, a, restoreEncKeyRequest(p));
+    const r = await arm.checkGatedCall(rt, 'restore-enc-key', a.account, p, passportAuth);
+    expect(r).toMatchObject({ ok: false, code: 'malformed' });
+    expect(r.ok ? '' : r.reason).toMatch(/opened with/);
+    // The opening key itself is restored.
+    const back = restore(a, a.openingKey);
+    expect(
+      await arm.checkGatedCall(
+        rt,
+        'restore-enc-key',
+        a.account,
+        back,
+        await browserGated(owner, a, restoreEncKeyRequest(back)),
+      ),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('when the opening transaction cannot be found, or the runtime cannot read it, nothing is restored', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    const browserKey = hex(randomBytes(32));
+    a.openingKey = browserKey;
+    const p = restore(a, browserKey);
+    const passportAuth = await browserGated(owner, a, restoreEncKeyRequest(p));
+    const noDeploy = { ...runtimeOf(a), openingEncKey: async () => null } as unknown as PassportRuntime;
+    expect(await arm.checkGatedCall(noDeploy, 'restore-enc-key', a.account, p, passportAuth)).toMatchObject({
+      ok: false,
+      code: 'wrong-account',
+    });
+    const { openingEncKey: _gone, ...rest } = runtimeOf(a) as unknown as Record<string, unknown>;
+    expect(
+      await arm.checkGatedCall(rest as unknown as PassportRuntime, 'restore-enc-key', a.account, p, passportAuth),
+    ).toMatchObject({ ok: false, code: 'not-supported' });
+  });
+
+  it('the cancel is unchanged: it re-affirms the CURRENT key, whatever the opening key', async () => {
+    const owner = wallet();
+    const a = accountOf(owner);
+    a.openingKey = hex(randomBytes(32));
+    const rt = runtimeOf(a);
+    const p = { newKey: a.encKey, authNonce: String(a.authNonce) };
+    expect(
+      await arm.checkGatedCall(rt, 'cancel-offers', a.account, p, await browserGated(owner, a, cancelOffersRequest(p))),
+    ).toMatchObject({ ok: true });
   });
 });
 

@@ -84,9 +84,14 @@ export interface PendingToken {
   since: number;
   /** Unix seconds after which the transaction can no longer land (its TTL, plus a margin). */
   notAfter: number;
-  /** `direct`: the one mint-and-deposit transaction; `via-sponsor`: the mint to the sponsor, then the
-   *  deposit into the account. */
-  stage: 'mint-and-deposit' | 'mint' | 'deposit';
+  /** `direct`: the one mint-and-deposit transaction; `via-sponsor`: the mint to the sponsor (`mint`:
+   *  submitted, not seen yet), the mint CONFIRMED in the sponsor wallet (`minted`: nothing submitted
+   *  since), then the deposit into the account (`deposit`: always after a confirmed mint). AA 00047
+   *  P11, audit round 3 R3-8 / F-B3-7: the two stages are kept apart, so a resumed claim after a
+   *  confirmed mint deposits only, and never mints again. */
+  stage: 'mint-and-deposit' | 'mint' | 'minted' | 'deposit';
+  /** `via-sponsor`: the confirmed mint's transaction id (stages `minted` and `deposit`). */
+  mintTx?: string;
   /** The 192-byte inbox entry (hex) the transaction files into the account: how it is found on chain. */
   entry?: string;
   /** The account's inbox count when it was written (decimal): where to start looking. */

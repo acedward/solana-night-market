@@ -25,6 +25,9 @@ export interface JobEnd {
   requesterFault: boolean;
   /** The job's public result, when it succeeded. */
   result?: Record<string, unknown>;
+  /** The job's error code, when it failed (a PublicError's, or `market-unavailable` for an
+   *  infrastructure failure): AA 00047 P11, R3-7, the unsettled-take count. */
+  code?: string;
 }
 
 export type AdmissionOutcome =

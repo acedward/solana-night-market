@@ -97,5 +97,71 @@ if [[ "$VERSION" == 0.35.0 ]]; then
     ok "COMPACTC_ACCOUNT must be a verified toolchain" || ko "COMPACTC_ACCOUNT must be a verified toolchain (exit $code)"
 fi
 
+# 6-9. AA 00047 P11, audit round 3 R3-10 (F-B3-8, F-A3-6.2): an override must resolve to the verified
+#      `compactc` executable itself, and that file is what runs. Before, the override's DIRECTORY was
+#      verified and then the override's own path was run.
+case "$VERSION" in
+  0.35.0) line='0.35.0 (debb05f94 2026-09-29)' var_name=COMPACTC_ACCOUNT ;;
+  *) line="$VERSION" var_name=COMPACTC_CALLEES ;;
+esac
+# 6. Another executable inside an otherwise verified directory, printing the pinned version line.
+copy impostor
+marker="$work/impostor-ran"
+printf '#!/bin/sh\ntouch "%s"\necho "%s"\n' "$marker" "$line" >"$work/impostor/evil-compactc"
+chmod +x "$work/impostor/evil-compactc"
+set +e
+env "$var_name=$work/impostor/evil-compactc" bash "$ROOT/scripts/compile-contracts.sh" >/dev/null 2>"$work/err"
+code=$?
+set -e
+if [[ "$code" -eq 65 ]] && grep -q "not a verified compactc $VERSION toolchain" "$work/err" && [[ ! -e "$marker" ]]; then
+  ok "$var_name naming another executable in a verified toolchain is refused, and never run"
+else
+  ko "$var_name naming another executable in a verified toolchain is refused, and never run (exit $code, ran: $([[ -e "$marker" ]] && echo yes || echo no))"
+fi
+# 7. --resolve: a verified toolchain's compactc resolves to itself; a symbolic link to it (from an
+#    unverified directory) resolves to the verified file.
+copy resolve-ok
+mkdir -p "$work/bin"
+ln -sfn "$work/resolve-ok/compactc" "$work/bin/compactc"
+ln -sfn "$work/resolve-ok/compactc" "$work/bin/my-compiler"
+real_ok="$(cd -P "$work/resolve-ok" && pwd -P)/compactc"
+if [[ "$(bash "$F" --resolve "$work/resolve-ok/compactc" "$VERSION" 2>/dev/null)" == "$real_ok" ]] &&
+  [[ "$(bash "$F" --resolve "$work/bin/compactc" "$VERSION" 2>/dev/null)" == "$real_ok" ]] &&
+  [[ "$(bash "$F" --resolve "$work/bin/my-compiler" "$VERSION" 2>/dev/null)" == "$real_ok" ]]; then
+  ok "--resolve gives the verified compactc itself (also through a symbolic link)"
+else
+  ko "--resolve gives the verified compactc itself (also through a symbolic link)"
+fi
+# 8. --resolve refuses an archive file that is not compactc, a link to an impostor, and a missing path.
+chmod +x "$work/resolve-ok/zkir" 2>/dev/null || true
+ln -sfn "$work/impostor/evil-compactc" "$work/bin/compactc-evil-link"
+set +e
+bash "$F" --resolve "$work/resolve-ok/zkir" "$VERSION" >/dev/null 2>&1
+c1=$?
+bash "$F" --resolve "$work/bin/compactc-evil-link" "$VERSION" >/dev/null 2>&1
+c2=$?
+bash "$F" --resolve "$work/does-not-exist/compactc" "$VERSION" >/dev/null 2>&1
+c3=$?
+set -e
+[[ "$c1$c2$c3" == 656565 ]] && ok "--resolve refuses a non-compactc file, a link to an impostor and a missing path (exit 65)" ||
+  ko "--resolve refuses a non-compactc file, a link to an impostor and a missing path (exits $c1 $c2 $c3)"
+# 9. A compactc whose directory is NOT verified (a changed sibling) is refused by --resolve too.
+copy resolve-bad
+printf 'x' >>"$work/resolve-bad/zkir"
+set +e
+bash "$F" --resolve "$work/resolve-bad/compactc" "$VERSION" >/dev/null 2>&1
+c4=$?
+set -e
+[[ "$c4" -eq 65 ]] && ok "--resolve refuses a compactc in a changed toolchain (exit 65)" ||
+  ko "--resolve refuses a compactc in a changed toolchain (exit $c4)"
+# 10. An override through a symbolic link to a verified toolchain is accepted by compile-contracts
+#     (which then runs the verified file; the light compile is up to date or is redone with it).
+set +e
+env "$var_name=$work/bin/compactc" bash "$ROOT/scripts/compile-contracts.sh" >/dev/null 2>"$work/err"
+code=$?
+set -e
+[[ "$code" -eq 0 ]] && ok "$var_name through a link to a verified toolchain is accepted" ||
+  ko "$var_name through a link to a verified toolchain is accepted (exit $code: $(tail -1 "$work/err"))"
+
 echo "test-fetch-compactc $VERSION: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

@@ -10,6 +10,7 @@ import { wordlist } from '@scure/bip39/wordlists/english.js';
 import {
   DEFAULT_EXPIRY_LIMITS,
   DEMO_TOKEN_PATHS,
+  WITHDRAWS_DAILY_CAP_DEFAULT,
   type DemoTokenPath,
   type ExpiryLimits,
   type NetworkOverrides,
@@ -105,7 +106,16 @@ export interface RelayConfig {
   failureBudget: { perOwner: number; perAccount: number };
   /** Per-account caps on offers, cancels and key restores (AA 00047 P10, R2-1;
    *  ./actions/account-caps.ts). */
-  accountCaps: { maxOpenOffers: number; makesPerDay: number; cancelsPerDay: number; restoresPerDay: number };
+  accountCaps: {
+    maxOpenOffers: number;
+    makesPerDay: number;
+    cancelsPerDay: number;
+    restoresPerDay: number;
+    /** Sponsored withdrawals per account in any rolling 24 hours (AA 00047 P11, R3-2; Q46 A at 100). */
+    withdrawsPerDay: number;
+    /** Takes per account in any rolling 24 hours refused at settlement not by the taker's fault (P11, R3-7). */
+    unsettledTakesPerDay: number;
+  };
   /** The limits on an offer's or a take's signed expiry (AA 00047 P9, audit C6; ./trade/expiry.ts). */
   expiry: ExpiryLimits;
   /** Security review F-B6 (questions Q13): require a second signature (a Solana envelope over the
@@ -404,6 +414,14 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       makesPerDay: int(env.MAKES_PER_ACCOUNT_PER_DAY, 20, 'MAKES_PER_ACCOUNT_PER_DAY', 1, 100_000),
       cancelsPerDay: int(env.CANCELS_PER_ACCOUNT_PER_DAY, 5, 'CANCELS_PER_ACCOUNT_PER_DAY', 1, 100_000),
       restoresPerDay: int(env.RESTORES_PER_ACCOUNT_PER_DAY, 3, 'RESTORES_PER_ACCOUNT_PER_DAY', 1, 100_000),
+      withdrawsPerDay: int(env.WITHDRAWS_DAILY_CAP, WITHDRAWS_DAILY_CAP_DEFAULT, 'WITHDRAWS_DAILY_CAP', 1, 1_000_000),
+      unsettledTakesPerDay: int(
+        env.TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY,
+        10,
+        'TAKES_UNSETTLED_PER_ACCOUNT_PER_DAY',
+        1,
+        100_000,
+      ),
     },
     expiry: {
       offerMaxLifetimeSeconds: int(

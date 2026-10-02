@@ -42,7 +42,11 @@
 // other mismatch. `restore-enc-key` (AA 00047 P10, audit round 2 R2-3) is the same circuit to ANOTHER
 // key, the one the customer's browser holds: the check refuses the on-chain key itself (a cancel in
 // disguise, which must not escape the cancels' daily cap), and the rebuilt message reads "Rotate
-// encryption key / New key <16 hex>". The first line's text is the vendored client's ("Site: <label>",
+// encryption key / New key <16 hex>". Since AA 00047 P11 (audit round 3 R3-9 / F-A3-5) it lands ONLY
+// the key the account was OPENED with (its deploy state's `enc_key`, which the browser chose and
+// checks at opening): a page that talks a wallet into "Rotate encryption key" for the page's OWN key
+// cannot have the market land it for free. (A proof of possession of the new key would not stop that
+// page: it holds its own key's secret. Questions Q50.) The first line's text is the vendored client's ("Site: <label>",
 // F3 v3, questions Q36); nothing here renders it.
 
 import { createHash } from 'node:crypto';
@@ -112,13 +116,17 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
     payload: P | null,
     passportRaw: unknown,
     rebuild: (payload: P, core: typeof CorePassport) => Rebuild,
-    keep?: (payload: P, ledger: AccountLedger) => GatedCheckFail | null,
+    keep?: (
+      payload: P,
+      ledger: AccountLedger,
+      at: { runtime: PassportRuntime; account: string },
+    ) => GatedCheckFail | null | Promise<GatedCheckFail | null>,
   ): Promise<CallCheckOk<P> | GatedCheckFail> {
     const pre = await preflightCall(runtime, accountRaw, payload, passportRaw);
     if (!pre.ok) return pre;
     const { account, passport, ledger } = pre;
 
-    const keyRefusal = keep?.(pre.payload, ledger);
+    const keyRefusal = await keep?.(pre.payload, ledger, { runtime, account });
     if (keyRefusal) return keyRefusal;
 
     if (options.accountKeys) {
@@ -198,7 +206,9 @@ export function ed25519Arm(options: Ed25519ArmOptions): DeviceArm {
         action === 'cancel-offers'
           ? (p, ledger) => cancelKeepsTheKey(p as CancelOffersPayload, ledger)
           : action === 'restore-enc-key'
-            ? (p, ledger) => restoreChangesTheKey(p as RestoreEncKeyPayload, ledger)
+            ? async (p, ledger, at) =>
+                restoreChangesTheKey(p as RestoreEncKeyPayload, ledger) ??
+                (await restoresTheOpeningKey(p as RestoreEncKeyPayload, at.runtime, at.account))
             : undefined,
       ) as never;
     },
@@ -253,6 +263,36 @@ export function restoreChangesTheKey(payload: RestoreEncKeyPayload, ledger: Acco
     code: 'malformed',
     reason:
       "this key is already the account's encryption key: there is nothing to restore (to end open offers, use Cancel offer)",
+  };
+}
+
+/**
+ * `restore-enc-key` puts back ONLY the key the account was opened with (AA 00047 P11, audit round 3
+ * R3-9 / F-A3-5): the restore's purpose is to undo a key change a page talked the wallet into, and the
+ * browser's key is the one it chose at opening (its deploy state's `enc_key`, which the browser checks
+ * then). Any other key is a real key change, which the market never asks a wallet for: refused, so a
+ * page that obtained "Rotate encryption key / New key <its own key>" cannot have the market land it.
+ * Refused before any signature work (at admission, and again when the job runs).
+ */
+export async function restoresTheOpeningKey(
+  payload: RestoreEncKeyPayload,
+  runtime: PassportRuntime,
+  account: string,
+): Promise<GatedCheckFail | null> {
+  const read = (runtime as { openingEncKey?: (a: string) => Promise<Uint8Array | null> }).openingEncKey;
+  if (typeof read !== 'function') {
+    return { ok: false, code: 'not-supported', reason: "this market cannot read an account's opening key" };
+  }
+  const opening = await read.call(runtime, account);
+  if (!opening) {
+    return { ok: false, code: 'wrong-account', reason: "the account's opening transaction could not be found" };
+  }
+  if (payload.newKey.replace(/^0x/, '').toLowerCase() === hex(Uint8Array.from(opening))) return null;
+  return {
+    ok: false,
+    code: 'malformed',
+    reason:
+      'a restore puts back only the encryption key the account was opened with; this is another key, and the market never moves an account to another key',
   };
 }
 

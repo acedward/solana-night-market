@@ -7,8 +7,17 @@
 #                                       Signet singleton stay on 0.34.0, as upstream builds them)
 #
 #   scripts/fetch-compactc.sh --verify <dir> <version>
-#                                       verify an installed toolchain directory (a compiler named by
-#                                       COMPACTC_ACCOUNT / COMPACTC_CALLEES): exit 0, or 65 refused
+#                                       verify an installed toolchain directory: exit 0, or 65 refused
+#
+#   scripts/fetch-compactc.sh --resolve <path> <version>
+#                                       resolve a compiler override (COMPACTC_ACCOUNT /
+#                                       COMPACTC_CALLEES) to the VERIFIED executable itself: <path>,
+#                                       with every symbolic link followed, must be the `compactc` of a
+#                                       toolchain directory --verify accepts. Prints that
+#                                       `<dir>/compactc` on stdout (run exactly it), or exits 65. AA 00047
+#                                       P11, audit round 3 R3-10 / F-B3-8, F-A3-6.2: an override used to
+#                                       be verified by its directory and then run by its own path, so
+#                                       another executable in a verified directory passed.
 #
 # The release archive is verified against the SHA-256 pinned below before it is unpacked, and the
 # unpacked compiler's `--version` line must be the pinned one. The compactc-v0.35.0 release
@@ -32,6 +41,10 @@ MODE=install
 if [[ "${1:-}" == "--verify" ]]; then
   MODE=verify
   VERIFY_DIR="${2:?usage: fetch-compactc.sh --verify <dir> <version>}"
+  shift 2
+elif [[ "${1:-}" == "--resolve" ]]; then
+  MODE=resolve
+  RESOLVE_PATH="${2:?usage: fetch-compactc.sh --resolve <path> <version>}"
   shift 2
 fi
 VERSION="${1:-0.35.0}"
@@ -128,6 +141,40 @@ verify_dir() {
     return 1
   fi
 }
+
+# real_path <path>: <path> with every symbolic link followed (the link's own directory for a
+# relative target), as an absolute physical path; fails when it does not exist or links loop.
+real_path() {
+  local p="$1" t n=0 d
+  while [[ -L "$p" ]]; do
+    n=$((n + 1))
+    [[ "$n" -le 40 ]] || return 1
+    t="$(readlink "$p")" || return 1
+    if [[ "$t" == /* ]]; then p="$t"; else p="$(dirname "$p")/$t"; fi
+  done
+  [[ -f "$p" ]] || return 1
+  d="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "$d" "$(basename "$p")"
+}
+
+if [[ "$MODE" == resolve ]]; then
+  if ! real="$(real_path "$RESOLVE_PATH")"; then
+    echo "fetch-compactc: the compiler override $RESOLVE_PATH does not exist (or its links loop)" >&2
+    exit 65
+  fi
+  if [[ "$(basename "$real")" != compactc ]]; then
+    echo "fetch-compactc: the compiler override $RESOLVE_PATH is $real, not a toolchain's compactc" >&2
+    exit 65
+  fi
+  dir="$(dirname "$real")"
+  if ! verify_dir "$dir" || [[ ! "$real" -ef "$dir/compactc" ]]; then
+    echo "fetch-compactc: the compiler override $RESOLVE_PATH ($real) is not in a verified compactc $VERSION toolchain" >&2
+    exit 65
+  fi
+  echo "fetch-compactc: compactc $VERSION override $RESOLVE_PATH resolved to the verified $dir/compactc" >&2
+  echo "$dir/compactc"
+  exit 0
+fi
 
 if [[ "$MODE" == verify ]]; then
   if verify_dir "$VERIFY_DIR"; then

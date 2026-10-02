@@ -22,4 +22,5 @@ export * from './tokens/registry.js';
 export * from './trade.js';
 export * from './unshielded.js';
 export * from './withdraw-unshielded.js';
+export * from './withdraw-allowance.js';
 export * from './zswap-check.js';

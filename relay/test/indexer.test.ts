@@ -114,7 +114,7 @@ describe('IndexerClient.accountTransactions', () => {
     ).rejects.toThrow('502');
   });
 
-  it('refuses a full page of actions with its own error (no paging yet, Q27)', async () => {
+  it('without a WebSocket URL, refuses a full page of actions with its own error (as before AA 00047 P11)', async () => {
     const actions = Array.from({ length: 3 }, (_, i) => ({
       transaction: { hash: `t${i}`, block: { height: i }, zswapLedgerEvents: [] },
     }));
@@ -257,11 +257,11 @@ describe('GET /v1/accounts/:account/*', () => {
     expect((await h.app.request(`/v1/accounts/${ME}/zswap`)).status).toBe(501);
   });
 
-  it('says 501 history-too-long, not "chain unavailable", for an account beyond one indexer page (Q27)', async () => {
+  it('says 501 history-too-long, not "chain unavailable", for an account beyond what the relay reads', async () => {
     const h = harness({
       chain: chain({
         zswap: async () => {
-          throw new AccountHistoryTooLongError(500);
+          throw new AccountHistoryTooLongError(100_000);
         },
       }),
     });
@@ -269,6 +269,6 @@ describe('GET /v1/accounts/:account/*', () => {
     expect(res.status).toBe(501);
     const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe('history-too-long');
-    expect(body.error.message).toContain('500 or more actions');
+    expect(body.error.message).toContain('more than 100000 actions');
   });
 });

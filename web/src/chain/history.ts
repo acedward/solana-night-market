@@ -16,9 +16,12 @@
 //   3. for a transaction that may have filled one of the account's approvals: its raw bytes
 //      (`transactions(offset: { hash }) { raw }`), whose contract calls are decoded (R3-6).
 //
-// HOW COMPLETENESS IS KNOWN: a page shorter than the cap is the whole history; otherwise the stream
-// must reach the page (by height, all of the oldest page height included), within a deadline and a cap
-// on actions. Anything else leaves the history marked INCOMPLETE (`complete: false`, with the reason in
+// HOW COMPLETENESS IS KNOWN: the chain's tip is read FIRST, in a query of its own (so every block up
+// to it is already indexed when the actions are read; sibling fields of one query may resolve from
+// different moments); a page shorter than the cap is then the whole history through that tip;
+// otherwise the stream must reach the page (by height, all of the oldest page height included),
+// within a deadline and a cap on actions. The relay's reader (relay/src/chain/indexer.ts, P11.R) uses
+// the same subscription; the page does not depend on it. Anything else leaves the history marked INCOMPLETE (`complete: false`, with the reason in
 // `gap`), and nothing is concluded from what it lacks (@nightmarket/core `historyCovers`).
 //
 // WHAT IS DECODED: every event, with ledger-v9 (./ledger-decode.ts, loaded lazily, only here), keeping
@@ -66,13 +69,15 @@ const ACTION_FIELDS = `__typename
         zswapLedgerEvents { id raw }
       }`;
 
+/** The chain's tip, read before the history: the height the read is complete through. */
+export const HISTORY_TIP_QUERY = `query AccountHistoryTip { block { height } }`;
+
 export const HISTORY_PAGE_QUERY = `query AccountHistory($address: HexEncoded!, $limit: Int) {
   contract(address: $address) {
     actions(limit: $limit) {
       ${ACTION_FIELDS}
     }
   }
-  block { height }
 }`;
 
 export const HISTORY_SUBSCRIPTION = `subscription AccountHistory($address: HexEncoded!, $offset: BlockOffset) {
@@ -169,11 +174,12 @@ export class AccountHistoryReader {
 
   private async read(address: string): Promise<AccountHistory> {
     const limit = Math.min(this.o.pageLimit ?? HISTORY_PAGE, HISTORY_PAGE);
-    const page = await this.o.graphql<{
-      contract: { actions: IndexerAction[] } | null;
-      block: { height: number } | null;
-    }>(HISTORY_PAGE_QUERY, { address, limit });
-    const tip = page.block?.height ?? 0;
+    // The tip FIRST: every block through it is indexed before the actions are read.
+    const tip = (await this.o.graphql<{ block: { height: number } | null }>(HISTORY_TIP_QUERY, {})).block?.height ?? 0;
+    const page = await this.o.graphql<{ contract: { actions: IndexerAction[] } | null }>(HISTORY_PAGE_QUERY, {
+      address,
+      limit,
+    });
     if (!page.contract) return { account: address, txs: [], complete: true, throughHeight: tip };
     const held = this.held.get(address) ?? { txs: [], completeThrough: null };
     const pageTxs = txsOfActions(page.contract.actions);

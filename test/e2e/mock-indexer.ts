@@ -236,6 +236,7 @@ export class MockIndexer {
     const address = String(body.variables?.address ?? '').toLowerCase();
     const query = body.query ?? '';
     const ours = address === ACCOUNT;
+    if (query.includes('AccountHistoryTip')) return json(200, { data: { block: { height: this.tip() } } });
     if (query.includes('type: DEPLOY')) {
       // The deploy's block (AA 00047 P10, R2-6).
       this.queries.push(`deploy:${address}`);
@@ -260,12 +261,7 @@ export class MockIndexer {
     if (query.includes('actions(')) {
       this.queries.push(`actions:${address}`);
       const limit = Number(body.variables?.limit ?? 100);
-      return json(200, {
-        data: {
-          contract: ours && this.relay.registered ? { actions: this.page(limit) } : null,
-          block: { height: this.tip() },
-        },
-      });
+      return json(200, { data: { contract: ours && this.relay.registered ? { actions: this.page(limit) } : null } });
     }
     this.queries.push(`state:${address}`);
     const state = ours ? await this.stateHex() : null;

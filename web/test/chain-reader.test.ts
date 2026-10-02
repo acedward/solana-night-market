@@ -126,17 +126,21 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
 
   it('reads a short history over HTTP, decodes its ledger events itself, and calls it complete', async () => {
     const A = accountA.account;
-    const { calls, fetchImpl } = stubIndexer(() => ({ data: accountA.data }));
+    const { calls, fetchImpl } = stubIndexer((b) =>
+      b.query.includes('AccountHistoryTip') ? { data: { block: { height: 777_000 } } } : { data: accountA.data },
+    );
     const chain = new ChainReader({ indexerUrl: URL_, networkId: 'stagenet', fetchImpl });
     const h = await chain.accountHistory(`0x${A.toUpperCase()}`);
-    expect(h).toMatchObject({ account: A, complete: true, throughHeight: accountA.data.block.height });
+    // Complete through the tip read BEFORE the actions (not a tip read beside them).
+    expect(h).toMatchObject({ account: A, complete: true, throughHeight: 777_000 });
     expect(h.txs.map((t) => t.blockHeight)).toEqual([685597, 685600, 685604, 685608, 685612, 685773, 685786]);
     expect(h.txs.flatMap((t) => t.outputs.map((o) => o.mtIndex))).toEqual(['5179', '5180', '5184', '5186']);
     expect(h.txs.find((t) => t.hash.startsWith('4464f3f4'))!.entryPoints).toEqual(['open_swap_shielded_with_ed25519']);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.body.query).toMatch(/actions\(limit: \$limit\)/);
-    expect(calls[0]!.body.query).toMatch(/zswapLedgerEvents \{ id raw \}/);
-    expect(calls[0]!.body.variables).toEqual({ address: A, limit: 500 });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.query).toMatch(/query AccountHistoryTip \{ block \{ height \} \}/);
+    expect(calls[1]!.body.query).toMatch(/actions\(limit: \$limit\)/);
+    expect(calls[1]!.body.query).toMatch(/zswapLedgerEvents \{ id raw \}/);
+    expect(calls[1]!.body.variables).toEqual({ address: A, limit: 500 });
   });
 
   it('decodes a swap transaction’s calls from its raw bytes, by hash, and refuses bytes of another transaction', async () => {
@@ -260,10 +264,11 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
 
     const indexer = (actions: typeof all, tip: number) =>
       stubIndexer((b) => {
+        if (b.query.includes('AccountHistoryTip')) return { data: { block: { height: tip } } };
         if (b.query.includes('type: DEPLOY'))
           return { data: { contract: { actions: [{ transaction: { block: { height: 10 } } }] } } };
         const limit = Number(b.variables.limit);
-        return { data: { contract: { actions: [...actions].reverse().slice(0, limit) }, block: { height: tip } } };
+        return { data: { contract: { actions: [...actions].reverse().slice(0, limit) } } };
       });
 
     it('streams the older actions over the indexer’s WebSocket from the deploy’s block, and calls it complete', async () => {
@@ -283,7 +288,9 @@ describe('ChainReader (the page reads the public indexer itself)', () => {
       expect(hist.txs.find((t) => t.hash === h(8))!.inputs).toEqual(['ee'.repeat(32)]);
       expect(ws.subscriptions).toEqual([{ address: ACCOUNT, offset: { height: 10 } }]);
       // One page read, one deploy read; nothing by a hash anyone named.
-      expect(calls.map((c) => (c.body.query.includes('DEPLOY') ? 'deploy' : 'page'))).toEqual(['page', 'deploy']);
+      expect(
+        calls.map((c) => (c.body.query.includes('DEPLOY') ? 'deploy' : c.body.query.includes('Tip') ? 'tip' : 'page')),
+      ).toEqual(['tip', 'page', 'deploy']);
       // The next read: the page reaches back to what this session already holds, so no stream.
       const again = await chain.accountHistory(ACCOUNT);
       expect(again.complete).toBe(true);

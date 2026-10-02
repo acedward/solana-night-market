@@ -32,7 +32,7 @@ import {
 } from '@nightmarket/core';
 
 import type { AuthKind } from '../auth/verifiers.js';
-import { dailyAdmission, makeAdmission, type AccountCaps } from './account-caps.js';
+import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type AccountCaps } from './account-caps.js';
 import { admitAll, type AdmissionCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
@@ -229,7 +229,9 @@ export function withRegistrationCaps(
 /**
  * The catalogue with the per-account caps (AA 00047 P10, audit round 2 R2-1: ./account-caps.ts): a
  * make is admitted after its own checks (the signed expiry) only under the open-offer and daily-make
- * caps; a cancel and a key restore each under their own daily cap.
+ * caps; a cancel and a key restore each under their own daily cap; and (AA 00047 P11, R3-2, Q46)
+ * every sponsored withdrawal under the account's daily allowance, with one whole-coin exit per listed
+ * token past it; and (R3-7) a take only while the account's unsettled takes are under their cap.
  */
 export function withAccountCaps(
   map: Map<RelayActionName, ActionDefinition>,
@@ -242,5 +244,9 @@ export function withAccountCaps(
   add('open-swap', makeAdmission(caps));
   add('cancel-offers', dailyAdmission(caps, 'cancels'));
   add('restore-enc-key', dailyAdmission(caps, 'restores'));
+  add('withdraw', withdrawAdmission(caps, 'withdraw'));
+  add('withdraw-unshielded', withdrawAdmission(caps, 'withdraw-unshielded'));
+  // AA 00047 P11 (R3-7): takes refused at settlement for the maker's or the exchange's reason.
+  add('take', takeAdmission(caps));
   return map;
 }

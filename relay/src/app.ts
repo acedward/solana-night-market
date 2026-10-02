@@ -261,14 +261,15 @@ export function createApp(deps: AppDeps): Hono {
       return page ? c.json(page) : apiError(c, 404, 'not-found', 'no such account');
     } catch (e) {
       if (e instanceof ChainReadNotImplementedError) return apiError(c, 501, 'not-implemented', e.message);
-      // A known limit, not an outage (RUNBOOK §12, plan question Q27): say which, so the page can.
+      // A known limit, not an outage: say which, so the page can. Since AA 00047 P11 (R3-5) the relay
+      // reads past one indexer page; only a history past its bound (100,000 actions) is refused.
       if (e instanceof AccountHistoryTooLongError) {
-        log.warn('account history beyond one indexer page; not read (no paging yet)', { kind, limit: e.limit });
+        log.warn('account history beyond what the relay reads', { kind, limit: e.limit });
         return apiError(
           c,
           501,
           'history-too-long',
-          `this account has ${e.limit} or more actions, more history than this version of the market can read`,
+          `this account has more than ${e.limit} actions, more history than this version of the market can read`,
         );
       }
       log.warn('chain read failed', { kind, error: e });
@@ -556,7 +557,8 @@ export function guarded(
     } catch (e) {
       if (refused) throw e; // nothing proved; the claims were given back
       const counted = charge(e, proved);
-      o.finished?.({ ok: false, proved, requesterFault: counted });
+      const code = e instanceof PublicError ? e.code : isInfrastructureFailure(e) ? 'market-unavailable' : undefined;
+      o.finished?.({ ok: false, proved, requesterFault: counted, ...(code ? { code } : {}) });
       if (!(e instanceof PublicError) && isInfrastructureFailure(e)) {
         ctx.log.warn('job failed on the market side (infrastructure)', { error: e });
         throw new PublicError(

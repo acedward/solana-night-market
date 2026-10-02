@@ -23,6 +23,15 @@
 // on-chain inbox: the entry is there → delivered; it is not and the transaction can no longer land →
 // minted again; it is not but could still land → the job stops (`demo-tokens-settling`, not counted)
 // and nothing is minted; nothing to look for → quarantined (held back for good; an operator decides).
+//
+// `via-sponsor` has two transactions per token (AA 00047 P11, audit round 3 R3-8 / F-B3-7): the mint to
+// the sponsor wallet, then the deposit into the account. The claim records the mint's CONFIRMATION
+// (the coin seen in the sponsor wallet) as its own stage (`minted`, with the mint's transaction id),
+// apart from the deposit's submission (`deposit`, with its entry). A resumed claim after a confirmed
+// mint resumes ONLY the deposit (from the sponsor's balance of that token): when the deposit is found,
+// it is delivered; when it can no longer land, it is deposited again, never minted again; when the
+// sponsor no longer holds the token to deposit, the state is unclear and the token is QUARANTINED.
+// A mint submitted but never confirmed (`mint`) is unclear too, and quarantined, as before.
 
 import type { DemoTokenMint, DemoTokenPath, DemoTokensInfo, DemoTokensResult } from '@nightmarket/core';
 
@@ -41,7 +50,19 @@ import type { ResolvedPackItem } from './pack.js';
  *  stage, the inbox entry the transaction files into the account (when it files one), and the Unix
  *  second after which it can no longer land (its TTL; absent: the relay's settle window). Throwing
  *  here (the claims store cannot write) stops the mint before anything is submitted. */
-export type BeforeSubmit = (p: { stage: PendingToken['stage']; entry?: Uint8Array; notAfter?: number }) => void;
+export type BeforeSubmit = (p: {
+  stage: PendingToken['stage'];
+  entry?: Uint8Array;
+  notAfter?: number;
+  /** `via-sponsor` (`minted`, `deposit`): the confirmed mint's transaction id (R3-8). */
+  mintTx?: string;
+}) => void;
+
+/** A resumed `via-sponsor` deposit cannot tell what happened (the sponsor does not hold the minted
+ *  token any more): the token is quarantined, never minted or deposited again (R3-8). */
+export class DemoMintUnclearError extends Error {
+  override name = 'DemoMintUnclearError';
+}
 
 /** One token's mint into the account (./faucet.ts `DemoFaucets.direct` / `viaSponsor`). */
 export type DemoMint = (o: {
@@ -53,6 +74,10 @@ export type DemoMint = (o: {
   path: DemoTokenPath;
   stage: (name: string, detail?: Record<string, string>) => void;
   beforeSubmit: BeforeSubmit;
+  /** `via-sponsor` only: the mint already landed in the sponsor wallet (its transaction id when
+   *  known): deposit ONLY (AA 00047 P11, R3-8). Throws a DemoMintUnclearError when the sponsor does
+   *  not hold the token to deposit. */
+  resume?: { mintTx?: string };
 }) => Promise<MintOutcome>;
 
 export interface DemoTokenDeps {
@@ -204,12 +229,25 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
       // An earlier attempt's tokens whose submission is uncertain are reconciled BEFORE anything is
       // minted (AA 00047 P10, R2-7): never mint a token twice.
       const settling: string[] = [];
+      /** `via-sponsor` tokens whose mint is confirmed: only their deposit is resumed (P11, R3-8). */
+      const depositOnly = new Map<string, { mintTx?: string }>();
       for (const [colour, pending] of Object.entries(claim.pending)) {
         const symbol = deps.pack.find((i) => norm(i.colour) === colour)?.symbol ?? colour.slice(0, 8);
+        const minted = pending.mintTx ? { mintTx: pending.mintTx } : {};
+        if (pending.stage === 'minted') {
+          // The mint landed in the sponsor wallet, and no deposit was submitted: deposit only.
+          ctx.stage('reconciled', { symbol, verdict: 'minted' });
+          depositOnly.set(colour, minted);
+          continue;
+        }
         const verdict = await reconcilePending(rt, account, pending, now());
         ctx.stage('reconciled', { symbol, verdict });
-        if (verdict === 'landed') claim.settle(colour, { reconciled: true });
-        else if (verdict === 'not-landed') claim.settle(colour, null);
+        if (verdict === 'landed')
+          claim.settle(colour, { ...(pending.mintTx ? { mint: pending.mintTx } : {}), reconciled: true });
+        else if (verdict === 'not-landed' && pending.stage === 'deposit') {
+          // A deposit is only ever submitted after its mint was confirmed: deposit again, never mint.
+          depositOnly.set(colour, minted);
+        } else if (verdict === 'not-landed') claim.settle(colour, null);
         else if (verdict === 'settling') settling.push(symbol);
         else {
           claim.quarantine(colour, 'its delivery was cut off before it could be found on chain');
@@ -241,26 +279,40 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
               continue;
             }
             if (held[colour]) continue; // quarantined: never minted again by the relay
-            ctx.stage('minting', { symbol: item.symbol });
+            const resume = depositOnly.get(colour);
+            ctx.stage(resume ? 'depositing' : 'minting', { symbol: item.symbol });
             attempted = true;
-            const txs = await deps.mint({
-              rt,
-              wallet: w as SponsorWalletHandle,
-              account,
-              encKey,
-              item,
-              path: deps.path,
-              stage: (name, detail) => ctx.stage(name, detail),
-              // Written durably BEFORE the transaction is submitted (R2-7); a write that fails throws
-              // here, and nothing is submitted.
-              beforeSubmit: ({ stage, entry, notAfter }) =>
-                claim.submitting(colour, {
-                  since: now(),
-                  notAfter: notAfter ?? now() + (deps.pendingSettleSeconds ?? 4 * 3600),
-                  stage,
-                  ...(entry ? { entry: hexOf(entry), inboxFrom: String(ledger.inbox_count) } : {}),
-                }),
-            });
+            let txs: MintOutcome;
+            try {
+              txs = await deps.mint({
+                rt,
+                wallet: w as SponsorWalletHandle,
+                account,
+                encKey,
+                item,
+                path: deps.path,
+                stage: (name, detail) => ctx.stage(name, detail),
+                // Written durably BEFORE the transaction is submitted (R2-7), and when a via-sponsor
+                // mint is confirmed (R3-8); a write that fails throws here, and nothing is submitted.
+                beforeSubmit: ({ stage, entry, notAfter, mintTx }) =>
+                  claim.submitting(colour, {
+                    since: now(),
+                    notAfter: notAfter ?? now() + (deps.pendingSettleSeconds ?? 4 * 3600),
+                    stage,
+                    ...(mintTx ? { mintTx } : {}),
+                    ...(entry ? { entry: hexOf(entry), inboxFrom: String(ledger.inbox_count) } : {}),
+                  }),
+                ...(resume ? { resume } : {}),
+              });
+            } catch (e) {
+              if (!(resume && e instanceof DemoMintUnclearError)) throw e;
+              // The minted token is no longer where the deposit needs it: never mint or deposit again.
+              claim.quarantine(colour, `its deposit could not be resumed: ${e.message}`);
+              deps.log.warn('a demo token was held back (quarantined): its minted coin cannot be deposited', {
+                symbol: item.symbol,
+              });
+              continue;
+            }
             // Written before the next token (audit C8 / F-B7): a failure later keeps this one's charge.
             claim.progress(colour, txs);
             out.push({ symbol: item.symbol, colour: item.colour, amount: item.amount, txs });
@@ -272,7 +324,10 @@ export function demoTokens(deps: DemoTokenDeps): { admit: AdmissionCheck; execut
         Object.values(m.txs).filter((t): t is string => typeof t === 'string' && t !== ''),
       );
       claim.confirm(txIds);
-      const heldBack = deps.pack.filter((i) => held[norm(i.colour)]).map(({ symbol, colour }) => ({ symbol, colour }));
+      const heldNow = claim.quarantined;
+      const heldBack = deps.pack
+        .filter((i) => heldNow[norm(i.colour)])
+        .map(({ symbol, colour }) => ({ symbol, colour }));
       deps.log.info('demo tokens delivered', {
         tokens: minted.length,
         transactions: txIds.length,

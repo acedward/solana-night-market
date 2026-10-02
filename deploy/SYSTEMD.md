@@ -4,7 +4,9 @@ MN Bank's native guide (AA 00039, `plans/00039-passport-evm-dapp-systemd-guide.m
 workspace) lays out a user, Bun, the runtime checkout, the proof server from its image, the key set,
 the relay and nginx as systemd units. Night Market uses the same layout with these differences.
 Names change from `mnbank` to `nightmarket` (user, units, `/etc/nightmarket`, `/srv/nightmarket`,
-`/var/lib/nightmarket`, `/var/www/nightmarket`). Not yet run on a real systemd host.
+`/var/lib/nightmarket`, `/var/www/nightmarket`). Section 8 has the complete unit files. Not yet run on
+a real systemd host; the units pass `systemd-analyze verify` (Debian 12). Before going live, go
+through the production checklist at the top of `deploy/RUNBOOK.md`.
 
 ## 1. Base
 
@@ -29,29 +31,46 @@ unpacks under `/nix/store`):
 | `nightmarket-proof-contracts` | `midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf` | 6300 | `/var/lib/nightmarket/proof-params-rc8` | `14G` (a k=18 Ed25519 proof peaks near 9.4 GiB, and rc.8's memory grows across proofs: below) |
 | `nightmarket-proof-dust` | `midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b` | 6301 | `/var/lib/nightmarket/proof-params-rc6` | `4G` |
 
-**The contract prover's memory grows across proofs** (AA 00047 plan risk R7: 11.94 GiB of a 12 GiB
-cap within four proofs of a restart on a localnet; killed at 14 GB after about 25). Give its unit
-`MemoryMax=14G` and `Restart=always`, and restart it periodically when the relay is idle, with a
-timer (a proof cut off fails its job as `market-unavailable`, never charged to the customer):
+Both binaries have the same name under different Nix store paths, so link each under its own name,
+taking the path from its image's own file list (arm64: `--platform linux/arm64`):
 
-```ini
-# /etc/systemd/system/nightmarket-prover-restart.service
-[Service]
-Type=oneshot
-# idle: each of the relay's three lanes (prover, account, relay) reports "running":0 in /health
-ExecStart=/bin/sh -c '[ "$(curl -fs http://127.0.0.1:8080/health | grep -o "\"running\":0" | wc -l)" -eq 3 ] && systemctl restart nightmarket-proof-contracts || true'
-
-# /etc/systemd/system/nightmarket-prover-restart.timer
-[Timer]
-OnCalendar=*-*-* 00/6:00:00
-[Install]
-WantedBy=timers.target
+```bash
+crane export --platform linux/amd64 \
+  midnightntwrk/proof-server:9.0.0-rc.8@sha256:2666c7bd7b4517f8ad135565387f98d14347a9ac715c6c466d4a8a852b545ecf /tmp/ps-rc8.tar
+crane export --platform linux/amd64 \
+  midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b /tmp/ps-rc6.tar
+for v in rc8 rc6; do
+  sudo tar -xf "/tmp/ps-$v.tar" -C / nix
+  sudo ln -sf "/$(tar -tf "/tmp/ps-$v.tar" | grep -m1 'bin/midnight-proof-server$')" "/usr/local/bin/midnight-proof-server-$v"
+done
+sudo install -d -o nightmarket -g nightmarket /var/lib/nightmarket/proof-params-rc8 \
+  /var/lib/nightmarket/proof-params-rc6 /var/lib/nightmarket/zk-params
 ```
 
-The two Nix trees have different store paths; link each binary under its own name
-(`/usr/local/bin/midnight-proof-server-rc8`, `…-rc6`). Neither has a bind option: **firewall 6300
-and 6301**. `docker pull` of the rc.8 tag has been seen to hang; `crane export` by the digest above
-does not use Docker.
+Neither binary has a bind option: **firewall 6300 and 6301**. `docker pull` of the rc.8 tag has been
+seen to hang; `crane export` by the digest above does not use Docker.
+
+**The contract prover's memory grows across proofs** (AA 00047 plan risk R7: 11.94 GiB of a 12 GiB
+cap within four proofs of a restart on a localnet; killed at 14 GB after about 25). Its unit has
+`MemoryMax=14G` and `Restart=always` (section 8), and a timer restarts it every 6 hours when the relay
+runs no job (a proof cut off anyway fails its job as `market-unavailable`, never charged to the
+customer). The check is a small script, not an inline `sh -c` line in the unit, because systemd
+itself processes backslash escapes and `$` in `ExecStart`:
+
+```bash
+sudo tee /usr/local/bin/nightmarket-prover-restart >/dev/null <<'SH'
+#!/bin/sh
+# Restart the contract prover (rc.8) only when the relay runs no job (deploy/RUNBOOK.md section 12.1).
+h="$(curl -fs http://127.0.0.1:8080/health)" || exit 0
+if printf '%s' "$h" | grep -q '"running":[1-9]'; then exit 0; fi
+exec systemctl restart nightmarket-proof-contracts
+SH
+sudo chmod 755 /usr/local/bin/nightmarket-prover-restart
+```
+
+The relay's `/health` lists every queue lane under `queue.lanes`, each with its `running` count: the
+script restarts only when none is above 0, and does nothing when `/health` does not answer. The
+timer and its service are in section 8.
 
 ## 3. Secrets and settings
 
@@ -114,7 +133,7 @@ does not use Docker.
 
 ## 4. The key set
 
-The same oneshot unit, with `TimeoutStartSec=2h` and `MemoryMax=12G`. It now also compiles the
+MN Bank's oneshot unit (section 8), with `TimeoutStartSec=2h` and `MemoryMax=12G`. It now also compiles the
 demo-token faucet (seconds) and checks its `mint` key against the deployed faucets. A good run ends
 with `verdict VERIFIED (fingerprint 21493588…5c5e)`, and the set is 2.5 GB. To import a set built
 elsewhere, put `KEYS_IMPORT_DIR=<dir holding account/>` in `native.env` for the first run (the job
@@ -122,7 +141,7 @@ copies only the kept prover keys).
 
 ## 5. The relay
 
-The same unit, with:
+MN Bank's unit (section 8 has the whole file), with:
 
 ```ini
 Wants=network-online.target nightmarket-proof-contracts.service nightmarket-proof-dust.service
@@ -167,4 +186,142 @@ A wallet DEDICATED to this server (`deploy/RUNBOOK.md` section 4.1): create a ne
 `/srv/nightmarket/secrets/sponsor.seed` (mode 600, owned by the relay's user, backed up offline).
 Register it for DUST as in MN Bank's guide (`nightmarket-tool register-dust` with the relay stopped);
 the DUST it needs, and the sponsor's worst case per day with Q46's allowance, are in
-`deploy/RUNBOOK.md` sections 4.3 and 9.
+`deploy/RUNBOOK.md` sections 4.3 and 9. Opening a Night Market account costs about 41 DUST at the
+default margin (not MN Bank's 60).
+
+## 8. The unit files
+
+Each goes in `/etc/systemd/system/`. Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now nightmarket-proof-contracts nightmarket-proof-dust
+sudo systemctl enable nightmarket-keys nightmarket-relay
+sudo systemctl start nightmarket-keys          # first time 15–60 min: journalctl -fu nightmarket-keys
+# fund the sponsor and run register-dust (section 7), then:
+sudo systemctl start nightmarket-relay
+sudo systemctl enable --now nightmarket-prover-restart.timer
+curl -s http://127.0.0.1:8080/health
+```
+
+`nightmarket-proof-contracts.service`:
+
+```ini
+[Unit]
+Description=Night Market contract prover (midnight-proof-server 9.0.0-rc.8)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=nightmarket
+Group=nightmarket
+Environment=MIDNIGHT_PP=/var/lib/nightmarket/proof-params-rc8
+ExecStart=/usr/local/bin/midnight-proof-server-rc8 --port 6300
+Restart=always
+RestartSec=5
+MemoryMax=14G
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`nightmarket-proof-dust.service`:
+
+```ini
+[Unit]
+Description=Night Market DUST prover (midnight-proof-server 9.0.0-rc.6)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=nightmarket
+Group=nightmarket
+Environment=MIDNIGHT_PP=/var/lib/nightmarket/proof-params-rc6
+ExecStart=/usr/local/bin/midnight-proof-server-rc6 --port 6301
+Restart=on-failure
+RestartSec=5
+MemoryMax=4G
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`nightmarket-keys.service`:
+
+```ini
+[Unit]
+Description=Night Market key set: build once, re-verify at every start (deploy/key-volume/build.sh)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=nightmarket
+Group=nightmarket
+WorkingDirectory=/app
+EnvironmentFile=/etc/nightmarket/relay.env
+EnvironmentFile=/etc/nightmarket/native.env
+ExecStartPre=/usr/bin/mkdir -p /app/vendor/passport/contract/contracts/managed
+ExecStart=/usr/bin/bash /app/deploy/key-volume/build.sh
+TimeoutStartSec=2h
+MemoryMax=12G
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`nightmarket-relay.service`:
+
+```ini
+[Unit]
+Description=Night Market relay
+Wants=network-online.target nightmarket-proof-contracts.service nightmarket-proof-dust.service
+Requires=nightmarket-keys.service
+After=network-online.target nightmarket-proof-contracts.service nightmarket-proof-dust.service nightmarket-keys.service
+
+[Service]
+User=nightmarket
+Group=nightmarket
+WorkingDirectory=/app
+EnvironmentFile=/etc/nightmarket/relay.env
+EnvironmentFile=/etc/nightmarket/native.env
+ExecStart=/usr/local/bin/bun relay/src/main.ts
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStopSec=30
+MemoryMax=8G
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nightmarket
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`nightmarket-prover-restart.service` and `nightmarket-prover-restart.timer` (the script is in
+section 2):
+
+```ini
+[Unit]
+Description=Night Market: restart the contract prover when the relay runs no job (plan risk R7)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nightmarket-prover-restart
+```
+
+```ini
+[Unit]
+Description=Night Market: restart the contract prover every 6 hours when idle
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+
+[Install]
+WantedBy=timers.target
+```

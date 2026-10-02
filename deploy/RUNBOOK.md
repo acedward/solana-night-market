@@ -9,6 +9,62 @@ Midnight test tokens from the mint-test-tokens faucets.
 This runbook deploys and runs the market on Midnight **stagenet**, a test network: nothing here
 carries real value. Every command runs from the repository root unless it says otherwise.
 `deploy/.env.example` documents every setting; `deploy/SYSTEMD.md` covers a host without Docker.
+What the market cannot promise is in the README's "Known limitations" (the site's About page,
+`/#about`, says the same to customers).
+
+## Production checklist
+
+Go through it before the market goes on a production server; each item names its section.
+
+- [ ] **A dedicated sponsor wallet** (4.1–4.4): a NEW wallet created for this server
+  (`sponsor-wallet.ts new`), never the shared `.stagenet` wallet or one a test run used.
+  `SPONSOR_DEDICATED_WALLET=true`, `SPONSOR_FUNDING_LOCK_FILE` empty. Seed file mode 600, readable
+  by `RELAY_USER`, backed up offline. Fund it, run `register-dust` after every top-up, and size it
+  (section 9): one account costs the sponsor at most about 125 DUST a day; at the default caps the
+  whole market can be made to spend up to about 6,500 DUST a day (about 9,000 NIGHT registered for
+  DUST sustains that). `REGISTER_DAILY_CAP` is the main lever.
+- [ ] **Domain and TLS** (3, 15): the site only over https (WebCrypto and Phantom need a secure
+  page), a TLS proxy in front of `127.0.0.1:18081` (`WEB_BIND_ADDRESS=127.0.0.1`), plain http
+  redirected. One TLS site per domain.
+- [ ] **The trusted proxy** (3): `WEB_TRUSTED_PROXIES` names your TLS proxy's address (the default
+  fits a proxy on the same host); `RELAY_TRUST_PROXY=true`. After the first start, open accounts
+  from two different networks: each must count against its own address. Wrong, every customer
+  shares one rate-limit bucket and one per-address registration cap.
+- [ ] **The Content-Security-Policy** (16): set `WEB_CONTENT_SECURITY_POLICY` to the tested value.
+  Its `connect-src` names the indexer's `https://` AND `wss://` origins (and the kernel), and
+  `script-src` allows `'wasm-unsafe-eval'`. Then open the Portfolio page with an account: the
+  browser console shows no CSP violation.
+- [ ] **Both proof servers** (1, 2, 12.1): `proof-server-contracts` is 9.0.0-rc.8 (pinned by
+  digest) with `CONTRACT_PROOF_SERVER_MEM_LIMIT=14g` AND the periodic restart (the cron line in
+  12.1); `proof-server-dust` is 9.0.0-rc.6 (4g). `/health` shows `proofServer.version`
+  `9.0.0-rc.8` and `dustProofServer.version` `9.0.0-rc.6`. Neither is reachable from outside.
+- [ ] **The key set** (5): `RELAY_KEYS_FINGERPRINT` as shipped in `deploy/.env.example`
+  (`21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e`). `up keys` ends with `verdict VERIFIED (fingerprint 21493588…)`, and `/health` shows
+  `proofServer.keys.matchesPin: true` and `complete: true`.
+- [ ] **The web pin** (16): build the web and relay images from the same commit.
+  `grep -o "keySet: '[0-9a-f]*'" packages/core/src/passport/pinned-account-keys.ts` must print the
+  same fingerprint; the first account opened after the start must show as open, with no refusal.
+- [ ] **The caps** (9): keep the defaults of `deploy/.env.example` unless a pattern shows:
+  registrations 100 a day, 3 per client address, 1 at a time; per account 1 job at a time, 3 open
+  offers, 20 makes, 5 cancels, 3 key restores, 100 withdrawals (then one whole-coin exit per
+  token), 20 change re-filings and 10 unsettled takes a day; 5 failures a day per key and per
+  account; 100 demo-token claims a day; fee margin 20; low DUST at 10. They live in memory: a relay
+  restart resets them. Copy any setting a newer release adds to `.env.example`.
+- [ ] **Backups** (7, 12.1): the sponsor seed file, and the `relay-data` volume (the demo-token
+  claims). The key volume can be rebuilt. With the relay idle:
+
+  ```sh
+  docker run --rm -v nightmarket_relay-data:/data:ro -v "$PWD":/backup \
+    busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e \
+    tar czf "/backup/relay-data-$(date -u +%F).tgz" -C /data .
+  ```
+
+  (`nightmarket_` is `COMPOSE_PROJECT_NAME`.) To restore, stop the relay, extract the archive into
+  the volume with `tar xzf … -C /data`, and start it: `relay-data-init` hands the files back to
+  `RELAY_USER`, and the relay takes over the archived `demo-token-claims.json.lock` once it is two
+  minutes old (section 7).
+- [ ] **After the first start**: `/health` is `ok`; watch the contract prover's memory
+  (`docker stats`) for the first days, and restart it more often if it climbs past 12 GiB.
 
 ## Contents
 
@@ -103,9 +159,11 @@ Phantom needs no SOL: it only signs messages.
 Do these steps in order. Sections 4 to 7 explain each one.
 
 ```sh
-# 1. The code, with the pinned Passport sources (the Ed25519 arm).
-git clone https://github.com/acedward/solana-night-market.git nightmarket
-cd nightmarket
+# 1. The code, with the pinned Passport sources (the Ed25519 arm), in /srv/nightmarket/app (the
+#    path the prover-restart line of section 12.1 uses).
+sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" /srv/nightmarket
+git clone https://github.com/acedward/solana-night-market.git /srv/nightmarket/app
+cd /srv/nightmarket/app
 git checkout <release branch or commit>
 git submodule update --init
 
@@ -190,8 +248,9 @@ Do not give the relay the `.stagenet` seed itself:
 **For the production server**, create a NEW wallet for it (section 4.2): not the `.stagenet` wallet,
 and not a wallet a test run or another deployment has used. Size its NIGHT for the DUST section 4.3
 describes and the sponsor's worst case in section 9 (with Q46's allowance, about 125 DUST per account
-per day at margin 20; market-wide the prover lane bounds it to about 1,700 DUST a day), and keep its
-seed file only on that server (mode 600, backed up offline).
+per day at margin 20; market-wide, at the default caps, up to about 6,500 DUST a day: the
+registrations up to about 4,100, the demo-token packs about 400 and the rest of the prover lane's
+day up to about 2,000), and keep its seed file only on that server (mode 600, backed up offline).
 
 ### 4.2 Create it
 
@@ -251,8 +310,8 @@ NIGHT gives about 714 DUST a day, about 17 new accounts a day at margin 20 or 34
 ### 4.5 Low DUST
 
 Below `SPONSOR_DUST_LOW_SPECKS` (default 10 DUST) the relay refuses new actions with a clear
-message and `/health` shows `sponsor.dustLow: true`. Registration needs about 60 DUST: keep the
-balance well above that.
+message and `/health` shows `sponsor.dustLow: true`. Opening one account costs about 41 DUST at
+the default margin (section 4.3): keep the balance well above that.
 
 The balance the relay reports and checks does not dip while a transaction is in flight (section 8,
 `sponsor.dustSpecks`), so `dustLow` only turns on when the DUST is really low, and it turns on at
@@ -580,19 +639,22 @@ value; request bodies are never logged).
 | Jobs | kept `JOB_TTL_SECONDS` (24 h), at most `JOB_MAX` (10,000), in memory | A relay restart forgets running jobs. |
 
 **Why these registration numbers** (audit C4). One registration deploys two waves and activates the
-device: it held the prover lane about 60 s on stagenet and cost the sponsor about 21 DUST (plan P6:
-22 DUST for an account plus its demo pack, the pack about 1 DUST). Without caps one client opening
-accounts with fresh Solana keys (they cost nothing) could stall every customer's action and drain the
-sponsor in under two days. With the defaults:
+device: it held the prover lane about 60 s on stagenet and cost the sponsor about 41 DUST at the
+default margin 20 (about 21 at margin 5: plan P6 measured 22 DUST at margin 5 for an account plus
+its demo pack, the pack about 1 DUST; section 4.3). Without caps one client opening accounts with
+fresh Solana keys (they cost nothing) could stall every customer's action and drain the sponsor in
+under two days. With the defaults:
 
-- at most 100 accounts a day: about 2,100 DUST and 100 minutes of prover time a day, at worst;
+- at most 100 accounts a day: about 4,100 DUST (2,100 at margin 5) and 100 minutes of prover time
+  a day, at worst;
 - one client address opens at most 3 a day, so reaching the global cap takes 34 addresses;
 - registrations never queue behind each other: any other action waits behind at most one (about a
   minute);
 - a key or account whose calls keep failing at proving time is stopped after 5 failures a day.
 
-Size the sponsor for the global cap: `REGISTER_DAILY_CAP` × 21 DUST a day, plus the actions. The
-counters live in memory: a relay restart resets them.
+Size the sponsor for the global cap: `REGISTER_DAILY_CAP` × 41 DUST a day at margin 20, plus the
+actions (the whole market's worst case is at the end of this section). The counters live in
+memory: a relay restart resets them.
 
 **Why these per-account numbers** (audit round 2 R2-1, questions Q37). One registered account used to
 be able to hold the prover lane: a make held it for its proof and the exchange's listing wait (about
@@ -632,11 +694,28 @@ key (section 7). One account can therefore use at most about 125 DUST a day, abo
 1,000 registered NIGHT generates (714 DUST a day, section 4.3). Several accounts are bounded by the
 registration caps (100 new accounts a day, each costing the sponsor about 41 DUST to open at margin
 20) and, market-wide, by the one prover lane: a withdrawal holds it about 40–45 s, so the lane can run
-at most about 2,000 sponsored transactions a day, about 1,700 DUST at margin 20 (2,400 NIGHT to
-sustain). Size the sponsor for the traffic you expect, watch `sponsor.dustSpecks` (section 8), and
-lower `WITHDRAWS_DAILY_CAP` if a pattern shows; the page explains the allowance only once a customer
-reaches it. An honest customer withdraws a handful of times a day; past the allowance, one whole
+at most about 2,000 sponsored transactions a day, about 1,700 DUST at margin 20 if they are all
+withdrawals (with the registrations, the demo packs and the change re-filings, the whole market's
+worst case is below). Size the sponsor for the traffic you expect, watch `sponsor.dustSpecks`
+(section 8), and lower `WITHDRAWS_DAILY_CAP` if a pattern shows; the page explains the allowance only
+once a customer reaches it. An honest customer withdraws a handful of times a day; past the allowance, one whole
 coin of each listed token still leaves every day, so funds never get stuck.
+
+**The whole market's worst case per day** (at margin 20, from the fees of section 4.3). Many
+accounts, each within its own caps, are bounded by the market-wide caps and the one prover lane:
+
+- registrations: at most `REGISTER_DAILY_CAP` (100) × about 41 DUST = about 4,100 DUST, using about
+  100 minutes of the lane;
+- demo-token packs: at most `DEMO_TOKENS_DAILY_CAP` (100) × 3 tokens × about 1.3 DUST = about 400
+  DUST, using about 100 minutes of the lane;
+- the rest of the lane's day (about 21 hours at 40–45 s per sponsored transaction, about 1,750
+  transactions): withdrawals at 0.83 DUST and their change re-filings at 1.5 DUST, up to about
+  2,000 DUST.
+
+So up to about **6,500 DUST a day**, which about 9,000 NIGHT registered for DUST sustains (0.714 DUST
+per NIGHT a day); about half at margin 5. `REGISTER_DAILY_CAP` is the main lever: each new account a
+day is about 41 DUST.
+
 ## 10. What customers must know
 
 - **Phantom approves every action, and shows what it approves.** The message is readable: the
@@ -655,8 +734,14 @@ coin of each listed token still leaves every day, so funds never get stuck.
   minutes), whoever holds the approval. **Cancel offer** ends it sooner (one approval, one
   transaction).
 - **Demo tokens**: once per wallet. These are test networks and test tokens.
+- **The About page** (`/#about`, linked from every page's footer) lists the known limitations in
+  plain words, as the README's "Known limitations" does. It says nothing about the withdrawal
+  allowance (questions Q46).
 
 ## 11. Known limits
+
+The README's "Known limitations" is the complete list, for customers and operators; this section
+adds the operator's side.
 
 - One live offer per account; one coin per payment, with no merging of coins.
 - All customer data in the browser, with Export and Import as the only backup.
@@ -683,6 +768,22 @@ coin of each listed token still leaves every day, so funds never get stuck.
 - One request per account at a time: a second one is refused (`429 account-busy`) until the first
   finishes (section 9).
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
+- **A new account the page refuses at opening stays refused** (audit R4-6; questions Q42, Q51), and
+  that wallet cannot open another account on this site. A deposit by anyone in the few blocks
+  between the deploy and the maintenance update that retires the setup key causes it, and so does
+  an update that lands more than 100 blocks after the deploy (a relay restarted between the two):
+  restart the relay only when `/health` shows nothing running.
+- **`via-sponsor` demo tokens** (audit R4-7; not the default): a resumed deposit takes any coin of
+  that colour from the sponsor's balance, possibly one minted for another pending claim, which is
+  then quarantined (section 7). Keep `DEMO_TOKENS_PATH=direct` unless stagenet refuses it.
+- **The used-nonce bound** (questions Q40): past `AUTH_MAX_USED_NONCES` the oldest used nonce is
+  forgotten, so its signed envelope could be accepted again until its own expiry (at most
+  `AUTH_MAX_TTL_SECONDS`, 10 minutes); every cap still applies.
+- **A page that proves and pays for itself can rotate an account's encryption key** with one
+  approval (audit R3-9; questions Q50): the relay lands only a restore to the opening key, but the
+  circuit accepts any key, so such a page reads the sealed notes filed after it (privacy, not funds).
+- **The contract prover's memory grows** (plan risk R7): 14g and the periodic restart (sections 2
+  and 12.1).
 
 ## 12. Start, stop, upgrade and re-pin
 
@@ -709,9 +810,13 @@ every lane under `queue.lanes` has `running` 0), so no customer's proof is cut o
 `market-unavailable`, which the failure budget never charges, and the customer can try again:
 
 ```sh
-# /etc/cron.d/nightmarket-prover: every 6 h, when the relay runs no job
-0 */6 * * * root cd /srv/nightmarket/app && [ "$(curl -fs http://127.0.0.1:18080/health | grep -o '"running":0' | wc -l)" -eq 3 ] && docker compose -f deploy/compose.yml restart proof-server-contracts
+# /etc/cron.d/nightmarket-prover: every 6 h, when no lane under /health queue.lanes runs a job
+0 */6 * * * root cd /srv/nightmarket/app && h="$(curl -fs http://127.0.0.1:18080/health)" && ! echo "$h" | grep -q '"running":[1-9]' && docker compose -f deploy/compose.yml restart proof-server-contracts
 ```
+
+The line does nothing when `/health` does not answer. `/srv/nightmarket/app` is the checkout of
+section 3; a line in `/etc/cron.d` names its user (`root`, or a user in the `docker` group) and may
+not contain `%`.
 
 ### 12.2 Upgrade to a new version of this repository
 

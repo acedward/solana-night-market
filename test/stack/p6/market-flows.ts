@@ -1675,7 +1675,10 @@ async function restoreStep() {
   //    change to any other key, sent as a restore, is refused before any proof; nothing moves.
   out.notTheOpeningKey = await restoreTo('A', away, 'a restore to a key that is not the opening key');
   const n = out.notTheOpeningKey as { admission: Reply; walletSaysRotate: boolean };
-  out.notTheOpeningKeyRefused = n.admission.status !== 202 && n.admission.code === 'malformed';
+  // The relay's refusal: 401 `unauthorised`, detail `malformed` (relay/src/passport/ed25519-arm.ts
+  // `restoresTheOpeningKey`), before any proof.
+  out.notTheOpeningKeyRefused =
+    n.admission.status === 401 && (n.admission.code === 'malformed' || n.admission.detail === 'malformed');
   out.keyAfterRefusal = (await siteChain.accountState(state.A.account!))?.encKey ?? null;
   put('restore', out);
   if (!out.notTheOpeningKeyRefused || out.keyAfterRefusal !== state.A.encPublic)
@@ -2722,6 +2725,10 @@ async function withdrawCap() {
   out.refusedRecordDropped = dropped;
   put('withdrawCap', out);
   if (!dropped) throw new Error('the refused withdrawal’s change stayed pending after the exit spent its coin');
+  // A spendable coin of the token for the next try (the first withdrawal's change, once the chain shows it).
+  await settledCoins('A', (c) =>
+    c.some((x) => !x.spent && !x.pending && x.mtIndex !== null && x.color === usdc && BigInt(x.value) >= 1_000_000n),
+  );
   const w4 = await attempt('after the exit: 1 twUSDC', 1_000_000n);
   if (w4.admitted || w4.status !== 429 || w4.code !== 'withdraws-daily-cap' || w4.detail !== 'whole-coin-exit-used')
     throw new Error(`the withdrawal after the exit was not refused with whole-coin-exit-used: ${json(w4)}`);

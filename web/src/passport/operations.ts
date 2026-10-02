@@ -899,6 +899,10 @@ export async function restoreEncryptionKey(env: OperationEnv, account: string): 
   if (!state) throw new OperationError('Midnight has no account at this address (the indexer does not show it).');
   if (check.ok)
     throw new OperationError("Your account already uses this browser's encryption key. Nothing to restore.");
+  // Restorable means the ONLY problem is the current key: the account's origin passed, so the state
+  // its deploy created carries THIS browser's key (AA 00047 P11, R3-1). The key sent below is
+  // therefore exactly the account's opening key, the only one the relay lands (P11.R, questions Q50).
+  // An origin not known yet is not restorable either: nothing is signed until it is.
   if (!restorableCheck(check)) throw new AccountCheckError(check);
   const view = state.view;
   if (!view.booted) throw new OperationError('The account is not active.');

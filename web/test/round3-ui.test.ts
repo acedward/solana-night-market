@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { keyFingerprint } from '../src/account/RestoreKeyDialog.js';
 import { exitCoins } from '../src/account/WholeCoinExit.js';
 import { checkStateOf } from '../src/chain/ChainContext.js';
-import { relayErrorText } from '../src/relay/messages.js';
+import { jobErrorText, relayErrorText } from '../src/relay/messages.js';
 import { signFacts } from '../src/wallet/sign-facts.js';
 
 describe('Q46: the allowance in plain words, only from the relay’s refusal', () => {
@@ -51,6 +51,22 @@ describe('Q46: the allowance in plain words, only from the relay’s refusal', (
       expect(t).toContain('You can withdraw again in 10 minutes.');
       expect(t).not.toContain('You can still withdraw one whole coin');
     }
+  });
+});
+
+describe('P11.R’s other new codes, in plain words', () => {
+  it('a coin already spent (refused, or a job that failed before proving)', () => {
+    const refused = relayErrorText({ status: 409, code: 'coin-spent', message: 'the coin … was already spent' });
+    expect(refused).toMatch(/^The coin this pays with was already spent on Midnight, so nothing was proven or sent\./);
+    expect(refused).toContain('Refresh your balances and try again');
+    expect(jobErrorText({ code: 'coin-spent', message: 'x' }, 'fallback')).toBe(refused);
+  });
+
+  it('too many unsettled takes today: wait, the rest still works', () => {
+    const t = relayErrorText({ status: 429, code: 'takes-unsettled-cap', message: 'x', retryAfterSeconds: 5 * 3600 });
+    expect(t).toContain('Several of your takes in the last 24 hours could not be settled by the exchange');
+    expect(t).toContain('Try again in about 5 hours; your other actions still work, and nothing was sent.');
+    expect(relayErrorText({ status: 429, code: 'takes-unsettled-cap', message: 'x' })).toContain('Try again in a day');
   });
 });
 

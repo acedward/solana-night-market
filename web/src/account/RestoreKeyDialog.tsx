@@ -1,9 +1,10 @@
 // "Restore my encryption key", explained BEFORE Phantom opens (AA 00047 P11, audit round 3 R3-9 /
 // F-A3-5). The wallet's own text for a restore is the same as for any key change ("Rotate encryption
 // key" / "New key <16 hex>"), so a phishing page could ask for one too. This dialog says, in plain
-// words, what this site's restore does: it sets the account's key back to the one THIS browser holds
-// (the one the account was opened with), it never moves funds, and the wallet must show exactly that
-// key. Only "Continue to Phantom" asks the wallet.
+// words, what this site's restore does: it sets the account's key back to the one it was OPENED with,
+// which is the one THIS browser holds (the page's origin check proves the two equal, and the relay
+// lands no other key: P11.R, questions Q50), it never moves funds, and the wallet must show exactly
+// that key. Only "Continue to Phantom" asks the wallet.
 
 import { Button, Dialog } from '../design/index.js';
 
@@ -42,8 +43,8 @@ export function RestoreKeyDialog({
     >
       <p data-testid="restore-explain-what">
         Your account on Midnight is no longer set to this browser&apos;s encryption key, so notes about coins sent to it
-        would not be readable here. Restoring sets the key back to the one this browser holds, the key your account was
-        opened with.
+        would not be readable here. Restoring sets it back to the key your account was opened with, which is the one
+        this browser holds. The market puts back no other key.
       </p>
       <p data-testid="restore-explain-funds">
         <strong>It never moves funds.</strong> Your tokens stay in your account, and nothing is sent anywhere.

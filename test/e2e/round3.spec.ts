@@ -117,7 +117,9 @@ test.describe('R3-9: the restore says what it does before Phantom opens', () => 
     await page.getByTestId('restore-key').click();
     const dialog = page.getByTestId('restore-explain');
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('sets the key back to the one this browser holds');
+    await expect(dialog).toContainText(
+      'Restoring sets it back to the key your account was opened with, which is the one this browser holds',
+    );
     await expect(dialog).toContainText('It never moves funds');
     await expect(dialog).toContainText(`New key ${mine.slice(0, 16)}`);
     expect(phantom.requests).toHaveLength(0); // nothing asked of the wallet yet

@@ -24,6 +24,7 @@ import {
   NEW_ACCOUNT_POLL_MS,
   NEW_ACCOUNT_WAIT_MS,
   openAccount,
+  restoreEncryptionKey,
   verifiedAccount,
   type OperationEnv,
 } from '../src/passport/operations.js';
@@ -245,5 +246,52 @@ describe('opening an account: the origin is waited for, and "not known yet" is n
     chain.check = { ok: false, useCounter: null, problems: [{ code: 'not-empty', message: 'seeded' }] };
     await expect(openAccount(e)).rejects.toBeInstanceOf(AccountCheckError);
     expect(readAccount(e.store, e.scope, ACCOUNT)?.refusedAtOpen).toEqual([{ code: 'not-empty', message: 'seeded' }]);
+  });
+});
+
+describe('the restore sends only the opening key: never while the origin is unknown or refused (R3-9, Q50)', () => {
+  it('signs nothing unless the current key is the ONLY problem (the origin passed)', async () => {
+    window.localStorage.clear();
+    const { signing, calls } = fakeSigning();
+    const sk = x25519.utils.randomSecretKey();
+    const chain = new FakeChain({
+      state: {
+        account: ACCOUNT,
+        booted: true,
+        deviceCount: 1,
+        deviceEpoch: '0',
+        devices: [],
+        authNonce: '3',
+        inboxCount: '0',
+        encKey: 'e1'.repeat(32),
+        networkSalt: '5a'.repeat(32),
+      },
+      entries: [],
+      zswapActivity: { account: ACCOUNT, outputs: [], inputs: [], transactions: 0, blockHeight: 0 },
+    });
+    const relay = new MiniRelay();
+    const e: OperationEnv = {
+      relay: relay as unknown as RelayClient,
+      chain,
+      store: new LocalStore(window.localStorage),
+      scope: { network: 'undeployed', owner: signing.deviceKey },
+      signing,
+    };
+    e.store.put(
+      e.scope,
+      'secret',
+      { encSecretKey: bytesToHex(sk), encPublicKey: bytesToHex(x25519.getPublicKey(sk)) },
+      { account: ACCOUNT },
+    );
+    const encKey = { code: 'enc-key' as const, message: 'not this browser’s key' };
+    for (const other of [
+      { code: 'provenance-unknown' as const, message: 'not known yet' },
+      { code: 'provenance' as const, message: 'another starting state' },
+    ]) {
+      chain.check = { ok: false, useCounter: null, problems: [encKey, other] };
+      await expect(restoreEncryptionKey(e, ACCOUNT)).rejects.toBeInstanceOf(AccountCheckError);
+    }
+    expect(calls).toEqual([]); // the wallet was never asked
+    expect(relay.submitted).toEqual([]);
   });
 });

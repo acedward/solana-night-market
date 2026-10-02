@@ -47,6 +47,11 @@ export interface AccountChainState {
   inbox: Array<string | null>;
   /** The public (unshielded) balances, one row per colour with a non-zero balance, by colour. */
   unshielded: Array<{ colour: string; amount: string }>;
+  /** The account's own ledger of credited unshielded amounts (its `unshielded_balances` map, which
+   *  `deposit_unshielded` credits and `withdraw_unshielded` debits), one row per colour, by colour.
+   *  A fresh account has none (AA 00047 P10, R2-6): a deployer that seeds it near 2^128 makes every
+   *  later deposit of that colour overflow. */
+  credited: Array<{ colour: string; amount: string }>;
 }
 
 const hex = (b: Uint8Array) => bytesToHex(b);
@@ -83,6 +88,9 @@ export function decodeAccountState(account: string, state: string | Uint8Array):
     .filter(([t, v]) => t.tag === 'unshielded' && typeof t.raw === 'string' && v > 0n)
     .map(([t, v]) => ({ colour: (t as { raw: string }).raw.replace(/^0x/, '').toLowerCase(), amount: v.toString(10) }))
     .sort((a, b) => (a.colour < b.colour ? -1 : a.colour > b.colour ? 1 : 0));
+  const credited = [...l.unshielded_balances]
+    .map(([c, v]) => ({ colour: hex(c), amount: v.toString(10) }))
+    .sort((a, b) => (a.colour < b.colour ? -1 : a.colour > b.colour ? 1 : 0));
   return {
     account: address,
     view: {
@@ -100,6 +108,7 @@ export function decodeAccountState(account: string, state: string | Uint8Array):
     authority: { committee: ma.committee.length, threshold: Number(ma.threshold) },
     inbox,
     unshielded,
+    credited,
   };
 }
 
@@ -111,7 +120,15 @@ export const networkSaltFor = (midnightNetworkId: string): string =>
 // ── The market account check (audit C3) ────────────────────────────────────────────
 
 export type AccountCheckCode =
-  'not-booted' | 'verifier-keys' | 'authority-live' | 'devices' | 'enc-key' | 'network-salt' | 'not-fresh';
+  | 'not-booted'
+  | 'verifier-keys'
+  | 'authority-live'
+  | 'devices'
+  | 'enc-key'
+  | 'network-salt'
+  | 'not-fresh'
+  /** AA 00047 P10 (R2-6): a just-opened account that is not empty (inbox, balances). */
+  | 'not-empty';
 
 export interface AccountCheckProblem {
   code: AccountCheckCode;
@@ -130,8 +147,10 @@ export interface MarketAccountExpectation {
   networkSalt: string;
   /** The verifier-key digests pinned in this build: circuit → SHA-256 (./pinned-account-keys.ts). */
   verifierKeys: Readonly<Record<string, string>>;
-  /** Just registered: the device must be at its first entry (counter 0, epoch 0) and nothing may
-   *  have been signed yet (auth nonce 0). */
+  /** Just registered: the device must be at its first entry (counter 0, epoch 0), nothing may have
+   *  been signed yet (auth nonce 0), and the account must start EMPTY: no inbox entry and no public
+   *  or credited balance (AA 00047 P10, audit round 2 R2-6: a deploy carries its initial state, so a
+   *  relay could otherwise seed fake notes or an overflowing balance into a "new" account). */
   fresh?: boolean;
   /** The use counter this browser last used (its roster), tried after the account's nonce. */
   counterHint?: bigint;
@@ -171,8 +190,18 @@ export function compareVerifierKeys(
 /**
  * Is this the account this site's market deploys, controlled by this wallet alone? Every rule is
  * checked (the page shows them all, not only the first that fails).
+ *
+ * `deployed` is the account's state as it was DEPLOYED (the indexer's state at the deploy's block):
+ * with `fresh`, the "starts empty" rule (R2-6) is judged on it, because that is what the deployer
+ * alone controlled; a note or a balance anyone added since (a permissionless deposit right after the
+ * deploy) is not the deployer's, and must not get a new account refused (questions Q42). Without it
+ * the current state is judged (stricter).
  */
-export function checkMarketAccount(s: AccountChainState, e: MarketAccountExpectation): AccountCheck {
+export function checkMarketAccount(
+  s: AccountChainState,
+  e: MarketAccountExpectation,
+  deployed?: Pick<AccountChainState, 'view' | 'inbox' | 'unshielded' | 'credited'>,
+): AccountCheck {
   const problems: AccountCheckProblem[] = [];
   const v = s.view;
   if (!v.booted) problems.push({ code: 'not-booted', message: 'It is not activated yet.' });
@@ -247,6 +276,24 @@ export function checkMarketAccount(s: AccountChainState, e: MarketAccountExpecta
       message: 'It has already been used, although it was just opened.',
       detail: `auth nonce ${v.authNonce}, device epoch ${v.deviceEpoch}`,
     });
+  // R2-6: a new account starts empty. Anything in it as deployed came with the deploy (the relay's
+  // choice, free of charge: fake notes, a credited balance near 2^128), so none of it is trusted.
+  if (e.fresh) {
+    const d = deployed ?? s;
+    const filed = d.inbox.filter((x) => x !== null).length;
+    if (BigInt(d.view.inboxCount) !== 0n || d.inbox.length !== 0 || filed !== 0)
+      problems.push({
+        code: 'not-empty',
+        message: 'It was deployed with notes already in its inbox, which this site did not put there.',
+        detail: `inbox count ${d.view.inboxCount}, entries ${filed}`,
+      });
+    if (d.unshielded.length !== 0 || d.credited.length !== 0)
+      problems.push({
+        code: 'not-empty',
+        message: 'It was deployed with balances already in it, which this site did not put there.',
+        detail: `public balances ${d.unshielded.length}, credited ${d.credited.map((c) => `${c.colour}:${c.amount}`).join(',')}`,
+      });
+  }
 
   return { ok: problems.length === 0, problems, useCounter: problems.length === 0 ? useCounter : null };
 }

@@ -22,6 +22,11 @@
 // is the contract's (`predictWithdrawChange`), unless `misreportChange` fabricates one (Q28 A).
 // `cancel-offers` (questions Q30) re-affirms the account's key and moves its nonce, or answers
 // `not-implemented` (`cancelMode`).
+//
+// AA 00047 P10 (audit round 2): `restore-enc-key` puts the browser's key back (R2-3; `restoreMode`),
+// and a relay can lie the ways round 2 found: report a call done that it never landed (`fakeSuccess`),
+// land a call and report it failed (`landButFail`), settle the maker's offer it holds when asked to
+// cancel (`settleOnCancel`), or file a note in the inbox for a coin that exists nowhere (`fakeNote`).
 
 import { randomBytes } from 'node:crypto';
 
@@ -33,6 +38,7 @@ import { bytesToHex, hexToBytes } from '../../packages/core/src/hex.js';
 import {
   callContext,
   cancelOffersRequest,
+  restoreEncKeyRequest,
   ed25519DeviceForCheck,
   ed25519DeviceForKey,
   networkSaltFor,
@@ -126,6 +132,20 @@ export class MockRelay {
   misreportChange = false;
   /** `cancel-offers`: done, or this relay cannot run it yet. */
   cancelMode: 'ok' | 'not-implemented' = 'ok';
+  /** `restore-enc-key` (R2-3): done, or this relay cannot run it yet. */
+  restoreMode: 'ok' | 'not-implemented' = 'ok';
+  /** Actions this relay reports done without landing anything (R2-4). */
+  readonly fakeSuccess = new Set<string>();
+  /** Actions this relay lands, then reports failed (R2-5). */
+  readonly landButFail = new Set<string>();
+  /** Asked to cancel, this relay settles the maker's offer it holds instead (R2-4). */
+  settleOnCancel = false;
+  /** Someone deposits a real one-unit coin into the new account right after its deploy (R2-6, Q42). */
+  depositAfterDeploy = false;
+  /** Refuse the next action request as P10.R's relay does (HTTP status, code, Retry-After). */
+  refuseNext: { status: number; code: string; message: string; retryAfter?: number } | null = null;
+  /** Fail the next job with this public error (P10.R's job codes, e.g. `market-unavailable`). */
+  failNextJob: { code: string; message: string } | null = null;
   /** The `validUntil` of every make and take, as signed. */
   readonly signedExpiries: string[] = [];
   authNonce = 3n;
@@ -171,6 +191,18 @@ export class MockRelay {
   private nextTx() {
     this.tx += 1;
     return this.tx.toString(16).padStart(64, '0');
+  }
+
+  /** A note in the account's inbox for a coin that exists nowhere (anyone can file one with
+   *  `deposit_shielded`, R2-6): sealed to the account's key, no Zswap leaf. */
+  async fakeNote(c: Coin) {
+    if (!this.encKey) throw new Error('no account yet');
+    const sealed = await sealEntryPortable(hexToBytes(this.encKey, 32), {
+      nonce: hexToBytes(c.nonce, 32),
+      color: hexToBytes(c.color, 32),
+      value: c.value,
+    });
+    this.entries.push(bytesToHex(sealed));
   }
 
   /** Put coins into the account the way `deposit_shielded` does: an inbox entry sealed to the
@@ -272,6 +304,10 @@ export class MockRelay {
       else if (action === 'cancel-offers') {
         if (payload.newKey !== this.encKey) return 'wrong-key'; // a cancel never changes the key
         await device.sign(this.ctx(), cancelOffersRequest(payload as never), this.useCounter);
+      } else if (action === 'restore-enc-key') {
+        // As lane P10.R's relay: another key than the on-chain one (the same would be a cancel).
+        if (!payload.newKey || payload.newKey === this.encKey) return 'malformed';
+        await device.sign(this.ctx(), restoreEncKeyRequest(payload as never), this.useCounter);
       } else if (action === 'open-swap' || action === 'take') {
         // As the relay after P9.R (audit C6): a real, signed expiry or nothing is admitted.
         if (BigInt(payload.validUntil ?? '0') === 0n) return 'no-expiry';
@@ -288,11 +324,59 @@ export class MockRelay {
   /** The job's side effects and public result, applied once (the job's first poll). */
   private async complete(s: Submitted) {
     const p = (s.body.payload ?? {}) as Record<string, string> & { coin?: Record<string, string> };
+    if (this.failNextJob) {
+      s.failed = this.failNextJob;
+      this.failNextJob = null;
+      return;
+    }
+    if (this.fakeSuccess.has(s.action)) {
+      // Reported done; nothing landed (R2-4).
+      s.stages = ['proving', 'submitted'];
+      s.result = { txId: this.nextTx(), change: null };
+      return;
+    }
+    await this.apply(s, p);
+    if (this.landButFail.has(s.action)) {
+      // Landed, then reported failed (R2-5).
+      delete s.result;
+      s.failed = { code: 'proof-failed', message: 'the prover crashed' };
+    }
+  }
+
+  /** The maker's offer this relay holds (the last make), settled by someone: what the chain shows. */
+  private async settleHeldOffer(tx: string) {
+    const make = [...this.submitted].reverse().find((x) => x.action === 'open-swap');
+    if (!make) return;
+    const m = (make.body.payload ?? {}) as Record<string, string> & { coin?: Record<string, string> };
+    const coin = m.coin!;
+    this.spend({ nonce: coin.nonce!, color: coin.color!, value: coin.value! }, tx);
+    this.entries.push(m.wantEntry!);
+    this.output({ nonce: m.wantNonce!, color: m.wantColor!, value: BigInt(m.wantAmount!) }, tx);
+    const change = predictChangeCoin(
+      {
+        nonce: hexToBytes(coin.nonce!, 32),
+        color: hexToBytes(coin.color!, 32),
+        value: BigInt(coin.value!),
+        mt_index: BigInt(coin.mtIndex!),
+      },
+      BigInt(m.giveAmount!),
+    );
+    if (change) {
+      this.entries.push(m.changeEntry!);
+      this.output({ nonce: bytesToHex(change.nonce), color: bytesToHex(change.color), value: change.value }, tx);
+    }
+    this.authNonce += 1n;
+    this.useCounter += 1n;
+  }
+
+  private async apply(s: Submitted, p: Record<string, string> & { coin?: Record<string, string> }) {
     const tx = this.nextTx();
     switch (s.action) {
       case 'register': {
         this.encKey = p.encPublicKey!;
         this.registered = true;
+        if (this.depositAfterDeploy)
+          await this.deposit([{ nonce: '5d'.repeat(32), color: COLOUR.twUSDC, value: 1n }], this.nextTx());
         // A new account: its device at its first entry, nothing signed yet.
         this.authNonce = 0n;
         this.useCounter = 0n;
@@ -353,6 +437,24 @@ export class MockRelay {
           };
           return;
         }
+        if (this.settleOnCancel) await this.settleHeldOffer(tx);
+        else {
+          this.authNonce += 1n;
+          this.useCounter += 1n;
+        }
+        s.stages = ['proving', 'submitted'];
+        s.result = { txId: tx };
+        return;
+      }
+      case 'restore-enc-key': {
+        if (this.restoreMode === 'not-implemented') {
+          s.failed = {
+            code: 'not-implemented',
+            message: 'the restore-enc-key operation is not available yet (plan lane P10.R)',
+          };
+          return;
+        }
+        this.encKey = p.newKey!;
         this.authNonce += 1n;
         this.useCounter += 1n;
         s.stages = ['proving', 'submitted'];
@@ -533,6 +635,22 @@ export class MockRelay {
       });
     }
     const action = /^\/v1\/actions\/([a-z-]+)$/.exec(path)?.[1];
+    if (action && req.method() === 'POST' && this.refuseNext) {
+      const r = this.refuseNext;
+      this.refuseNext = null;
+      this.refused.push(`${action}: ${r.code}`);
+      return route.fulfill({
+        status: r.status,
+        // Cross-origin here (a deployment serves the relay same-origin): expose Retry-After.
+        headers: {
+          ...CORS,
+          'access-control-expose-headers': 'retry-after',
+          ...(r.retryAfter ? { 'retry-after': String(r.retryAfter) } : {}),
+        },
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: r.code, message: r.message } }),
+      });
+    }
     if (action && req.method() === 'POST') {
       const body = JSON.parse(req.postData() ?? '{}') as Record<string, unknown>;
       if (action === 'demo-tokens' && this.deviceKey && this.demo.claimed.has(this.deviceKey)) {

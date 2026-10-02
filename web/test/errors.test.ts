@@ -66,6 +66,31 @@ describe('the relay’s refusals, in words', () => {
       'The market answered with an error (HTTP 502). Try again later.',
     );
     expect(t('not-found', { message: 'no such job' })).toBe('No such job.');
+    // AA 00047 P10 (relay lane P10.R, R2-1/R2-2): one request per account, the per-account caps and
+    // the failure budget, in plain words, never the relay's raw text.
+    expect(t('account-busy', { status: 429, retryAfterSeconds: 45 })).toBe(
+      'Your account already has a request in progress at the market. Wait for it to finish (about 45 s), then try again; nothing was sent.',
+    );
+    expect(t('open-offers-cap', { status: 429 })).toMatch(/as many open offers as the market lists at once\. Cancel/);
+    expect(t('makes-daily-cap', { status: 429, retryAfterSeconds: 3 * 3600 })).toMatch(
+      /made as many offers in the last 24 hours.*Try again in about 3 hours; nothing was sent/,
+    );
+    expect(t('cancels-daily-cap', { status: 429, retryAfterSeconds: 600 })).toMatch(
+      /cancelled as many times.*stop working at the expiry you approved.*in 10 minutes/,
+    );
+    expect(t('restores-daily-cap', { status: 429 })).toMatch(/encryption key was restored as many times.*in a while/);
+    expect(t('failure-budget', { status: 429, retryAfterSeconds: 7200 })).toMatch(
+      /pausing new ones for about 2 hours\. Withdrawals, cancels and key restores still work/,
+    );
+    expect(t('registration-busy', { status: 429 })).toMatch(/opening other accounts right now\. Try again in a minute/);
+    for (const code of [
+      'account-busy',
+      'open-offers-cap',
+      'makes-daily-cap',
+      'cancels-daily-cap',
+      'restores-daily-cap',
+    ])
+      expect(t(code, { status: 429 })).not.toContain('raw');
     expect(sentence('the exchange refused it')).toBe('The exchange refused it.');
   });
 
@@ -100,6 +125,19 @@ describe('the relay’s refusals, in words', () => {
       (async () => new Response(JSON.stringify(h), { status: 503 })) as unknown as typeof fetch,
     );
     expect((await client.health()).status).toBe('down');
+  });
+
+  it('words the market-side job failures of P10.R plainly (AA 00047 P10)', () => {
+    const j = (code: string) => jobErrorText({ code, message: 'raw relay text' }, 'fallback');
+    expect(j('market-unavailable')).toMatch(
+      /^The market's prover or its connection to Midnight failed.*does not count against you/,
+    );
+    expect(j('failure-budget')).toMatch(
+      /Nothing ran; you can send it again later\. Withdrawals, cancels and key restores are never paused/,
+    );
+    expect(j('demo-tokens-settling')).toMatch(/may still land on Midnight.*not minting them again yet/);
+    for (const code of ['market-unavailable', 'failure-budget', 'demo-tokens-settling'])
+      expect(j(code)).not.toContain('raw relay text');
   });
 
   it('words failed jobs of the exchange and the internal error', () => {

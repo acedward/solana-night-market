@@ -127,6 +127,17 @@ export interface StoredCoin extends CoinInfo {
   /** A withdrawal's change: the coin it was paid from (its commitment) and the amount paid, from
    *  which the browser recomputes the change before it seals an entry for it (AA 00047 P9.S, Q28 A). */
   changeOf?: { spent: string; amount: string };
+  /**
+   * A PENDING RECOVERY RECORD (AA 00047 P10, audit round 2 R2-5 / F-B2-2): the change of a withdrawal
+   * the wallet signed, written BEFORE the approval leaves the page, so a relay that reports a failure
+   * or never answers cannot make the browser forget it. It holds the coin the withdrawal spends
+   * (`input`), the auth nonce it signed (`authNonce`), and (with `changeOf`) the amount; the coin
+   * itself is the expected change. Until the CHAIN shows the change's leaf it is neither in a balance
+   * nor spendable nor filed in the inbox; once it does, `pending` is dropped. When the account's
+   * nonce has moved past `authNonce` and the input was never spent, the withdrawal can never land and
+   * the record is dropped.
+   */
+  pending?: { authNonce: string; input: CoinInfo; since: number };
 }
 
 export interface ReconcileInput {
@@ -235,17 +246,35 @@ export function localCoin(
 
 export interface ColourHolding {
   color: string;
-  /** Sum of the unspent coins, base units. */
+  /** Sum of the unspent coins the CHAIN confirms (`confirmedOnChain`), base units. */
   total: bigint;
   /** The largest single payment: the biggest unspent, positioned coin (Q9). */
   largest: bigint;
+  /** Unspent coins the chain confirms. */
   coins: number;
-  /** Unspent coins whose position is not known yet (not spendable until it is). */
+  /** Unspent coins whose position is not known yet: NOT in `total` or `coins` (not spendable, and
+   *  possibly not real, AA 00047 P10 R2-6), only counted here. */
   unpositioned: number;
   /** Unspent coins with no inbox entry (recoverable only from this browser, Q13). */
   notInInbox: number;
 }
 
+/**
+ * Whether the CHAIN confirms a coin (AA 00047 P10, audit round 2 R2-6 / F-A2-4): its leaf, the
+ * commitment the browser computes from the coin itself, is among the account's outputs that the
+ * public indexer's own raw events carry (@nightmarket/core `checkZswapActivity`, Q31), which is what
+ * gives it a position. An inbox note is NOT proof: anyone can file one with `deposit_shielded` (and a
+ * deployer can seed them), describing a coin that exists nowhere. Only confirmed coins count toward a
+ * balance or can pay.
+ */
+export const confirmedOnChain = (c: Pick<StoredCoin, 'mtIndex'>): boolean => c.mtIndex !== null;
+
+/** The account's unspent coins the chain does not confirm (yet): never in a balance (R2-6). */
+export const unconfirmedCoins = (coins: readonly StoredCoin[]): StoredCoin[] =>
+  coins.filter((c) => !c.spent && !confirmedOnChain(c));
+
+/** The holdings per colour, from the coins the CHAIN confirms only (R2-6): a colour shows when the
+ *  account has at least one such coin of it; unconfirmed coins are counted in `unpositioned`. */
 export function holdingsByColour(coins: readonly StoredCoin[]): ColourHolding[] {
   const out = new Map<string, ColourHolding>();
   for (const c of coins) {
@@ -259,14 +288,16 @@ export function holdingsByColour(coins: readonly StoredCoin[]): ColourHolding[] 
       notInInbox: 0,
     };
     const v = BigInt(c.value);
-    h.total += v;
-    h.coins += 1;
-    if (c.mtIndex === null) h.unpositioned += 1;
-    else if (v > h.largest) h.largest = v;
-    if (!c.inInbox) h.notInInbox += 1;
+    if (!confirmedOnChain(c)) h.unpositioned += 1;
+    else {
+      h.total += v;
+      h.coins += 1;
+      if (v > h.largest) h.largest = v;
+      if (!c.inInbox) h.notInInbox += 1;
+    }
     out.set(c.color, h);
   }
-  return [...out.values()].sort((a, b) => (a.color < b.color ? -1 : 1));
+  return [...out.values()].filter((h) => h.coins > 0).sort((a, b) => (a.color < b.color ? -1 : 1));
 }
 
 export class CoinChoiceError extends Error {

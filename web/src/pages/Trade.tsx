@@ -38,6 +38,7 @@ import {
   parseUnits,
   takeLegs,
 } from '@nightmarket/core';
+import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useActivity } from '../activity/ActivityContext.js';
 import { OFFER_OFF_CHAIN, stageWords, type ActivityKind } from '../activity/activity.js';
@@ -106,6 +107,8 @@ const STATE_TEXT: Record<ShownState, string> = {
   // listed (yet) says so, never "Listed" (AA 00047 P9.S, the P8.2 follow-up).
   live: 'Listed',
   unlisted: 'Not listed yet',
+  // The exchange (or the relay) says it is taken; the chain does not show it yet (AA 00047 P10, R2-4).
+  settling: 'Settling',
   filled: 'Filled',
   expired: 'Expired',
   cancelled: 'Cancelled',
@@ -115,6 +118,7 @@ const STATE_TEXT: Record<ShownState, string> = {
 const STATE_PILL: Record<ShownState, PillStatus> = {
   live: 'live',
   unlisted: 'progress',
+  settling: 'progress',
   filled: 'filled',
   expired: 'idle',
   cancelled: 'cancelled',
@@ -301,6 +305,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     owner,
     secret?.encPublicKey ?? null,
     revision,
+    (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
   );
   const trades = useMemo(
     () => (store && scope && account ? readTrades(store, scope, account.address) : []),
@@ -314,6 +319,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     return () => clearInterval(t);
   }, []);
   const live = liveOffer(trades, now);
+  // An approval the chain has not decided yet (a live make, a take the market reports settled): the
+  // page keeps reconciling while there is one (AA 00047 P10, R2-4).
+  const unsettled = trades.some((t) => t.status === 'live');
   // The history lists only the markets the filter shows; a live offer (the banner) always shows.
   const shownTrades = trades.filter((t) => assets.showsColour(t.base) && assets.showsColour(t.quote));
 
@@ -340,7 +348,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     try {
       const changed = await reconcileOffers(e, accountAddress, kernel);
       if (changed.length === 0) await syncAccount(e, accountAddress);
-      const filled = changed.find((c) => c.status === 'filled');
+      // A make someone else settled (a take's own result is the take's toast).
+      const filled = changed.find((c) => c.status === 'filled' && c.role === 'make');
       if (filled) setMessage({ kind: 'ok', text: `Your offer (${filled.summary}) was filled.` });
     } catch {
       /* the next refresh tries again; the page keeps the last known state */
@@ -349,13 +358,13 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   useEffect(() => {
     if (!accountAddress) return;
     const t = setTimeout(() => void reconcile(), 0);
-    const every = live ? setInterval(() => void reconcile(), 30_000) : null;
+    const every = live || unsettled ? setInterval(() => void reconcile(), 30_000) : null;
     return () => {
       clearTimeout(t);
       if (every) clearInterval(every);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountAddress, owner, !!live]);
+  }, [accountAddress, owner, !!live || unsettled]);
 
   // Bring the review into view when an offer is picked (on a phone it sits above the book).
   useEffect(() => {
@@ -495,9 +504,14 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const doCancel = () =>
     void run('cancel', 'cancel-offers', async (e) => {
       const r = await cancelOffers(e, account.address);
+      const tx = `tx ${r.txId.slice(0, 8)}…${r.txId.slice(-6)}`;
       setMessage({
         kind: 'ok',
-        text: `Cancelled: your offer can no longer be taken by anyone (tx ${r.txId.slice(0, 8)}…${r.txId.slice(-6)}).`,
+        // Cancelled only when the chain shows the nonce moved AND the offer was not filled (R2-4).
+        text:
+          r.cancelled > 0
+            ? `Cancelled: your offer can no longer be taken by anyone (${tx}).`
+            : `Done (${tx}): nothing signed before can be used any more. Your offer was taken before the cancel landed; it shows as Filled.`,
       });
     });
 
@@ -698,7 +712,16 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         </Notice>
       )}
       <RelayNotices place="trade" className="panel-intro" />
-      {accountCheck.status !== 'ok' && <AccountCheckNotice check={accountCheck} />}
+      {accountCheck.status !== 'ok' && (
+        <AccountCheckNotice
+          check={accountCheck}
+          restore={
+            <a href="#account" data-testid="trade-restore-key">
+              Restore it on Portfolio.
+            </a>
+          }
+        />
+      )}
       {paused && (
         <Notice tone="warning" className="panel-intro" data-testid="trade-paused">
           Not now: {paused}

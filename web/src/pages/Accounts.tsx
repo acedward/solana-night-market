@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import {
+  confirmedOnChain,
   formatUnits,
   holdingsByColour,
   parseUnits,
@@ -24,11 +25,12 @@ import {
   type TokenRegistry,
   type UnshieldedBalancesView,
 } from '@nightmarket/core';
+import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useActivity } from '../activity/ActivityContext.js';
 import { stageWords, type ActivityKind } from '../activity/activity.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
-import { AccountCheckNotice } from '../chain/AccountCheckNotice.js';
+import { AccountCheckNotice, keyRestorable } from '../chain/AccountCheckNotice.js';
 import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import { DemoTokens } from '../demo/DemoTokens.js';
 
@@ -58,10 +60,15 @@ import {
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
+  awaitChange,
+  CHANGE_PENDING,
   openAccount,
+  pendingChanges,
   recipientOf,
+  restoreEncryptionKey,
   secureChange,
   syncAccount,
+  unconfirmedNotes,
   unsecuredCoins,
   withdrawToWallet,
   withdrawUnshieldedToWallet,
@@ -72,7 +79,7 @@ import { useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient } from '../relay/client.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
-import { confirmCancelsOffer as confirmOffer, markLiveOffersCancelled } from '../trade/operations.js';
+import { confirmCancelsOffer as confirmOffer, reconcileFromChain } from '../trade/operations.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet } from '../wallet/WalletContext.js';
 
@@ -85,6 +92,8 @@ const JOB_TITLE: Record<string, string> = {
   'withdraw-unshielded': 'Withdrawing public tokens',
   'append-inbox': 'Saving your change',
   'demo-tokens': 'Delivering your demo tokens',
+  'cancel-offers': 'Cancelling your offer',
+  'restore-enc-key': 'Restoring your encryption key',
 };
 
 /** "14:06" UTC from the relay's Unix seconds. */
@@ -476,6 +485,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     owner,
     secret?.encPublicKey ?? null,
     revision,
+    (account?.refusedAtOpen ?? null) as AccountCheckProblem[] | null,
   );
   // The holdings and Send list show only the assets the filter shows (plan 00042); what needs the
   // customer's action (an unrecorded change coin, under Pending) shows whatever it is.
@@ -578,7 +588,8 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       if (!account) return;
       if (!confirmCancelsOffer('withdraw')) return;
       const r = await withdrawToWallet(e, account.address, { color, amount, recipient }, { recipientEnvelope });
-      markLiveOffersCancelled(e, account.address);
+      // Whether a live offer ended is the chain's to say, not the relay's "sent" (AA 00047 P10, R2-4).
+      await reconcileFromChain(e, account.address).catch(() => undefined);
       if (r.changeMismatch) {
         // Q28 A: the market reported another change coin than this withdrawal creates. The browser
         // keeps the one it computed, and says so; the coin is still recorded below.
@@ -587,16 +598,32 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
           text: `Sent (tx ${short(r.txId)}), but the market reported a different change coin than this withdrawal creates. Night Market kept the correct one, computed in this browser. Tell the market's operator.`,
         });
       } else {
-        setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}). Recording the change in your inbox…` });
+        setMessage({
+          kind: 'ok',
+          text: r.change
+            ? `Sent (tx ${short(r.txId)}). Recording the change in your inbox…`
+            : `Sent (tx ${short(r.txId)}).`,
+        });
       }
+      if (!r.change) return void (await syncAccount(e, account.address));
+      // R2-5: the change counts, pays and is filed only once the CHAIN shows it. Q13 default A: then
+      // file its inbox entry right away (a second signature).
+      const outcome = await awaitChange(e, account.address, r.change.commitment);
+      if (outcome.state === 'pending') {
+        setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}). ${CHANGE_PENDING}` });
+        return;
+      }
+      if (outcome.state === 'void') {
+        setMessage({
+          kind: 'error',
+          text: 'The market reported the withdrawal sent, but Midnight shows it never happened: your account moved on without it. Nothing left your account.',
+        });
+        return;
+      }
+      await secureChange(e, account.address, outcome.coin);
       await syncAccount(e, account.address);
-      // Q13 default A: file the change's inbox entry right away (a second signature).
-      if (r.change) {
-        await secureChange(e, account.address, r.change);
-        await syncAccount(e, account.address);
-        if (!r.changeMismatch)
-          setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}); the change is recorded in your inbox.` });
-      }
+      if (!r.changeMismatch)
+        setMessage({ kind: 'ok', text: `Sent (tx ${short(r.txId)}); the change is recorded in your inbox.` });
     });
 
   const sendUnshielded = (color: string, amount: bigint, recipient: string, balance: bigint) =>
@@ -604,7 +631,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       if (!account) return;
       if (!confirmCancelsOffer('withdraw')) return;
       const r = await withdrawUnshieldedToWallet(e, account.address, { color, amount, recipient, balance });
-      markLiveOffersCancelled(e, account.address);
+      await reconcileFromChain(e, account.address).catch(() => undefined);
       unshieldedRead.reload();
       setMessage({ kind: 'ok', text: `Withdrawn (tx ${short(r.txId)}).` });
     });
@@ -614,9 +641,23 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
       if (!account) return;
       if (!confirmCancelsOffer('append-inbox')) return;
       await secureChange(e, account.address, coin);
-      markLiveOffersCancelled(e, account.address);
+      await reconcileFromChain(e, account.address).catch(() => undefined);
       await syncAccount(e, account.address);
       setMessage({ kind: 'ok', text: 'The coin is recorded in your inbox on Midnight.' });
+    });
+
+  // "Restore my encryption key" (AA 00047 P10, audit round 2 R2-3): the account's key on Midnight is no
+  // longer this browser's, while this wallet is still its one device.
+  const restore = () =>
+    run('restore-enc-key', async (e) => {
+      if (!account) return;
+      const r = await restoreEncryptionKey(e, account.address);
+      await reconcileFromChain(e, account.address).catch(() => undefined);
+      accountCheck.reload();
+      setMessage({
+        kind: 'ok',
+        text: `Your encryption key is restored (tx ${short(r.txId)}): Midnight shows this browser's key on your account again.`,
+      });
     });
 
   const lede =
@@ -649,7 +690,10 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
 
   const registering = pendingJobs.find((j) => j.job.action === 'register' && j.account === null);
   const unsecured = unsecuredCoins(coins);
-  const coinCount = shownCoins.filter((c) => !c.spent).length;
+  // R2-5 / R2-6: changes the chain does not show yet, and inbox notes it does not confirm (counted only).
+  const waiting = pendingChanges(coins);
+  const unconfirmed = unconfirmedNotes(coins).length;
+  const coinCount = shownCoins.filter((c) => !c.spent && confirmedOnChain(c)).length;
 
   return (
     <section data-testid="section-account">
@@ -702,7 +746,24 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                   <a href="#local">Your data</a>.
                 </Notice>
               )}
-              {hasSecret && <AccountCheckNotice check={accountCheck} />}
+              {hasSecret && (
+                <AccountCheckNotice
+                  check={accountCheck}
+                  restore={
+                    keyRestorable(accountCheck) ? (
+                      <Button
+                        size="small"
+                        className="gap-top"
+                        data-testid="restore-key"
+                        disabled={!!busy || !!spendingPaused}
+                        onClick={() => void restore()}
+                      >
+                        {busy === 'restore-enc-key' ? 'Restoring…' : 'Restore my encryption key'}
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              )}
               <div data-testid="account" data-account={account.address}>
                 <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} />
                 {!unshieldedRead.served && (
@@ -808,7 +869,37 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">
               <p className="small muted">Not in your balances yet, or waiting for you.</p>
-              {unsecured.length === 0 && !job ? <p className="pending-item small muted">Nothing pending.</p> : null}
+              {unsecured.length === 0 && waiting.length === 0 && unconfirmed === 0 && !job ? (
+                <p className="pending-item small muted">Nothing pending.</p>
+              ) : null}
+              {waiting.length > 0 && (
+                <div data-testid="pending-changes">
+                  {waiting.map((c) => (
+                    <PendingItem
+                      key={c.commitment}
+                      data-testid="pending-change"
+                      what={
+                        <>
+                          {formatUnits(BigInt(c.value), tokens?.byColour(c.color)?.decimals ?? 0, {
+                            minFractionDigits: 2,
+                            grouping: true,
+                          })}{' '}
+                          {tokens?.byColour(c.color)?.symbol ?? short(c.color)}
+                        </>
+                      }
+                      state="Change of a withdrawal, not on Midnight yet."
+                      meta="Not in your balances or usable until Midnight shows it. Kept in this browser and checked on every refresh."
+                    />
+                  ))}
+                </div>
+              )}
+              {unconfirmed > 0 && (
+                <p className="pending-item small muted" data-testid="unconfirmed-notes" data-count={unconfirmed}>
+                  {unconfirmed === 1 ? 'One note' : `${unconfirmed} notes`} in your account&apos;s inbox{' '}
+                  {unconfirmed === 1 ? 'describes a coin' : 'describe coins'} Midnight does not show. Not counted in
+                  your balances.
+                </p>
+              )}
               {unsecured.length > 0 && (
                 <div data-testid="pending-items">
                   {unsecured.map((c) => (

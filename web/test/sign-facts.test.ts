@@ -6,7 +6,13 @@
 
 import nacl from 'tweetnacl';
 import { bytesToHex, registryFor, type DeviceSigner, type OpenSwapPayload } from '@nightmarket/core';
-import { cancelOffersRequest, withdrawRequest, withdrawUnshieldedRequest } from '@nightmarket/core/passport';
+import {
+  cancelOffersRequest,
+  restoreEncKeyRequest,
+  siteLine,
+  withdrawRequest,
+  withdrawUnshieldedRequest,
+} from '@nightmarket/core/passport';
 import { describe, expect, it } from 'vitest';
 
 import { SignFactsMismatchError, missingFromSignedText, signFacts, type SignFacts } from '../src/wallet/sign-facts.js';
@@ -252,6 +258,113 @@ describe('the wallet is asked only for text that carries every fact the panel sh
     expect(err).toBeInstanceOf(SignFactsMismatchError);
     expect((err as SignFactsMismatchError).missing).toEqual(['This site labels it: 10.000000 twUSDC']);
     expect(asked).toHaveLength(0);
+  });
+});
+
+describe('AA 00047 P10 (audit round 2): the lines in ORDER (R2-9), and the key restore (R2-3)', () => {
+  const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(11));
+  const ctx = { account: 'c0'.repeat(32), authNonce: 5n, networkSalt: '71'.repeat(32), encKey: '6c'.repeat(32) };
+  const walletOf = () => {
+    const asked: Uint8Array[] = [];
+    const signer: DeviceSigner = {
+      deviceKey: bytesToHex(kp.publicKey),
+      address: 'x',
+      signMessage: async (m) => (asked.push(m), nacl.sign.detached(m, kp.secretKey)),
+    };
+    return { signer, asked };
+  };
+
+  it('R2-9: a swap’s two "This site labels it:" lines must each follow their own leg', () => {
+    const f = signFacts({ kind: 'swap', action: 'open-swap', payload: swap() }, tokens)!;
+    const { signer } = walletOf();
+    const text = ed25519ActionSigning(signer, { network: 'stagenet', tokens }).preview(ctx, {
+      kind: 'swap',
+      action: 'open-swap',
+      payload: swap(),
+    }).text;
+    expect(missingFromSignedText(f, text)).toEqual([]);
+    const lines = text.split('\n');
+    const give = lines.findIndex((l) => l.startsWith('This site labels it: 0.01000000 twBTC'));
+    const get = lines.findIndex((l) => l.startsWith('This site labels it: 10.000000 twUSDC'));
+    expect(give).toBeGreaterThan(0);
+    expect(get).toBeGreaterThan(give);
+    // The same lines, the two labels swapped between the legs: every line is still there (a set match
+    // passed it), but not where it belongs.
+    const swapped = [...lines];
+    [swapped[give], swapped[get]] = [lines[get]!, lines[give]!];
+    expect(missingFromSignedText(f, swapped.join('\n')).length).toBeGreaterThan(0);
+  });
+
+  it('R2-9: the operation line is the SECOND line, and no fact may come from the free first line', () => {
+    const g = signFacts(
+      {
+        kind: 'gated',
+        request: withdrawUnshieldedRequest({ recipient: '23'.repeat(32), color: twUSDC, amount: '1', authNonce: '5' }),
+      },
+      tokens,
+    )!;
+    const tail = `Token ${twUSDC}\nThis site labels it: 0.000001 twUSDC\nTo address ${'23'.repeat(8)}\n`;
+    expect(missingFromSignedText(g, `Night Market - stagenet\nWithdraw unshielded\nBase units 1\n${tail}`)).toEqual([]);
+    // A label imitating the enforced line above the real one (F-A2-3): "Base units 1" only in line 1.
+    expect(missingFromSignedText(g, `Base units 1\nWithdraw unshielded\nBase units 1000000\n${tail}`)).toEqual([
+      'Base units 1',
+    ]);
+    // The operation title anywhere but the second line does not count.
+    expect(missingFromSignedText(g, `Withdraw unshielded\nSite\nBase units 1\n${tail}`)).toContain(
+      'Withdraw unshielded',
+    );
+  });
+
+  // P10.C's F3 v3 (questions Q36) puts "Site: " before the label: the gate requires that exact first
+  // line, so a LABEL equal to a title ("Cancel all open offers") can never stand in for anything.
+  it('R2-9 / Q36: the first line must be exactly the site line ("Site: <label>" in F3 v3)', () => {
+    const c = signFacts(
+      { kind: 'gated', request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }) },
+      tokens,
+    )!;
+    const site = 'Site: Night Market - stagenet';
+    const body = 'Cancel all open offers\nYour key does not change\nAccount c0c0c0c0c0c0c0c0 nonce 5\n';
+    expect(missingFromSignedText(c, `${site}                 \n${body}`, site)).toEqual([]);
+    expect(missingFromSignedText(c, `Cancel all open offers\n${body}`, site)).toEqual([site]);
+    expect(missingFromSignedText(c, `Night Market - stagenet\n${body}`, site)).toEqual([site]);
+    // The gate in the page passes the pinned client's site line (the bare label until P10.I re-pins).
+    const { signer } = walletOf();
+    const text = ed25519ActionSigning(signer, { network: 'stagenet', tokens }).preview(ctx, {
+      kind: 'gated',
+      request: cancelOffersRequest({ newKey: ctx.encKey, authNonce: '5' }),
+    }).text;
+    expect(missingFromSignedText(c, text, siteLine('stagenet'))).toEqual([]);
+  });
+
+  it('R2-3: the restore facts are lines of the real wallet text ("Rotate encryption key / New key …"), in order', async () => {
+    const mine = 'b7'.repeat(32);
+    const call = {
+      kind: 'gated',
+      request: restoreEncKeyRequest({ newKey: mine, authNonce: '5' }),
+      purpose: 'restore-enc-key',
+    } as const;
+    const f = signFacts(call, tokens, ctx)!;
+    expect(f.title).toBe('Restore my encryption key');
+    expect(f.signedTitle).toBe('Rotate encryption key');
+    expect(f.facts.find((x) => x.label === "New key (this browser's)")).toMatchObject({
+      value: mine,
+      signed: [`New key ${'b7'.repeat(8)}`],
+    });
+    expect(f.facts.find((x) => x.label === 'Replaces the key on Midnight now')).toMatchObject({ value: ctx.encKey });
+    const { signer, asked } = walletOf();
+    const signing = ed25519ActionSigning(signer, { network: 'stagenet', tokens });
+    expect(missingFromSignedText(f, signing.preview(ctx, call).text)).toEqual([]);
+    await signing.authorise(ctx, call, 0n);
+    expect(asked).toHaveLength(1);
+    expect(
+      String.fromCharCode(...asked[0]!)
+        .split('\n')
+        .slice(1, 3),
+    ).toEqual(['Rotate encryption key ', `New key ${'b7'.repeat(8)}`]);
+    // A "restore" to the account's CURRENT key would read as a cancel: never sent to the wallet.
+    const same = { ...call, request: restoreEncKeyRequest({ newKey: ctx.encKey, authNonce: '5' }) } as const;
+    await expect(signing.authorise(ctx, same, 0n)).rejects.toBeInstanceOf(SignFactsMismatchError);
+    expect(asked).toHaveLength(1);
   });
 });
 

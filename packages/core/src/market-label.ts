@@ -12,17 +12,25 @@ import type { NetworkName } from './network.js';
  *  holds the two equal). */
 export const MARKET_LABEL_BYTES = 24;
 
+// AA 00047 P10 (questions Q36, P10.C's F3 v3): the circuit puts a fixed "Site: " in front of the label
+// and accepts only words of visible ASCII with single spaces between them (no leading space, no run
+// of spaces, not empty); `marketLabel` checks the same rule, so both labels below pass either client.
 export const MARKET_LABELS: Readonly<Record<NetworkName, string>> = {
   stagenet: 'Night Market - stagenet',
   // "Night Market - undeployed" would be 25 characters.
   undeployed: 'Night Market - local',
 };
 
+/** Words of visible ASCII with single spaces between them (F3 v3's label rule, P10.C `isRenderableLabel`). */
+export const LABEL_RULE = /^[\x21-\x7e]+( [\x21-\x7e]+)*$/;
+
 export function marketLabel(network: NetworkName): string {
   const label = MARKET_LABELS[network];
   if (label === undefined) throw new RangeError(`no market label for network ${JSON.stringify(network)}`);
-  if (label.length > MARKET_LABEL_BYTES || !/^[\x20-\x7e]*$/.test(label)) {
-    throw new RangeError(`the ${network} label must be at most ${MARKET_LABEL_BYTES} printable ASCII characters`);
+  if (label.length > MARKET_LABEL_BYTES || !LABEL_RULE.test(label)) {
+    throw new RangeError(
+      `the ${network} label must be at most ${MARKET_LABEL_BYTES} printable ASCII characters, words with single spaces between them`,
+    );
   }
   return label;
 }

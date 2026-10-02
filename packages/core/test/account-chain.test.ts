@@ -79,6 +79,10 @@ describe('decodeAccountState (the indexer’s serialised ContractState, decoded 
     expect(s.authority).toEqual({ committee: 0, threshold: 1 });
     expect(s.inbox).toEqual([entry, 'cd'.repeat(192)]);
     expect(s.unshielded).toEqual([{ colour: 'ef'.repeat(32), amount: '25000000' }]);
+    expect(s.credited).toEqual([]);
+    // The account's own credited amounts (its `unshielded_balances` map, AA 00047 P10 R2-6).
+    const c = await decode({ ...honest, credited: [['ef'.repeat(32), (1n << 128n) - 2n]] });
+    expect(c.credited).toEqual([{ colour: 'ef'.repeat(32), amount: ((1n << 128n) - 2n).toString() }]);
   });
 
   it('refuses bytes that are not a contract state', () => {
@@ -194,6 +198,43 @@ describe('checkMarketAccount (audit C3: the account the relay made, checked by t
     expect(
       codes(checkMarketAccount(await decode({ ...honest, useCounter: 1n }), expectation({ fresh: true }))),
     ).toEqual(['devices']);
+  });
+
+  // AA 00047 P10 (audit round 2, R2-6 / F-A2-4): a deploy carries its initial state, so a relay could
+  // seed fake inbox notes, or a credited balance near 2^128 that makes every later deposit of that
+  // colour overflow. A just-opened account must be EMPTY.
+  it('refuses a "fresh" account that was opened with inbox notes or balances in it (R2-6)', async () => {
+    const fresh = expectation({ fresh: true });
+    expect(codes(checkMarketAccount(await decode(honest), fresh))).toEqual([]);
+    const seededInbox = checkMarketAccount(await decode({ ...honest, inbox: ['ab'.repeat(192)] }), fresh);
+    expect(codes(seededInbox)).toEqual(['not-empty']);
+    expect(accountCheckText(seededInbox)).toMatch(/notes already in its inbox/);
+    expect(codes(checkMarketAccount(await decode({ ...honest, unshielded: [['ef'.repeat(32), 5n]] }), fresh))).toEqual([
+      'not-empty',
+    ]);
+    const overflow = checkMarketAccount(
+      await decode({ ...honest, credited: [['ef'.repeat(32), (1n << 128n) - 1n]] }),
+      fresh,
+    );
+    expect(codes(overflow)).toEqual(['not-empty']);
+    expect(accountCheckText(overflow)).toMatch(/balances already in it/);
+    expect(overflow.useCounter).toBeNull();
+    // Later (not fresh) the same notes and balances are an account in use: no problem.
+    const later = { ...honest, inbox: ['ab'.repeat(192)], credited: [['ef'.repeat(32), 5n]] as const };
+    expect(codes(checkMarketAccount(await decode(later), expectation()))).toEqual([]);
+  });
+
+  // Questions Q42: "empty" is judged on the account AS DEPLOYED (what only the deployer controlled),
+  // so a permissionless deposit by anyone right after the deploy cannot get a new account refused.
+  it('judges "starts empty" on the deploy-time state when it is given (R2-6, Q42)', async () => {
+    const fresh = expectation({ fresh: true });
+    const now = await decode({ ...honest, inbox: ['ab'.repeat(192)], unshielded: [['ef'.repeat(32), 1n]] });
+    const asDeployed = await decode({ ...honest, noDevice: true, booted: false });
+    expect(codes(checkMarketAccount(now, fresh, asDeployed))).toEqual([]);
+    const seededAtDeploy = await decode({ ...honest, noDevice: true, booted: false, inbox: ['cd'.repeat(192)] });
+    expect(codes(checkMarketAccount(await decode(honest), fresh, seededAtDeploy))).toEqual(['not-empty']);
+    // Without it, the current state is judged (stricter).
+    expect(codes(checkMarketAccount(now, fresh))).toEqual(['not-empty', 'not-empty']);
   });
 
   it('knows the stagenet salt (keccak256 of "midnight:stagenet"), as account A carries it', () => {

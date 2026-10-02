@@ -17,14 +17,20 @@ export function madeOfferText(rec: Pick<TradeRecord, 'summary' | 'offerId' | 'ke
     case 'live':
       return `Your offer is listed on the market: ${rec.summary} (${id}). ${OFFER_OFF_CHAIN}`;
     case 'consumed':
-      return `Your offer was listed and someone has already taken it: ${rec.summary} (${id}). It settled on Midnight; refresh your balances to see it.`;
+      // The exchange's word, not the chain's (AA 00047 P10, R2-4): it shows as Filled once Midnight does.
+      return `Your offer was listed and the exchange says someone has already taken it: ${rec.summary} (${id}). It shows as Filled once Midnight shows the settlement.`;
     default:
       return `The market has your offer, but it is not listed yet: ${rec.summary} (${id}). Refresh in a minute. ${OFFER_OFF_CHAIN}`;
   }
 }
 
-/** The toast after a take: the one transaction that settles the offer. */
-export function tookOfferText(rec: Pick<TradeRecord, 'summary' | 'settledTx'>): string {
+/** The toast after a take: the one transaction that settles the offer, once the CHAIN shows it
+ *  (AA 00047 P10, R2-4); until then, the market's report and that the page waits for Midnight. */
+export function tookOfferText(
+  rec: Pick<TradeRecord, 'summary' | 'settledTx'> & { status?: TradeRecord['status'] },
+): string {
+  if (rec.status !== undefined && (rec.status !== 'filled' || !rec.settledTx))
+    return `The market reports it settled: ${rec.summary}. Midnight does not show it yet; it shows here as Filled once it does.`;
   return `Done: ${rec.summary}, settled in one transaction on Midnight (tx ${short(rec.settledTx ?? '')}).`;
 }
 

@@ -2,10 +2,26 @@
 // account from Midnight itself and it is the market's own, with this wallet as its only device; or it
 // is not, and nothing will be signed or sent for it.
 
+import type { ReactNode } from 'react';
+
 import { Notice } from '../design/index.js';
 import type { AccountCheckState } from './ChainContext.js';
 
-export function AccountCheckNotice({ check, className }: { check: AccountCheckState; className?: string }) {
+/** Whether the check failed ONLY on the encryption key (this wallet is still the account's one
+ *  device): the account can be restored (AA 00047 P10, audit round 2 R2-3). */
+export const keyRestorable = (check: AccountCheckState): boolean =>
+  check.status === 'failed' && check.problems.length > 0 && check.problems.every((p) => p.code === 'enc-key');
+
+export function AccountCheckNotice({
+  check,
+  className,
+  restore,
+}: {
+  check: AccountCheckState;
+  className?: string;
+  /** What to offer instead of a dead end when only the key is wrong (R2-3): a button or a link. */
+  restore?: ReactNode;
+}) {
   if (check.status === 'ok')
     return (
       <p className={className ?? 'table-note'} data-testid="account-check" data-state="ok">
@@ -30,7 +46,14 @@ export function AccountCheckNotice({ check, className }: { check: AccountCheckSt
             </li>
           ))}
         </ul>
-        Night Market will not sign anything for it. Do not send tokens to it.
+        {keyRestorable(check) && restore ? (
+          <span data-testid="account-check-restorable">
+            Your wallet still controls this account: only its encryption key was changed, so new notes would not be
+            sealed to you. Until you restore your key, Night Market will not sign anything else for it. {restore}
+          </span>
+        ) : (
+          <>Night Market will not sign anything for it. Do not send tokens to it.</>
+        )}
       </Notice>
     );
   if (check.status === 'error')

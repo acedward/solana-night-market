@@ -40,6 +40,7 @@ import {
   isRenderableTokenDisplay,
   type EdTokenResolver,
 } from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
+import * as edMessage from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
 import { marketLabel } from '../market-label.js';
 
 export {
@@ -92,6 +93,18 @@ export {
  * (B3: the relay envelope's Solana scheme in the package root starts with it too).
  */
 export { MARKET_LABELS, marketLabel } from '../market-label.js';
+
+/**
+ * The fixed text the pinned client's renderer (and the circuit) puts in front of the label on the
+ * first line (AA 00047 P10, questions Q36): `'Site: '` from F3 v3 on (passport `599327b`,
+ * `ED25519_SITE_PREFIX`), none in F3 v2 (`b2f1847`, pinned until P10.I re-pins). Read from the
+ * client itself, so the re-pin needs no change here.
+ */
+export const SITE_LINE_PREFIX: string = (edMessage as { ED25519_SITE_PREFIX?: string }).ED25519_SITE_PREFIX ?? '';
+
+/** The first line of every account call's message on `network`, trailing spaces trimmed: what the
+ *  signing gate requires exactly (R2-9, Q36), e.g. "Site: Night Market - stagenet" in F3 v3. */
+export const siteLine = (network: NetworkName): string => `${SITE_LINE_PREFIX}${marketLabel(network)}`;
 
 /**
  * How the arm labels a token (its symbol and decimals), from the market's registry: the F3 v2 wallet

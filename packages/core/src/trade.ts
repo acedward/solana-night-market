@@ -242,7 +242,7 @@ export function offerStillLive(o: OfferRuleInput, now: number, currentAuthNonce?
 }
 
 /** The signed actions an account can take. */
-export type SignedAction = 'withdraw' | 'append-inbox' | 'open-swap' | 'take' | 'cancel-offers';
+export type SignedAction = 'withdraw' | 'append-inbox' | 'open-swap' | 'take' | 'cancel-offers' | 'restore-enc-key';
 
 const ACTION_TEXT: Record<SignedAction, string> = {
   withdraw: 'This withdrawal',
@@ -250,6 +250,7 @@ const ACTION_TEXT: Record<SignedAction, string> = {
   'open-swap': 'A second offer',
   take: 'Taking this offer',
   'cancel-offers': 'Cancelling',
+  'restore-enc-key': 'Restoring your encryption key',
 };
 
 export type ActionGuard =

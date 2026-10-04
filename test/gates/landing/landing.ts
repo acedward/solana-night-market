@@ -609,6 +609,8 @@ async function tx1(amount: bigint, label: string, opts: { sealTo?: string } = {}
     tx1: r.txId,
     tx1Hash: landed?.hash ?? null,
     tx1Block: landed?.block?.height ?? null,
+    tx1Fees: landed?.fees ?? null,
+    tx1Status: landed?.transactionResult?.status ?? null,
     tx1Seconds: seconds,
     tx1Outputs: outputs.map((o: Any) => ({ ...o, commitment: `${o.commitment.slice(0, 16)}…` })),
     predictedCommitmentInTx1: !!hit,

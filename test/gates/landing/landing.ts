@@ -111,11 +111,20 @@ const errorChain = (e: unknown): string => {
 };
 
 // ── state: market-flows' (A) and this gate's own ────────────────────────────
-const flows = JSON.parse(readFileSync(join(STATE_DIR, 'state.json'), 'utf8')) as {
+// market-flows.ts writes state.json when it opens A (after STEP=bridge-deploy): read it lazily.
+interface FlowsState {
   network: string;
   A: { seed: string; encSecret: string; encPublic: string; account?: string; txs?: Any };
-};
-if (flows.network !== NETWORK) throw new Error(`the state is for ${flows.network}`);
+}
+let flowsCache: FlowsState | null = null;
+function flowsState(): FlowsState {
+  if (flowsCache) return flowsCache;
+  const path = join(STATE_DIR, 'state.json');
+  if (!existsSync(path)) throw new Error('no state.json: open account A first (market-flows.ts STEPS=open-a)');
+  const f = JSON.parse(readFileSync(path, 'utf8')) as FlowsState;
+  if (f.network !== NETWORK) throw new Error(`the state is for ${f.network}`);
+  return (flowsCache = f);
+}
 interface GateState {
   operatorSecret?: string;
   bridge?: { contract: string; colour: string; sourceMint: string; networkTag: string };
@@ -137,11 +146,30 @@ const record = (key: string, value: unknown) => {
 };
 
 const tokens = registryFor(NETWORK, JSON.parse(readFileSync(join(RUN, 'tokens.json'), 'utf8')));
-const kpA = nacl.sign.keyPair.fromSeed(hexToBytes(flows.A.seed, 32));
+/** A's test keypair (the "wallet"), from market-flows.ts's state, loaded on first use. */
+let kpCache: nacl.SignKeyPair | null = null;
+const kpOfA = () => (kpCache ??= nacl.sign.keyPair.fromSeed(hexToBytes(flowsState().A.seed, 32)));
+const kpA = {
+  get publicKey() {
+    return kpOfA().publicKey;
+  },
+  get secretKey() {
+    return kpOfA().secretKey;
+  },
+};
 const signerA = {
-  deviceKey: bytesToHex(kpA.publicKey),
-  address: base58.encode(kpA.publicKey),
+  get deviceKey() {
+    return bytesToHex(kpA.publicKey);
+  },
+  get address() {
+    return base58.encode(kpA.publicKey);
+  },
   signMessage: async (m: Uint8Array) => nacl.sign.detached(m, kpA.secretKey),
+};
+const flows = {
+  get A() {
+    return flowsState().A;
+  },
 };
 const account = () => {
   if (!flows.A.account) throw new Error('account A is not open (run market-flows.ts STEPS=open-a)');
@@ -1048,8 +1076,10 @@ async function negCircuit() {
 
 async function main() {
   out.network = NETWORK;
-  out.account = flows.A.account ?? null;
-  out.wallet = signerA.address;
+  if (STEP !== 'bridge-deploy') {
+    out.account = flows.A.account ?? null;
+    out.wallet = signerA.address;
+  }
   switch (STEP) {
     case 'bridge-deploy':
       return bridgeDeploy();

@@ -147,6 +147,15 @@ export class RelayClient {
     }
   }
 
+  /** The relay's token-list digest (AA 00060 P4.3, `GET /v1/config` `tokensDigest`), or null when this
+   *  relay does not publish one (an older relay: then there is nothing to compare). Throws when the
+   *  relay cannot be read. */
+  async tokensDigest(): Promise<string | null> {
+    const body = (await this.call(API_PATHS.config)) as { tokensDigest?: unknown } | null;
+    const d = body?.tokensDigest;
+    return typeof d === 'string' && /^[0-9a-f]{64}$/.test(d) ? d : null;
+  }
+
   /** The demo-token offer (AA 00047, packages/core/src/demo-tokens.ts): the pack, the limits and,
    *  for `owner`, whether that key has claimed. Null when this relay does not serve it. */
   async demoTokensInfo(owner?: string): Promise<DemoTokensInfo | null> {

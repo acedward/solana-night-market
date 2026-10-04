@@ -210,7 +210,14 @@ describe('reads', () => {
     expect((await h.app.request('/health')).status).toBe(200);
     const cfg = (await (await h.app.request('/v1/config')).json()) as Record<string, unknown>;
     expect(cfg).toMatchObject({ network: 'undeployed', relayVersion: 'test' });
-    expect(Object.keys(cfg).sort()).toEqual(['limits', 'network', 'relayVersion', 'withdrawRecipientEnvelope']);
+    // AA 00060 P4.2: `tokensDigest` (a SHA-256 over the public token list) is public too.
+    expect(Object.keys(cfg).sort()).toEqual([
+      'limits',
+      'network',
+      'relayVersion',
+      'tokensDigest',
+      'withdrawRecipientEnvelope',
+    ]);
     expect((await h.app.request('/v1/queue')).status).toBe(200);
     expect((await h.app.request('/v1/jobs/zz')).status).toBe(400);
     expect((await h.app.request(`/v1/jobs/${'0'.repeat(32)}`)).status).toBe(404);

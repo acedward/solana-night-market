@@ -8,7 +8,7 @@ import { BridgeRegistryError, parseJourneyRegistry, type BridgeRegistryRefusal }
 import { bytesToHex } from '../src/hex.js';
 import { base58 } from '@scure/base';
 import colours from './fixtures/bridge-colour.json';
-import fixture from './fixtures/journey-registry.undeployed.json';
+import fixture from '../../../test/fixtures/journey-registry.undeployed.json';
 
 const EXPECT = { midnightNetwork: 'undeployed', solanaGenesisHash: fixture.solanaGenesisHash };
 const clone = () => JSON.parse(JSON.stringify(fixture)) as typeof fixture;

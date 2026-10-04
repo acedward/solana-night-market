@@ -189,5 +189,11 @@ export const PublicConfigSchema = z.object({
    *  (a Solana envelope over the whole body) for a shielded withdrawal that names a recipient
    *  encryption key. False by default: one wallet prompt per action. */
   withdrawRecipientEnvelope: z.boolean().optional(),
+  /** AA 00060 P4.2 (spec FR-014): the relay's token list digest (./tokens/digest.ts). Optional so a page
+   *  tolerates an older relay (it then has nothing to compare). */
+  tokensDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
 });
 export type PublicConfig = z.infer<typeof PublicConfigSchema>;

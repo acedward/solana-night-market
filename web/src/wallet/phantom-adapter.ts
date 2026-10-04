@@ -29,6 +29,9 @@ export interface SolanaAdapterOptions {
   prompts: SignPromptStore;
   /** How long the page waits for the wallet (connect or sign), in ms. */
   timeoutMs: number;
+  /** AA 00060 P4.3: why the wallet must not be asked now (the token lists differ), or null. Checked before
+   *  EVERY request, so a paused site never opens a wallet prompt. */
+  gate?: () => string | null;
   win?: Window;
 }
 
@@ -36,7 +39,7 @@ export interface SolanaAdapterOptions {
 export function walletSigner(
   wallet: ConnectedSolanaWallet,
   name: string,
-  opts: Pick<SolanaAdapterOptions, 'prompts' | 'timeoutMs'>,
+  opts: Pick<SolanaAdapterOptions, 'prompts' | 'timeoutMs' | 'gate'>,
   onHardware: () => void = () => undefined,
 ): DeviceSigner {
   const deviceKey = bytesToHex(wallet.publicKey);
@@ -44,6 +47,8 @@ export function walletSigner(
     deviceKey,
     address: wallet.address,
     async signMessage(message: Uint8Array): Promise<Uint8Array> {
+      const paused = opts.gate?.() ?? null;
+      if (paused) throw new WalletError('paused', paused);
       opts.prompts.open(message, name);
       let signed = false;
       try {

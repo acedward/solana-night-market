@@ -40,6 +40,9 @@ export interface SiteConfig {
   solana?: SolanaRpcConfig | null;
   /** AA 00060: the RPC injector ("Show in my wallet", `injector: {url}`). */
   injector?: { url: string } | null;
+  /** AA 00060 P4.3: the journey registry (I-1) this site bridges, as config.json carries it
+   *  (`scripts/bridge-tokens.ts` writes it); checked by ./bridge/registry.ts. */
+  bridges?: unknown;
 }
 
 export interface SolanaRpcConfig {
@@ -94,6 +97,7 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     devProbe?: unknown;
     solana?: unknown;
     injector?: unknown;
+    bridges?: unknown;
   } = {};
   try {
     const res = await fetchImpl('./config.json', { cache: 'no-store' });
@@ -111,6 +115,7 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     ...(raw.pairs !== undefined ? { pairs: raw.pairs } : {}),
     assets: siteAssets(network, raw.tokens, raw.assets),
     walletTimeoutSeconds: walletTimeout(raw.walletTimeoutSeconds),
+    ...(raw.bridges !== undefined ? { bridges: raw.bridges } : {}),
     devProbe: raw.devProbe === true,
     solana: solanaRpcConfig(raw.solana),
     injector: (() => {

@@ -13,3 +13,5 @@ packages/core/src/tokens/mint-test-tokens/metadata.stagenet.json
 *.md
 # Kernel responses captured verbatim from the staging exchange; never reformat
 packages/core/test/fixtures/kernel/staging-*/
+# AA 00060 P0.4: message goldens captured byte for byte by scripts/message-goldens.ts; never reformat
+test/fixtures/messages-10b29b1.json

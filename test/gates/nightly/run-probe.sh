@@ -98,6 +98,8 @@ up() {
     '[ -d node_modules/@nightmarket ] || bun install --frozen-lockfile; [ -f vendor/passport/contract/contracts/managed/account/contract/index.js ] || bun run contracts; bun run build:web' >"$STATE_DIR/build.log" 2>&1
   rm -rf "$STATE_DIR/site"
   docker cp "$CHECK-runner:/app/web/dist" "$STATE_DIR/site"
+  # The probe's goldens (P0.4), next to config.json: the bundle never carries them.
+  cp "$ROOT/test/fixtures/messages-10b29b1.json" "$STATE_DIR/site/wallet-probe-goldens.json"
   cat >"$STATE_DIR/site/config.json" <<JSON
 {
   "network": "undeployed",

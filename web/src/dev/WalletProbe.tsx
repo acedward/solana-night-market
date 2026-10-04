@@ -11,6 +11,9 @@
 //   - it builds a harmless transaction (a Memo signed by the wallet) for the configured RPC and
 //     cluster, sends it once with `solana:signAndSendTransaction` and once with
 //     `solana:signTransaction` plus the page's own send, and shows each one's confirmation.
+// The goldens are NOT bundled (the production image builds web/ alone): the page loads them at run time
+// from `./wallet-probe-goldens.json`, which test/gates/nightly/run-probe.sh copies next to config.json from
+// test/fixtures/messages-10b29b1.json. Without that file the probe signs the I-5 and I-4 samples only.
 // The JSON report holds NO signature of any message (the I-5 signature is a secret key, and the
 // landing master it derives is wiped at once); transaction signatures are public chain data.
 
@@ -33,7 +36,6 @@ import {
   unsignedTransaction,
 } from '@nightmarket/core/solana';
 
-import goldens from '../../../test/fixtures/messages-10b29b1.json';
 import type { SiteConfig } from '../config.js';
 import { Button, ButtonRow, Notice, PageHead, Panel } from '../design/index.js';
 import { messageFingerprint } from '../wallet/sign-prompt.js';
@@ -54,6 +56,16 @@ interface RawWallet {
   accounts: readonly RawAccount[];
   features: Record<string, { version?: string } & Record<string, unknown>>;
 }
+
+interface GoldenMessage {
+  id: string;
+  network: string;
+  family: string;
+  hex: string;
+}
+
+/** Where run-probe.sh puts the P0.4 goldens (never bundled). */
+export const GOLDENS_FILE = './wallet-probe-goldens.json';
 
 interface ProbeMessage {
   id: string;
@@ -172,6 +184,15 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
   const [genesis, setGenesis] = useState<string | null>(null);
   const [rpcError, setRpcError] = useState<string | null>(null);
   const [withStagenet, setWithStagenet] = useState(false);
+  const [goldens, setGoldens] = useState<GoldenMessage[] | null>(null);
+  useEffect(() => {
+    fetch(GOLDENS_FILE, { cache: 'no-store' })
+      .then((r) => (r.ok ? (r.json() as Promise<{ messages?: GoldenMessage[] }>) : { messages: [] }))
+      .then(
+        (j) => setGoldens(Array.isArray(j.messages) ? j.messages : []),
+        () => setGoldens([]),
+      );
+  }, []);
   const [results, setResults] = useState<Record<string, MessageResult>>({});
   const [landing, setLanding] = useState<{
     verdicts: SignatureVerdict[];
@@ -195,7 +216,7 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
   const messages = useMemo<ProbeMessage[]>(() => {
     if (!account) return [];
     const wallet = encodeKey(account.publicKey);
-    const out: ProbeMessage[] = goldens.messages
+    const out: ProbeMessage[] = (goldens ?? [])
       .filter((m) => m.network === network || withStagenet)
       .map((m) => ({ id: `golden:${m.id}`, family: m.family, bytes: hexToBytes(m.hex) }));
     out.push({
@@ -212,7 +233,7 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
       ),
     });
     return out;
-  }, [account, network, withStagenet, config.injector, connectedAt]);
+  }, [account, network, withStagenet, config.injector, connectedAt, goldens]);
 
   const landingSample = useMemo(() => {
     if (!account) return null;
@@ -423,6 +444,7 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
               features: [...account.features],
             }
           : null,
+      goldensLoaded: goldens?.length ?? 0,
       messages: messages.map((m) => results[m.id] ?? { id: m.id, family: m.family, verdict: 'not signed yet' }),
       landingKey: landing,
       transactions: txs,
@@ -480,6 +502,11 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
       {account && chosen && (
         <>
           <Panel title={`2. Messages (${chosen.name}, ${account.address})`}>
+            {goldens !== null && goldens.length === 0 && (
+              <Notice tone="warning" data-testid="probe-no-goldens">
+                No {GOLDENS_FILE} next to this page: only the landing-key and registration samples can be signed.
+              </Notice>
+            )}
             <ButtonRow>
               <Button
                 variant="primary"

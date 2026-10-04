@@ -1,0 +1,20 @@
+{
+  "network": "undeployed",
+  "relayUrl": "http://127.0.0.1:18080",
+  "tokens": {
+    "mode": "replace",
+    "tokens": [
+      {
+        "symbol": "twUSDC",
+        "decimals": 6,
+        "midnightColour": "a13a505f63f56936e9bf500eab8602acc7d4f88992b734c46607418e02eca65e"
+      },
+      {
+        "symbol": "twBTC",
+        "decimals": 8,
+        "midnightColour": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      }
+    ]
+  },
+  "pairs": ["twBTC/twUSDC"]
+}

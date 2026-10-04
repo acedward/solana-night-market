@@ -127,6 +127,8 @@ export interface JobHold {
 
 export class MockRelay {
   readonly submitted: Submitted[] = [];
+  /** AA 00060 P4.3: the token-list digest `/v1/config` publishes (none: an older relay). */
+  tokensDigest: string | null = null;
   /** Requests refused before anything was queued: `action: code/detail`. */
   readonly refused: string[] = [];
   deviceKey: string | null = null;
@@ -692,6 +694,7 @@ export class MockRelay {
         network: 'stagenet',
         relayVersion: 'e2e',
         limits: { authMaxTtlSeconds: 600, jobTtlSeconds: 3600 },
+        ...(this.tokensDigest ? { tokensDigest: this.tokensDigest } : {}),
       });
     if (path === '/v1/auth/nonce') {
       const nonce = `0x${randomBytes(32).toString('hex')}`;

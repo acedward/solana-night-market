@@ -18,13 +18,16 @@ export type WalletErrorKind =
   | 'bad-signature'
   /** The wallet cannot be used here (gone, no message signing, a key the account cannot use). */
   | 'unavailable'
+  /** AA 00060 P4.3: the page refused to ask the wallet at all (the site's and the market's token lists
+   *  differ, so the market would refuse the signature); the message says why. */
+  | 'paused'
   /** Anything else the wallet threw. */
   | 'failed';
 
 export const HARDWARE_NOT_SUPPORTED =
   "Hardware (Ledger) accounts aren't supported yet. Your wallet signed in the Ledger's wrapped form, which a Night Market account cannot verify. Switch to a software account in your wallet and connect again. Nothing was sent.";
 
-const TEXT: Record<Exclude<WalletErrorKind, 'failed' | 'unavailable' | 'timeout'>, string> = {
+const TEXT: Record<Exclude<WalletErrorKind, 'failed' | 'unavailable' | 'timeout' | 'paused'>, string> = {
   rejected: 'You declined the request in your wallet. Nothing was signed, and nothing was sent.',
   locked:
     'Your wallet is locked, or this site is no longer connected to it. Unlock it (or connect again) and try again. Nothing was sent.',

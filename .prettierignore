@@ -15,3 +15,5 @@ packages/core/src/tokens/mint-test-tokens/metadata.stagenet.json
 packages/core/test/fixtures/kernel/staging-*/
 # AA 00060 P0.4: message goldens captured byte for byte by scripts/message-goldens.ts; never reformat
 test/fixtures/messages-10b29b1.json
+# AA 00060 P4.4: the generator's goldens, exactly what scripts/bridge-tokens.ts writes; never reformat
+test/fixtures/bridge-tokens/*.out.json

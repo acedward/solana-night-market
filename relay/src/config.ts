@@ -21,6 +21,9 @@ import {
   resolveNetwork,
 } from '@nightmarket/core';
 
+import { BridgeRegistryError, parseJourneyRegistry, type BridgeRegistry } from '@nightmarket/core/bridge';
+
+import { tokenListProblems } from './bridge/registry-check.js';
 import type { ClientPrefixes } from './client-key.js';
 import { LOG_LEVELS, type LogLevel } from './log.js';
 import { DEFAULT_HOLD_FLOOR_SECONDS } from './queue/prover-lock.js';
@@ -32,6 +35,10 @@ export class ConfigError extends Error {
 export interface RelayConfig {
   network: NetworkProfile;
   tokens: TokenRegistry;
+  /** AA 00060 (spec FR-014): the journey registry (I-1) from BRIDGE_REGISTRY_FILE, or null. Every
+   *  bridged token must be in `tokens` (checked here), and every bridge's deployed `lockForSolana`
+   *  verifier key must be the key volume's (checked at start-up, ./bridge/registry-check.ts). */
+  bridges: BridgeRegistry | null;
   host: string;
   port: number;
   /** Trust the last X-Forwarded-For entry (set by our own reverse proxy) for rate limiting. */
@@ -308,6 +315,31 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     throw new ConfigError((e as Error).message);
   }
 
+  // AA 00060 P4.2: the journey registry. A bridged token missing from TOKENS_FILE, or listed there with
+  // another symbol or decimals, would make every message naming it differ between the site and the
+  // relay: refuse to start, naming the entry.
+  let bridges: BridgeRegistry | null = null;
+  const bridgeFile = str(env.BRIDGE_REGISTRY_FILE);
+  if (bridgeFile) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFile(bridgeFile));
+    } catch {
+      throw new ConfigError('BRIDGE_REGISTRY_FILE cannot be read as JSON');
+    }
+    try {
+      bridges = parseJourneyRegistry(raw, { midnightNetwork: network.midnightNetworkId });
+    } catch (e) {
+      if (e instanceof BridgeRegistryError) throw new ConfigError(`BRIDGE_REGISTRY_FILE: ${e.message}`);
+      throw e;
+    }
+    const problems = tokenListProblems(bridges, tokens);
+    if (problems.length > 0) throw new ConfigError(`BRIDGE_REGISTRY_FILE: ${problems.join('; ')}`);
+    if (!str(env.MIDNIGHT_MANAGED_PATH)) {
+      throw new ConfigError("BRIDGE_REGISTRY_FILE needs the key volume (MIDNIGHT_MANAGED_PATH) with the bridge's keys");
+    }
+  }
+
   const logLevel = (str(env.LOG_LEVEL) ?? 'info') as LogLevel;
   if (!LOG_LEVELS.includes(logLevel)) throw new ConfigError(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}`);
 
@@ -353,6 +385,7 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
   const config: RelayConfig = {
     network,
     tokens,
+    bridges,
     host: str(env.RELAY_HOST) ?? '0.0.0.0',
     port: int(env.RELAY_PORT, 8080, 'RELAY_PORT', 1, 65535),
     trustProxy: bool(env.RELAY_TRUST_PROXY, false, 'RELAY_TRUST_PROXY'),

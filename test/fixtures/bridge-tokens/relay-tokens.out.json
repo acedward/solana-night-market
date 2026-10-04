@@ -1,0 +1,33 @@
+{
+  "mode": "replace",
+  "tokens": [
+    {
+      "symbol": "twUSDC",
+      "decimals": 6,
+      "midnightColour": "a13a505f63f56936e9bf500eab8602acc7d4f88992b734c46607418e02eca65e"
+    },
+    {
+      "symbol": "twBTC",
+      "decimals": 8,
+      "midnightColour": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    },
+    {
+      "symbol": "X",
+      "name": "Test X",
+      "decimals": 6,
+      "privacy": "shielded",
+      "midnightColour": "5d17c86110853c018dfcc6428a8c11a7ddfbf2f7d79c50d1b4b3411fa740f32b",
+      "contract": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "domainSeparator": ""
+    },
+    {
+      "symbol": "Y",
+      "name": "Test Y",
+      "decimals": 6,
+      "privacy": "shielded",
+      "midnightColour": "dcb6b861440b2a4b28d93d767cb80c5b5ebcf765b7c16a9b319c4f505c898fae",
+      "contract": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "domainSeparator": ""
+    }
+  ]
+}

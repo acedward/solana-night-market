@@ -29,6 +29,7 @@ import {
   type RelayActionName,
   NOT_SUPPORTED_REASON,
   type RelayActionScheme,
+  tokensDigest,
 } from '@nightmarket/core';
 
 import { AccountGate } from './actions/account-gate.js';
@@ -163,6 +164,8 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(h, h.status === 'down' ? 503 : 200);
   });
 
+  // AA 00060 P4.2 (spec FR-014): the token list's digest; the site disables signed actions while its own differs.
+  const digest = tokensDigest(config.tokens);
   app.get(API_PATHS.config, (c) => {
     const body: PublicConfig = {
       network: config.network.name,
@@ -174,6 +177,7 @@ export function createApp(deps: AppDeps): Hono {
         takeMaxLifetimeSeconds: config.expiry.takeMaxLifetimeSeconds,
       },
       withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
+      tokensDigest: digest,
     };
     return c.json(body);
   });

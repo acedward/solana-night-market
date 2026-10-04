@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 
 import { KernelClient } from '@nightmarket/core';
 
+import { bridgeKeyProblems, type ReadContractState } from './bridge/registry-check.js';
 import { AccountCaps } from './actions/account-caps.js';
 import { AccountGate } from './actions/account-gate.js';
 import {
@@ -160,6 +161,25 @@ async function main(): Promise<void> {
       }
       log.error('the Passport runtime could not be loaded; account actions are unavailable', { error: e });
     }
+  }
+  // AA 00060 P4.2 (spec FR-014): with a journey registry, each bridge's deployed `lockForSolana` verifier
+  // key must be the key volume's, or Bridge out would be proven with keys the contract refuses.
+  if (config.bridges) {
+    if (!runtime || !config.managedPath) {
+      log.error('BRIDGE_REGISTRY_FILE is set but the key volume is not loaded; refusing to start');
+      process.exit(78);
+    }
+    const rt = runtime;
+    const problems = await bridgeKeyProblems(
+      config.bridges,
+      config.managedPath,
+      async (address) => (await rt.contractState(address)) as Awaited<ReturnType<ReadContractState>>,
+    );
+    if (problems.length > 0) {
+      log.error('the journey registry does not match the key volume or the chain; refusing to start', { problems });
+      process.exit(78);
+    }
+    log.info('journey registry checked', { bridges: config.bridges.entries.map((b) => b.symbol) });
   }
   // AA 00047 P11 (R3-5): a history past one indexer page is read through the WebSocket subscription.
   const indexer = new IndexerClient({

@@ -9,7 +9,14 @@ import type { HealthResponse } from '@nightmarket/core';
 export type NoticePlace = 'shell' | 'trade';
 
 export interface RelayNotice {
-  id: 'relay-down' | 'prover-down' | 'sponsor-low' | 'sponsor-syncing' | 'batcher-down' | 'batcher-refusing';
+  id:
+    | 'relay-down'
+    | 'prover-down'
+    | 'sponsor-low'
+    | 'sponsor-syncing'
+    | 'batcher-down'
+    | 'batcher-refusing'
+    | 'tokens-mismatch';
   place: NoticePlace;
   tone: 'danger' | 'warning' | 'info';
   title: string;
@@ -23,7 +30,18 @@ export interface RelayState {
   reachable: boolean | null;
   /** Unix ms of the last read. */
   checkedAt: number | null;
+  /** AA 00060 P4.3 (spec FR-014): the token-list digests, the site's own and the relay's
+   *  (`GET /v1/config`); null when unknown (an older relay publishes none). */
+  siteTokensDigest?: string | null;
+  relayTokensDigest?: string | null;
 }
+
+/** AA 00060 P4.3: the site's and the market's token lists differ (both digests known and unequal). */
+export const tokensMismatch = (s: RelayState): boolean =>
+  !!s.siteTokensDigest && !!s.relayTokensDigest && s.siteTokensDigest !== s.relayTokensDigest;
+
+export const TOKENS_MISMATCH_TEXT =
+  "Every action that needs your wallet's signature is paused: the market would refuse it, because it labels tokens differently. Your balances are safe. The site's operator must update this site's token list to the market's.";
 
 /** A refusal of the batcher counts for this long after it happened (seconds). */
 export const BATCHER_REFUSAL_RECENT_S = 3_600;
@@ -40,9 +58,18 @@ export function relayNotices(s: RelayState, nowS = Math.floor(Date.now() / 1000)
       },
     ];
   }
-  const h = s.health;
-  if (!h) return [];
   const out: RelayNotice[] = [];
+  if (tokensMismatch(s)) {
+    out.push({
+      id: 'tokens-mismatch',
+      place: 'shell',
+      tone: 'danger',
+      title: 'This site and the market list different tokens.',
+      text: TOKENS_MISMATCH_TEXT,
+    });
+  }
+  const h = s.health;
+  if (!h) return out;
   // The contract prover (the account's circuits) and the DUST prover (the fee payment): every paid
   // action needs both.
   if (!h.proofServer.reachable || h.dustProofServer?.reachable === false) {
@@ -100,6 +127,13 @@ export function relayNotices(s: RelayState, nowS = Math.floor(Date.now() / 1000)
 
 /** Whether the market can take actions that it pays fees for (register, withdrawals, offers) now. */
 export function spendingPaused(s: RelayState): string | null {
-  const n = relayNotices(s).find((x) => ['relay-down', 'prover-down', 'sponsor-low', 'sponsor-syncing'].includes(x.id));
+  const n = relayNotices(s).find((x) =>
+    ['relay-down', 'prover-down', 'sponsor-low', 'sponsor-syncing', 'tokens-mismatch'].includes(x.id),
+  );
   return n ? `${n.title} ${n.text}` : null;
+}
+
+/** AA 00060 P4.3: why the wallet must not be asked to sign anything now (the token lists differ), or null. */
+export function signingPaused(s: RelayState): string | null {
+  return tokensMismatch(s) ? `This site and the market list different tokens. ${TOKENS_MISMATCH_TEXT}` : null;
 }

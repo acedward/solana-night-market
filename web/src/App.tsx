@@ -10,11 +10,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
-import { registryFor, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
+import { registryFor, shortSolanaAddress, tokensDigest, type NetworkProfile } from '@nightmarket/core';
 
 import { ActivityProvider } from './activity/ActivityContext.js';
 import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
+import { BridgeNotice, BridgeProvider } from './bridge/BridgeContext.js';
 import { ChainProvider } from './chain/ChainContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
@@ -43,7 +44,8 @@ import { LocalData } from './pages/LocalData.js';
 import { Markets } from './pages/Markets.js';
 import { Trade } from './pages/Trade.js';
 import { findAccount } from './passport/records.js';
-import { RelayNotices, RelayStatusProvider } from './relay/RelayStatus.js';
+import { RelayNotices, RelayStatusProvider, useRelayStatus } from './relay/RelayStatus.js';
+import { signingPaused } from './relay/status.js';
 import { storageText } from './store/messages.js';
 import { StoreProvider, useStore } from './store/StoreContext.js';
 import { WalletProvider, useWallet, type WalletAdapter } from './wallet/WalletContext.js';
@@ -367,7 +369,10 @@ function Shell({
           ) : section === 'local' ? (
             <LocalData network={network.name} />
           ) : section === 'account' ? (
-            <Accounts network={network} relayUrl={config.relayUrl} />
+            <>
+              <BridgeNotice />
+              <Accounts network={network} relayUrl={config.relayUrl} />
+            </>
           ) : section === 'markets' ? (
             <Markets network={network} relayUrl={config.relayUrl} />
           ) : section === 'trade' ? (
@@ -392,7 +397,11 @@ function Shell({
 /** The Solana wallet adapter (AA 00047 lane B2): Phantom, and any Wallet Standard wallet that signs
  *  Solana messages. Its messages use the network's label and the site's token list (the same one the
  *  relay renders with, questions Q12); without a token list there is nothing to trade, and no adapter. */
-function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletAdapter | null {
+function walletAdapterFor(
+  config: SiteConfig,
+  prompts: SignPromptStore,
+  gate: () => string | null = () => null,
+): WalletAdapter | null {
   let tokens;
   try {
     tokens = registryFor(config.network.name, config.tokens);
@@ -403,7 +412,32 @@ function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletA
     display: { network: config.network.name, tokens },
     prompts,
     timeoutMs: config.walletTimeoutSeconds * 1000,
+    gate,
   });
+}
+
+/** AA 00060 P4.3 (spec FR-014): this site's token-list digest, or null without a token list. */
+function siteTokensDigest(config: SiteConfig): string | null {
+  try {
+    return tokensDigest(registryFor(config.network.name, config.tokens));
+  } catch {
+    return null;
+  }
+}
+
+/** AA 00060 P4.3: why the wallet must not be asked to sign now, or null (one page, one App). The wallet
+ *  adapter reads it before every request; <SigningGate> keeps it current. */
+const signingGate: { reason: string | null } = { reason: null };
+
+/** Keeps the wallet's signing gate in step with the market's status: while the site's and the market's
+ *  token lists differ, every wallet request is refused before the wallet is asked (AA 00060 P4.3). */
+function SigningGate() {
+  const status = useRelayStatus();
+  const reason = signingPaused(status);
+  useEffect(() => {
+    signingGate.reason = reason;
+  }, [reason]);
+  return null;
 }
 
 function Loading({ children }: { children: ReactNode }) {
@@ -425,7 +459,11 @@ export function App() {
   }, []);
   const prompts = useMemo(() => new SignPromptStore(), []);
   const activity = useMemo(() => new ActivityStore(), []);
-  const adapter = useMemo(() => (config ? walletAdapterFor(config, prompts) : null), [config, prompts]);
+  const adapter = useMemo(
+    () => (config ? walletAdapterFor(config, prompts, () => signingGate.reason) : null),
+    [config, prompts],
+  );
+  const siteDigest = useMemo(() => (config ? siteTokensDigest(config) : null), [config]);
   const [probeRoute, setProbeRoute] = useState(isProbeRoute);
   useEffect(() => {
     const on = () => setProbeRoute(isProbeRoute());
@@ -445,18 +483,21 @@ export function App() {
   return (
     <StoreProvider>
       <WalletProvider adapter={adapter}>
-        <RelayStatusProvider relayUrl={config.relayUrl}>
-          <ChainProvider network={config.network}>
-            <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
-              <AssetFilterProvider site={config.assets}>
-                <ActivityProvider store={activity}>
-                  <ToastProvider>
-                    <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
-                  </ToastProvider>
-                </ActivityProvider>
-              </AssetFilterProvider>
-            </MarketProvider>
-          </ChainProvider>
+        <RelayStatusProvider relayUrl={config.relayUrl} siteTokensDigest={siteDigest}>
+          <SigningGate />
+          <BridgeProvider bridges={config.bridges} network={config.network.name} solana={config.solana}>
+            <ChainProvider network={config.network}>
+              <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
+                <AssetFilterProvider site={config.assets}>
+                  <ActivityProvider store={activity}>
+                    <ToastProvider>
+                      <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                    </ToastProvider>
+                  </ActivityProvider>
+                </AssetFilterProvider>
+              </MarketProvider>
+            </ChainProvider>
+          </BridgeProvider>
         </RelayStatusProvider>
       </WalletProvider>
     </StoreProvider>

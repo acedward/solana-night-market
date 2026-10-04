@@ -23,6 +23,10 @@ const CORS = {
 };
 
 async function serveConfig(page: Page, devProbe: boolean) {
+  // run-probe.sh places the goldens next to config.json; the bundle never carries them.
+  await page.route('**/wallet-probe-goldens.json', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify(goldens) }),
+  );
   await page.route('**/config.json', (route) =>
     route.fulfill({
       contentType: 'application/json',

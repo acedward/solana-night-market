@@ -17,6 +17,7 @@ export * from './network.js';
 export * from './offer-expiry.js';
 export * from './shielded-address.js';
 export * from './signing.js';
+export * from './solana-signature.js';
 export * from './tokens/pairs.js';
 export * from './tokens/registry.js';
 export * from './trade.js';

@@ -36,6 +36,7 @@ import {
   type TabItem,
 } from './design/index.js';
 import { MarketProvider } from './market/MarketContext.js';
+import WalletProbe from './dev/WalletProbe.js';
 import { About } from './pages/About.js';
 import { Accounts } from './pages/Accounts.js';
 import { LocalData } from './pages/LocalData.js';
@@ -50,6 +51,14 @@ import { ConnectPromptContext } from './wallet/connect-prompt.js';
 import { solanaWalletAdapter } from './wallet/phantom-adapter.js';
 import { SignPromptStore } from './wallet/sign-prompt.js';
 import { SigningPrompt } from './wallet/SigningPrompt.js';
+
+// AA 00060 P1.6: the dev-only wallet probe (G-NIGHTLY), shown only when config.json has `devProbe: true`
+// and the page is at #wallet-probe. It is imported statically ON PURPOSE: as a lazy chunk, Rollup moved
+// the modules it shares with the page (zod among them) into a separate chunk that runs BEFORE
+// ./no-eval.ts, which broke the RUNBOOK's CSP (`script-src eval`) and the store's first writes
+// (e2e chain.spec / zswap-decode.spec / smoke.spec, 2026-10-04).
+const PROBE_ROUTE = 'wallet-probe';
+const isProbeRoute = () => window.location.hash.replace(/^#/, '').split('?')[0] === PROBE_ROUTE;
 
 export const SECTIONS = [
   { id: 'markets', label: 'Markets', icon: 'markets' },
@@ -417,6 +426,12 @@ export function App() {
   const prompts = useMemo(() => new SignPromptStore(), []);
   const activity = useMemo(() => new ActivityStore(), []);
   const adapter = useMemo(() => (config ? walletAdapterFor(config, prompts) : null), [config, prompts]);
+  const [probeRoute, setProbeRoute] = useState(isProbeRoute);
+  useEffect(() => {
+    const on = () => setProbeRoute(isProbeRoute());
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
   if (failed)
     return (
       <div className="wrap app-banner">
@@ -426,6 +441,7 @@ export function App() {
       </div>
     );
   if (!config) return <Loading>Loading Night Market…</Loading>;
+  if (config.devProbe === true && probeRoute) return <WalletProbe config={config} />;
   return (
     <StoreProvider>
       <WalletProvider adapter={adapter}>

@@ -1,0 +1,23 @@
+{
+  "source": "the compiled bridge contract (template f460da1, managed/contract/index.js sha256 03292e89e99061bce7a2d1f0cd89d5ff68f19bd8815bb2dc4ca54c03a040e710) pureCircuits.domainSep / tokenColor",
+  "vectors": [
+    {
+      "splMint": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+      "bridgeContract": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "domainSep": "794fd192eedf908f5dbcf025fcc3dd386d0c2bf0b9d353b75df23344c97f8625",
+      "colour": "5d17c86110853c018dfcc6428a8c11a7ddfbf2f7d79c50d1b4b3411fa740f32b"
+    },
+    {
+      "splMint": "1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE",
+      "bridgeContract": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "domainSep": "f535295d021ddad9936b2730a4b631f673200d03c94569b357e0fc69addeeef7",
+      "colour": "dcb6b861440b2a4b28d93d767cb80c5b5ebcf765b7c16a9b319c4f505c898fae"
+    },
+    {
+      "splMint": "So11111111111111111111111111111111111111112",
+      "bridgeContract": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "domainSep": "8ea34b3549680cf6101247ab3d53d2eee02748c323dcc709c0f4068c2d35c923",
+      "colour": "7b5f2fc48cedf6f0c9b47c8e6efd628e199c4512c92ceb611697a805d49b5b70"
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "source": "@solana/web3.js 1.99.0 Transaction.serializeMessage (bridge template node_modules, read only)",
+  "vectors": [
+    {
+      "name": "memo",
+      "feePayer": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "recentBlockhash": "7kuT1dfMhUysWcLEV1eYk8ir7RTjszHmsUdrrPQNThcv",
+      "instructions": [
+        {
+          "programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+          "keys": [
+            {
+              "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+              "isSigner": true,
+              "isWritable": false
+            }
+          ],
+          "dataHex": "4e69676874204d61726b65742077616c6c65742070726f62652031373030303030303030"
+        }
+      ],
+      "messageHex": "010001028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301010100244e69676874204d61726b65742077616c6c65742070726f62652031373030303030303030",
+      "unsignedTxHex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010001028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301010100244e69676874204d61726b65742077616c6c65742070726f62652031373030303030303030"
+    },
+    {
+      "name": "self-transfer-0",
+      "feePayer": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "recentBlockhash": "7kuT1dfMhUysWcLEV1eYk8ir7RTjszHmsUdrrPQNThcv",
+      "instructions": [
+        {
+          "programId": "11111111111111111111111111111111",
+          "keys": [
+            {
+              "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+              "isSigner": true,
+              "isWritable": true
+            },
+            {
+              "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+              "isSigner": false,
+              "isWritable": true
+            }
+          ],
+          "dataHex": "020000000000000000000000"
+        }
+      ],
+      "messageHex": "010001028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c00000000000000000000000000000000000000000000000000000000000000006465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301010200000c020000000000000000000000",
+      "unsignedTxHex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010001028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c00000000000000000000000000000000000000000000000000000000000000006465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301010200000c020000000000000000000000"
+    },
+    {
+      "name": "lock-shaped+memo",
+      "feePayer": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "recentBlockhash": "7kuT1dfMhUysWcLEV1eYk8ir7RTjszHmsUdrrPQNThcv",
+      "instructions": [
+        {
+          "programId": "JEJUoGfGEPTZ1XTwN39dYdFxYxDiDaSKVNy5qYWJmZt3",
+          "keys": [
+            {
+              "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+              "isSigner": true,
+              "isWritable": false
+            },
+            {
+              "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+              "isSigner": false,
+              "isWritable": true
+            },
+            {
+              "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse",
+              "isSigner": false,
+              "isWritable": true
+            },
+            {
+              "pubkey": "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1",
+              "isSigner": false,
+              "isWritable": true
+            },
+            {
+              "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+              "isSigner": false,
+              "isWritable": false
+            }
+          ],
+          "dataHex": "030065cd1d00000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        },
+        {
+          "programId": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+          "keys": [
+            {
+              "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+              "isSigner": true,
+              "isWritable": false
+            }
+          ],
+          "dataHex": "78"
+        }
+      ],
+      "messageHex": "010003078a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a96465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283020405000103020629030065cd1d00000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10501000178",
+      "unsignedTxHex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010003078a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7ced4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a96465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283020405000103020629030065cd1d00000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10501000178"
+    },
+    {
+      "name": "two-signers",
+      "feePayer": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      "recentBlockhash": "7kuT1dfMhUysWcLEV1eYk8ir7RTjszHmsUdrrPQNThcv",
+      "instructions": [
+        {
+          "programId": "11111111111111111111111111111111",
+          "keys": [
+            {
+              "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+              "isSigner": true,
+              "isWritable": true
+            },
+            {
+              "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse",
+              "isSigner": false,
+              "isWritable": true
+            }
+          ],
+          "dataHex": "020000008813000000000000"
+        }
+      ],
+      "messageHex": "020001048a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d100000000000000000000000000000000000000000000000000000000000000006465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301030201020c020000008813000000000000",
+      "unsignedTxHex": "020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020001048a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d100000000000000000000000000000000000000000000000000000000000000006465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828301030201020c020000008813000000000000"
+    }
+  ]
+}

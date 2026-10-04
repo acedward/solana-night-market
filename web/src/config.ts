@@ -32,6 +32,49 @@ export interface SiteConfig {
   /** How long the page waits for the Solana wallet to answer a connection or a signature, in
    *  seconds (`walletTimeoutSeconds`, 5–600; default 120). */
   walletTimeoutSeconds: number;
+  /** AA 00060 P1.6: serve the dev-only wallet probe at `#wallet-probe` (G-NIGHTLY). Only `devProbe: true`
+   *  turns it on; the production configs never set it. */
+  devProbe?: boolean;
+  /** AA 00060: the site's Solana RPC (`solana: {rpcUrl, genesisHash?, cluster}`; `cluster` is the
+   *  Wallet Standard chain, e.g. `solana:devnet`). P4.3 checks it against the journey registry. */
+  solana?: SolanaRpcConfig | null;
+  /** AA 00060: the RPC injector ("Show in my wallet", `injector: {url}`). */
+  injector?: { url: string } | null;
+}
+
+export interface SolanaRpcConfig {
+  rpcUrl: string;
+  /** base58 of 32 bytes, when the site pins one. */
+  genesisHash: string | null;
+  /** The Wallet Standard chain the wallet is asked to use: `solana:mainnet|devnet|testnet|localnet`. */
+  cluster: string;
+}
+
+const httpUrl = (v: unknown): string | null => {
+  if (typeof v !== 'string') return null;
+  try {
+    const u = new URL(v);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? v.replace(/\/+$/, '') : null;
+  } catch {
+    return null;
+  }
+};
+
+/** `solana` from config.json, or null when absent or malformed (named in the console). */
+export function solanaRpcConfig(v: unknown): SolanaRpcConfig | null {
+  if (v === undefined || v === null) return null;
+  const o = typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  const rpcUrl = httpUrl(o.rpcUrl);
+  const cluster = typeof o.cluster === 'string' && /^solana:[a-z]{1,16}$/.test(o.cluster) ? o.cluster : null;
+  const genesisHash =
+    typeof o.genesisHash === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(o.genesisHash) ? o.genesisHash : null;
+  if (!rpcUrl || !cluster || (o.genesisHash !== undefined && !genesisHash)) {
+    console.warn(
+      'Night Market: config.json `solana` needs an http(s) rpcUrl, a `solana:<cluster>` cluster and, if given, a base58 genesisHash',
+    );
+    return null;
+  }
+  return { rpcUrl, cluster, genesisHash };
 }
 
 export const DEFAULT_WALLET_TIMEOUT_SECONDS = 120;
@@ -48,6 +91,9 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     pairs?: unknown;
     assets?: unknown;
     walletTimeoutSeconds?: unknown;
+    devProbe?: unknown;
+    solana?: unknown;
+    injector?: unknown;
   } = {};
   try {
     const res = await fetchImpl('./config.json', { cache: 'no-store' });
@@ -65,6 +111,12 @@ export async function loadSiteConfig(fetchImpl: typeof fetch = fetch): Promise<S
     ...(raw.pairs !== undefined ? { pairs: raw.pairs } : {}),
     assets: siteAssets(network, raw.tokens, raw.assets),
     walletTimeoutSeconds: walletTimeout(raw.walletTimeoutSeconds),
+    devProbe: raw.devProbe === true,
+    solana: solanaRpcConfig(raw.solana),
+    injector: (() => {
+      const url = httpUrl((raw.injector as { url?: unknown } | undefined)?.url);
+      return url ? { url } : null;
+    })(),
   };
 }
 

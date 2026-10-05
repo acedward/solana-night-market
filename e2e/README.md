@@ -149,3 +149,11 @@ The full runbook section comes with P5R.4. The gate `e2e/stagenet/run-gate.sh` r
   - It writes into a buffer whose keypair file the harness holds. The CLI therefore never prints a recovery phrase, and a failed deploy resumes into the same buffer.
 - **Orphaned stagenet contract — NOT the live bridge X.** Contract `7b015a9c410b7602cd0768bb6e52d251ced8863138caba69374c93ee6839d662` (tx `c041fa5a…0761`, 2026-10-05) is a deploy that landed but was never recorded. `deploy.ts` failed afterwards on the harness's storage password, which is now fixed. Ignore it. The live contract is the one in the deployment files under `~/.config/aa-00057/p5r0/deployments/`.
 - **Bridge node on devnet:** the pinned engine's Solana sync cannot read current devnet blocks. Devnet carries version-1 transactions, and the engine requests blocks with `maxSupportedTransactionVersion: 0`. The free public RPC also allows only about 6 `getBlock` calls per 10 s. See the 00057 questions file, Q16.
+- **The devnet RPC.** The rehearsal uses a private devnet RPC, stored at `~/.config/aa-00057/devnet/rpc-url` (mode 600). Its URL carries an API key.
+  - The harness reads it in-process only and never prints it. The Solana CLIs get it through a config file (`-C`), and the containers through an env file; both are mode 600 and live in the run's temp directory. Every file of the evidence is redacted at the teardown.
+  - `run-gate.sh rpc-check` checks the RPC (genesis hash, version-1 blocks) and the redaction; it prints no secret.
+  - For this LOCAL rehearsal only, the site's `solana.rpcUrl` is the private URL too, served on 127.0.0.1. **A deployment must NOT ship an API-keyed URL in a public `config.json`**: it would publish the key. Give the site a key-less public RPC, or a proxy that adds the key server-side.
+- **Sync speed on devnet:** the bridge node reads one `getBlock` per slot, one after another.
+  - At about 0.55 s per call that is ≈ 1.8 blocks/s, even on the private RPC, while devnet makes ≈ 2.5 slots/s or more.
+  - Eight calls in parallel give ≈ 17 blocks/s (evidence `p5r0/gate/rpc-private-throughput.json`).
+  - So the node only keeps up if the block reader fetches concurrently.

@@ -64,7 +64,11 @@ STG_NODE_HTTP=https://rpc.stagenet.shielded.tools
 STG_NODE_WS=wss://rpc.stagenet.shielded.tools
 STG_INDEXER=https://indexer.stagenet.shielded.tools/api/v4/graphql
 STG_INDEXER_WS=wss://indexer.stagenet.shielded.tools/api/v4/graphql/ws
-DEVNET="${DEVNET_RPC:-https://api.devnet.solana.com}"
+# Solana devnet: the PRIVATE RPC URL in DEVNET_RPC_FILE (it carries an API key: read into this process only,
+# handed to the CLIs through a config file and to containers through env files (600, in the run's temp dir);
+# never printed; every file in $OUT is redacted at the teardown). Without the file: the public RPC (rate-limited).
+DEVNET_RPC_FILE="${DEVNET_RPC_FILE:-$CONF/devnet/rpc-url}"
+DEVNET=https://api.devnet.solana.com
 DEVNET_GENESIS=EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG
 DEPLOYMENT=p5r-x
 UNIT=1000000
@@ -74,7 +78,9 @@ say() { echo "[gate $(date -u +%H:%M:%SZ)] $*"; }
 fail() { say "STOPPED: $*"; echo "$*" >"$OUT/stopped.txt"; exit 1; }
 mark() { printf '{"at":"%s","t":%s,"what":"%s","event":"%s"}\n' "$(date -u +%FT%TZ)" "$(date +%s)" "$1" "$2" >>"$OUT/timings.jsonl"; }
 pub() { "$AGAVE/solana-keygen" pubkey "$1"; }
-sol_balance() { "$AGAVE/solana" balance "$1" --url "$DEVNET" --lamports 2>/dev/null | awk '{print $1}'; }
+sol() { "$AGAVE/solana" -C "$RUN/solana-cli.yml" "$@"; }
+spl() { "$SPL_TOKEN" -C "$RUN/solana-cli.yml" "$@"; }
+sol_balance() { sol balance "$1" --lamports 2>/dev/null | awk '{print $1}'; }
 free_port() {
   python3 - <<'PY'
 import random, socket
@@ -112,7 +118,7 @@ tmpl() { # <name> <dir under the template> <cmd...>: the 00058 template's enviro
     -e MIDNIGHT_NETWORK_ID=stagenet -e "MIDNIGHT_NODE_HTTP=$STG_NODE_WS" \
     -e "MIDNIGHT_INDEXER_HTTP=$STG_INDEXER" -e "MIDNIGHT_INDEXER_WS=$STG_INDEXER_WS" \
     -e MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300 -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 \
-    -e "SOLANA_DEVNET_RPC_URL=$DEVNET" -e "SOLANA_EXPECTED_GENESIS_HASH=$DEVNET_GENESIS" \
+    --env-file "$RUN/devnet.env" -e "SOLANA_EXPECTED_GENESIS_HASH=$DEVNET_GENESIS" \
     -e BRIDGE_DELIVERY_ADAPTERS=passport -e NODE_ENV=production -e OUT=/out \
     -w "$TROOT/$wd" "$STEP_IMAGE" bash -c '
       if [ -f "$BRIDGE_SECRETS_DIR/storage-password" ]; then export MIDNIGHT_STORAGE_PASSWORD="$(cat "$BRIDGE_SECRETS_DIR/storage-password")"; fi
@@ -140,7 +146,7 @@ landing() { # [VAR=…]…  (test/gates/landing/landing.ts: the page's own opera
     -e JOURNEY_FILE=/run/nm/journey-tokens.stagenet.json -e PROMPT_LOG=/out/prompts.jsonl -e RELAY_URL=http://relay:8080 \
     -e "INDEXER_URL=$STG_INDEXER" -e "NODE_WS_URL=$STG_NODE_WS" \
     -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server:6300 \
-    -e "SOLANA_GENESIS=$DEVNET_GENESIS" -e "SOLANA_RPC_URL=$DEVNET" -e SOLANA_CLUSTER=solana:devnet \
+    -e "SOLANA_GENESIS=$DEVNET_GENESIS" --env-file "$RUN/devnet.env" -e SOLANA_CLUSTER=solana:devnet \
     -e "LANDING_ORIGIN=http://127.0.0.1:$WEB_PORT" -e BRIDGES=X -e BRIDGE_IN_TIMEOUT_MS=1800000 ${args[@]+"${args[@]}"} "$BUN_IMAGE" \
     bun test/gates/landing/landing.ts 2>&1 | tee -a "$OUT/landing.log"
   return "${PIPESTATUS[0]}"
@@ -198,6 +204,39 @@ except Exception as e:
     print(json.dumps({"error": str(e)}))
 PY
 }
+# The private devnet RPC (its URL, its API key) is replaced in every file under the given directory.
+redact_rpc() {
+  [[ -n "${DEVNET:-}" && "$DEVNET" != https://api.devnet.solana.com ]] || return 0
+  DEVNET_URL="$DEVNET" python3 - "$1" <<'PY'
+import os, sys, urllib.parse
+url = os.environ["DEVNET_URL"]
+parts = urllib.parse.urlsplit(url)
+secrets = {url, url.rstrip("/")}
+for _k, v in urllib.parse.parse_qsl(parts.query):
+    if len(v) >= 8:
+        secrets.add(v)
+for seg in parts.path.split("/"):
+    if len(seg) >= 16:
+        secrets.add(seg)
+secrets = sorted(secrets, key=len, reverse=True)
+total = left = 0
+for root, _dirs, files in os.walk(sys.argv[1]):
+    for f in files:
+        p = os.path.join(root, f)
+        try:
+            data = open(p, "rb").read()
+        except Exception:
+            continue
+        new = data
+        for x in secrets:
+            total += new.count(x.encode())
+            new = new.replace(x.encode(), b"[REDACTED devnet RPC]")
+        if new != data:
+            open(p, "wb").write(new)
+        left += sum(new.count(x.encode()) for x in secrets)
+print(f"redacted {total} occurrence(s) of the private devnet RPC under {sys.argv[1]}; left {left}")
+PY
+}
 # The template volume's deployment files of this gate (addresses only) are kept in $P5R/deployments, so a
 # stopped gate resumes from them (run 2 lost the Solana section when the teardown cleaned the volume).
 save_deployments() {
@@ -226,7 +265,11 @@ sync_sampler() {
   while :; do
     local bh tip
     bh="$(curl -s -m 10 "http://127.0.0.1:$X_API_PORT/block-heights" 2>/dev/null)"
-    tip="$(curl -s -m 10 "$DEVNET" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"confirmed"}]}' 2>/dev/null)"
+    tip="$(DEVNET_URL="$DEVNET" python3 -c '
+import json, os, urllib.request
+req = urllib.request.Request(os.environ["DEVNET_URL"], data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": [{"commitment": "confirmed"}]}).encode(), headers={"content-type": "application/json"})
+try: print(urllib.request.urlopen(req, timeout=10).read().decode())
+except Exception: print("{}")' 2>/dev/null)"
     python3 -c '
 import json, sys, time
 try: bh = json.loads(sys.argv[1])
@@ -273,6 +316,7 @@ teardown() {
   lock=$([[ -d "$LOCK" ]] && grep -q "$CP" "$LOCK/holder" 2>/dev/null && echo 1 || echo 0)
   printf '{"project":"%s","containers":%s,"volumes":%s,"networks":%s,"runDirLeft":%s,"lockHeld":%s,"at":"%s"}\n' \
     "$CP" "$containers" "$volumes" "$net" "$rundir" "$lock" "$(date -u +%FT%TZ)" | tee "$OUT/down-check.json"
+  redact_rpc "$OUT" | tee "$OUT/redaction.txt"
   python3 "$HERE/gate-report.py" "$OUT" || say "WARNING: no gate report"
 }
 
@@ -334,6 +378,15 @@ while True:
 PY
   cp "$CONF/stagenet/temporary-11.seed" "$RUN/nm/sponsor.seed"
   chmod 600 "$RUN"/secrets-x/* "$RUN/nm/sponsor.seed"
+  # The devnet RPC: into the Solana CLIs' config file and the containers' env file only (both 600).
+  if [[ -f "$DEVNET_RPC_FILE" ]]; then
+    [[ "$(stat -f %Lp "$DEVNET_RPC_FILE")" == 600 ]] || fail "$DEVNET_RPC_FILE must be mode 600"
+    DEVNET="$(tr -d ' \r\n' <"$DEVNET_RPC_FILE")"
+  fi
+  ( umask 077
+    printf 'json_rpc_url: "%s"\nwebsocket_url: ""\nkeypair_path: "%s"\naddress_labels:\n  "11111111111111111111111111111111": System Program\ncommitment: confirmed\n' \
+      "$DEVNET" "$RUN/secrets-x/solana-operator.json" >"$RUN/solana-cli.yml"
+    printf 'SOLANA_DEVNET_RPC_URL=%s\nSOLANA_RPC_URL=%s\n' "$DEVNET" "$DEVNET" >"$RUN/devnet.env" )
   cp -Rc "$KEYS_SRC" "$RUN/keys-relay"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-relay/bridge"
   cp -Rc "$KEYS_SRC" "$RUN/keys-harness"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-harness/bridge"
   cp -Rc "$PS_PARAMS_SRC" "$RUN/ps-params"; cp -Rc "$PS8_PARAMS_SRC" "$RUN/ps8-params"
@@ -346,8 +399,9 @@ PY
     for i in "$PS6_IMAGE" "$PS8_IMAGE" "$BUN_IMAGE"; do echo "$i $(docker image inspect "$i" --format '{{.Id}}')"; done
     echo "agave $("$AGAVE/solana" --version)"; echo "x-operator $X_OPERATOR"; echo "x-program $X_PROGRAM"; echo "funder $FUNDER"
     echo "ports relay $RELAY_PORT bridge-x $X_API_PORT site $WEB_PORT"
+    echo "devnet-rpc $(DEVNET_URL="$DEVNET" python3 -c 'import os, urllib.parse as u; print(u.urlsplit(os.environ["DEVNET_URL"]).hostname)') ($([[ "$DEVNET" == https://api.devnet.solana.com ]] && echo public || echo 'private, key redacted'))"
   } >"$OUT/pins.txt"
-  local genesis; genesis="$("$AGAVE/solana" genesis-hash --url "$DEVNET")"
+  local genesis; genesis="$(sol genesis-hash 2>/dev/null)"
   [[ "$genesis" == "$DEVNET_GENESIS" ]] || fail "the Solana RPC is not devnet (genesis $genesis)"
   snapshot start
 
@@ -383,7 +437,7 @@ PY
     >"$OUT/deployments-restored.txt" 2>&1 || fail "restore the deployment files"
   # The program account exists = deployed (`solana program show` needs a default signer on this host, so it
   # cannot tell; run 1 found that). deploy-devnet.ts then checks its upgrade authority is x-operator.
-  if "$AGAVE/solana" account "$X_PROGRAM" --url "$DEVNET" >"$OUT/program-account-before.txt" 2>&1; then
+  if sol account "$X_PROGRAM" >"$OUT/program-account-before.txt" 2>&1; then
     say "program $X_PROGRAM already deployed (kept)"
   else
     # Q14 A (run 1: `--use-rpc` through the public devnet RPC failed, "Max retries exceeded"): the write
@@ -398,7 +452,7 @@ PY
     fi
     echo "buffer $(pub "$buf")" >>"$OUT/pins.txt"
     l0="$(sol_balance "$X_OPERATOR")"
-    "$AGAVE/solana" program deploy "$TPL/packages/contracts-solana/build/bridge.so" --url "$DEVNET" \
+    sol program deploy "$TPL/packages/contracts-solana/build/bridge.so" \
       --keypair "$RUN/secrets-x/solana-operator.json" --upgrade-authority "$RUN/secrets-x/solana-operator.json" \
       --program-id "$RUN/secrets-x/solana-bridge-program.json" --buffer "$buf" --commitment confirmed \
       --with-compute-unit-price "${CU_PRICE:-20000}" --max-sign-attempts "${MAX_SIGN_ATTEMPTS:-30}" --output json \
@@ -409,8 +463,8 @@ PY
     if [[ $rc != 0 ]]; then
       tail -20 "$OUT/deploy-x-program.err"
       # Q14: on a second failure, the buffer's SOL goes back to x-operator, and the gate stops.
-      "$AGAVE/solana" program close --buffers --keypair "$RUN/secrets-x/solana-operator.json" \
-        --authority "$RUN/secrets-x/solana-operator.json" --recipient "$X_OPERATOR" --url "$DEVNET" \
+      sol program close --buffers --keypair "$RUN/secrets-x/solana-operator.json" \
+        --authority "$RUN/secrets-x/solana-operator.json" --recipient "$X_OPERATOR" \
         >"$OUT/close-buffers.log" 2>&1
       echo "close-buffers exit $? lamportsAfterClose $(sol_balance "$X_OPERATOR")" >>"$OUT/close-buffers.log"
       fail "the devnet program deploy (TPU path, buffer $(pub "$buf")); the buffers are closed"
@@ -444,14 +498,16 @@ PY
 
   # ── 2. I-1 for stagenet, the relay's and the site's lists ──
   say "==== 2. the journey registry and the token lists"
-  bun_nm -v "$RUN/nm:/run/nm" -v "$OUT:/out:ro" "$BUN_IMAGE" bun e2e/registry/build.ts --network stagenet \
-    --genesis "$DEVNET_GENESIS" --solana-rpc "$DEVNET" --out /run/nm/journey-tokens.stagenet.json \
+  bun_nm -v "$RUN/nm:/run/nm" -v "$OUT:/out:ro" --env-file "$RUN/devnet.env" "$BUN_IMAGE" sh -c \
+    'exec bun e2e/registry/build.ts "$@" --solana-rpc "$SOLANA_RPC_URL"' _ --network stagenet \
+    --genesis "$DEVNET_GENESIS" --out /run/nm/journey-tokens.stagenet.json \
     --site-icons-out /run/nm/site-icons.json "/out/$DEPLOYMENT.record.json" 2>&1 | tee "$OUT/registry-build.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "the journey registry"
   echo '{"network":"stagenet","relayUrl":"http://relay:8080"}' >"$RUN/nm/site-config.json"
-  bun_nm -v "$RUN/nm:/run/nm" "$BUN_IMAGE" bun scripts/bridge-tokens.ts /run/nm/journey-tokens.stagenet.json \
+  bun_nm -v "$RUN/nm:/run/nm" --env-file "$RUN/devnet.env" "$BUN_IMAGE" sh -c \
+    'exec bun scripts/bridge-tokens.ts "$@" --solana-rpc "$SOLANA_RPC_URL"' _ /run/nm/journey-tokens.stagenet.json \
     --site-config /run/nm/site-config.json --relay-tokens /run/nm/tokens.json --pairs X/twUSDC --icons /run/nm/site-icons.json \
-    --solana-rpc "$DEVNET" 2>&1 | tee "$OUT/bridge-tokens.log"
+    2>&1 | tee "$OUT/bridge-tokens.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "bridge-tokens"
   cp "$RUN/nm/journey-tokens.stagenet.json" "$RUN/nm/tokens.json" "$RUN/nm/site-config.json" "$RUN/nm/site-icons.json" "$OUT/"
 
@@ -488,6 +544,7 @@ MIDNIGHT_INDEXER_WS=$STG_INDEXER_WS
 MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300
 MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300
 EOF
+  chmod 600 "$RUN/x.env"
   docker compose -p "$CP-x" --env-file "$RUN/x.env" -f "$TPL/deploy/standin/compose.bridge.yml" up -d >/dev/null 2>&1 || fail "bridge node X up"
   local h=""
   for _ in $(seq 1 200); do
@@ -509,14 +566,16 @@ EOF
   sync_sampler & SAMPLER_PID=$!
   # The site: Night Market's build with a stagenet config.json (the relay behind it on /relay/).
   rm -rf "$RUN/site"; cp -Rc "$STATE_ROOT/site-dist" "$RUN/site"
-  python3 - "$RUN/nm/site-config.json" "$RUN/nm/journey-tokens.stagenet.json" "$RUN/site/config.json" "$WEB_PORT" "$X_API_PORT" "$DEVNET" "$DEVNET_GENESIS" <<'PY'
-import json, sys
+  # The site's `solana.rpcUrl` is the private RPC too, for this LOCAL rehearsal only (served on 127.0.0.1; the
+  # evidence copy is redacted). A deployment must never ship an API-keyed URL in a public config.json.
+  DEVNET_URL="$DEVNET" python3 - "$RUN/nm/site-config.json" "$RUN/nm/journey-tokens.stagenet.json" "$RUN/site/config.json" "$WEB_PORT" "$X_API_PORT" "$DEVNET_GENESIS" <<'PY'
+import json, os, sys
 site, journey = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
 web = f"http://127.0.0.1:{sys.argv[4]}"
 for t in journey["tokens"]:
     t["bridgeApi"] = f"http://127.0.0.1:{sys.argv[5]}"
 config = {"network": "stagenet", "relayUrl": f"{web}/relay", "tokens": site.get("tokens"), "pairs": site.get("pairs"),
-          "bridges": journey, "solana": {"rpcUrl": sys.argv[6], "genesisHash": sys.argv[7], "cluster": "solana:devnet"},
+          "bridges": journey, "solana": {"rpcUrl": os.environ["DEVNET_URL"], "genesisHash": sys.argv[6], "cluster": "solana:devnet"},
           "walletTimeoutSeconds": 300}
 json.dump({k: v for k, v in config.items() if v is not None}, open(sys.argv[3], "w"), indent=1)
 PY
@@ -552,30 +611,30 @@ PY
   say "==== 5. A's Solana wallet $WALLET_A: SOL and 2 X"
   local lamA; lamA="$(sol_balance "$WALLET_A")"; lamA="${lamA:-0}"
   if (( lamA < 20000000 )); then
-    if "$AGAVE/solana" airdrop 0.1 "$WALLET_A" --url "$DEVNET" --commitment confirmed >"$OUT/airdrop-a.log" 2>&1; then
+    if sol airdrop 0.1 "$WALLET_A" --commitment confirmed >"$OUT/airdrop-a.log" 2>&1; then
       say "devnet airdrop 0.1 SOL to A"
     else
       say "the devnet airdrop was refused ($(tail -1 "$OUT/airdrop-a.log")); 0.05 SOL from the funder"
-      "$AGAVE/solana" transfer "$WALLET_A" 0.05 --from "$CONF/devnet/funder.json" --fee-payer "$CONF/devnet/funder.json" \
-        --allow-unfunded-recipient --url "$DEVNET" --commitment confirmed >"$OUT/transfer-sol-to-a.log" 2>&1 \
+      sol transfer "$WALLET_A" 0.05 --from "$CONF/devnet/funder.json" --fee-payer "$CONF/devnet/funder.json" \
+        --allow-unfunded-recipient --commitment confirmed >"$OUT/transfer-sol-to-a.log" 2>&1 \
         || { cat "$OUT/transfer-sol-to-a.log"; fail "0.05 SOL to A"; }
     fi
   fi
   local ataA haveX
-  ataA="$("$SPL_TOKEN" address --token "$MINT_X" --owner "$WALLET_A" --verbose --url "$DEVNET" 2>/dev/null | awk '/Associated token address/{print $NF}')"
+  ataA="$(spl address --token "$MINT_X" --owner "$WALLET_A" --verbose 2>/dev/null | awk '/Associated token address/{print $NF}')"
   [[ -n "$ataA" ]] || fail "no associated token address for A"
-  if ! haveX="$("$SPL_TOKEN" balance --address "$ataA" --url "$DEVNET" 2>/dev/null)"; then
+  if ! haveX="$(spl balance --address "$ataA" 2>/dev/null)"; then
     # A's token account for X, paid by x-operator (A's SOL is for its own lock fees).
-    "$SPL_TOKEN" create-account "$MINT_X" --owner "$WALLET_A" --fee-payer "$RUN/secrets-x/solana-operator.json" \
-      --url "$DEVNET" >"$OUT/create-ata-a.log" 2>&1 || { cat "$OUT/create-ata-a.log"; fail "A's token account for X"; }
+    spl create-account "$MINT_X" --owner "$WALLET_A" --fee-payer "$RUN/secrets-x/solana-operator.json" \
+      >"$OUT/create-ata-a.log" 2>&1 || { cat "$OUT/create-ata-a.log"; fail "A's token account for X"; }
     haveX=0
   fi
   if python3 -c "import sys; sys.exit(0 if float(sys.argv[1] or 0) < 2 else 1)" "$haveX"; then
-    "$SPL_TOKEN" mint "$MINT_X" 2 "$ataA" --mint-authority "$RUN/secrets-x/solana-operator.json" \
-      --fee-payer "$RUN/secrets-x/solana-operator.json" --url "$DEVNET" >"$OUT/mint-x-to-a.log" 2>&1 \
+    spl mint "$MINT_X" 2 "$ataA" --mint-authority "$RUN/secrets-x/solana-operator.json" \
+      --fee-payer "$RUN/secrets-x/solana-operator.json" >"$OUT/mint-x-to-a.log" 2>&1 \
       || { cat "$OUT/mint-x-to-a.log"; fail "mint 2 X to A"; }
   fi
-  echo "X on A's wallet: $("$SPL_TOKEN" balance --address "$ataA" --url "$DEVNET" 2>/dev/null)" | tee "$OUT/wallet-a-x.txt"
+  echo "X on A's wallet: $(spl balance --address "$ataA" 2>/dev/null)" | tee "$OUT/wallet-a-x.txt"
   snapshot funded
 
   # ── 6. (a) 1 X in ──
@@ -625,8 +684,50 @@ PY
   echo PASS >"$OUT/result.txt"
 }
 
+# rpc-check: the devnet RPC as the gate will use it (read only): the CLI config and env file, the genesis hash,
+# a recent block with version-1 transactions, and the redaction of a file that holds the URL. Prints no secret.
+rpc_check() {
+  RUN="$(mktemp -d "${TMPDIR:-/tmp}/aa00057-rpccheck.XXXXXX")"; chmod 700 "$RUN"; mkdir -p "$RUN/secrets-x" "$RUN/out"
+  trap 'rm -rf "$RUN"' EXIT
+  cp "$CONF/devnet/x-operator.json" "$RUN/secrets-x/solana-operator.json"; chmod 600 "$RUN/secrets-x/solana-operator.json"
+  if [[ -f "$DEVNET_RPC_FILE" ]]; then
+    [[ "$(stat -f %Lp "$DEVNET_RPC_FILE")" == 600 ]] || { echo "$DEVNET_RPC_FILE must be mode 600" >&2; exit 1; }
+    DEVNET="$(tr -d ' \r\n' <"$DEVNET_RPC_FILE")"
+  fi
+  ( umask 077
+    printf 'json_rpc_url: "%s"\nwebsocket_url: ""\nkeypair_path: "%s"\naddress_labels:\n  "11111111111111111111111111111111": System Program\ncommitment: confirmed\n' \
+      "$DEVNET" "$RUN/secrets-x/solana-operator.json" >"$RUN/solana-cli.yml" )
+  local g; g="$(sol genesis-hash 2>/dev/null)"
+  echo "genesis $([[ "$g" == "$DEVNET_GENESIS" ]] && echo devnet-ok || echo "MISMATCH")"
+  echo "x-operator lamports $(sol_balance "$(pub "$RUN/secrets-x/solana-operator.json")")"
+  DEVNET_URL="$DEVNET" python3 - <<'PY'
+import json, os, time, urllib.request, urllib.error
+url = os.environ["DEVNET_URL"]
+def rpc(m, p):
+    req = urllib.request.Request(url, data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": m, "params": p}).encode(), headers={"content-type": "application/json"})
+    try:
+        return 200, json.load(urllib.request.urlopen(req, timeout=30))
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+_, b = rpc("getSlot", [{"commitment": "confirmed"}])
+tip = b["result"]
+t0 = time.time(); codes = {}; v1 = 0; errs = 0
+for s in range(tip - 300, tip - 280):
+    c, b = rpc("getBlock", [s, {"encoding": "json", "transactionDetails": "full", "rewards": False, "maxSupportedTransactionVersion": 1, "commitment": "confirmed"}])
+    codes[c] = codes.get(c, 0) + 1
+    if "error" in b: errs += 1
+    for t in (b.get("result") or {}).get("transactions", []):
+        if t.get("version") == 1: v1 += 1
+print(json.dumps({"getBlock": 20, "seconds": round(time.time() - t0, 1), "httpCodes": codes, "rpcErrors": errs, "v1Transactions": v1}))
+PY
+  echo "a line with $DEVNET inside" >"$RUN/out/probe.txt"
+  redact_rpc "$RUN/out"
+  grep -c 'REDACTED devnet RPC' "$RUN/out/probe.txt" | sed 's/^/redaction marks: /'
+}
+
 case "$CMD" in
   prep) prep ;;
   gate) gate ;;
-  *) echo "usage: $0 prep|gate" >&2; exit 64 ;;
+  rpc-check) rpc_check ;;
+  *) echo "usage: $0 prep|gate|rpc-check" >&2; exit 64 ;;
 esac

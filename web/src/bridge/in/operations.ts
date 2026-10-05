@@ -318,19 +318,137 @@ export const bridgeInCheckDue = (r: BridgeInRecord, now = Date.now()): boolean =
   !r.lookupErrors || now >= (r.checkedAt ?? 0) + bridgeInBackoffMs(r.lookupErrors);
 
 /**
- * One look on Solana for a lock whose wallet answer was lost (audit C3): by its signature when known, else
- * among the source token account's transactions back to the slot its blockhash was read at, by its exact
- * message. Found: `sent` (then followed as usual).
+ * What Solana shows about a lock (P10.5, audit E1: R3-B1, R3-A1/E5). Built ONLY by `lockEvidence` (and, for
+ * a lock the page never handed to anything that could send it, by the send path), and read ONLY through
+ * `definitelyNotSent` / `nothingLockedText`.
+ */
+export type LockEvidence =
+  /** The page never handed the lock to the wallet's send, nor sent it itself. */
+  | { kind: 'never-sent' }
+  /** The lock is on Solana (confirmed): this signature. */
+  | { kind: 'found'; signature: string }
+  /** The lock's transaction landed and FAILED: the program locked nothing. */
+  | { kind: 'failed-on-chain'; signature: string }
+  /** The blockhash had expired at `expirySlot`, and well-formed answers from nodes at or past that slot
+   *  list every transaction of the token account back to the lock's slot, none of them the lock. */
+  | { kind: 'absent'; expirySlot: string }
+  /** Anything else: not definite. `error`: a lookup failed or answered something not well-formed. */
+  | { kind: 'unknown'; expired: boolean; error: boolean; cursor?: string };
+
+/** THE decision (audit E1): whether nothing was locked. Every "Nothing was locked" text, every `failed`
+ *  Bridge-in record and so every replacement it unblocks comes from here. */
+export const definitelyNotSent = (e: LockEvidence): boolean =>
+  e.kind === 'never-sent' || e.kind === 'failed-on-chain' || e.kind === 'absent';
+
+/** The ONLY source of the words "nothing was locked": null unless `definitelyNotSent(e)`. */
+export function nothingLockedText(e: LockEvidence): string | null {
+  if (!definitelyNotSent(e)) return null;
+  if (e.kind === 'failed-on-chain') return 'The Solana transaction failed: nothing was locked.';
+  if (e.kind === 'absent')
+    return "Not sent: your wallet's request expired before it reached Solana. Nothing was locked.";
+  return 'Nothing was locked.';
+}
+
+/** A record that ends "nothing was locked": only on definite evidence (throws otherwise). */
+function notLockedRecord(r: BridgeInRecord, e: LockEvidence, now: number): BridgeInRecord {
+  const text = nothingLockedText(e);
+  if (text === null) throw new BridgeInError('not definite: the lock may have been sent');
+  const { lookupErrors: _e, searchBefore: _c, ...rest } = r;
+  return {
+    ...rest,
+    state: 'failed',
+    ...(e.kind === 'absent' ? { blockhashExpired: true } : {}),
+    progress: text,
+    checkedAt: now,
+  };
+}
+
+/**
+ * Gather what Solana shows about a lock whose wallet answer was lost (audit C3, D1, D5, E1): by its signature
+ * when known, and among the source token account's transactions back to the slot its blockhash was read
+ * at, by its exact message.
  *
- * "Nothing was locked" (`failed`) needs DEFINITE evidence (audit D1: R-A2, R-B1): the blockhash has expired
- * (its height read FIRST, so a lock that lands later cannot be missed), and the search reached the lock's
- * slot with every listed transaction read. Any lookup that fails (an RPC error, a listed transaction Solana
- * does not return, a body that does not decode) leaves the record `unknown`, counts the error (the page then
- * backs off, `bridgeInCheckDue`), and keeps blocking a new Bridge in of the token.
+ * `absent` (audit E1) needs ALL of:
+ *  - the expiry, read with its slot in ONE answer (`epochPosition`): block height past the blockhash's last
+ *    valid height, at slot S;
+ *  - the history from nodes at or past S (`minContextSlot`; a lagging node refuses, never answers short);
+ *  - every listed transaction returned, well-formed (`splitTransaction` parses the whole message), carrying
+ *    the very signature it was listed under, and not the lock;
+ *  - the search reaching the lock's slot (or the account's first transaction);
+ *  - when the signature is known, its status "no such transaction" from a node at or past S.
+ * Any lookup that fails or answers something not well-formed is `unknown` with `error`.
  *
- * Once the blockhash has expired, a look that stops at the page limit records where it stopped
- * (`searchBefore`) and the next one resumes there (audit D5: R-A5): any lock landed before the expiry, so
- * newer transactions need no second look.
+ * Once the blockhash has expired, a search stopped at the page limit returns its cursor; the next look
+ * resumes there (audit D5): any lock landed before the expiry, so newer transactions need no second look.
+ */
+export async function lockEvidence(r: BridgeInRecord, rpc: SolanaRpc): Promise<LockEvidence> {
+  let expired = r.blockhashExpired === true;
+  const unknown = (error: boolean, cursor?: string): LockEvidence => ({
+    kind: 'unknown',
+    expired,
+    error,
+    ...(cursor ? { cursor } : {}),
+  });
+  try {
+    let expirySlot: bigint | null = null;
+    if (r.lastValidBlockHeight) {
+      const at = await rpc.epochPosition();
+      if (at.blockHeight > BigInt(r.lastValidBlockHeight)) {
+        expired = true;
+        expirySlot = at.slot;
+      }
+    }
+    let signatureAbsentAt: bigint | null = null;
+    if (r.signature) {
+      const st = await rpc.signatureStatusAt(r.signature);
+      if (st.status === 'failed') return { kind: 'failed-on-chain', signature: r.signature };
+      if (st.status === 'confirmed' || st.status === 'finalized') return { kind: 'found', signature: r.signature };
+      if (st.status === null) signatureAbsentAt = st.slot;
+    }
+    if (!r.message || !r.source) return unknown(false);
+    const from = r.fromSlot ? BigInt(r.fromSlot) : null;
+    // Resume only a search that began after the expiry (its cursor is kept only then).
+    let before = expirySlot !== null && r.blockhashExpired ? r.searchBefore : undefined;
+    let complete = false;
+    search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
+      const sigs = await rpc.signaturesForAddress(r.source, 100, before, expirySlot ?? undefined);
+      for (const { signature, slot } of sigs) {
+        if (from !== null && slot < from) {
+          complete = true;
+          break search;
+        }
+        const wire = await rpc.transactionWire(signature);
+        if (!wire) return unknown(true);
+        let parts: { signatures: Uint8Array[]; message: Uint8Array };
+        try {
+          parts = splitTransaction(wire);
+        } catch {
+          return unknown(true);
+        }
+        // The body must be the transaction it was listed under (an inconsistent answer proves nothing).
+        if (parts.signatures.length === 0 || encodeKey(parts.signatures[0]!) !== signature) return unknown(true);
+        if (toBase64(parts.message) === r.message) return { kind: 'found', signature };
+      }
+      if (sigs.length < 100) {
+        complete = true;
+        break;
+      }
+      before = sigs[sigs.length - 1]!.signature;
+    }
+    if (!complete) return unknown(false, expirySlot !== null ? before : undefined);
+    if (expirySlot === null) return unknown(false);
+    if (r.signature && !(signatureAbsentAt !== null && signatureAbsentAt >= expirySlot)) return unknown(false);
+    return { kind: 'absent', expirySlot: expirySlot.toString(10) };
+  } catch {
+    return unknown(true);
+  }
+}
+
+/**
+ * One look on Solana for a lock whose wallet answer was lost: `lockEvidence`, then the record. Found: `sent`
+ * (then followed as usual). `failed` ("Nothing was locked") only when `definitelyNotSent`. Otherwise still
+ * `unknown`, blocking a new Bridge in of the token; a failed lookup counts an error (the page backs off,
+ * `bridgeInCheckDue`).
  */
 export async function reconcileBridgeIn(
   r: BridgeInRecord,
@@ -338,75 +456,29 @@ export async function reconcileBridgeIn(
   now = Date.now(),
 ): Promise<BridgeInRecord> {
   if (r.state !== 'signing' && r.state !== 'unknown') return r;
+  const e = await lockEvidence(r, ctx.rpc);
   const { lookupErrors: _errors, searchBefore: _cursor, ...rest } = r;
-  let expired = r.blockhashExpired === true;
-  const found = (signature: string): BridgeInRecord => {
+  if (e.kind === 'found') {
     const { blockhashExpired: _x, ...clean } = rest;
-    return { ...clean, signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
-  };
-  const unreadable = (): BridgeInRecord => ({
-    ...r,
-    state: 'unknown',
-    ...(expired ? { blockhashExpired: true } : {}),
-    lookupErrors: (r.lookupErrors ?? 0) + 1,
-    progress: BRIDGE_IN_UNREADABLE_TEXT,
-    checkedAt: now,
-  });
-  let complete = !r.message || !r.source;
-  let cursor: string | undefined;
-  try {
-    if (r.lastValidBlockHeight) {
-      const height = await ctx.rpc.blockHeight();
-      if (height > BigInt(r.lastValidBlockHeight)) expired = true;
-    }
-    if (r.signature && (await ctx.rpc.signatureStatus(r.signature))) return found(r.signature);
-    if (r.message && r.source) {
-      const from = r.fromSlot ? BigInt(r.fromSlot) : null;
-      // Resume only a search that began after the expiry (its cursor is kept only then).
-      let before = expired && r.blockhashExpired ? r.searchBefore : undefined;
-      search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
-        const sigs = await ctx.rpc.signaturesForAddress(r.source, 100, before);
-        for (const { signature, slot } of sigs) {
-          if (from !== null && slot < from) {
-            complete = true;
-            break search;
-          }
-          // A listed transaction Solana does not return, or one that does not decode, is not "not found".
-          const wire = await ctx.rpc.transactionWire(signature);
-          if (!wire) return unreadable();
-          let sent: Uint8Array;
-          try {
-            sent = splitTransaction(wire).message;
-          } catch {
-            return unreadable();
-          }
-          if (toBase64(sent) === r.message) return found(signature);
-        }
-        if (sigs.length < 100) {
-          complete = true;
-          break;
-        }
-        before = sigs[sigs.length - 1]!.signature;
-      }
-      if (!complete && expired) cursor = before;
-    }
-  } catch {
-    return unreadable();
+    return { ...clean, signature: e.signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
   }
-  if (complete && expired) {
+  if (definitelyNotSent(e)) return notLockedRecord(r, e, now);
+  const u = e as Extract<LockEvidence, { kind: 'unknown' }>;
+  if (u.error) {
     return {
-      ...rest,
-      state: 'failed',
-      blockhashExpired: true,
-      progress: "Not sent: your wallet's request expired before it reached Solana. Nothing was locked.",
+      ...r,
+      state: 'unknown',
+      ...(u.expired ? { blockhashExpired: true } : {}),
+      lookupErrors: (r.lookupErrors ?? 0) + 1,
+      progress: BRIDGE_IN_UNREADABLE_TEXT,
       checkedAt: now,
     };
   }
   return {
     ...rest,
     state: 'unknown',
-    ...(expired ? { blockhashExpired: true } : {}),
-    ...(cursor ? { searchBefore: cursor } : {}),
+    ...(u.expired ? { blockhashExpired: true } : {}),
+    ...(u.cursor ? { searchBefore: u.cursor } : {}),
     progress: 'Checking Solana for the lock',
     checkedAt: now,
   };
@@ -480,8 +552,7 @@ export async function followBridgeIn(
   }
   if (r.state === 'sent' && r.signature) {
     const status = await ctx.rpc.signatureStatus(r.signature);
-    if (status === 'failed')
-      return { ...r, state: 'failed', progress: 'The Solana transaction failed: nothing was locked.', checkedAt: now };
+    if (status === 'failed') return notLockedRecord(r, { kind: 'failed-on-chain', signature: r.signature }, now);
     if (!status) return { ...r, progress: 'Waiting for Solana to confirm the lock', checkedAt: now };
     const logs = await ctx.rpc.logMessages(r.signature);
     if (!logs) return { ...r, progress: 'Waiting for Solana to confirm the lock', checkedAt: now };

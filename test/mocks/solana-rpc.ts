@@ -47,6 +47,10 @@ export interface MockSolanaRpc {
   advanceBlockHeight(n: number): void;
   /** AA 00060 P10.4 (audit D1): JSON-RPC methods that answer an error (an RPC that cannot be read). */
   failing: Set<string>;
+  /** AA 00060 P10.5 (audit E1/E5, R3-A1): how many slots the node answering history and statuses lags the
+   *  head (a load-balanced RPC). It answers history up to its own slot only, reports that slot as its
+   *  context, and refuses a request whose `minContextSlot` it has not reached. */
+  historyLag: number;
 }
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
@@ -77,6 +81,7 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
     sent: [],
     logsFor: () => [],
     calls: [],
+    historyLag: 0,
     failing: new Set<string>(),
     advanceBlockHeight(n) {
       slot += n;
@@ -148,11 +153,19 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
         }
         case 'getBlockHeight':
           return ok(slot);
+        case 'getEpochInfo':
+          // The head node: its slot and block height in ONE answer (the mock's height is its slot).
+          return ok({ absoluteSlot: slot, blockHeight: slot, epoch: 0, slotIndex: slot, slotsInEpoch: 432_000 });
         case 'getSignaturesForAddress': {
           const address = String(p[0]);
-          const o = (p[1] as { limit?: number; before?: string } | undefined) ?? {};
+          const o = (p[1] as { limit?: number; before?: string; minContextSlot?: number } | undefined) ?? {};
           const limit = Number(o.limit ?? 1000);
-          const naming = rpc.sent.filter((t) => t.accountKeys.includes(address)).reverse();
+          const historySlot = slot - rpc.historyLag;
+          if (o.minContextSlot !== undefined && historySlot < o.minContextSlot)
+            return err(-32016, `Minimum context slot has not been reached (context slot ${historySlot})`);
+          const naming = rpc.sent
+            .filter((t) => t.accountKeys.includes(address) && (t.slot ?? 0) <= historySlot)
+            .reverse();
           const start = o.before ? naming.findIndex((t) => t.signature === o.before) + 1 : 0;
           return ok(
             naming.slice(start, start + limit).map((t) => ({
@@ -167,17 +180,18 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
         }
         case 'getSignatureStatuses': {
           const sigs = (p[0] as string[]) ?? [];
+          const historySlot = slot - rpc.historyLag;
           return ok({
-            context,
+            context: { slot: historySlot },
             value: sigs.map((s) =>
-              rpc.sent.some((t) => t.signature === s)
+              rpc.sent.some((t) => t.signature === s && (t.slot ?? 0) <= historySlot)
                 ? { slot, confirmations: null, err: null, confirmationStatus: 'confirmed' }
                 : null,
             ),
           });
         }
         case 'getTransaction': {
-          const tx = rpc.sent.find((t) => t.signature === String(p[0]));
+          const tx = rpc.sent.find((t) => t.signature === String(p[0]) && (t.slot ?? 0) <= slot - rpc.historyLag);
           if (!tx) return ok(null);
           return ok({
             slot,

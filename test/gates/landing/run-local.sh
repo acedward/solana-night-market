@@ -48,7 +48,7 @@ until mkdir "$LOCK" 2>/dev/null; do
   if (( waited >= LOCK_WAIT_S )); then echo "run-local: gave up waiting for the stack lock" >&2; exit 75; fi
   sleep 60; waited=$((waited + 60))
 done
-printf '00060 %s G-LANDING (P3) compose project %s\n' "$(date -u +%FT%TZ)" "$COMPOSE_PROJECT_NAME" >"$LOCK/holder"
+printf '00060 %s %s compose project %s\n' "$(date -u +%FT%TZ)" "${GATE_NAME:-G-LANDING (P3)}" "$COMPOSE_PROJECT_NAME" >"$LOCK/holder"
 
 mkdir -p "$OUT"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aa00060-landing.XXXXXX")"
@@ -143,6 +143,64 @@ fresh_prover() {
 phase() { echo; echo "run-local: ==== $1 ($((SECONDS - T0)) s)"; }
 
 status=0
+# P6.0, the Q5 gate (GATE=q5): a coin sealed to ANOTHER encryption key is spent through the page's
+# computed path, (i) to finish the lock and (ii) to return it to A; the honest path, by the SDK wallet and
+# by the computed path, still lands.
+run_q5() {
+  phase 'bridge-deploy (third party, dev seed 3)'
+  landing STEP=bridge-deploy || return 1
+  local bridge
+  bridge="$(grep -h '^BRIDGE ' "$OUT/landing.log" | tail -1 | sed 's/^BRIDGE //')"
+  python3 - "$RUN_DIR/tokens.json" "$bridge" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); b = json.loads(sys.argv[2])
+t["tokens"].append({"symbol": "Y", "name": "Bridged Y", "decimals": 6, "privacy": "shielded",
+                    "midnightColour": b["colour"], "contract": b["contract"], "domainSeparator": ""})
+json.dump(t, open(sys.argv[1], "w"), indent=1)
+PY
+  cp "$RUN_DIR/tokens.json" "$OUT/tokens.json"
+  phase 'relay up; open account A (market-flows.ts STEPS=open-a)'
+  relay_up || return 1
+  bun_run -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN_DIR:/run/nm:ro" \
+    -v "$STATE_DIR:/state" -v "$OUT:/out" -w /app -e RELAY_URL=http://relay:8080 -e NETWORK=undeployed \
+    -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out -e OUT_NAME=market-flows-open-a.json \
+    -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS=open-a \
+    "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || return 1
+
+  phase 'honest, unchanged: 10 Y, tx1, tx2 by the SDK wallet'
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-h1 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-h1 || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=tx2 TX1_LABEL=tx1-h1 LABEL=tx2-h1-sdk || return 1
+
+  phase 'honest, computed path: 10 Y, tx1, tx2 by the computed coin'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-h2 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-h2 || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=tx2 TX1_LABEL=tx1-h2 LABEL=tx2-h2-computed COMPUTED=1 || return 1
+
+  phase 'Q5 (i): 15 Y, tx1 SEALED TO ANOTHER KEY; the SDK misses it; the computed coin finishes the lock'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=15000000 LABEL=fund-s1 || return 1
+  landing STEP=tx1 AMOUNT=15000000 LABEL=tx1-s1 SEAL_TO=other || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=neg-seal-check TX1_LABEL=tx1-s1 COMPUTED=1 || return 1
+  landing STEP=tx2 TX1_LABEL=tx1-s1 LABEL=tx2-s1-computed COMPUTED=1 || return 1
+
+  phase 'Q5 (ii): 10 Y, tx1 SEALED TO ANOTHER KEY; the computed coin returns it to A'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-s2 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-s2 SEAL_TO=other || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=neg-seal-check TX1_LABEL=tx1-s2 COMPUTED=1 || return 1
+  landing STEP=return TX1_LABEL=tx1-s2 COMPUTED=1 || return 1
+}
+if [[ "${GATE:-}" == q5 ]]; then
+  if run_q5; then echo "run-local: Q5 GATE PASS ($((SECONDS - T0)) s)"; else echo "run-local: Q5 GATE FAILED"; status=1; fi
+  exit $status
+fi
 run_phases() {
   phase 'bridge-deploy (third party, dev seed 3)'
   landing STEP=bridge-deploy || return 1

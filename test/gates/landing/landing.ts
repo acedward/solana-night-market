@@ -22,6 +22,13 @@
 //   STEP=neg-node       L.9 (c) (relay stopped): tx2 with the Solana recipient changed after proving
 //   STEP=neg-seal       L.9 (d): tx1 sealed to another encryption key: does keys_t's wallet still see it?
 //
+// AA 00060 P6.0, the Q5 gate (owner decision A, the computed-coin spend): with COMPUTED=1, STEP=tx2 and
+// STEP=return balance the call with the landing coin built by the PAGE's own path
+// (@nightmarket/core/bridge/landing-spend: keys_t's ledger-v9 Zswap local state watches for the predicted
+// coin and replays every Zswap event from the public indexer, web/src/bridge/out/zswap-events.ts) instead
+// of the wallet SDK's sync, so it works whatever key tx1 sealed the coin to. STEP=return (TX1_LABEL=…)
+// returns that transfer's coin to A (`deposit_shielded`, sealed to A's on-chain key).
+//
 // SECRETS: A's test device seed is market-flows.ts's (state.json, mode 600); the landing master is
 // re-derived from it in every process and never written; the operator's throwaway key is in
 // landing-state.json (mode 600). Everything written to $OUT is public.
@@ -45,6 +52,12 @@ import {
   type NetworkName,
 } from '@nightmarket/core';
 import { bridgeColourOf, deriveLandingMaster, type LandingMaster } from '@nightmarket/core/bridge';
+import {
+  balanceWithLandingCoin,
+  findLandingCoin,
+  landingLocalState,
+  type LandingCoinInfo,
+} from '@nightmarket/core/bridge/landing-spend';
 import { landingKeyFor, type LandingKeys } from '@nightmarket/core/bridge/landing-wallet';
 import {
   callContext,
@@ -66,6 +79,7 @@ import { ChainReader, indexerWsUrlFor } from '../../../web/src/chain/indexer.js'
 import { decodeEvent } from '../../../web/src/chain/ledger-decode.js';
 import { syncAccount, withdrawToWallet } from '../../../web/src/passport/operations.js';
 import { readCoins } from '../../../web/src/passport/records.js';
+import { readZswapEvents } from '../../../web/src/bridge/out/zswap-events.js';
 import { headlessPage, type HeadlessPage } from '../../stack/p6/page.js';
 import { landingCoinCommitment, paidOutNonce } from './coins.js';
 
@@ -97,6 +111,8 @@ const UNIT = 1_000_000n;
 const ORIGIN = process.env.LANDING_ORIGIN ?? 'http://127.0.0.1:5173';
 /** No Solana chain in this gate: a fixed genesis hash stands in for the I-1 value. */
 const GENESIS = process.env.SOLANA_GENESIS ?? base58.encode(new Uint8Array(32).fill(7));
+/** P6.0 (Q5 A): balance with the page's computed-coin path instead of the SDK's sync. */
+const COMPUTED = process.env.COMPUTED === '1';
 
 const say = (s: string) => process.stdout.write(`   ${s}\n`);
 const step = (s: string) => process.stdout.write(`\n== ${new Date().toISOString()} ${s}\n`);
@@ -316,6 +332,44 @@ async function openLanding(keys: LandingKeys) {
   };
   return { wallet, syncMs, firstState: state, balances, waitFor, stop: () => wallet.stop() };
 }
+
+/**
+ * P6.0 (Q5 A): keys_t's OWN Zswap local state (the page's computed path): every Zswap event from the
+ * public indexer, replayed into a ledger-v9 local state that watches for the predicted landing coin.
+ * No wallet SDK, no decryption: it finds the coin whatever key tx1 sealed it to.
+ */
+async function computedLanding(keys: LandingKeys, coin: LandingCoinInfo) {
+  if (!('WebSocket' in globalThis)) {
+    const { WebSocket } = await import('ws');
+    (globalThis as { WebSocket?: unknown }).WebSocket = WebSocket;
+  }
+  const t0 = Date.now();
+  const events = await readZswapEvents(INDEXER_WS_URL, { timeoutMs: 300_000 });
+  const readMs = Date.now() - t0;
+  const t1 = Date.now();
+  const state = landingLocalState(
+    keys,
+    coin,
+    events.map((e) => e.raw),
+  );
+  const replayMs = Date.now() - t1;
+  const q = findLandingCoin(state, coin);
+  return {
+    state,
+    events: events.length,
+    lastEventId: events.at(-1)?.id ?? null,
+    readMs,
+    replayMs,
+    holds: !!q,
+    mtIndex: q ? String((q as Any).mt_index) : null,
+  };
+}
+
+const coinOf = (label: string): LandingCoinInfo => {
+  const t = gate.tx1?.[label];
+  if (!t?.landingCoin) throw new Error(`no landing coin recorded for ${label}`);
+  return { nonce: t.landingCoin.nonce, color: t.landingCoin.color, value: BigInt(t.landingCoin.value) };
+};
 
 /** Building a call reads no key material (the browser holds none): anything that asks throws. */
 const NO_KEY_MATERIAL = (() => {
@@ -618,7 +672,14 @@ async function tx1(amount: bigint, label: string, opts: { sealTo?: string } = {}
     change: r.change ? r.change.value : null,
   };
   gate.tx1 = {
-    [label]: { authNonce: n.toString(), amount: amount.toString(), txHash: landed?.hash ?? null },
+    [label]: {
+      authNonce: n.toString(),
+      amount: amount.toString(),
+      txHash: landed?.hash ?? null,
+      // P6.0: the landing coin the page computes (public: from tx1's spend and the withdrawal).
+      landingCoin: { nonce: t.coin.nonce, color: t.coin.color, value: t.coin.value },
+      sealedElsewhere: epk !== t.keys.encryptionPublicKey,
+    },
     ...(gate.tx1 ?? {}),
   };
   saveGate();
@@ -630,19 +691,40 @@ async function tx1(amount: bigint, label: string, opts: { sealTo?: string } = {}
 }
 
 /** L.6 + L.7: tx2 `lockForSolana` (no key material, landing-key balancing, rc.8, DUST-only sponsor). */
-async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tamperRecipient?: boolean } = {}) {
-  step(`${label}: tx2 = lockForSolana(coin, <A's wallet key>), balanced by keys_t, DUST by the sponsor`);
+async function tx2(
+  authNonce: bigint,
+  amount: bigint,
+  label: string,
+  opts: { tamperRecipient?: boolean; coin?: LandingCoinInfo } = {},
+) {
+  const path = COMPUTED ? 'the COMPUTED coin (P6.0)' : 'the SDK wallet';
+  step(`${label}: tx2 = lockForSolana(coin, <A's wallet key>), balanced by keys_t via ${path}, DUST by the sponsor`);
   const { master } = await landingMaster();
   const keys = landingKeyFor(master, account(), authNonce);
   master.wipe();
   const rt = await runtime();
   const bridge = await bridgeRuntime();
-  const landing = await openLanding(keys);
+  if (COMPUTED && !opts.coin) throw new Error('COMPUTED needs the landing coin');
+  const landing = COMPUTED ? null : await openLanding(keys);
+  let comp: Awaited<ReturnType<typeof computedLanding>> | null = null;
   const sponsor = await openWallet(need('SPONSOR_SEED_FILE'));
-  const res: Record<string, Any> = { authNonce: authNonce.toString(), amount: amount.toString() };
+  const res: Record<string, Any> = { authNonce: authNonce.toString(), amount: amount.toString(), path };
   try {
-    res.landingSyncMs = landing.syncMs;
-    res.landingBalanceY = String(await landing.waitFor(colourY(), amount));
+    if (landing) {
+      res.landingSyncMs = landing.syncMs;
+      res.landingBalanceY = String(await landing.waitFor(colourY(), amount));
+    } else {
+      comp = await computedLanding(keys, opts.coin!);
+      res.computed = {
+        events: comp.events,
+        lastEventId: comp.lastEventId,
+        readMs: comp.readMs,
+        replayMs: comp.replayMs,
+        holds: comp.holds,
+        mtIndex: comp.mtIndex,
+      };
+      res.landingBalanceY = comp.holds ? amount.toString() : '0';
+    }
     if (BigInt(res.landingBalanceY) < amount) throw new Error(`keys_t holds ${res.landingBalanceY} Y, not ${amount}`);
     const contract = gate.bridge!.contract;
     const pdp: Any = rt.publicDataProvider;
@@ -693,9 +775,17 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     }
     const unproven = call.private.unprovenTx;
     const t1 = Date.now();
-    const balancing = await landing.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven);
-    if (!balancing) throw new Error('keys_t balanced nothing: the coin was not spent');
-    const merged = unproven.merge(balancing);
+    let merged: Any;
+    if (comp) {
+      const b = balanceWithLandingCoin(unproven, comp.state, keys, opts.coin!, PROFILE.midnightNetworkId);
+      merged = b.tx;
+      res.computed.segment = b.segment;
+      res.computed.spentMtIndex = b.mtIndex.toString();
+    } else {
+      const balancing = await landing!.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven);
+      if (!balancing) throw new Error('keys_t balanced nothing: the coin was not spent');
+      merged = unproven.merge(balancing);
+    }
     res.balanceMs = Date.now() - t1;
     res.shape = shapeOf(merged);
     if (
@@ -751,13 +841,21 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     };
     // keys_t after: no Y left (the landing coin spent), and never any DUST or NIGHT.
     await new Promise((r) => setTimeout(r, 6_000));
-    res.landingBalancesAfter = Object.fromEntries(
-      Object.entries(await landing.balances()).map(([k, v]) => [k.slice(0, 12), v.toString()]),
-    );
+    let yAfter: bigint;
+    if (landing) {
+      res.landingBalancesAfter = Object.fromEntries(
+        Object.entries(await landing.balances()).map(([k, v]) => [k.slice(0, 12), v.toString()]),
+      );
+      yAfter = BigInt(Object.entries(await landing.balances()).find(([k]) => k === colourY())?.[1] ?? 0n);
+    } else {
+      // The computed path again: the coin's nullifier is now in the chain's events, so it is gone.
+      const again = await computedLanding(keys, opts.coin!);
+      res.computedAfter = { events: again.events, holdsCoin: again.holds };
+      yAfter = again.holds ? amount : 0n;
+    }
     res.landingHoldsDustOrNight = false; // keys_t never derives a NIGHT key; its Dust key is never registered
     const dustAfter = await dustOf(sponsor.handle as SponsorWalletHandle);
     res.sponsorDust = { before: dustBefore?.toString() ?? null, after: dustAfter?.toString() ?? null };
-    const yAfter = BigInt(Object.entries(await landing.balances()).find(([k]) => k === colourY())?.[1] ?? 0n);
     res.landingYAfter = yAfter.toString();
     if (opts.tamperRecipient) {
       // L.9 (c): the node must refuse it, and nothing may change on the bridge.
@@ -787,7 +885,7 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     return res;
   } finally {
     keys.clear();
-    await landing.stop().catch(() => undefined);
+    await landing?.stop().catch(() => undefined);
     await sponsor.stop().catch(() => undefined);
   }
 }
@@ -948,6 +1046,102 @@ async function resumeReturn() {
   }
 }
 
+/**
+ * P6.0 (Q5 A) (ii): return the coin of the transfer recorded as TX1_LABEL to A (`deposit_shielded`, the
+ * entry sealed to A's on-chain key), balanced by keys_t through the COMPUTED coin (or the SDK wallet
+ * without COMPUTED=1), DUST by the sponsor; the page must see the coin.
+ */
+async function returnCoin(label: string) {
+  const t = gate.tx1?.[label];
+  if (!t) throw new Error(`no ${label} recorded`);
+  const amount = BigInt(t.amount);
+  const path = COMPUTED ? 'the COMPUTED coin (P6.0)' : 'the SDK wallet';
+  step(`return ${label}: deposit_shielded into A (sealed to A), balanced by keys_t via ${path}`);
+  const { master } = await landingMaster();
+  const keys = landingKeyFor(master, account(), BigInt(t.authNonce));
+  master.wipe();
+  const rt = await runtime();
+  const coin = COMPUTED ? coinOf(label) : null;
+  const landing = COMPUTED ? null : await openLanding(keys);
+  const sponsor = await openWallet(need('SPONSOR_SEED_FILE'));
+  const res: Record<string, Any> = { tx1: label, authNonce: String(t.authNonce), amount: amount.toString(), path };
+  try {
+    let comp: Awaited<ReturnType<typeof computedLanding>> | null = null;
+    if (coin) {
+      comp = await computedLanding(keys, coin);
+      res.computed = {
+        events: comp.events,
+        readMs: comp.readMs,
+        replayMs: comp.replayMs,
+        holds: comp.holds,
+        mtIndex: comp.mtIndex,
+      };
+      if (!comp.holds) throw new Error('the computed path does not find the landing coin');
+    } else {
+      const bal = await landing!.waitFor(colourY(), amount, 60_000);
+      res.sdkBalance = bal.toString();
+      if (bal < amount) throw new Error(`the SDK wallet holds ${bal} Y, not ${amount}`);
+    }
+    const before = await pageY();
+    const l = await rt.ledgerState(account());
+    if (!l) throw new Error('A is not on chain');
+    const deposit = { nonce: new Uint8Array(randomBytes(32)), color: hexToBytes(colourY(), 32), value: amount };
+    const entry = await sealEntryPortable(Uint8Array.from(l.enc_key), deposit);
+    const pdp: Any = rt.publicDataProvider;
+    const block = await pdp.queryBlock();
+    const states = await pdp.queryZSwapAndContractState(account(), { type: 'blockHash', blockHash: block.hash });
+    const [zswapChainState, contractState, ledgerParameters] = states;
+    const { createUnprovenCallTxFromInitialStates } = (await import('@midnight-ntwrk/midnight-js-contracts')) as Any;
+    const call: Any = await createUnprovenCallTxFromInitialStates(
+      NO_KEY_MATERIAL,
+      {
+        compiledContract: rt.compiledAccount(),
+        contractAddress: account(),
+        circuitId: 'deposit_shielded',
+        args: [deposit, entry],
+        coinPublicKey: keys.coinPublicKey,
+        initialContractState: contractState,
+        initialZswapChainState: zswapChainState,
+        ledgerParameters,
+      },
+      keys.encryptionPublicKey,
+    );
+    const unproven = call.private.unprovenTx;
+    let merged: Any;
+    if (comp) {
+      const b = balanceWithLandingCoin(unproven, comp.state, keys, coin!, PROFILE.midnightNetworkId);
+      merged = b.tx;
+      res.computed.segment = b.segment;
+    } else {
+      merged = unproven.merge(await landing!.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven));
+    }
+    res.shape = shapeOf(merged);
+    const t0 = Date.now();
+    const finalized = (await (rt.proofProvider as Any).proveTx(merged, { timeout: 900_000 })).bind();
+    res.proveMs = Date.now() - t0;
+    const submitted = await addDustAndSubmit(sponsor.handle as SponsorWalletHandle, finalized);
+    res.tx = submitted.txId;
+    const landed = await indexerTx(submitted.txId);
+    res.txHash = landed?.hash ?? null;
+    res.txStatus = landed?.transactionResult?.status ?? null;
+    const after = await pageY((v) => v >= before.total + amount);
+    res.pageY = { before: before.total.toString(), after: after.total.toString() };
+    res.returned = after.total === before.total + amount;
+    if (coin) {
+      const again = await computedLanding(keys, coin);
+      res.computedAfter = { holdsCoin: again.holds };
+    }
+    res.verdict = res.txStatus === 'SUCCESS' && res.returned && !res.computedAfter?.holdsCoin ? 'PASS' : 'FAIL';
+    record(`return:${label}`, res);
+    if (res.verdict !== 'PASS') throw new Error(`the return did not land as expected: ${json(res)}`);
+    return res;
+  } finally {
+    keys.clear();
+    await landing?.stop().catch(() => undefined);
+    await sponsor.stop().catch(() => undefined);
+  }
+}
+
 /** L.9 (a): tx1's payload with another recipient and the original approval → 401, nothing lands. */
 async function negRelay() {
   step('neg-relay (L.9 a): another recipient with the original approval, at the live relay');
@@ -1097,8 +1291,11 @@ async function main() {
       if (!t) throw new Error(`no ${label} recorded`);
       return tx2(BigInt(t.authNonce), BigInt(t.amount), process.env.LABEL ?? 'tx2', {
         tamperRecipient: process.env.TAMPER === '1',
+        ...(COMPUTED ? { coin: coinOf(label) } : {}),
       });
     }
+    case 'return':
+      return returnCoin(process.env.TX1_LABEL ?? 'tx1');
     case 'resume-lock':
       return resumeLock();
     case 'resume-return':
@@ -1117,8 +1314,14 @@ async function main() {
       const w = await openLanding(keys);
       const bal = (await w.balances())[colourY()] ?? 0n;
       await w.stop().catch(() => undefined);
+      // P6.0: the page's computed path finds it anyway (it watches for the coin, no decryption).
+      const comp = COMPUTED ? await computedLanding(keys, coinOf(process.env.TX1_LABEL ?? 'tx1-seal')) : null;
       keys.clear();
-      return record('negSeal', { sdkSeesCoin: bal >= BigInt(t.amount), balance: bal.toString() });
+      return record(`negSeal:${process.env.TX1_LABEL ?? 'tx1-seal'}`, {
+        sdkSeesCoin: bal >= BigInt(t.amount),
+        balance: bal.toString(),
+        ...(comp ? { computedSeesCoin: comp.holds, computedMtIndex: comp.mtIndex, events: comp.events } : {}),
+      });
     }
     default:
       throw new Error(`unknown STEP ${JSON.stringify(STEP)}`);

@@ -13,6 +13,7 @@
     "./solana-signature": "./src/solana-signature.ts",
     "./bridge": "./src/bridge/index.ts",
     "./bridge/landing-wallet": "./src/bridge/landing-wallet.ts",
+    "./bridge/landing-spend": "./src/bridge/landing-spend.ts",
     "./solana": "./src/solana/index.ts"
   },
   "dependencies": {

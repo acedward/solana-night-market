@@ -18,7 +18,15 @@ import { describe, expect, it } from 'vitest';
 
 import { bytesToHex, contractCoinCommitment, solanaAddressOf, type StoredCoin } from '@nightmarket/core';
 import type { BridgeEntry } from '@nightmarket/core/bridge';
-import { TOKEN_PROGRAM_ID, associatedTokenAddress, splitTransaction } from '@nightmarket/core/solana';
+import {
+  TOKEN_PROGRAM_ID,
+  associatedTokenAddress,
+  compileLegacyMessage,
+  encodeKey,
+  memoInstruction,
+  splitTransaction,
+  unsignedTransaction,
+} from '@nightmarket/core/solana';
 
 import { followBridgeIn, precheckBridgeIn, sendBridgeIn, type BridgeInContext } from '../src/bridge/in/operations.js';
 import type { BridgeInRecord } from '../src/bridge/in/records.js';
@@ -557,6 +565,89 @@ describe('D7: Bridge in refuses a bridge whose deployment cannot be verified (R-
     await expect(precheckBridgeIn(other.ctx, entry, 1_000_000n)).rejects.toThrow(/SPL mint/);
     const same = withDeployment(deploymentRecordOf(entry));
     await expect(precheckBridgeIn(same.ctx, entry, 1_000_000n)).resolves.toMatchObject({ splBalance: 600_000_000n });
+  });
+});
+
+// ── Round 3 (AA 00060 P10.5): the audit's round-3 consolidation, E1 ─────────────────────────────────────
+
+/** A well-formed transaction that is NOT the lock (another transfer of the token account), signed. */
+function anotherTransaction(): Uint8Array {
+  const kp = nacl.sign.keyPair();
+  const payer = solanaAddressOf(bytesToHex(kp.publicKey));
+  const message = compileLegacyMessage(payer, '11111111111111111111111111111111', [memoInstruction(payer, 'other')]);
+  const wire = unsignedTransaction(message);
+  wire.set(nacl.sign.detached(message.bytes, kp.secretKey), 1);
+  return wire;
+}
+/** The RPC, but `transactionWire` answers `body(realWire)` for every transaction. */
+function bodies(rpc: SolanaRpc, body: (real: Uint8Array | null) => Uint8Array | null | 'throw'): SolanaRpc {
+  const f = Object.create(rpc) as Record<string, unknown>;
+  f.transactionWire = async (signature: string) => {
+    const out = body(await rpc.transactionWire(signature));
+    if (out === 'throw') throw new Error('429 Too Many Requests');
+    return out;
+  };
+  return f as unknown as SolanaRpc;
+}
+
+describe('E1: ONE decision says "definitely not sent", and only on definite evidence (R3-B1, R3-A1)', () => {
+  it.each([
+    ['the lock, cut to 65 bytes (truncated)', (w: Uint8Array | null) => w!.slice(0, 65)],
+    ['the lock with a malformed message (a trailing byte)', (w: Uint8Array | null) => Uint8Array.from([...w!, 0])],
+    ['the lock cut inside its message', (w: Uint8Array | null) => w!.slice(0, w!.length - 7)],
+    ['no body (null)', () => null],
+    ['an RPC error (throw)', () => 'throw' as const],
+    ['another transaction under the lock’s signature (an inconsistent answer)', () => anotherTransaction()],
+  ])('the lock WAS sent; Solana answers %s: unknown, never "Nothing was locked", still blocking', async (_n, body) => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const { s, rec } = await sentThenLost();
+    const r: BridgeInRecord = await ops
+      .reconcileBridgeIn(rec, { rpc: bodies(s.ctx.rpc, body) }, 2000)
+      .catch((e: unknown) => ({ state: `threw: ${String(e)}` }));
+    expect(r.state).toBe('unknown');
+    expect(r.progress ?? '').not.toMatch(/Nothing was locked/);
+    expect(ops.blocksNewBridgeIn([r], entry.colour)).toBe(true);
+  });
+
+  it('the lock WAS sent, but the node answering history lags the expiry check: unknown, then found', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const { s, rec } = await sentThenLost();
+    s.chain.historyLag = 5_000; // its history ends before the lock
+    const r: BridgeInRecord = await ops
+      .reconcileBridgeIn(rec, s.ctx, 2000)
+      .catch((e: unknown) => ({ state: `threw: ${String(e)}` }));
+    expect(r.state).toBe('unknown');
+    expect(r.progress ?? '').not.toMatch(/Nothing was locked/);
+    s.chain.historyLag = 0;
+    expect(await ops.reconcileBridgeIn(rec, s.ctx, 3000)).toMatchObject({ state: 'sent' });
+  });
+
+  it('well-formed answers, fresh enough, show no lock and the request expired: definitely not sent', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    expect(typeof ops.definitelyNotSent).toBe('function');
+    const s = setup();
+    s.ctx.transactions = {
+      signAndSend: async () => {
+        throw Object.assign(new WalletError('timeout', 'Your wallet did not answer in time.'), {
+          late: new Promise<never>(() => undefined),
+        });
+      },
+    };
+    const err: Any = await sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, {} as never).catch((e: unknown) => e);
+    // Another transfer of the token account, readable and consistent, is listed: it is not the lock.
+    const other = anotherTransaction();
+    const parts = splitTransaction(other);
+    s.chain.sent.push({
+      signature: encodeKey(parts.signatures[0]!),
+      wire: other,
+      message: parts.message,
+      accountKeys: [err.record.source],
+    });
+    s.chain.advanceBlockHeight(1000);
+    const r = await ops.reconcileBridgeIn(err.record, s.ctx, 2000);
+    expect(r.state).toBe('failed');
+    expect(r.progress).toMatch(/Nothing was locked/);
+    expect(ops.blocksNewBridgeIn([r], entry.colour)).toBe(false);
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

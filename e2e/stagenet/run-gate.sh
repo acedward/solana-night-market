@@ -1452,24 +1452,26 @@ offer_b_make() {
   local offer; offer="$(grep -h '^OFFER_B ' "$log" | tail -1 | sed 's/^OFFER_B //')"
   [[ -n "$offer" ]] || return 1
   echo "$offer" >>"$OUT/offers-b.jsonl"
-  python3 - "$offer" <<'PY'
+  python3 - "$offer" <<'PY' | tee -a "$OUT/offers-b-kernel.jsonl"
 import json, sys, time, urllib.request
 o = json.loads(sys.argv[1])
 until = int(o.get("validUntil") or 0)
-listed = False
+listed, k = False, {}
 for _ in range(20):
     try:
-        body = json.load(urllib.request.urlopen("https://stagenet.api-zswap.zkdojo.com/v1/offers", timeout=20))
-        offers = body.get("offers", body if isinstance(body, list) else [])
-        listed = any(o["offerId"] in json.dumps(x) for x in offers)
+        k = json.load(urllib.request.urlopen(f"https://stagenet.api-zswap.zkdojo.com/v1/offers/{o['offerId']}", timeout=20))
+        listed = k.get("offerId") == o["offerId"]
     except Exception as e:
         print("kernel read failed:", type(e).__name__)
     if listed: break
     time.sleep(6)
-print(json.dumps({"offerId": o["offerId"], "listedOnKernel": listed,
+c = k.get("computed") or {}
+print(json.dumps({"offerId": o["offerId"], "listedOnKernel": listed, "kernelStatus": c.get("status"),
+                  "kernelExpiresAt": c.get("expiresAt"), "gives": c.get("gives"), "wants": c.get("wants"),
                   "validUntil": until, "expiresUtc": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(until))}))
 sys.exit(0 if listed else 2)
 PY
+  return "${PIPESTATUS[0]}"
 }
 # B's Bridge in of Y. It needs no relay restart: the page's own Bridge in (one lock, node Y delivers into account
 # B) reads the X+Y registry from a separate file in the run directory (the relay keeps reading its own).

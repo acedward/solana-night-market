@@ -2,8 +2,10 @@
 
 This lane runs the spec's US5 journey on local stand-ins: two Solana-wallet users with Passport accounts on
 Midnight, two classic SPL tokens X and Y, two bridge deployments (AA 00058) and the injector RPC (AA 00059),
-driven through Night Market's own page code (AA 00060). P6 turns this file into the full runbook (local and
-live); for now it documents the local harness.
+driven through Night Market's own page code (AA 00060). It is the journey's runbook: the scripted run
+(`run-local.sh run`), the stack for a by-hand session in a real wallet (`run-local.sh up`), and what each
+check proves. The owner's live acceptance (00057 P5) ran by hand on these same local stand-ins (the owner's
+decision of 2026-10-05: stagenet and devnet were dropped for now; deployment is a later project).
 
 | Path | What |
 |---|---|
@@ -16,6 +18,15 @@ live); for now it documents the local harness.
 | `run-local.sh` | `prep`, `up`, `journey`, `down`, `run` |
 | `report.py` | one run's evidence table (`report.md`, `report.json`) |
 | `template/` | runs inside the 00058 bridge template's environment: `entry.sh` (sync + install), `bridge-wallets.ts` (fresh bridge keys and funding), `solana-shim.ts` |
+
+## Pinned set of the final runs (2026-10-05)
+
+| Repository | Ref | SHA |
+|---|---|---|
+| acedward/solana-night-market (this lane; base #22) | `00057-solana-midnight-journey` | `cade844` = #22 @ `58610ac4a393b7fdf0972a968481630d4d333e6d` + `e2e/` |
+| effectstream/effectstream (#937) | `00058-bridge-contract-delivery` | `1c9f4959db1a9f004820c01fb321225bb255916c` |
+| acedward/solana-token-injector (#2) | `00059-injector-passport-accounts` | `459c904fc7f6e1180ad48bd4d3b8bc64971e1909` |
+| Token icons | `https://midnight-solana-token-icons.ac-edward.workers.dev/v3/` | `registry/token-icons.json` (`SHA256SUMS-v3`; published versions are never overwritten) |
 
 ## The registry generator
 
@@ -54,6 +65,15 @@ e2e/run-local.sh journey                    #     the journey on the running sta
 e2e/run-local.sh down                       #     everything goes, and that is checked
 ```
 
+What `up` builds, in order: the native validator; the Midnight node, indexer and both provers (rc.8 restarts on
+failure under a 12 GiB cap); Night Market's demo-token faucets; for X and Y fresh bridge keys funded from dev
+seed 3, the program (host Agave CLI), `deploy-devnet.ts` (the SPL mint; its operator is the mint authority),
+`deploy.ts` (the bridge contract) and `bridge:record`; the journey registry (I-1) with icons and the site's
+icon map; Night Market's lists (`bridge-tokens.ts --pairs X/Y`); the injector's token file; the relay's SPL
+faucet keys (the operators' keypairs, mode 600, never in the evidence); the injector, the relay with the
+mock exchange; the two bridge nodes (each must serve exactly its record at `GET /deployment`). Every
+service's health is recorded against a 1500 s budget (the final runs: about 480–500 s).
+
 Every host port is a random free one of 10000 and above on 127.0.0.1; compose projects are `aa00057-<n>`. The
 stack lock `~/.aa-00057-stack.lock` is taken before anything starts and released at `down`; a held lock makes
 `up` wait (at most `LOCK_WAIT_S`), and another holder's lock is never removed. At most one such stack runs on
@@ -78,3 +98,39 @@ validator, accounts A and B by the page's own code, A's wallet through the injec
 | Q10 | after A's demo claim: twBTC 8 decimals (0.1), twUSDC 6, names and icons through the injector, equal to the page; the published icons equal the site's copies | 2 (the claim, and the refused second claim) |
 
 `$OUT/report.md` is the run's evidence table; `$OUT/report.json` the same as data.
+
+## What a passing run shows (the final runs, 2026-10-05)
+
+The oracle table, read EXACTLY at every checkpoint on every surface (A's wallet on the validator, accounts A
+and B by the page's own code, A's wallet through the injector, the two vaults):
+
+| After | Wallet A Solana | Account A | Wallet A through the injector | Account B | Vaults |
+|---|---|---|---|---|---|
+| start | X 600 | — | X 600 | Y 50 | X 0, Y 50 |
+| II | X 100 | X 500 | X 100 (A not registered: byte-identical to the validator) | Y 50 | X 500, Y 50 |
+| III | X 100 | X 500 | X 100, X (Midnight) 500 | Y 50 | X 500, Y 50 |
+| IV | X 100 | X 300, Y 50 | X 100, X (Midnight) 300, Y (Midnight) 50 | X 200 | X 500, Y 50 |
+| V | X 100, Y 50 | X 300 | X 100, Y 50, X (Midnight) 300 | X 200 | X 500, Y 0 |
+| after the negatives | X 100, Y 50 | X 300 | X 100, Y 50, X (Midnight) 300 | X 200 | X 501, Y 0 (the non-account lock's 1 X stays locked) |
+| after the partial Bridge out | X 200, Y 50 | X 200 | X 200, Y 50, X (Midnight) 200 | X 200 | X 401, Y 0 |
+
+Bridge in reaches the account in about 80–90 s (SC-002: within 300 s); the injector shows a change within a
+few seconds of the step (SC-003: within 60 s); a Bridge out's release arrives on Solana about 20–25 s after the
+lock; user A signs 7 times (SC-005). The stack peaks near 16–17 GiB.
+
+## Troubleshooting
+
+- **`up` waits:** another project holds `~/.aa-00057-stack.lock` (its `holder` file says who). Never remove it;
+  `LOCK_WAIT_S` bounds the wait.
+- **`up` refuses at once:** a pinned clone is not at its pin or is dirty, or the template volume was built from
+  another 00058 commit: run `prep` again.
+- **A bridge node restart:** the node's database does not survive a container restart (Effectstream issue
+  00063): it re-syncs from the deployment's start heights. Safe (exactly once holds), but slow; `up` never
+  restarts a node.
+- **The relay image build hangs on `docker/dockerfile:1`:** `prep` builds from a copy of the Dockerfile without
+  its `# syntax=` line, so no frontend image is fetched.
+- **The icons row fails:** the published icon set changed. Publish a new `/vN/` folder instead of overwriting
+  one, then update `registry/token-icons.json` and Night Market's `web/public/token-icons/` together.
+- **A failed run:** `run` always tears down (`$OUT/down-check.json` proves nothing is left); `up` + `journey`
+  keeps a failed stack for inspection until `down`.
+

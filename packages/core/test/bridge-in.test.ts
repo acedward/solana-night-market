@@ -110,8 +110,11 @@ describe("00058 Q6 (resolved A): an s2m view whose recipientKind is null is 'loc
   it('parses, reads as not seen, and the page keeps polling with the waiting words', async () => {
     const view = { ...vectors.i3.transferViews[0]!, recipientKind: null, recipient: null, delivery: null };
     expect(TransferViewSchema.parse(view).recipientKind).toBeNull();
+    // The node's real answer wraps the view (`{ transfer }`, audit C13).
     const fetchImpl = (async () =>
-      new Response(JSON.stringify(view), { headers: { 'content-type': 'application/json' } })) as typeof fetch;
+      new Response(JSON.stringify({ transfer: view }), {
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
     const read = await readTransfer('http://bridge.test', view.id, fetchImpl);
     expect(read).toEqual({ kind: 'not-seen' });
     expect(transferProgressText(read)).toBe('Waiting for the bridge to see the lock');
@@ -119,7 +122,7 @@ describe("00058 Q6 (resolved A): an s2m view whose recipientKind is null is 'loc
     const known = await readTransfer(
       'http://bridge.test',
       view.id,
-      (async () => new Response(JSON.stringify({ ...view, recipientKind: 'contract' }))) as typeof fetch,
+      (async () => new Response(JSON.stringify({ transfer: { ...view, recipientKind: 'contract' } }))) as typeof fetch,
     );
     expect(known.kind).toBe('view');
   });

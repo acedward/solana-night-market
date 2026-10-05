@@ -33,7 +33,7 @@ import {
 } from '@nightmarket/core';
 
 import { AccountGate } from './actions/account-gate.js';
-import type { AdmissionOutcome, JobEnd } from './actions/admission.js';
+import type { AdmissionOutcome, JobEnd, PreauthOutcome } from './actions/admission.js';
 import type { ActionDefinition } from './actions/catalogue.js';
 import {
   BUDGET_EXEMPT_ACTIONS,
@@ -120,6 +120,8 @@ export function createApp(deps: AppDeps): Hono {
   const nonceLimiter = new RateLimiter(limits.noncesPerMinute);
   const actionLimiter = new RateLimiter(limits.actionsPerMinute);
   const ownerLimiter = new RateLimiter(limits.actionsPerOwnerPerMinute);
+  // AA 00060 P10.3 (audit C2): unsigned actions get their own per-client budget.
+  const unauthLimiter = new RateLimiter(limits.unauthenticatedPerMinute);
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
 
   const app = new Hono();
@@ -333,6 +335,7 @@ export function createApp(deps: AppDeps): Hono {
       }
 
       let outcome: VerifyOutcome;
+      let preauthAdds: Record<string, unknown> = {};
       if (def.auth === 'relay-action') {
         outcome = verifyRelayActionRequest(request.auth, {
           action: def.action,
@@ -348,8 +351,30 @@ export function createApp(deps: AppDeps): Hono {
         outcome = { ok: false, code: 'not-supported', reason: 'this market does not offer Bridge out' };
       } else if (def.auth === 'entitlement') {
         // AA 00060 P6.3: no signature; what authorises the request is in its body (a single-use landing
-        // entitlement, or the public-indexer evidence of an entitlement re-issue), checked by the action's
-        // admission before any queue slot. The device key the body names keys the owner limiter.
+        // entitlement, or the public-indexer evidence of an entitlement re-issue). P10.3 (audit C2: F-A2,
+        // F-B2): it is VERIFIED here (`preauth`), under the client's own unsigned budget, BEFORE it may
+        // charge the device or the account it names: an invalid one costs them nothing.
+        const unauthRefused = limited(unauthLimiter, client, c);
+        if (unauthRefused) return unauthRefused;
+        if (def.preauth) {
+          let pre: PreauthOutcome;
+          try {
+            pre = await def.preauth({ ...(account ? { account } : {}), payload: payload.data, client });
+          } catch (e) {
+            log.warn('preauthorisation failed', { action: def.action, error: e });
+            return apiError(
+              c,
+              503,
+              'chain-unavailable',
+              'the request could not be checked right now; try again shortly',
+            );
+          }
+          if (!pre.ok) {
+            log.info('action refused', { action: def.action, code: pre.code });
+            return apiError(c, pre.status, pre.code, pre.reason);
+          }
+          preauthAdds = pre.adds ?? {};
+        }
         const p = payload.data as { landing?: { deviceKey?: string }; deviceKey?: string };
         const named = (p.landing?.deviceKey ?? p.deviceKey ?? '').toLowerCase();
         outcome = /^[0-9a-f]{64}$/.test(named)
@@ -413,7 +438,7 @@ export function createApp(deps: AppDeps): Hono {
 
       // One queued-or-running job per account (AA 00047 P10, R2-1): taken before the admission check,
       // so a second request of a busy account claims nothing.
-      const slot = account ? gate.take(account) : () => {};
+      const slot = account && def.accountGate !== false ? gate.take(account) : () => {};
       if (!slot) {
         outcome.release?.();
         c.header('Retry-After', String(ACCOUNT_BUSY_RETRY_SECONDS));
@@ -491,6 +516,7 @@ export function createApp(deps: AppDeps): Hono {
           account,
           payload: {
             ...request.payload,
+            ...preauthAdds,
             ...(request.auth ? { auth: request.auth } : {}),
             ...(request.passportAuth ? { passportAuth: request.passportAuth } : {}),
             ...(account ? { account } : {}),

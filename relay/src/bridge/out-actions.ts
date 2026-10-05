@@ -6,15 +6,22 @@
 //                         the account, the device key, the landing coin public key, the colour, the
 //                         amount, the operation (the landing coin's commitment) and the expiry (30 days),
 //                         so it survives a restart and cannot be forged. Single use: held while its job
-//                         runs, spent when it succeeds, released when it fails; spent ops are remembered
-//                         in memory until they expire (a restart forgets them, and the ledger refuses a
-//                         second spend of the landing coin anyway).
+//                         runs, spent when it succeeds, released when it fails. Spent ops, and each op's
+//                         failures after proving, are kept ON DISK (RELAY_DATA_DIR) until the op expires,
+//                         keyed by the landing coin (a re-issue for the same coin is the same op): a
+//                         restart or a re-issue does not make a spent landing coin sponsorable again, and
+//                         an op that failed after proving `maxFailedAttempts` times (default 3) in a day is
+//                         refused until the day passes (AA 00060 P10.3, audit C1: F-A1, F-B1, F-B5).
 //   bridge-out            ONE sponsored second transaction of a landing coin: the lock (`lockForSolana`
 //                         on a bridge of the journey registry, the Solana recipient the device's wallet)
 //                         or the return (`deposit_shielded` into the same account). Checked BEFORE any
 //                         queue slot, proof or DUST (spec FR-008; `bridgeOutChecks`): exactly one call,
 //                         the right contract and entry point, no DUST spend, no unshielded offer, every
-//                         output the call's own, a balanced shielded side; then the call's transcript is
+//                         output the call's own, a balanced shielded side; exactly ONE input, and it is the
+//                         ENTITLED landing coin (its nullifier recomputed from the entitlement's commitment
+//                         and the coin secret key the unproven call carries anyway, Q2 A), exactly one
+//                         output, no fallible section, no proven transaction (audit C1); then the call's
+//                         transcript is
 //                         RUN on the contract's state of the block the page built it on (a lock must
 //                         record exactly `{device's wallet, entitlement's amount}`) and on the latest
 //                         state (a concurrent lock makes it stale: `bridge-out-stale`, rebuild). The
@@ -29,6 +36,8 @@
 // key's witness for its one input (Q2 A, a documented limitation), which only the proof request uses.
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import type { BridgeEntry, BridgeRegistry } from '@nightmarket/core/bridge';
 import {
@@ -36,7 +45,9 @@ import {
   BridgeOutEntitlePayloadSchema,
   BridgeOutPayloadSchema,
   LANDING_ENTITLEMENT_PATTERN,
+  coinPublicKeyOfSecret,
   landingCoinCommitment,
+  landingCoinNullifier,
   predictLandingCoin,
   type BridgeOutEntitlePayload,
   type BridgeOutPayload,
@@ -44,7 +55,7 @@ import {
   type LandingBinding,
 } from '@nightmarket/core/bridge/out';
 
-import type { AdmissionCheck, AdmissionOutcome } from '../actions/admission.js';
+import type { AdmissionCheck, AdmissionOutcome, PreauthCheck } from '../actions/admission.js';
 import type { Logger } from '../log.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 
@@ -76,6 +87,21 @@ export interface LandingEntitlementOptions {
   network: string;
   ttlSeconds?: number;
   now?: () => number;
+  /** Where spent ops and failed attempts are kept (`<RELAY_DATA_DIR>/landing-entitlements.json`); null or
+   *  absent: in memory only (tests). */
+  file?: string | null;
+  /** Proved failures one op may have per `attemptWindowSeconds` (default 3, the page's own retries). */
+  maxFailedAttempts?: number;
+  attemptWindowSeconds?: number;
+}
+
+/** What the entitlement store keeps on disk (no secret: ops are hashes of public commitments). */
+interface LandingStoreFile {
+  version: 1;
+  /** op → the token's expiry (unix s). */
+  spent: Record<string, number>;
+  /** op → its proved failures since `since` (unix s), kept until `expiresAt`. */
+  failures: Record<string, { count: number; since: number; expiresAt: number }>;
 }
 
 export type LandingCheck = { ok: true; op: string; expiresAt: number } | { ok: false; reason: string };
@@ -90,17 +116,59 @@ const normBinding = (b: LandingBinding): LandingBinding => ({
 export class LandingEntitlements {
   private readonly now: () => number;
   private readonly ttl: number;
+  private readonly maxFailures: number;
+  private readonly window: number;
   /** Ops whose bridge-out is queued or running. */
   private readonly pending = new Set<string>();
-  /** Ops whose bridge-out succeeded → the token's expiry (unix s). */
+  /** Ops whose running bridge-out failed its re-check before the prover ran (audit C9): not counted. */
+  private readonly beforeProof = new Set<string>();
+  /** Ops whose bridge-out succeeded → the token's expiry (unix s). Persisted. */
   private readonly spent = new Map<string, number>();
+  /** Ops whose bridge-out failed after proving. Persisted. */
+  private readonly failures = new Map<string, { count: number; since: number; expiresAt: number }>();
 
   constructor(private readonly opts: LandingEntitlementOptions) {
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
     this.ttl = opts.ttlSeconds ?? LANDING_ENTITLEMENT_TTL_SECONDS;
+    this.maxFailures = opts.maxFailedAttempts ?? 3;
+    this.window = opts.attemptWindowSeconds ?? 86_400;
+    if (opts.file) this.load(opts.file);
+  }
+
+  private load(file: string): void {
+    if (!existsSync(file)) return;
+    // A file that does not parse is refused loudly: starting with an empty store would make every spent
+    // landing coin sponsorable again.
+    const data = JSON.parse(readFileSync(file, 'utf8')) as LandingStoreFile;
+    if (data.version !== 1) throw new Error(`${file}: unknown landing entitlement store version`);
+    for (const [op, exp] of Object.entries(data.spent ?? {})) this.spent.set(op, Number(exp));
+    for (const [op, f] of Object.entries(data.failures ?? {})) this.failures.set(op, { ...f });
+    this.sweep();
+  }
+
+  private save(): void {
+    const file = this.opts.file;
+    if (!file) return;
+    const data: LandingStoreFile = {
+      version: 1,
+      spent: Object.fromEntries(this.spent),
+      failures: Object.fromEntries(this.failures),
+    };
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(data)}\n`, { mode: 0o600 });
+    renameSync(tmp, file);
   }
 
   /** The operation of a landing coin: its commitment, hashed under the label. */
+  /** The running job of `token` failed its re-check before the prover ran (a concurrent lock moved the
+   *  bridge on while it was queued): its failure costs nothing, so it does not use up an attempt (audit
+   *  C9 / F-A6). Failures after the prover ran, including a lock that does not land, still count. */
+  failedBeforeProof(token: string): void {
+    const op = typeof token === 'string' ? token.split('.')[2] : undefined;
+    if (op && this.pending.has(op)) this.beforeProof.add(op);
+  }
+
   static opOf(landingCommitment: string): string {
     return createHash('sha256')
       .update(`${MAC_LABEL}|op|landing:${norm(landingCommitment)}`)
@@ -145,7 +213,10 @@ export class LandingEntitlements {
     return { ok: true, op, expiresAt };
   }
 
-  /** Admission: valid, not spent, not in use; the op is held until `spend` or `release`. */
+  /**
+   * Admission: valid, not spent, not in use, not out of attempts; the op is held until its job ends
+   * (`finished`: spent on success, a proved failure counted) or the request is refused (`release`).
+   */
   admit(token: unknown, account: string | undefined, binding: LandingBinding): AdmissionOutcome {
     this.sweep();
     const v = this.verify(token, account, binding);
@@ -156,6 +227,17 @@ export class LandingEntitlements {
         status: 403,
         code: R.entitlementUsed,
         reason: 'this landing coin was already locked or returned (the entitlement is single use)',
+      };
+    }
+    const f = this.failures.get(v.op);
+    if (f && f.count >= this.maxFailures) {
+      const retryAfterSeconds = Math.max(1, f.since + this.window - this.now());
+      return {
+        ok: false,
+        status: 429,
+        code: R.attempts,
+        reason: `this landing coin's second transaction failed ${f.count} times after the market proved it; try again later`,
+        retryAfterSeconds,
       };
     }
     this.pending.add(v.op);
@@ -171,14 +253,44 @@ export class LandingEntitlements {
         if (released) return;
         released = true;
         this.pending.delete(v.op);
-        if (end.ok) this.spent.set(v.op, v.expiresAt);
+        const unproven = this.beforeProof.delete(v.op);
+        if (end.ok) {
+          this.spent.set(v.op, v.expiresAt);
+          this.failures.delete(v.op);
+          this.save();
+        } else if (end.proved && !unproven) {
+          const now = this.now();
+          const cur = this.failures.get(v.op);
+          const fresh = !cur || cur.since + this.window <= now;
+          this.failures.set(v.op, {
+            count: fresh ? 1 : cur.count + 1,
+            since: fresh ? now : cur.since,
+            expiresAt: v.expiresAt,
+          });
+          this.save();
+        }
       },
     };
   }
 
   private sweep(): void {
     const now = this.now();
-    for (const [op, exp] of this.spent) if (exp <= now) this.spent.delete(op);
+    let changed = false;
+    for (const [op, exp] of this.spent)
+      if (exp <= now) {
+        this.spent.delete(op);
+        changed = true;
+      }
+    for (const [op, f] of this.failures) {
+      if (f.expiresAt <= now) {
+        this.failures.delete(op);
+        changed = true;
+      } else if (f.since + this.window <= now && f.count > 0) {
+        this.failures.set(op, { ...f, count: 0, since: now });
+        changed = true;
+      }
+    }
+    if (changed) this.save();
   }
 }
 
@@ -218,6 +330,13 @@ export interface BridgeOutTxFacts {
   transients: number;
   /** Non-zero, non-DUST imbalances, `segment:token`. */
   imbalances: string[];
+  /** The guaranteed offer's inputs and outputs (audit C1: exactly one each). */
+  guaranteedInputs: number;
+  guaranteedOutputs: number;
+  /** The guaranteed inputs' nullifiers (64 hex). */
+  nullifiers: string[];
+  /** The segments of any FALLIBLE offer (audit C1: none). */
+  fallibleSegments: number[];
 }
 
 const entryPointOf = (ep: unknown): string =>
@@ -243,13 +362,17 @@ export function bridgeOutTxFacts(tx: Any): BridgeOutTxFacts {
   const outputs: (string | null)[] = [];
   let transients = 0;
   const offers: Any[] = [];
+  const fallibleSegments: number[] = [];
   if (tx.guaranteedOffer) offers.push(tx.guaranteedOffer);
   if (tx.fallibleOffer instanceof Map) {
     for (const [seg, o] of tx.fallibleOffer) {
       segments.add(Number(seg));
+      fallibleSegments.push(Number(seg));
       offers.push(o);
     }
   }
+  const guaranteed = tx.guaranteedOffer;
+  const nullifiers: string[] = (guaranteed?.inputs ?? []).map((i: Any) => norm(i.nullifier));
   for (const o of offers) {
     for (const out of o.outputs ?? []) outputs.push(out.contractAddress ? norm(out.contractAddress) : null);
     transients += o.transients?.length ?? 0;
@@ -261,7 +384,19 @@ export function bridgeOutTxFacts(tx: Any): BridgeOutTxFacts {
       imbalances.push(`${s}:${token?.tag}:${norm(token?.raw)}=${delta}`);
     }
   }
-  return { calls, otherActions, dustActions, unshielded, outputs, transients, imbalances };
+  return {
+    calls,
+    otherActions,
+    dustActions,
+    unshielded,
+    outputs,
+    transients,
+    imbalances,
+    guaranteedInputs: guaranteed?.inputs?.length ?? 0,
+    guaranteedOutputs: guaranteed?.outputs?.length ?? 0,
+    nullifiers,
+    fallibleSegments,
+  };
 }
 
 export class BridgeOutRefused extends Error {
@@ -317,6 +452,29 @@ export function structuralChecks(
     }
   }
   if (facts.transients > 0) throw new BridgeOutRefused(R.shape, 'the transaction has transient coins');
+  // Audit C1: nothing that can fail AFTER the market paid (a fallible offer or a fallible part of the call),
+  // and exactly the page's layout: one input (the landing coin) and one output (the coin the call receives).
+  if ((facts.fallibleSegments ?? []).length > 0) {
+    throw new BridgeOutRefused(
+      R.shape,
+      'the transaction has a fallible offer (the market pays only for a guaranteed one)',
+    );
+  }
+  if (c.call?.fallibleTranscript) {
+    throw new BridgeOutRefused(R.shape, 'the call has a fallible part (the market pays only for a guaranteed call)');
+  }
+  if (facts.guaranteedInputs !== 1) {
+    throw new BridgeOutRefused(
+      R.shape,
+      `the transaction must spend exactly one input (the landing coin), not ${facts.guaranteedInputs}`,
+    );
+  }
+  if (facts.guaranteedOutputs !== 1) {
+    throw new BridgeOutRefused(
+      R.shape,
+      `the transaction must create exactly one output, not ${facts.guaranteedOutputs}`,
+    );
+  }
   if (facts.outputs.length === 0 || facts.outputs.some((o) => o !== c.address)) {
     throw new BridgeOutRefused(
       R.shape,
@@ -425,23 +583,64 @@ const stripMeta = (raw: unknown) => {
   return rest;
 };
 
+/**
+ * Audit C1: the transaction's ONE input is the ENTITLED landing coin. From the request's `spend`: the coin
+ * secret key's public key must be the binding's; the coin (that nonce, the binding's colour and amount,
+ * that key) must be the coin whose commitment the entitlement's op names; and the input's nullifier must
+ * be that coin's. Another key's coin, another coin of the same key, or any other amount or colour is
+ * refused here, before any proof or DUST.
+ */
+export function inputChecks(facts: BridgeOutTxFacts, p: BridgeOutPayload, op: string): void {
+  if (!p.spend) throw new BridgeOutRefused(R.input, 'the request does not name the landing coin it spends');
+  let coinPublicKey: string;
+  try {
+    coinPublicKey = coinPublicKeyOfSecret(p.spend.coinSecretKey);
+  } catch {
+    throw new BridgeOutRefused(R.input, 'the landing key is malformed');
+  }
+  if (coinPublicKey !== norm(p.landing.coinPublicKey)) {
+    throw new BridgeOutRefused(R.input, "the coin is not the entitled landing key's");
+  }
+  const coin = {
+    nonce: norm(p.spend.nonce),
+    color: norm(p.landing.colour),
+    value: BigInt(p.landing.amount).toString(10),
+  };
+  if (LandingEntitlements.opOf(landingCoinCommitment(coin, coinPublicKey)) !== op) {
+    throw new BridgeOutRefused(R.input, 'the coin is not the landing coin this entitlement is for');
+  }
+  const nullifier = landingCoinNullifier(coin, p.spend.coinSecretKey);
+  if (facts.nullifiers.length !== 1 || facts.nullifiers[0] !== nullifier) {
+    throw new BridgeOutRefused(R.input, 'the transaction does not spend the entitled landing coin');
+  }
+}
+
 /** Deserialize and run every check; the transaction, the call's facts and the withdrawal id. */
 export async function checkBridgeOut(
-  deps: Pick<BridgeOutDeps, 'bridges' | 'ledger' | 'transcripts'>,
+  deps: Pick<BridgeOutDeps, 'bridges' | 'ledger' | 'transcripts' | 'entitlements'>,
   account: string,
   p: BridgeOutPayload,
 ): Promise<{ tx: Any; withdrawalId: bigint | null }> {
+  // Audit C1: a proven transaction cannot show which coin it spends (its witness is gone); the page sends
+  // it unproven and the relay proves it (questions Q2 A).
+  if (p.proven) {
+    throw new BridgeOutRefused(
+      R.proven,
+      'send the bridge-out unproven: the market proves it, and checks the coin it spends',
+    );
+  }
+  const v = deps.entitlements.verify(p.entitlement, account, p.landing);
+  if (!v.ok) throw new BridgeOutRefused(R.entitlementInvalid, v.reason, 403);
   const ledger = await deps.ledger();
   let tx: Any;
   try {
-    tx = p.proven
-      ? ledger.Transaction.deserialize('signature', 'proof', 'pre-binding', unhex(p.tx))
-      : ledger.Transaction.deserialize('signature', 'pre-proof', 'pre-binding', unhex(p.tx));
+    tx = ledger.Transaction.deserialize('signature', 'pre-proof', 'pre-binding', unhex(p.tx));
   } catch (e) {
     throw new BridgeOutRefused(R.shape, `the transaction does not decode (${(e as Error).message})`);
   }
   const facts = bridgeOutTxFacts(tx);
   const { call, address } = structuralChecks(facts, p.kind, account, p.landing, deps.bridges);
+  inputChecks(facts, p, v.op);
   const { withdrawalId } = await transcriptChecks(
     await deps.transcripts(),
     p.kind,
@@ -451,6 +650,21 @@ export async function checkBridgeOut(
     p.blockHash,
   );
   return { tx, withdrawalId };
+}
+
+/**
+ * `bridge-out`'s preauthorisation (audit C2: F-A2, F-B2): the entitlement's MAC, BEFORE the request may
+ * charge the device it names (the owner's rate limit), the account (its one-job gate) or the queue. A
+ * forged or foreign entitlement costs the named customer nothing.
+ */
+export function bridgeOutPreauth(entitlements: LandingEntitlements): PreauthCheck {
+  return async ({ account, payload }) => {
+    const p = BridgeOutPayloadSchema.safeParse(payload);
+    if (!p.success)
+      return { ok: false, status: 400, code: 'bad-request', reason: 'the bridge-out request is malformed' };
+    const v = entitlements.verify(p.data.entitlement, account, p.data.landing);
+    return v.ok ? { ok: true } : { ok: false, status: 403, code: R.entitlementInvalid, reason: v.reason };
+  };
 }
 
 /** `bridge-out`'s admission: the entitlement, then every check, before any queue slot. */
@@ -484,17 +698,16 @@ export function bridgeOutExecutor(deps: BridgeOutDeps): JobExecutor {
       try {
         checked = await checkBridgeOut(deps, account, p);
       } catch (e) {
+        // Nothing was proven: this failure does not use up one of the entitlement's attempts (audit C9).
+        deps.entitlements.failedBeforeProof(p.entitlement);
         if (e instanceof BridgeOutRefused) throw new PublicError(e.code, e.message);
         throw e;
       }
       ctx.stage('checked', { kind: p.kind });
-      let proven: Any = checked.tx;
-      if (!p.proven) {
-        ctx.stage('proving');
-        const t0 = Date.now();
-        proven = await deps.prove(checked.tx);
-        ctx.stage('proven', { seconds: String(Math.round((Date.now() - t0) / 100) / 10) });
-      }
+      ctx.stage('proving');
+      const t0 = Date.now();
+      const proven: Any = await deps.prove(checked.tx);
+      ctx.stage('proven', { seconds: String(Math.round((Date.now() - t0) / 100) / 10) });
       const bound = proven.bind();
       const txId = await deps.submitWithDust(bound);
       ctx.stage('submitted', { tx: txId });
@@ -556,16 +769,40 @@ export async function entitle(deps: EntitleDeps, account: string, p: BridgeOutEn
   return deps.entitlements.issue(account, landing.binding, landing.commitment);
 }
 
-export function bridgeOutEntitleExecutor(deps: EntitleDeps): JobExecutor {
-  return async (raw) => {
-    const account = norm((raw as { account?: string }).account);
-    const p = BridgeOutEntitlePayloadSchema.parse(stripMeta(raw));
-    try {
-      return { landingEntitlement: await entitle(deps, account, p) };
-    } catch (e) {
-      if (e instanceof BridgeOutRefused) throw new PublicError(e.code, e.message);
-      throw e;
+/**
+ * `bridge-out-entitle`'s whole check, as a preauthorisation (audit C2: F-A2, F-B2): the indexer's evidence
+ * of tx1 and the live device are checked BEFORE the request may charge the device it names, take the
+ * account's one-job gate, or a queue slot. On success the entitlement rides into the job, which only
+ * returns it (no gate, no prover). Refusals are 403 `entitle-not-found`; an indexer outage is 503.
+ */
+export function entitlePreauth(deps: EntitleDeps): PreauthCheck {
+  return async ({ account, payload }) => {
+    const p = BridgeOutEntitlePayloadSchema.safeParse(payload);
+    if (!p.success || !account) {
+      return { ok: false, status: 400, code: 'bad-request', reason: 'the entitlement request is malformed' };
     }
+    try {
+      return { ok: true, adds: { landingEntitlement: await entitle(deps, norm(account), p.data) } };
+    } catch (e) {
+      if (e instanceof BridgeOutRefused) return { ok: false, status: 403, code: e.code, reason: e.message };
+      return {
+        ok: false,
+        status: 503,
+        code: 'chain-unavailable',
+        reason: "the account's history could not be read right now; try again shortly",
+      };
+    }
+  };
+}
+
+/** `bridge-out-entitle`'s executor: the entitlement its preauthorisation issued (nothing else to do). */
+export function bridgeOutEntitleExecutor(): JobExecutor {
+  return async (raw) => {
+    const token = (raw as { landingEntitlement?: unknown }).landingEntitlement;
+    if (typeof token !== 'string' || !LANDING_ENTITLEMENT_PATTERN.test(token)) {
+      throw new PublicError(R.entitleNotFound, 'no entitlement was issued for this request');
+    }
+    return { landingEntitlement: token };
   };
 }
 

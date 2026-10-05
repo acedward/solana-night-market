@@ -88,6 +88,9 @@ export interface RelayConfig {
     maxUsedNonces: number;
     actionsPerMinute: number;
     actionsPerOwnerPerMinute: number;
+    /** AA 00060 P10.3 (audit C2): unsigned actions (Bridge out's) per client per minute, beside the
+     *  per-client action limit; they never charge the owner they name before they are verified. */
+    unauthenticatedPerMinute: number;
     authMaxTtlSeconds: number;
     nonceTtlSeconds: number;
     jobTtlSeconds: number;
@@ -422,6 +425,7 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         'RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN',
         1,
       ),
+      unauthenticatedPerMinute: int(env.RATE_LIMIT_UNAUTHENTICATED_PER_MIN, 6, 'RATE_LIMIT_UNAUTHENTICATED_PER_MIN', 1),
       authMaxTtlSeconds: int(env.AUTH_MAX_TTL_SECONDS, 600, 'AUTH_MAX_TTL_SECONDS', 30, 3600),
       nonceTtlSeconds: int(env.AUTH_NONCE_TTL_SECONDS, 600, 'AUTH_NONCE_TTL_SECONDS', 30, 3600),
       maxUsedNonces: int(env.AUTH_MAX_USED_NONCES, 200_000, 'AUTH_MAX_USED_NONCES', 1000, 10_000_000),

@@ -29,6 +29,7 @@ import {
   adoptTransfer,
   finishLock,
   findTransfers,
+  transfersToAdopt,
   followBridgeOut,
   landingMasterFor,
   returnToAccount,
@@ -49,7 +50,7 @@ const STATE_TEXT: Record<BridgeOutRecord['state'], string> = {
   arrived: 'In your wallet on Solana',
   returning: 'Returning to your account',
   returned: 'Back in your account',
-  failed: 'Not sent: nothing moved',
+  failed: 'Stopped',
 };
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong.');
@@ -290,7 +291,9 @@ export function BridgeOut({
           <ul className="small">
             <li>
               <strong>Two signatures of the same landing-key text.</strong> They create the private key your tokens land
-              on for a moment. Sign it only on this site.
+              on for a moment. The key is permanent for this site, network and wallet: anyone who gets this signature
+              can take the tokens in transit now and in every future Bridge out from this wallet on this site. Sign it
+              only on this site.
             </li>
             <li>
               <strong>One approval</strong> of a withdrawal of {formatUnits(asking.raw, asking.entry.decimals)}{' '}
@@ -364,9 +367,8 @@ export function BridgeOut({
             void run('find', async (c) => {
               const m = await master(c);
               const found = await findTransfers(c, m, account);
-              const known = new Set(readBridgeOuts(c.env.store, c.env.scope, account).map((r) => r.authNonce));
               let adopted = 0;
-              for (const f of found.filter((x) => x.open && !known.has(x.authNonce))) {
+              for (const f of transfersToAdopt(found, readBridgeOuts(c.env.store, c.env.scope, account))) {
                 const e = ready.registry.byColour(f.spentCoin.color);
                 if (!e) continue;
                 await adoptTransfer(c, m, account, f, e);

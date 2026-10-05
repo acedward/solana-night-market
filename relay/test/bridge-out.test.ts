@@ -2,8 +2,8 @@
 //
 //   T6.1  the landing entitlement: its MAC, expiry and single use; tampering with any bound field
 //         (account, device, landing coin key, colour, amount) is `entitlement-invalid`; a new instance
-//         with the same key (a restart) accepts it, and forgets it was spent (the ledger refuses the
-//         second spend of the coin: plan T6.1)
+//         with the same key (a restart) still verifies it (that a spent one stays spent needs the relay's
+//         data file: P10.3, ./bridge-out-audit.test.ts)
 //   T6.2  the checks before any proof or DUST, on REAL unproven transactions built here exactly as the
 //         page builds them (web/src/bridge/out/build.ts: midnight-js `createUnprovenCallTxFromInitialStates`
 //         on the vendored bridge, the landing coin's input from @nightmarket/core/bridge/landing-spend): the
@@ -26,8 +26,17 @@ import { describe, expect, it } from 'vitest';
 import { bytesToHex, hexToBytes } from '@nightmarket/core';
 import { BridgeRegistry } from '@nightmarket/core/bridge';
 import { findLandingCoin, type LandingCoinInfo } from '@nightmarket/core/bridge/landing-spend';
-import { landingKeysFromSeed } from '@nightmarket/core/bridge/landing-wallet';
-import { BRIDGE_OUT_REFUSALS as R, type BridgeOutPayload, type LandingBinding } from '@nightmarket/core/bridge/out';
+import {
+  landingCoinSecretKeyHex,
+  landingKeysFromSeed,
+  type LandingKeys,
+} from '@nightmarket/core/bridge/landing-wallet';
+import {
+  BRIDGE_OUT_REFUSALS as R,
+  landingCoinCommitment,
+  type BridgeOutPayload,
+  type LandingBinding,
+} from '@nightmarket/core/bridge/out';
 import { AccountContract } from '@nightmarket/core/passport';
 
 import {
@@ -124,15 +133,13 @@ describe('T6.1 the landing entitlement', () => {
     expect(e.admit(t2, account, binding).ok).toBe(true);
   });
 
-  it('survives a restart (the key is the seed’s); a restarted relay forgets the spend', () => {
+  it('survives a restart (the key is the seed’s): a restarted relay still verifies it', () => {
     const a = new LandingEntitlements({ key, network: 'undeployed' });
     const token = a.issue(account, binding, commitment);
-    const held = a.admit(token, account, binding);
-    if (held.ok) held.finished?.({ ok: true, proved: true, requesterFault: false });
     const b = new LandingEntitlements({ key: landingEntitlementKey('11'.repeat(32)), network: 'undeployed' });
     expect(b.verify(token, account, binding).ok).toBe(true);
-    // After a restart a reuse is admitted; its tx2 then fails on chain: the landing coin is spent.
-    expect(b.admit(token, account, binding).ok).toBe(true);
+    // That a SPENT one stays spent across a restart needs the data file the relay keeps (P10.3, audit C1):
+    // relay/test/bridge-out-audit.test.ts.
   });
 
   it('a withdrawal’s entitlement binds the landing coin it paid (tx1’s paid-out coin, the landing key)', () => {
@@ -274,9 +281,12 @@ const registryOf = (...bridges: { address: string; colour: string }[]) =>
     })),
   );
 
+const ENTITLEMENTS = new LandingEntitlements({ key: landingEntitlementKey('11'.repeat(32)), network: NETWORK_ID });
+
 function relayDeps(bridges: BridgeRegistry, states: Record<string, Any>, latest?: Record<string, Any>) {
   return {
     bridges,
+    entitlements: ENTITLEMENTS,
     ledger: async () => ledger,
     transcripts: async () => ({
       runtime: crt as never,
@@ -287,13 +297,26 @@ function relayDeps(bridges: BridgeRegistry, states: Record<string, Any>, latest?
   };
 }
 
-const payload = (kind: 'lock' | 'return', tx: string, binding: LandingBinding): BridgeOutPayload => ({
+/** A request as the page sends it: the entitlement the relay issued for `account`'s landing coin `l`, and
+ *  the coin it spends (P10.3, audit C1). */
+const payload = (
+  kind: 'lock' | 'return',
+  tx: string,
+  binding: LandingBinding,
+  l: { keys: Pick<LandingKeys, 'shieldedSecretKeys'>; coin: LandingCoinInfo },
+  account: string,
+): BridgeOutPayload => ({
   kind,
-  entitlement: `le1.${'00'.repeat(32)}.${'00'.repeat(32)}.1.${'00'.repeat(32)}`,
+  entitlement: ENTITLEMENTS.issue(
+    account,
+    binding,
+    landingCoinCommitment({ nonce: l.coin.nonce, color: binding.colour, value: binding.amount }, binding.coinPublicKey),
+  ),
   landing: binding,
   tx,
   proven: false,
   blockHash: 'ab'.repeat(32),
+  spend: { nonce: l.coin.nonce, coinSecretKey: landingCoinSecretKeyHex(l.keys) },
 });
 
 const refusal = async (p: Promise<unknown>) => {
@@ -321,7 +344,7 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
     const out = await checkBridgeOut(
       relayDeps(registryOf(bridge), { [bridge.address]: bridge.state }),
       ACCOUNT,
-      payload('lock', hex, binding),
+      payload('lock', hex, binding, landing, ACCOUNT),
     );
     expect(out.withdrawalId).toBe(0n);
   }, 60_000);
@@ -341,17 +364,24 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
     // Another destination: the lock pays another wallet.
     const d = await lockTx({ bridge, amount: 50_000_000n, recipient: 'ee'.repeat(32) });
     expect(
-      await refusal(checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', d.hex, bind(d.landing)))),
+      await refusal(
+        checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', d.hex, bind(d.landing), d.landing, ACCOUNT)),
+      ),
     ).toBe(R.destination);
-    // Another amount: the lock records 49 Y, the entitlement says 50.
+    // Another amount: the lock (and its coin) is 49 Y, the entitlement says 50. Since P10.3 (audit C1) the
+    // coin it spends is not the entitled one, which is refused first.
     const a = await lockTx({ bridge, amount: 49_000_000n });
     expect(
-      await refusal(checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', a.hex, bind(a.landing)))),
-    ).toBe(R.amount);
+      await refusal(
+        checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', a.hex, bind(a.landing), a.landing, ACCOUNT)),
+      ),
+    ).toBe(R.input);
     // Another colour: the other bridge, while the landing coin's colour is the first's.
     const c = await lockTx({ bridge: other, amount: 50_000_000n });
     expect(
-      await refusal(checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', c.hex, bind(c.landing)))),
+      await refusal(
+        checkBridgeOut(relayDeps(reg, states), ACCOUNT, payload('lock', c.hex, bind(c.landing), c.landing, ACCOUNT)),
+      ),
     ).toBe(R.colour);
     // A bridge that is not in the journey registry.
     const n = await lockTx({ bridge: other, amount: 50_000_000n });
@@ -360,7 +390,7 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
         checkBridgeOut(
           relayDeps(registryOf(bridge), states),
           ACCOUNT,
-          payload('lock', n.hex, bind(n.landing, { colour: other.colour })),
+          payload('lock', n.hex, bind(n.landing, { colour: other.colour }), n.landing, ACCOUNT),
         ),
       ),
     ).toBe(R.contract);
@@ -387,7 +417,7 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
         checkBridgeOut(
           relayDeps(registryOf(bridge), { [bridge.address]: bridge.state }, { [bridge.address]: moved }),
           ACCOUNT,
-          payload('lock', second.hex, binding),
+          payload('lock', second.hex, binding, second.landing, ACCOUNT),
         ),
       ),
     ).toBe(R.stale);
@@ -420,10 +450,21 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
       amount: '20000000',
     };
     const deps = relayDeps(registryOf(), { [acc.address]: acc.state });
-    expect((await checkBridgeOut(deps, acc.address, payload('return', hex, binding))).withdrawalId).toBeNull();
-    expect(await refusal(checkBridgeOut(deps, 'ee'.repeat(32), payload('return', hex, binding)))).toBe(R.destination);
+    expect(
+      (await checkBridgeOut(deps, acc.address, payload('return', hex, binding, l, acc.address))).withdrawalId,
+    ).toBeNull();
+    // Another account's own entitlement, with a return into THIS account: refused.
+    expect(
+      await refusal(checkBridgeOut(deps, 'ee'.repeat(32), payload('return', hex, binding, l, 'ee'.repeat(32)))),
+    ).toBe(R.destination);
     // A return is not a lock, and a lock is not a return.
-    expect(await refusal(checkBridgeOut(deps, acc.address, payload('lock', hex, binding)))).toBe(R.contract);
+    expect(await refusal(checkBridgeOut(deps, acc.address, payload('lock', hex, binding, l, acc.address)))).toBe(
+      R.contract,
+    );
+    // The entitlement is for ANOTHER account than the request names: refused before anything else.
+    expect(await refusal(checkBridgeOut(deps, acc.address, payload('return', hex, binding, l, 'ee'.repeat(32))))).toBe(
+      R.entitlementInvalid,
+    );
   }, 120_000);
 
   it('two calls, an extra call, a DUST spend, an unshielded offer, a transient, change elsewhere: refused on the facts', () => {
@@ -438,6 +479,10 @@ describe('T6.2 the relay refuses every other transaction before any proof or DUS
       outputs: ['b1'.repeat(32)],
       transients: 0,
       imbalances: [],
+      guaranteedInputs: 1,
+      guaranteedOutputs: 1,
+      nullifiers: ['ab'.repeat(32)],
+      fallibleSegments: [],
     };
     const code = (over: Partial<BridgeOutTxFacts>) => {
       try {

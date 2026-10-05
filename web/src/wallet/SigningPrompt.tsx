@@ -35,7 +35,7 @@ const lede = (kind: SignPromptKind, wallet: string): string =>
     'account-call': `${wallet} shows you this text. It is exactly what you approve, and what your account checks before anything happens. Approve it only if it matches what you asked for.`,
     'relay-envelope': `${wallet} asks you to prove you own this wallet, so the market can act for you. This signature moves none of your funds and costs nothing.`,
     'rpc-registration': `${wallet} shows you this text. Signing it lets the RPC it names show your Night Market balances in your wallet. It authorises nothing on chain and moves no funds.`,
-    'landing-key': `${wallet} shows you this text, and asks you twice: sign the same text both times. It creates the private key your Bridge out lands on. Sign it only on this site; anyone who gets this signature can take tokens while they are in transit.`,
+    'landing-key': `${wallet} shows you this text, and asks you twice: sign the same text both times. It creates the private key your Bridge out lands on, and that key is permanent for this site, network and wallet: the same text gives the same key every time. Sign it only on this site; anyone who gets this signature can take the tokens of every Bridge out from this wallet on this site while they are in transit, now and in the future.`,
     'solana-transaction': `${wallet} asks you to approve one Solana transaction that this page built. It is the transaction below: check it matches what ${wallet} shows. It costs a small SOL fee.`,
   })[kind];
 

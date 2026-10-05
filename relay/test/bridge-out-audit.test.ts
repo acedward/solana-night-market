@@ -25,6 +25,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import { bytesToHex, hexToBytes } from '@nightmarket/core';
 import { BridgeRegistry } from '@nightmarket/core/bridge';
+import { encodeKey } from '@nightmarket/core/solana';
 import { findLandingCoin } from '@nightmarket/core/bridge/landing-spend';
 import { landingKeysFromSeed, type LandingKeys } from '@nightmarket/core/bridge/landing-wallet';
 import {
@@ -86,7 +87,9 @@ async function bridgeAt(sourceMint = rand()) {
     sourceMint,
     rand(),
   );
-  const colour = bytesToHex((bridgeModule as Any).pureCircuits.tokenColor(sourceMint, { bytes: hexToBytes(address, 32) }));
+  const colour = bytesToHex(
+    (bridgeModule as Any).pureCircuits.tokenColor(sourceMint, { bytes: hexToBytes(address, 32) }),
+  );
   return {
     address,
     colour,
@@ -151,9 +154,7 @@ function balanceWith(unproven: Any, w: ReturnType<typeof walletWith>, coins = w.
   return tx;
 }
 const coinSecretKeyOf = (keys: LandingKeys) =>
-  hexOf(
-    (keys.shieldedSecretKeys.coinSecretKey as Any).yesIKnowTheSecurityImplicationsOfThis_serialize().slice(-32),
-  );
+  hexOf((keys.shieldedSecretKeys.coinSecretKey as Any).yesIKnowTheSecurityImplicationsOfThis_serialize().slice(-32));
 
 /**
  * A lock of `amount` on `bridge`, entitled for the landing coin `entitled` of `owner` (its commitment is
@@ -244,7 +245,10 @@ describe('C1: tx2 spends exactly the entitled landing coin (F-A1, F-B1)', () => 
 
   it('A2: a lock balanced by 40 one-unit coins is refused (exactly one input)', async () => {
     const bridge = await bridgeAt();
-    const owner = walletWith(bridge.colour, Array.from({ length: 40 }, () => 1n));
+    const owner = walletWith(
+      bridge.colour,
+      Array.from({ length: 40 }, () => 1n),
+    );
     const entitled = { nonce: randHex(), color: bridge.colour, value: 40n };
     const { out } = await lockCase({ bridge, owner, entitled, spent: owner.coins });
     expect(out.ok).toBe(false);
@@ -289,7 +293,12 @@ describe('C1: tx2 spends exactly the entitled landing coin (F-A1, F-B1)', () => 
 });
 
 describe('C1: consumption persists; failures are bounded (F-A1 parts 2-3, F-B1, F-B5)', () => {
-  const binding: LandingBinding = { deviceKey: WALLET, coinPublicKey: 'cc'.repeat(32), colour: 'c3'.repeat(32), amount: '5' };
+  const binding: LandingBinding = {
+    deviceKey: WALLET,
+    coinPublicKey: 'cc'.repeat(32),
+    colour: 'c3'.repeat(32),
+    amount: '5',
+  };
 
   it('A4 after a restart: a spent entitlement, and a RE-ISSUED one for the same coin, are refused', () => {
     const file = join(tempDir(), 'landing-entitlements.json');
@@ -299,7 +308,14 @@ describe('C1: consumption persists; failures are bounded (F-A1 parts 2-3, F-B1, 
     expect(held.ok).toBe(true);
     if (held.ok) held.finished?.({ ok: true, proved: true, requesterFault: false });
     // A restart: a new instance, the same key and the same data file.
-    const b = new LandingEntitlements({ key: landingEntitlementKey('11'.repeat(32)), network: NETWORK_ID, file } as Any);
+    // (Its clock a minute later, so the re-issued token's expiry, hence the token, differs.)
+    const later = Math.floor(Date.now() / 1000) + 60;
+    const b = new LandingEntitlements({
+      key: landingEntitlementKey('11'.repeat(32)),
+      network: NETWORK_ID,
+      file,
+      now: () => later,
+    } as Any);
     expect(b.admit(token, ACCOUNT, binding)).toMatchObject({ ok: false, code: 'entitlement-used' });
     // bridge-out-entitle re-issues a token for the same landing coin (a new expiry): still spent.
     const reissued = b.issue(ACCOUNT, binding, 'dd'.repeat(32));
@@ -316,9 +332,15 @@ describe('C1: consumption persists; failures are bounded (F-A1 parts 2-3, F-B1, 
       expect(h.ok, `attempt ${i + 1}`).toBe(true);
       if (h.ok) h.finished?.({ ok: false, proved: true, requesterFault: true });
     }
-    expect(a.admit(token, ACCOUNT, { ...binding, amount: '6' })).toMatchObject({ ok: false, code: 'bridge-out-attempts' });
+    expect(a.admit(token, ACCOUNT, { ...binding, amount: '6' })).toMatchObject({
+      ok: false,
+      code: 'bridge-out-attempts',
+    });
     const b = new LandingEntitlements({ key: KEY, network: NETWORK_ID, file, maxFailedAttempts: 3 } as Any);
-    expect(b.admit(token, ACCOUNT, { ...binding, amount: '6' })).toMatchObject({ ok: false, code: 'bridge-out-attempts' });
+    expect(b.admit(token, ACCOUNT, { ...binding, amount: '6' })).toMatchObject({
+      ok: false,
+      code: 'bridge-out-attempts',
+    });
   });
 
   it('a refusal before any proof (stale at admission) does not use up an attempt', () => {
@@ -339,6 +361,26 @@ describe('C9: a stale bridge-out is not the requester’s fault (F-A6)', () => {
   it('bridge-out-stale (another lock moved the bridge on, or the chain was slow) is not charged', () => {
     expect(countsAgainstBudget(new PublicError('bridge-out-stale', 'the contract moved on'), true)).toBe(false);
   });
+
+  it('a queued job whose re-check fails before the prover ran does not use up an attempt; a proved one does', () => {
+    const binding: LandingBinding = {
+      deviceKey: WALLET,
+      coinPublicKey: 'cc'.repeat(32),
+      colour: 'c3'.repeat(32),
+      amount: '5',
+    };
+    const a = new LandingEntitlements({ key: KEY, network: NETWORK_ID, maxFailedAttempts: 1 } as Any);
+    const token = a.issue(ACCOUNT, binding, 'ac'.repeat(32));
+    for (let i = 0; i < 5; i++) {
+      const h = a.admit(token, ACCOUNT, binding);
+      expect(h.ok, `race ${i + 1}`).toBe(true);
+      a.failedBeforeProof(token);
+      if (h.ok) h.finished?.({ ok: false, proved: true, requesterFault: false, code: 'bridge-out-stale' });
+    }
+    const h = a.admit(token, ACCOUNT, binding);
+    if (h.ok) h.finished?.({ ok: false, proved: true, requesterFault: false, code: 'bridge-out-stale' });
+    expect(a.admit(token, ACCOUNT, binding)).toMatchObject({ ok: false, code: 'bridge-out-attempts' });
+  });
 });
 
 describe('C11: the registry’s mint is the deployed bridge’s sealed source mint (F-A10)', () => {
@@ -352,10 +394,9 @@ describe('C11: the registry’s mint is the deployed bridge’s sealed source mi
     );
     const read = async (a: string) => (a === bridge.address ? bridge.state : null);
     const bridgeLedger = (s: Any) => (bridgeModule as Any).ledger(s);
-    const { base58 } = await import('@scure/base');
-    const right = registryOf({ address: bridge.address, colour: bridge.colour, splMint: base58.encode(bridge.sourceMint) });
+    const right = registryOf({ address: bridge.address, colour: bridge.colour, splMint: encodeKey(bridge.sourceMint) });
     expect(await bridgeKeyProblems(right, managed, read as Any, bridgeLedger as Any)).toEqual([]);
-    const wrong = registryOf({ address: bridge.address, colour: bridge.colour, splMint: base58.encode(rand()) });
+    const wrong = registryOf({ address: bridge.address, colour: bridge.colour, splMint: encodeKey(rand()) });
     const problems = await bridgeKeyProblems(wrong, managed, read as Any, bridgeLedger as Any);
     expect(problems.join('\n')).toMatch(/seals another SPL mint/);
   }, 60_000);

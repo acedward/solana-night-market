@@ -43,7 +43,14 @@ export const MARKET_SIDE_FAILURES: ReadonlySet<string> = new Set([
 /** Job errors caused by the other side of a trade (a maker who cancelled, an offer that expired or
  *  was taken), never the requester's (AA 00047 P10, F-A2-2). Every `take-*` code is one too: the merge
  *  refusing the maker's offer. */
-export const COUNTERPARTY_FAILURES: ReadonlySet<string> = new Set(['exchange-error', 'take-refused', 'offer-gone']);
+export const COUNTERPARTY_FAILURES: ReadonlySet<string> = new Set([
+  'exchange-error',
+  'take-refused',
+  'offer-gone',
+  // AA 00060 P10.3 C9 (F-A6): a bridge-out made stale by ANOTHER customer's lock on the same bridge, or
+  // by a chain too slow to show the lock in time, is not the requester's doing.
+  'bridge-out-stale',
+]);
 
 /** Refusals before any proof that still count against the requester (AA 00047 P11.F2, R4b-1): requests
  *  no honest page sends. */

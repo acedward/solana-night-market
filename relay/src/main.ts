@@ -176,10 +176,23 @@ async function main(): Promise<void> {
       process.exit(78);
     }
     const rt = runtime;
+    // AA 00060 P10.3 (audit C11, F-A10): with the key volume's bridge module, each bridge's sealed
+    // `sourceMint` must be the registry's SPL mint too.
+    let bridgeLedger: ((data: unknown) => { sourceMint: Uint8Array }) | undefined;
+    try {
+      bridgeLedger = (
+        (await import(join(config.managedPath, 'bridge', 'contract', 'index.js'))) as {
+          ledger: (s: unknown) => { sourceMint: Uint8Array };
+        }
+      ).ledger;
+    } catch {
+      bridgeLedger = undefined; // the bundle check below names the missing bundle
+    }
     const problems = await bridgeKeyProblems(
       config.bridges,
       config.managedPath,
       async (address) => (await rt.contractState(address)) as Awaited<ReturnType<ReadContractState>>,
+      bridgeLedger,
     );
     if (problems.length > 0) {
       log.error('the journey registry does not match the key volume or the chain; refusing to start', { problems });
@@ -277,12 +290,21 @@ async function main(): Promise<void> {
   });
   // AA 00060 P6.3: Bridge out's single-use landing entitlements (./bridge/out-actions.ts), MAC'd with a
   // key from the seed so they survive a restart; only with a journey registry and the key volume.
+  // P10.3 (audit C1): spent landing coins and their failed attempts are kept in RELAY_DATA_DIR, so a
+  // restart (or a re-issue) never makes a spent landing coin sponsorable again.
+  if (config.bridges && runtime && config.managedPath && !config.dataDir) {
+    log.error(
+      'BRIDGE_REGISTRY_FILE needs RELAY_DATA_DIR (spent landing entitlements must survive a restart); refusing to start',
+    );
+    process.exit(78);
+  }
   const landing =
-    config.bridges && runtime && config.managedPath
+    config.bridges && runtime && config.managedPath && config.dataDir
       ? {
           entitlements: new LandingEntitlements({
             key: landingEntitlementKey(secrets.sponsorSeedHex),
             network: config.network.name,
+            file: join(config.dataDir, 'landing-entitlements.json'),
           }),
           bridges: config.bridges,
         }

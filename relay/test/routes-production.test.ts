@@ -782,7 +782,8 @@ describe('C2: unsigned Bridge-out requests cannot spend a named victim’s allow
   it('unauthenticated requests have their own per-client budget (each naming a fresh device)', async () => {
     const r = productionRelay({ bridgeOut: true, env: { RATE_LIMIT_UNAUTHENTICATED_PER_MIN: '4' } });
     const statuses: number[] = [];
-    for (let i = 0; i < 6; i++) statuses.push((await post(r, 'bridge-out-entitle', entitleBody(randHex()), ATTACKER)).status);
+    for (let i = 0; i < 6; i++)
+      statuses.push((await post(r, 'bridge-out-entitle', entitleBody(randHex()), ATTACKER)).status);
     expect(statuses.slice(0, 4).every((s) => s === 403)).toBe(true);
     expect(statuses.slice(4)).toEqual([429, 429]);
     // Another client is not affected.

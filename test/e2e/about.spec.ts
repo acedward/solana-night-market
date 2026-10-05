@@ -27,6 +27,7 @@ const LIMITS = [
   'restarts',
   'demo-tokens',
   'one-offer',
+  'own-offer',
   'wallets',
   'your-data',
 ];

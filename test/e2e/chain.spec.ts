@@ -151,7 +151,8 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
 
     // A take: ten minutes (AA 00047 P11.F, R4-1: the relay's maximum, so a busy queue can still reach it).
     await page.getByTestId('trade-pair').selectOption('twETH/twBTC');
-    await page.getByTestId('sell-best-bid').click();
+    // AA 00060 FR-026: the best bid is the first row under Buyers.
+    await page.getByTestId('trade-book-bids').getByTestId('take-line').first().click();
     await expect(page.getByTestId('take-validity')).toContainText('valid for 10 minutes');
     const t1 = nowS();
     await page.getByTestId('take-sign').click();

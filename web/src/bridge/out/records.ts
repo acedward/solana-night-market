@@ -79,5 +79,9 @@ export function readBridgeOuts(store: LocalStore, scope: WalletScope, account: s
   return out.sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** Audit D6 (R-B4): a stored record always fits the backup format (its progress at most 300 characters). */
 export const putBridgeOut = (store: LocalStore, scope: WalletScope, account: string, r: BridgeOutRecord) =>
-  store.put(scope, 'bridge', r, { account, id: `out-${r.authNonce}` });
+  store.put(scope, 'bridge', r.progress !== undefined ? { ...r, progress: r.progress.slice(0, 300) } : r, {
+    account,
+    id: `out-${r.authNonce}`,
+  });

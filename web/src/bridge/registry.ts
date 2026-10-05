@@ -37,9 +37,12 @@ export async function rpcGenesisHash(rpcUrl: string, fetchImpl: typeof fetch = f
 
 const hexOf = (v: unknown) => (typeof v === 'string' ? v.toLowerCase().replace(/^0x/, '') : v);
 
-/** What a bridge's own deployment record (I-3 `GET /deployment`) says differently from the registry's
- *  entry: the field names, or [] (also when the bridge does not answer or answers no record). */
-export async function deploymentMismatch(entry: BridgeEntry, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+/** A bridge's own deployment record (I-3 `GET /deployment`) against the registry's entry: it matches, it
+ *  names other values (the field names), or it could not be read (P10.4, audit D7: R-B5). */
+export type DeploymentCheck =
+  { kind: 'ok' } | { kind: 'mismatch'; fields: string[] } | { kind: 'unavailable'; why: string };
+
+export async function verifyDeployment(entry: BridgeEntry, fetchImpl: typeof fetch = fetch): Promise<DeploymentCheck> {
   let d: Record<string, unknown>;
   try {
     const res = await fetchImpl(`${entry.bridgeApi}/deployment`, {
@@ -48,12 +51,12 @@ export async function deploymentMismatch(entry: BridgeEntry, fetchImpl: typeof f
       credentials: 'omit',
       signal: AbortSignal.timeout(8_000),
     });
-    if (res.status !== 200) return [];
+    if (res.status !== 200) return { kind: 'unavailable', why: `it answered HTTP ${res.status}` };
     const body: unknown = await res.json();
-    if (!body || typeof body !== 'object') return [];
+    if (!body || typeof body !== 'object') return { kind: 'unavailable', why: 'it answered no deployment record' };
     d = body as Record<string, unknown>;
   } catch {
-    return [];
+    return { kind: 'unavailable', why: 'it does not answer' };
   }
   const out: string[] = [];
   if (d.splMint !== entry.splMint) out.push('SPL mint');
@@ -61,7 +64,15 @@ export async function deploymentMismatch(entry: BridgeEntry, fetchImpl: typeof f
   if (hexOf(d.bridgeContract) !== entry.bridgeContract) out.push('Midnight contract');
   if (hexOf(d.colour) !== entry.colour) out.push('colour');
   if (d.splMintDecimals !== entry.decimals) out.push('decimals');
-  return out;
+  return out.length > 0 ? { kind: 'mismatch', fields: out } : { kind: 'ok' };
+}
+
+/** The field names a bridge's deployment record names differently from the registry's entry; [] when it
+ *  matches OR cannot be read: at start the page only refuses a bridge that says something else. Bridge in
+ *  verifies again before every lock and refuses a bridge it cannot verify (`verifyDeployment`, audit D7). */
+export async function deploymentMismatch(entry: BridgeEntry, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  const v = await verifyDeployment(entry, fetchImpl);
+  return v.kind === 'mismatch' ? v.fields : [];
 }
 
 /** Check `bridges` (I-1) for this site: its Midnight network, the Solana RPC's genesis hash, and each

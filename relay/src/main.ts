@@ -11,7 +11,7 @@ import { KernelClient } from '@nightmarket/core';
 
 import { addDustAndSubmit } from './bridge/dust-submit.js';
 import { LandingEntitlements, landingEntitlementKey } from './bridge/out-actions.js';
-import { bridgeKeyProblems, type ReadContractState } from './bridge/registry-check.js';
+import { bridgeKeyProblems, loadBridgeLedger, type ReadContractState } from './bridge/registry-check.js';
 import { AccountCaps } from './actions/account-caps.js';
 import { AccountGate } from './actions/account-gate.js';
 import {
@@ -177,16 +177,14 @@ async function main(): Promise<void> {
     }
     const rt = runtime;
     // AA 00060 P10.3 (audit C11, F-A10): with the key volume's bridge module, each bridge's sealed
-    // `sourceMint` must be the registry's SPL mint too.
-    let bridgeLedger: ((data: unknown) => { sourceMint: Uint8Array }) | undefined;
+    // `sourceMint` must be the registry's SPL mint too. P10.4 (audit D7, R-B5): a module or decoder that
+    // does not load stops the start; the check is never skipped.
+    let bridgeLedger: (data: unknown) => { sourceMint: Uint8Array };
     try {
-      bridgeLedger = (
-        (await import(join(config.managedPath, 'bridge', 'contract', 'index.js'))) as {
-          ledger: (s: unknown) => { sourceMint: Uint8Array };
-        }
-      ).ledger;
-    } catch {
-      bridgeLedger = undefined; // the bundle check below names the missing bundle
+      bridgeLedger = await loadBridgeLedger(config.managedPath);
+    } catch (e) {
+      log.error('the journey registry cannot be checked; refusing to start', { error: (e as Error).message });
+      process.exit(78);
     }
     const problems = await bridgeKeyProblems(
       config.bridges,
@@ -435,6 +433,18 @@ async function main(): Promise<void> {
       }),
       prove: (tx) =>
         (rt.proofProvider as { proveTx(t: unknown, o: unknown): Promise<unknown> }).proveTx(tx, { timeout: 900_000 }),
+      // P10.4 (audit D2, R-A1): after the 180 s wait, watch up to an hour more; a lock that lands then has
+      // its landing coin recorded spent.
+      lateLanding: async (txId) => {
+        const watch = (pdp as unknown as { watchForTxData(id: string): Promise<{ status?: unknown }> }).watchForTxData(
+          txId,
+        );
+        const out = await Promise.race([
+          watch.catch(() => null),
+          new Promise<null>((r) => setTimeout(() => r(null), 3_600_000).unref?.()),
+        ]);
+        return out !== null && String(out.status) === 'SucceedEntirely';
+      },
       awaitLanded: async (txId) => {
         const watch = (pdp as unknown as { watchForTxData(id: string): Promise<{ status?: unknown }> }).watchForTxData(
           txId,

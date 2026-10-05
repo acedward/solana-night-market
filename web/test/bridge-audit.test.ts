@@ -20,13 +20,13 @@ import { bytesToHex, contractCoinCommitment, solanaAddressOf, type StoredCoin } 
 import type { BridgeEntry } from '@nightmarket/core/bridge';
 import { TOKEN_PROGRAM_ID, associatedTokenAddress, splitTransaction } from '@nightmarket/core/solana';
 
-import { followBridgeIn, sendBridgeIn, type BridgeInContext } from '../src/bridge/in/operations.js';
+import { followBridgeIn, precheckBridgeIn, sendBridgeIn, type BridgeInContext } from '../src/bridge/in/operations.js';
 import type { BridgeInRecord } from '../src/bridge/in/records.js';
 import type { BridgeOutRecord } from '../src/bridge/out/records.js';
 import { SolanaRpc } from '../src/bridge/solana-rpc.js';
 import { WalletError } from '../src/wallet/wallet-errors.js';
 import journeyFixture from '../../test/fixtures/journey-registry.undeployed.json';
-import { mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
+import { deploymentRecordOf, mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
 import { asFetch } from '../../test/mocks/http.js';
 import { mockSolanaRpc } from '../../test/mocks/solana-rpc.js';
 
@@ -195,7 +195,9 @@ describe('C3: the search for a lost lock is bounded, and a search cut short neve
       rpc: {
         blockHeight: async () => 1_000n,
         signatureStatus: async () => null,
-        transactionWire: async () => null,
+        // Every listed transaction is READ, and none is the lock (P10.4, audit D1 / R-B1: a body Solana does
+        // not return is no evidence of absence, so this test once accepted incomplete evidence).
+        transactionWire: async () => Uint8Array.from([1, ...new Array<number>(64).fill(0), 9, 9, 9]),
         signaturesForAddress: async () => {
           const page = pages++;
           return Array.from({ length: 100 }, (_, i) => ({ signature: `s${page}-${i}`, slot: BigInt(slotOf(page, i)) }));
@@ -274,7 +276,11 @@ describe('C7: "Find my transfers" adopts a transfer whose local record is unusab
       ({ authNonce, state: 'tx1-sent', ...o }) as BridgeOutRecord;
     const found = ['1', '2', '3', '4'].map((authNonce) => ({ authNonce, open: true }));
     const records = [
-      rec('1', { state: 'tx1-sent', entitlement: `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.1.${'c'.repeat(64)}` }),
+      // A LIVE entitlement (P10.4 D4: an expired one is adopted again).
+      rec('1', {
+        state: 'tx1-sent',
+        entitlement: `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.9999999999.${'c'.repeat(64)}`,
+      }),
       rec('2', { state: 'failed' }),
       rec('3', { state: 'tx1-signing' }),
     ];
@@ -336,6 +342,221 @@ describe('C11: the site checks each bridge’s own deployment record (F-A10)', (
     );
     expect(swapped).toMatchObject({ state: 'refused' });
     expect((swapped as Any).reason).toMatch(/X/);
+  });
+});
+
+// ── Round 2 (AA 00060 P10.4): the audit's round-2 consolidation, D1 and D4–D7 (page side) ─────────────────
+
+/** A readable transaction body that is not the lock (another transfer of the token account). */
+const otherWire = () => {
+  const w = new Uint8Array(1 + 64 + 40);
+  w[0] = 1;
+  w.fill(7, 65);
+  return w;
+};
+/** An RPC whose `method` fails (throws, or answers nothing for a transaction it listed). */
+function failing(
+  rpc: SolanaRpc,
+  method: 'transactionWire' | 'signaturesForAddress' | 'blockHeight' | 'signatureStatus',
+  how: 'throw' | 'null',
+): SolanaRpc {
+  const f = Object.create(rpc) as Record<string, unknown>;
+  f[method] = async () => {
+    if (how === 'throw') throw new Error('429 Too Many Requests');
+    return null;
+  };
+  return f as unknown as SolanaRpc;
+}
+/** The wallet SENT the lock and its answer is lost; the lock's blockhash has expired. */
+async function sentThenLost() {
+  const s = setup();
+  s.ctx.transactions = {
+    signAndSend: async (tx: Uint8Array) => {
+      const signed = s.signWire(tx);
+      await s.ctx.rpc.sendTransaction(signed);
+      throw Object.assign(new WalletError('timeout', 'Your wallet did not answer in time.'), {
+        late: new Promise<never>(() => undefined),
+      });
+    },
+  };
+  const err: Any = await sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, {} as never).catch((e: unknown) => e);
+  expect(err?.record?.state).toBe('unknown');
+  s.chain.advanceBlockHeight(1000);
+  return { s, rec: err.record as BridgeInRecord };
+}
+
+describe('D1: a Solana lookup that fails is never "not found" (R-A2, R-B1)', () => {
+  it('the lock WAS sent and the RPC fails to return it: unknown, never "Nothing was locked", still blocking; then found', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const { s, rec } = await sentThenLost();
+    const cases = [
+      ['transactionWire', 'throw'],
+      ['transactionWire', 'null'],
+      ['signaturesForAddress', 'throw'],
+      ['blockHeight', 'throw'],
+    ] as const;
+    for (const [method, how] of cases) {
+      const r: BridgeInRecord = await ops
+        .reconcileBridgeIn(rec, { rpc: failing(s.ctx.rpc, method, how) }, 2000)
+        .catch((e: unknown) => ({ state: `threw: ${String(e)}` }));
+      expect(r.state, `${method} ${how}`).toBe('unknown');
+      expect(r.progress ?? '', `${method} ${how}`).not.toMatch(/Nothing was locked/);
+      expect(ops.blocksNewBridgeIn([r], entry.colour), `${method} ${how}`).toBe(true);
+    }
+    // A definite answer once Solana can be read: the lock is found.
+    const ok = await ops.reconcileBridgeIn(rec, s.ctx, 3000);
+    expect(ok).toMatchObject({ state: 'sent', signature: s.chain.sent[0]!.signature });
+  });
+
+  it('after a failed lookup the page waits before asking Solana again (backoff), then asks', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const { s, rec } = await sentThenLost();
+    const r1: Any = await ops.reconcileBridgeIn(rec, { rpc: failing(s.ctx.rpc, 'transactionWire', 'throw') }, 10_000);
+    expect(r1.state).toBe('unknown');
+    expect(r1.lookupErrors).toBe(1);
+    const calls = s.chain.calls.length;
+    const r2 = await followBridgeIn(r1, s.ctx, async () => [], 10_500);
+    expect(s.chain.calls.length).toBe(calls);
+    expect(r2).toEqual(r1);
+    const r3 = await followBridgeIn(r1, s.ctx, async () => [], 70_000);
+    expect(r3.state).toBe('sent');
+  });
+});
+
+const lostBase: BridgeInRecord = {
+  direction: 'in',
+  key: 'ab'.repeat(32),
+  message: Buffer.from('the lock message').toString('base64'),
+  lastValidBlockHeight: '100',
+  fromSlot: '500',
+  source: '11111111111111111111111111111111',
+  colour: entry.colour,
+  mint: entry.splMint,
+  symbol: entry.symbol,
+  amount: '1',
+  bridgeApi: entry.bridgeApi,
+  balanceBefore: '0',
+  createdAt: 1,
+  state: 'unknown',
+};
+
+describe('D5: a lock nobody can find no longer blocks the token for good (R-A5)', () => {
+  it('once the request has expired, the search resumes where it stopped, and completes', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    // 1,500 transactions of the token account: the 1,200 newest after the lock's slot, then older ones.
+    const sigs = Array.from({ length: 1500 }, (_, i) => ({
+      signature: `s${i + 1}`,
+      slot: BigInt(i < 1200 ? 900 : 400),
+    }));
+    const rpc = {
+      blockHeight: async () => 1_000n,
+      signatureStatus: async () => null,
+      transactionWire: async () => otherWire(),
+      signaturesForAddress: async (_a: string, limit = 100, before?: string) => {
+        const start = before ? sigs.findIndex((x) => x.signature === before) + 1 : 0;
+        return sigs.slice(start, start + limit);
+      },
+    } as unknown as SolanaRpc;
+    const r1: Any = await ops.reconcileBridgeIn(lostBase, { rpc }, 10);
+    expect(r1.state).toBe('unknown');
+    expect(r1.blockhashExpired).toBe(true);
+    expect(r1.searchBefore).toBe('s1000');
+    const r2: Any = await ops.reconcileBridgeIn(r1, { rpc }, 20);
+    expect(r2.state).toBe('failed');
+    expect(r2.progress).toMatch(/Nothing was locked/);
+  });
+
+  it('"Stop checking": only once the request has expired; the record is final and the token unblocked', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    expect(typeof ops.dismissBridgeIn).toBe('function');
+    expect(() => ops.dismissBridgeIn(lostBase, 5)).toThrow(/expired/);
+    const d: Any = ops.dismissBridgeIn({ ...lostBase, blockhashExpired: true }, 5);
+    expect(d.state).toBe('dismissed');
+    expect(ops.isFinal(d)).toBe(true);
+    expect(ops.blocksNewBridgeIn([d], entry.colour)).toBe(false);
+  });
+});
+
+describe('D4: "Find my transfers" renews an expired entitlement (R-A4, R-B3)', () => {
+  it('a record whose entitlement has expired is adopted again; one with a live entitlement is left alone', async () => {
+    const ops: Any = await import('../src/bridge/out/operations.js');
+    const token = (exp: string) => `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.${exp}.${'c'.repeat(64)}`;
+    const found = ['1', '2'].map((authNonce) => ({ authNonce, open: true }));
+    const records = [
+      { authNonce: '1', state: 'landed', entitlement: token('1700000000') },
+      { authNonce: '2', state: 'landed', entitlement: token('1900000000') },
+    ];
+    expect(ops.transfersToAdopt(found, records, 1_800_000_000).map((f: Any) => f.authNonce)).toEqual(['1']);
+    expect(typeof ops.entitlementExpired).toBe('function');
+    expect(ops.entitlementExpired(token('1700000000'), 1_800_000_000)).toBe(true);
+    expect(ops.entitlementExpired(token('1900000000'), 1_800_000_000)).toBe(false);
+  });
+});
+
+describe('D6: a stopped tx1 record always fits the backup format (R-B4)', () => {
+  const stopped = (authNonce: string, progress: string): BridgeOutRecord => ({
+    direction: 'out',
+    authNonce,
+    colour: entry.colour,
+    symbol: 'X',
+    amount: '5',
+    bridgeContract: entry.bridgeContract,
+    bridgeProgram: entry.bridgeProgram,
+    bridgeApi: entry.bridgeApi,
+    wallet: entry.bridgeProgram,
+    spentCoin: { nonce: 'd1'.repeat(32), color: entry.colour, value: '9' },
+    landingCoinPublicKey: 'cc'.repeat(32),
+    landingNonce: 'd2'.repeat(32),
+    landingCommitment: 'd3'.repeat(32),
+    check: 'ab'.repeat(16),
+    createdAt: 1,
+    state: 'failed',
+    progress,
+  });
+
+  it('a long error keeps the "Find my transfers" advice within 300 characters, and the backup imports', async () => {
+    const ops: Any = await import('../src/bridge/out/operations.js');
+    expect(typeof ops.tx1StoppedProgress).toBe('function');
+    const progress: string = ops.tx1StoppedProgress(new Error('x'.repeat(400)));
+    expect(progress.length).toBeLessThanOrEqual(300);
+    expect(progress.endsWith(ops.TX1_MAY_HAVE_MOVED)).toBe(true);
+    const { LocalStore } = await import('../src/store/store.js');
+    const { putBridgeOut } = await import('../src/bridge/out/records.js');
+    const scope = { network: 'stagenet', owner: '22'.repeat(32) } as const;
+    localStorage.clear();
+    const store = new LocalStore(localStorage);
+    putBridgeOut(store, scope, ACCOUNT, stopped('7', progress));
+    // A record handed a longer progress is bounded when it is stored.
+    putBridgeOut(store, scope, ACCOUNT, stopped('8', 'y'.repeat(400)));
+    const file = JSON.parse(JSON.stringify(store.exportWallet(scope))) as unknown;
+    localStorage.clear();
+    expect(new LocalStore(localStorage).importWallet(file, scope).imported).toBe(2);
+  });
+});
+
+describe('D7: Bridge in refuses a bridge whose deployment cannot be verified (R-B5)', () => {
+  function withDeployment(deployment?: unknown) {
+    const s = setup();
+    const bridge = mockBridgeApi(deployment ? { deployment } : {});
+    s.ctx.fetchImpl = asFetch(bridge.handler);
+    s.ctx.transactions = {
+      signAndSend: async () => {
+        throw new Error('the wallet is not asked here');
+      },
+    };
+    return s;
+  }
+
+  it('no deployment record, or one naming another mint: refused before the wallet; a matching one: allowed', async () => {
+    const none = withDeployment();
+    await expect(precheckBridgeIn(none.ctx, entry, 1_000_000n)).rejects.toThrow(/cannot be verified/);
+    const other = withDeployment({
+      ...deploymentRecordOf(entry),
+      splMint: '1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE',
+    });
+    await expect(precheckBridgeIn(other.ctx, entry, 1_000_000n)).rejects.toThrow(/SPL mint/);
+    const same = withDeployment(deploymentRecordOf(entry));
+    await expect(precheckBridgeIn(same.ctx, entry, 1_000_000n)).resolves.toMatchObject({ splBalance: 600_000_000n });
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

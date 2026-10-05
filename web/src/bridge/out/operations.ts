@@ -101,6 +101,22 @@ async function landingKeys(master: LandingMaster, account: string, authNonce: st
 export const TX1_MAY_HAVE_MOVED =
   'If the tokens left your account anyway, use "Find my transfers": it finds them and lets you finish or return them.';
 
+/** A stopped tx1 record's progress (audit D6: R-B4): the error, cut so that the advice above always fits the
+ *  record's 300 characters (an export holding a longer one would not import). */
+export function tx1StoppedProgress(e: unknown): string {
+  const room = 300 - TX1_MAY_HAVE_MOVED.length - 1;
+  const why = (e instanceof Error ? e.message : 'failed').replace(/\s+/g, ' ').trim();
+  const cut = why.length > room ? `${why.slice(0, room - 1)}…` : why;
+  return `${cut} ${TX1_MAY_HAVE_MOVED}`;
+}
+
+/** Whether an entitlement's expiry (its 4th field, unix seconds) has passed (audit D4: R-A4, R-B3). */
+export function entitlementExpired(token: string | undefined, nowSeconds = Math.floor(Date.now() / 1000)): boolean {
+  if (!token) return false;
+  const exp = Number(token.split('.')[3]);
+  return Number.isFinite(exp) && exp <= nowSeconds;
+}
+
 /** tx1: the record first, then ONE approval of the withdrawal to the landing key. */
 export async function startBridgeOut(
   ctx: BridgeOutContext,
@@ -165,7 +181,7 @@ export async function startBridgeOut(
         putBridgeOut(ctx.env.store, ctx.env.scope, o.account, {
           ...record,
           state: 'failed',
-          progress: `${(e instanceof Error ? e.message : 'failed').slice(0, 240)} ${TX1_MAY_HAVE_MOVED}`,
+          progress: tx1StoppedProgress(e),
           checkedAt: Date.now(),
         });
       }
@@ -232,6 +248,10 @@ async function secondTransaction(
   kind: 'lock' | 'return',
 ): Promise<BridgeOutRecord> {
   if (!r.entitlement) throw new BridgeOutError('This transfer has no entitlement yet: use "Find my transfers".');
+  if (entitlementExpired(r.entitlement)) {
+    // Audit D4: "Find my transfers" renews it (the market re-issues it from tx1's evidence).
+    throw new BridgeOutError('This transfer\'s entitlement has expired: use "Find my transfers" to renew it.');
+  }
   const keys = await landingKeys(master, account, r.authNonce);
   try {
     if (keys.coinPublicKey !== r.landingCoinPublicKey) {
@@ -473,18 +493,26 @@ export async function findTransfers(
 /**
  * Which found transfers "Find my transfers" adopts (P10.3, audit C7 / F-B4): every OPEN one whose record
  * this browser lacks, or holds without an entitlement (tx1 landed but its answer was lost), or marked
- * failed or still signing after an interrupted tx1. Adopting re-issues the entitlement and overwrites
- * that record. A record with an entitlement is left alone (its own Finish / Return works).
+ * failed or still signing after an interrupted tx1, or (P10.4, audit D4) whose entitlement has EXPIRED.
+ * Adopting re-issues the entitlement and overwrites that record. A record with a live entitlement is left
+ * alone (its own Finish / Return works).
  */
 export function transfersToAdopt<F extends Pick<FoundTransfer, 'authNonce' | 'open'>>(
   found: readonly F[],
   records: readonly Pick<BridgeOutRecord, 'authNonce' | 'state' | 'entitlement'>[],
+  nowSeconds = Math.floor(Date.now() / 1000),
 ): F[] {
   const byNonce = new Map(records.map((r) => [r.authNonce, r]));
   return found.filter((f) => {
     if (!f.open) return false;
     const r = byNonce.get(f.authNonce);
-    return !r || !r.entitlement || r.state === 'failed' || r.state === 'tx1-signing';
+    return (
+      !r ||
+      !r.entitlement ||
+      entitlementExpired(r.entitlement, nowSeconds) ||
+      r.state === 'failed' ||
+      r.state === 'tx1-signing'
+    );
   });
 }
 

@@ -31,6 +31,8 @@ export const BRIDGE_IN_STATES = [
   'undeliverable',
   /** The Solana transaction failed: nothing was locked. */
   'failed',
+  /** The customer stopped a check the page could not finish, once its request had expired (audit D5). */
+  'dismissed',
 ] as const;
 export type BridgeInState = (typeof BRIDGE_IN_STATES)[number];
 
@@ -46,6 +48,12 @@ export interface BridgeInRecord {
   lastValidBlockHeight?: string;
   /** The slot its blockhash was read at: the lock cannot be in an earlier slot (the search's bound). */
   fromSlot?: string;
+  /** Audit D1: failed Solana lookups in a row (the page backs off; never read as "not found"). */
+  lookupErrors?: number;
+  /** Audit D5: the page has seen the blockhash expire (the wallet can no longer send the lock). */
+  blockhashExpired?: boolean;
+  /** Audit D5: where an expired lock's search stopped (the oldest signature checked); the next look resumes. */
+  searchBefore?: string;
   /** The depositor's token account the lock spends from (where the page looks for it). */
   source?: string;
   colour: string;
@@ -79,8 +87,15 @@ export const readBridgeIns = (store: LocalStore, scope: WalletScope, account: st
 /** The record's id: `in-<key>` (the message's hash), or `in-<signature>` for a record from before P10.3. */
 export const bridgeInId = (r: Pick<BridgeInRecord, 'key' | 'signature'>): string => `in-${r.key ?? r.signature ?? ''}`;
 
+/** Audit D6: a stored record always fits the backup format (progress ≤ 300, the bridge's reason ≤ 500). */
+const bounded = (r: BridgeInRecord): BridgeInRecord => ({
+  ...r,
+  ...(r.progress !== undefined ? { progress: r.progress.slice(0, 300) } : {}),
+  ...(r.reason ? { reason: { ...r.reason, message: r.reason.message.slice(0, 500) } } : {}),
+});
+
 export const putBridgeIn = (store: LocalStore, scope: WalletScope, account: string, r: BridgeInRecord) =>
-  store.put(scope, 'bridge', r, { account, id: bridgeInId(r) });
+  store.put(scope, 'bridge', bounded(r), { account, id: bridgeInId(r) });
 
 /** Withdraw a record the wallet declined (nothing was sent: audit C3). */
 export const removeBridgeIn = (store: LocalStore, scope: WalletScope, account: string, r: BridgeInRecord) =>

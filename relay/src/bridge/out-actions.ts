@@ -100,7 +100,7 @@ interface LandingStoreFile {
   version: 1;
   /** op → the token's expiry (unix s). */
   spent: Record<string, number>;
-  /** op → its proved failures since `since` (unix s), kept until `expiresAt`. */
+  /** op → its proved failures since `since` (unix s), kept for one attempt window (`expiresAt` is unused). */
   failures: Record<string, { count: number; since: number; expiresAt: number }>;
 }
 
@@ -122,7 +122,9 @@ export class LandingEntitlements {
   private readonly pending = new Set<string>();
   /** Ops whose running bridge-out failed its re-check before the prover ran (audit C9): not counted. */
   private readonly beforeProof = new Set<string>();
-  /** Ops whose bridge-out succeeded → the token's expiry (unix s). Persisted. */
+  /** Ops whose landing coin was consumed → when that was recorded (unix s; files from before P10.4 hold the
+   *  spending token's expiry). Persisted and NEVER swept (P10.4, audit D2: R-A1, R-B2): a re-issue from
+   *  tx1's evidence must not make a spent coin sponsorable again. 64 hex per completed bridge-out. */
   private readonly spent = new Map<string, number>();
   /** Ops whose bridge-out failed after proving. Persisted. */
   private readonly failures = new Map<string, { count: number; since: number; expiresAt: number }>();
@@ -160,7 +162,21 @@ export class LandingEntitlements {
     renameSync(tmp, file);
   }
 
-  /** The operation of a landing coin: its commitment, hashed under the label. */
+  /** Whether the landing coin with commitment `landingCommitment` was consumed (audit D2). */
+  isSpent(landingCommitment: string): boolean {
+    return this.spent.has(LandingEntitlements.opOf(landingCommitment));
+  }
+
+  /** Record `token`'s landing coin as consumed: a lock that landed after the relay stopped waiting for it
+   *  (audit D2: R-A1, a late landing). */
+  markSpent(token: string): void {
+    const op = typeof token === 'string' ? token.split('.')[2] : undefined;
+    if (!op || !/^[0-9a-f]{64}$/.test(op)) return;
+    this.spent.set(op, this.now());
+    this.failures.delete(op);
+    this.save();
+  }
+
   /** The running job of `token` failed its re-check before the prover ran (a concurrent lock moved the
    *  bridge on while it was queued): its failure costs nothing, so it does not use up an attempt (audit
    *  C9 / F-A6). Failures after the prover ran, including a lock that does not land, still count. */
@@ -255,7 +271,7 @@ export class LandingEntitlements {
         this.pending.delete(v.op);
         const unproven = this.beforeProof.delete(v.op);
         if (end.ok) {
-          this.spent.set(v.op, v.expiresAt);
+          this.spent.set(v.op, this.now());
           this.failures.delete(v.op);
           this.save();
         } else if (end.proved && !unproven) {
@@ -273,20 +289,14 @@ export class LandingEntitlements {
     };
   }
 
+  /** A failure count lasts one attempt window, whatever the token it was counted under; spent ops stay
+   *  (audit D2: R-B2). */
   private sweep(): void {
     const now = this.now();
     let changed = false;
-    for (const [op, exp] of this.spent)
-      if (exp <= now) {
-        this.spent.delete(op);
-        changed = true;
-      }
     for (const [op, f] of this.failures) {
-      if (f.expiresAt <= now) {
+      if (f.since + this.window <= now) {
         this.failures.delete(op);
-        changed = true;
-      } else if (f.since + this.window <= now && f.count > 0) {
-        this.failures.set(op, { ...f, count: 0, since: now });
         changed = true;
       }
     }
@@ -575,6 +585,9 @@ export interface BridgeOutDeps {
   /** Whether the submitted transaction landed on Midnight (false: refused at its block, or not seen in
    *  time). A lock that does not land frees its entitlement (the job fails `bridge-out-stale`). */
   awaitLanded(txId: string): Promise<boolean>;
+  /** P10.4 (audit D2, R-A1): after `awaitLanded` gave up, whether the transaction landed after all (a longer
+   *  watch). When it resolves true, the entitlement's landing coin is recorded spent. Optional (tests). */
+  lateLanding?(txId: string): Promise<boolean>;
   log: Logger;
 }
 
@@ -714,6 +727,17 @@ export function bridgeOutExecutor(deps: BridgeOutDeps): JobExecutor {
       // A call built on a state a concurrent lock replaced passes the pool and fails at its block (no
       // fees): it frees its entitlement here, and the page rebuilds it on the new state (plan T6.5 i).
       if (!(await deps.awaitLanded(txId))) {
+        // It may still land (audit D2): keep watching, and record the coin spent if it does.
+        if (deps.lateLanding) {
+          void deps
+            .lateLanding(txId)
+            .then((landed) => {
+              if (!landed) return;
+              deps.entitlements.markSpent(p.entitlement);
+              deps.log.info('a bridge-out landed after the wait; its landing coin is recorded spent', { tx: txId });
+            })
+            .catch(() => undefined);
+        }
         throw new PublicError(
           R.stale,
           'the transaction did not land (the contract moved on before it was included): rebuild it and send again',
@@ -740,6 +764,32 @@ export interface EntitleDeps {
   tx1(account: string, tx1Hash: string): Promise<{ entryPoints: string[]; outputs: string[] } | null>;
   /** Whether `deviceKey`'s entry at `useCounter` is a live device of the account. */
   liveDevice(account: string, deviceKey: string, useCounter: bigint): Promise<boolean>;
+  /** P10.4 (audit D3, R-A3): how many re-issue evidence reads (account histories) run at once relay-wide,
+   *  and how many more may wait for a turn; beyond that a request is refused 503 `busy`. */
+  readLimit?: { max: number; waiting: number };
+}
+
+/** Default relay-wide bound on re-issue evidence reads (audit D3). */
+export const ENTITLE_READ_LIMIT = { max: 2, waiting: 8 };
+
+/** A counting semaphore with a bounded waiting room: `acquire` resolves with a release, or null when full. */
+export class ReadLimiter {
+  private running = 0;
+  private readonly queue: Array<() => void> = [];
+  constructor(private readonly limit: { max: number; waiting: number }) {}
+  acquire(): Promise<(() => void) | null> {
+    const release = () => {
+      const next = this.queue.shift();
+      if (next) next();
+      else this.running--;
+    };
+    if (this.running < this.limit.max) {
+      this.running++;
+      return Promise.resolve(release);
+    }
+    if (this.queue.length >= this.limit.waiting) return Promise.resolve(null);
+    return new Promise((resolve) => this.queue.push(() => resolve(release)));
+  }
 }
 
 export const WITHDRAW_ENTRY_POINT = 'withdraw_shielded_with_ed25519';
@@ -763,6 +813,14 @@ export async function entitle(deps: EntitleDeps, account: string, p: BridgeOutEn
   if (!tx1.outputs.map(norm).includes(landing.commitment)) {
     throw new BridgeOutRefused(R.entitleNotFound, 'tx1 paid no such coin to that landing key', 403);
   }
+  // Audit D2 (R-A1, R-B2): no new entitlement for a landing coin already locked or returned.
+  if (deps.entitlements.isSpent(landing.commitment)) {
+    throw new BridgeOutRefused(
+      R.entitlementUsed,
+      'this landing coin was already locked or returned: there is nothing left to finish',
+      403,
+    );
+  }
   if (!(await deps.liveDevice(account, p.deviceKey, BigInt(p.useCounter)))) {
     throw new BridgeOutRefused(R.entitleNotFound, 'the device is not a live device of the account', 403);
   }
@@ -776,10 +834,21 @@ export async function entitle(deps: EntitleDeps, account: string, p: BridgeOutEn
  * returns it (no gate, no prover). Refusals are 403 `entitle-not-found`; an indexer outage is 503.
  */
 export function entitlePreauth(deps: EntitleDeps): PreauthCheck {
+  // Audit D3 (R-A3): the evidence reads run in the request path, so they are bounded relay-wide.
+  const limiter = new ReadLimiter(deps.readLimit ?? ENTITLE_READ_LIMIT);
   return async ({ account, payload }) => {
     const p = BridgeOutEntitlePayloadSchema.safeParse(payload);
     if (!p.success || !account) {
       return { ok: false, status: 400, code: 'bad-request', reason: 'the entitlement request is malformed' };
+    }
+    const release = await limiter.acquire();
+    if (!release) {
+      return {
+        ok: false,
+        status: 503,
+        code: 'busy',
+        reason: 'the relay is checking too many transfers right now; try again shortly',
+      };
     }
     try {
       return { ok: true, adds: { landingEntitlement: await entitle(deps, norm(account), p.data) } };
@@ -791,6 +860,8 @@ export function entitlePreauth(deps: EntitleDeps): PreauthCheck {
         code: 'chain-unavailable',
         reason: "the account's history could not be read right now; try again shortly",
       };
+    } finally {
+      release();
     }
   };
 }

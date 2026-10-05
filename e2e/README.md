@@ -136,3 +136,16 @@ lock; user A signs 7 times (SC-005). The stack peaks near 16–17 GiB.
 - **A failed run:** `run` always tears down (`$OUT/down-check.json` proves nothing is left); `up` + `journey`
   keeps a failed stack for inspection until `down`.
 
+
+## Stagenet rehearsal (P5R): notes so far
+
+The full runbook section comes with P5R.4. The gate `e2e/stagenet/run-gate.sh` runs as `prep` and then `OUT=<dir> run-gate.sh gate`. Its results are recorded in the organizer's `evidence/00057-solana-midnight-journey/p5r0/gate/`.
+
+- **Bridge X on devnet:**
+  - program `4eJdq8HUur1fkBQvq2XujhMCYngGXKkDVuQqTVMgbK9a`, with x-operator as payer, operator and upgrade authority;
+  - test mint X `DsfqaShveLrwND8TW6jL6iMeR9k7r6SHG4E1uZweTnSb` (6 decimals, mint authority x-operator), initialized at slot 507835598.
+- **How the program deploy works:**
+  - It writes through the leaders' TPU ports, not `--use-rpc`: the public RPC refused the writes, "Max retries exceeded".
+  - It writes into a buffer whose keypair file the harness holds. The CLI therefore never prints a recovery phrase, and a failed deploy resumes into the same buffer.
+- **Orphaned stagenet contract — NOT the live bridge X.** Contract `7b015a9c410b7602cd0768bb6e52d251ced8863138caba69374c93ee6839d662` (tx `c041fa5a…0761`, 2026-10-05) is a deploy that landed but was never recorded. `deploy.ts` failed afterwards on the harness's storage password, which is now fixed. Ignore it. The live contract is the one in the deployment files under `~/.config/aa-00057/p5r0/deployments/`.
+- **Bridge node on devnet:** the pinned engine's Solana sync cannot read current devnet blocks. Devnet carries version-1 transactions, and the engine requests blocks with `maxSupportedTransactionVersion: 0`. The free public RPC also allows only about 6 `getBlock` calls per 10 s. See the 00057 questions file, Q16.

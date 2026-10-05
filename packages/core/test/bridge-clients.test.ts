@@ -3,6 +3,8 @@
 // against the mock injector, and the minimal Solana transaction toolkit against @solana/web3.js 1.99's
 // bytes (fixtures/solana-tx-web3.json).
 
+import { readFileSync } from 'node:fs';
+
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
 import { describe, expect, it } from 'vitest';
@@ -131,6 +133,21 @@ describe('T1.6 I-3 client against the mock bridge API', () => {
     await expect(readTransfer('http://bridge', 's2m:9', f)).rejects.toThrow(/unknown shape/);
   });
 
+  it("C13: the bridge node's REAL answer (wrapped as {transfer}, recorded live by 00057) is read", async () => {
+    const live = readFileSync(new URL('../../../test/fixtures/00058-live-transfer-s2m-1.json', import.meta.url), 'utf8');
+    const f = (async () => new Response(live, { status: 200 })) as unknown as typeof fetch;
+    const r = await readTransfer('http://bridge', 's2m:1', f);
+    expect(r.kind).toBe('view');
+    if (r.kind !== 'view') return;
+    expect(r.view).toMatchObject({ id: 's2m:1', status: 'undeliverable', recipientKind: 'contract' });
+    expect(r.view.reason?.code).toBe('not-a-passport-account');
+    expect(transferProgressText(r)).toContain(UNDELIVERABLE_TEXT['not-a-passport-account']);
+    // A bare view (not what the node sends) is not a transfer answer.
+    const bare = JSON.stringify((JSON.parse(live) as { transfer: unknown }).transfer);
+    const g = (async () => new Response(bare, { status: 200 })) as unknown as typeof fetch;
+    await expect(readTransfer('http://bridge', 's2m:1', g)).rejects.toThrow(/unknown shape/);
+  });
+
   it('the recognition verdict', async () => {
     const api = mockBridgeApi();
     const f = asFetch(api.handler);
@@ -165,6 +182,23 @@ describe('T1.6 I-4 client against the mock injector (FROZEN 2026-10-04 @ 00059 f
     expect(lines[0]!.startsWith('Site: ')).toBe(false);
     for (const l of Object.values(MARKET_LABELS)) expect(lines[0]).not.toBe(l);
     expect(() => assertSafeEd25519Message(new TextEncoder().encode(text))).not.toThrow();
+  });
+
+  it('C5: the POST that carries the viewing key never follows a redirect, and sends no credentials', async () => {
+    const seen: RequestInit[] = [];
+    const f = (async (_url: string, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return new Response(JSON.stringify({ code: 'storage-error', error: 'x' }), { status: 500 });
+    }) as unknown as typeof fetch;
+    const body = {
+      solanaAddress: '9C6hybhQ6Aycep9jaUnP6uL9ZYvDjUp1aSkFWPUFJtpj',
+      accountAddress: 'ab'.repeat(32),
+      accountViewingKey: 'cd'.repeat(32),
+      message: 'm',
+      signature: 'ef'.repeat(64),
+    };
+    await postRegistration('http://inj', body, f).catch(() => undefined);
+    expect(seen[0]).toMatchObject({ method: 'POST', redirect: 'error', credentials: 'omit' });
   });
 
   it('registers once, reads the status, and surfaces an error code without retrying', async () => {

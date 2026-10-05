@@ -32,6 +32,8 @@ import { bytesToHex, hexToBytes, normaliseHex32 } from '../hex.js';
 
 const PAID_OUT_SEPARATOR = 'midnight:kernel:nonce_evolve';
 const COMMITMENT_DOMAIN = 'midnight:zswap-cc[v1]';
+const NULLIFIER_DOMAIN = 'midnight:zswap-cn[v1]';
+const PUBLIC_KEY_DOMAIN = 'midnight:zswap-pk[v1]';
 
 /** The standard library's PAID-OUT coin nonce for a spend of the coin with `inputNonce` (64 hex). */
 export function paidOutNonce(inputNonce: string): string {
@@ -50,22 +52,19 @@ export function predictLandingCoin(spent: Pick<CoinInfo, 'nonce' | 'color' | 'va
   return { nonce: paidOutNonce(spent.nonce), color: normaliseHex32(spent.color), value: amount.toString(10) };
 }
 
-/** A USER-owned coin's commitment (64 hex) for the coin public key `coinPublicKey` (64 hex). */
-export function landingCoinCommitment(
-  coin: Pick<CoinInfo, 'nonce' | 'color' | 'value'>,
-  coinPublicKey: string,
-): string {
+/** SHA-256 over domain ‖ nonce ‖ colour ‖ value (u128 LE) ‖ is_user = 1 ‖ key (midnight-ledger coin.rs). */
+function userCoinHash(domain: string, coin: Pick<CoinInfo, 'nonce' | 'color' | 'value'>, key: string): string {
   const value = BigInt(coin.value);
   if (value < 0n || value >= 1n << 128n) throw new RangeError('a coin value is a u128');
   const v = new Uint8Array(16);
   for (let i = 0, x = value; i < 16; i++, x >>= 8n) v[i] = Number(x & 0xffn);
   const parts = [
-    new TextEncoder().encode(COMMITMENT_DOMAIN),
+    new TextEncoder().encode(domain),
     hexToBytes(normaliseHex32(coin.nonce), 32),
     hexToBytes(normaliseHex32(coin.color), 32),
     v,
     Uint8Array.of(1),
-    hexToBytes(normaliseHex32(coinPublicKey), 32),
+    hexToBytes(normaliseHex32(key), 32),
   ];
   const buf = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
@@ -73,6 +72,30 @@ export function landingCoinCommitment(
     buf.set(p, o);
     o += p.length;
   }
+  return bytesToHex(sha256(buf));
+}
+
+/** A USER-owned coin's commitment (64 hex) for the coin public key `coinPublicKey` (64 hex). */
+export function landingCoinCommitment(
+  coin: Pick<CoinInfo, 'nonce' | 'color' | 'value'>,
+  coinPublicKey: string,
+): string {
+  return userCoinHash(COMMITMENT_DOMAIN, coin, coinPublicKey);
+}
+
+/** A USER-owned coin's nullifier (64 hex) under the coin SECRET key `coinSecretKey` (32 bytes, 64 hex):
+ *  what its spend publishes (ledger `coinNullifier`; relay/test/bridge-out-audit.test.ts checks them equal). */
+export function landingCoinNullifier(coin: Pick<CoinInfo, 'nonce' | 'color' | 'value'>, coinSecretKey: string): string {
+  return userCoinHash(NULLIFIER_DOMAIN, coin, coinSecretKey);
+}
+
+/** The coin public key (64 hex) of a coin secret key (32 bytes, 64 hex): SHA-256("midnight:zswap-pk[v1]" ‖ key). */
+export function coinPublicKeyOfSecret(coinSecretKey: string): string {
+  const sk = hexToBytes(normaliseHex32(coinSecretKey), 32);
+  const d = new TextEncoder().encode(PUBLIC_KEY_DOMAIN);
+  const buf = new Uint8Array(d.length + 32);
+  buf.set(d, 0);
+  buf.set(sk, d.length);
   return bytesToHex(sha256(buf));
 }
 
@@ -87,7 +110,7 @@ const decimal = z.string().regex(/^(0|[1-9][0-9]{0,39})$/);
  * sponsored tx2 (the lock, or the return) of that landing coin. The MAC binds the network, the account,
  * the device key, the landing coin public key, the colour, the amount, the operation and the expiry.
  */
-export const LANDING_ENTITLEMENT_PATTERN = /^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9]{1,12}\.[0-9a-f]{64}$/;
+export const LANDING_ENTITLEMENT_PATTERN = /^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[1-9][0-9]{0,11}\.[0-9a-f]{64}$/;
 
 /** What a landing entitlement binds besides the account (sent with every bridge-out request). */
 export const LandingBindingSchema = z
@@ -108,6 +131,17 @@ export type BridgeOutKind = (typeof BRIDGE_OUT_KINDS)[number];
 /** The most a bridge-out transaction may be (hex characters): a few kilobytes in practice. */
 export const BRIDGE_OUT_TX_MAX_HEX = 400_000;
 
+/**
+ * The landing coin a bridge-out spends (AA 00060 P10.3, audit C1): its nonce (public: the paid-out nonce of
+ * tx1's spend) and keys_t's coin SECRET key. The relay recomputes the coin's commitment from the
+ * entitlement's binding and this nonce (it must be the entitlement's op), the key's public key (it must
+ * be the binding's), and the coin's nullifier (it must be the transaction's ONE input's). The key is the
+ * one the unproven call's spend witness already carries for the relay to prove it (questions Q2 A): no
+ * new exposure, and it opens only this transfer's landing key.
+ */
+export const LandingSpendSchema = z.object({ nonce: hex64, coinSecretKey: hex64 }).strict();
+export type LandingSpend = z.infer<typeof LandingSpendSchema>;
+
 /** `bridge-out`: one sponsored second transaction of a landing coin (no signature: the entitlement). */
 export const BridgeOutPayloadSchema = z
   .object({
@@ -124,6 +158,8 @@ export const BridgeOutPayloadSchema = z
     proven: z.boolean(),
     /** The block whose state the call was built on (64 hex): the relay checks it against that state. */
     blockHash: hex64,
+    /** The coin the transaction spends (required: the relay refuses a bridge-out without it). */
+    spend: LandingSpendSchema.optional(),
   })
   .strict();
 export type BridgeOutPayload = z.infer<typeof BridgeOutPayloadSchema>;
@@ -173,6 +209,12 @@ export const BRIDGE_OUT_REFUSALS = {
   unshielded: 'bridge-out-unshielded',
   /** The call no longer runs on the contract's current state (a concurrent lock): rebuild and resend. */
   stale: 'bridge-out-stale',
+  /** The transaction does not spend exactly the entitled landing coin (audit C1). */
+  input: 'bridge-out-input',
+  /** A proven transaction: the relay cannot see which coin it spends (audit C1; the page sends it unproven). */
+  proven: 'bridge-out-proven',
+  /** This landing coin's second transaction failed after proving too many times (audit C1). */
+  attempts: 'bridge-out-attempts',
   entitlementInvalid: 'entitlement-invalid',
   entitlementUsed: 'entitlement-used',
   entitleNotFound: 'entitle-not-found',

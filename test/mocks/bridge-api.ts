@@ -19,6 +19,38 @@ export interface MockBridgeApi {
   /** Set the verdict an account address answers (default: deliverable). */
   setVerdict(address: string, verdict: RecipientVerdict['verdict'], code?: UndeliverableCode): void;
   requests: { method: string; path: string }[];
+  /** AA 00060 P10.4 (audit D7): set (or clear, with null) the `GET /deployment` record. */
+  setDeployment(record: unknown): void;
+}
+
+/** A bridge's deployment record (I-3 `GET /deployment`) that matches a registry entry (AA 00060 P10.4). */
+export function deploymentRecordOf(
+  e: {
+    splMint: string;
+    decimals: number;
+    name: string;
+    symbol: string;
+    bridgeProgram: string;
+    bridgeContract: string;
+    colour: string;
+    bridgeApi: string;
+  },
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    schema: 'effectstream.solana-midnight-bridge.deployment/1',
+    splMint: e.splMint,
+    splMintDecimals: e.decimals,
+    name: e.name,
+    symbol: e.symbol,
+    bridgeProgram: e.bridgeProgram,
+    bridgeContract: e.bridgeContract,
+    colour: e.colour,
+    midnightNetwork: 'undeployed',
+    solanaGenesisHash: '11111111111111111111111111111111',
+    api: e.bridgeApi,
+    ...extra,
+  };
 }
 
 /** A complete v2 view with defaults (an s2m contract delivery). */
@@ -46,6 +78,7 @@ export function mockBridgeApi(opts: { deployment?: unknown } = {}): MockBridgeAp
   const transfers = new Map<string, TransferView>();
   const verdicts = new Map<string, RecipientVerdict>();
   const requests: MockBridgeApi['requests'] = [];
+  let deployment: unknown = opts.deployment ?? null;
   const handler: Handler = (req) => {
     const url = new URL(req.url);
     requests.push({ method: req.method, path: url.pathname });
@@ -70,12 +103,15 @@ export function mockBridgeApi(opts: { deployment?: unknown } = {}): MockBridgeAp
         },
       );
     }
-    if (url.pathname === '/deployment' && opts.deployment) return json(opts.deployment);
+    if (url.pathname === '/deployment' && deployment) return json(deployment);
     return json({ error: 'not found' }, 404);
   };
   return {
     handler,
     requests,
+    setDeployment(record) {
+      deployment = record;
+    },
     setTransfer(view, id) {
       const key = id ?? view?.id;
       if (!key) throw new Error('setTransfer(null) needs the id');

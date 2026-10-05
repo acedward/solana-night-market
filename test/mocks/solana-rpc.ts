@@ -45,6 +45,8 @@ export interface MockSolanaRpc {
   calls: string[];
   /** Move the block height on by `n` (blockhashes handed out before then expire). */
   advanceBlockHeight(n: number): void;
+  /** AA 00060 P10.4 (audit D1): JSON-RPC methods that answer an error (an RPC that cannot be read). */
+  failing: Set<string>;
 }
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
@@ -75,6 +77,7 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
     sent: [],
     logsFor: () => [],
     calls: [],
+    failing: new Set<string>(),
     advanceBlockHeight(n) {
       slot += n;
     },
@@ -83,6 +86,7 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
       rpc.calls.push(body.method);
       const ok = (result: unknown) => json({ jsonrpc: '2.0', id: body.id, result });
       const err = (code: number, message: string) => json({ jsonrpc: '2.0', id: body.id, error: { code, message } });
+      if (rpc.failing.has(body.method)) return err(-32005, 'Node is behind (a test failure)');
       const p = body.params ?? [];
       const context = { slot: slot++ };
       switch (body.method) {

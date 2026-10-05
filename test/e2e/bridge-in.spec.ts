@@ -258,3 +258,37 @@ test('C3: a sign-and-send that answers after the timeout: status unknown, the lo
   await expect(record).toHaveAttribute('data-state', 'locked', { timeout: 30_000 });
   expect(s.rpc.sent).toHaveLength(1);
 });
+
+// AA 00060 P10.4 D1 + D5 (R-A2, R-B1, R-A5): the wallet SENT the lock and never answers, and Solana cannot
+// return the lock's transaction. The page must not say "Nothing was locked": the record stays "checking" and
+// blocks a second Bridge in of the token. Once the request has expired, "Stop checking" shows the evidence the
+// customer checks in their wallet, and unblocks the token.
+test('D1/D5: a lost lock Solana cannot return stays "checking" and blocks the token; once expired, "stop checking" shows the evidence and unblocks', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const s = await bridgeSite(page, { walletTimeoutSeconds: 5 });
+  s.wallet.lateAnswerMs = 600_000;
+  s.rpc.failing.add('getTransaction');
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  await expect(page.getByTestId('bridge-in-error')).toContainText('checking', { timeout: 15_000 });
+  expect(s.rpc.sent).toHaveLength(1);
+  s.rpc.advanceBlockHeight(1_000);
+  const record = page.getByTestId('bridge-in-record');
+  await expect(record).toContainText('could not be read', { timeout: 30_000 });
+  await expect(record).toHaveAttribute('data-state', 'unknown');
+  await expect(record).not.toContainText('Nothing was locked');
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-error')).toContainText('wait until this page has checked');
+  expect(txRequests(s.wallet)).toHaveLength(1);
+  await page.getByTestId('bridge-in-dismiss').click();
+  const evidence = page.getByTestId('bridge-in-dismiss-evidence');
+  await expect(evidence).toContainText('500 X');
+  await expect(evidence).toContainText(s.ata);
+  await page.getByTestId('bridge-in-dismiss-confirm').click();
+  await expect(record).toHaveAttribute('data-state', 'dismissed');
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-facts')).toBeVisible();
+});

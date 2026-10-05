@@ -38,11 +38,17 @@ import {
 import { countsAgainstBudget } from '../src/actions/failure-budget.js';
 import {
   LandingEntitlements,
+  WITHDRAW_ENTRY_POINT,
   bridgeOutAdmission,
+  bridgeOutExecutor,
+  entitle,
+  entitlePreauth,
   landingEntitlementKey,
+  landingOfWithdrawal,
   structuralChecks,
   type BridgeOutTxFacts,
 } from '../src/bridge/out-actions.js';
+import { createLogger } from '../src/log.js';
 import { bridgeKeyProblems } from '../src/bridge/registry-check.js';
 import { PublicError } from '../src/queue/jobs.js';
 import { buildLock } from '../../web/src/bridge/out/build.js';
@@ -407,6 +413,151 @@ describe('C12: an entitlement has one spelling', () => {
     const t = (exp: string) => `le1.${'5e'.repeat(32)}.${'11'.repeat(32)}.${exp}.${'22'.repeat(32)}`;
     expect(LANDING_ENTITLEMENT_PATTERN.test(t('1790000000'))).toBe(true);
     expect(LANDING_ENTITLEMENT_PATTERN.test(t('01790000000'))).toBe(false);
+  });
+});
+
+// ── Round 2 (AA 00060 P10.4): the audit's round-2 consolidation, D2, D3 and D7 (relay side) ──────────────
+// New functions and options are reached through `as Any`, so the run before the fix fails on each test's own
+// assertion instead of on a type error.
+
+const silent = createLogger({ level: 'error', sink: () => undefined });
+
+describe('D2: a consumed landing coin stays consumed (R-A1, R-B2)', () => {
+  const binding: LandingBinding = {
+    deviceKey: WALLET,
+    coinPublicKey: 'cc'.repeat(32),
+    colour: 'c3'.repeat(32),
+    amount: '5',
+  };
+
+  it('a spent op outlives the token that spent it, and a restart: a re-issue 31 days later is refused', () => {
+    const file = join(tempDir(), 'landing-entitlements.json');
+    let now = 1_800_000_000;
+    const a = new LandingEntitlements({ key: KEY, network: NETWORK_ID, file, now: () => now } as Any);
+    const token = a.issue(ACCOUNT, binding, 'ad'.repeat(32));
+    const held = a.admit(token, ACCOUNT, binding);
+    expect(held.ok).toBe(true);
+    if (held.ok) held.finished?.({ ok: true, proved: true, requesterFault: false });
+    now += 31 * 86_400; // past the 30-day token that spent it
+    const b = new LandingEntitlements({ key: KEY, network: NETWORK_ID, file, now: () => now } as Any);
+    const reissued = b.issue(ACCOUNT, binding, 'ad'.repeat(32));
+    expect(b.admit(reissued, ACCOUNT, binding)).toMatchObject({ ok: false, code: 'entitlement-used' });
+    expect(Object.keys(JSON.parse(readFileSync(file, 'utf8')).spent)).toHaveLength(1);
+  });
+
+  it('bridge-out-entitle refuses to re-issue the entitlement of a consumed landing coin', async () => {
+    const entitlements = new LandingEntitlements({ key: KEY, network: NETWORK_ID });
+    const p = {
+      tx1Hash: 'ab'.repeat(32),
+      spentCoin: { nonce: randHex(), color: 'c3'.repeat(32), value: '9' },
+      amount: '5',
+      landingCoinPublicKey: 'cc'.repeat(32),
+      deviceKey: WALLET,
+      useCounter: '0',
+    };
+    const landing = landingOfWithdrawal({
+      recipient: p.landingCoinPublicKey,
+      color: p.spentCoin.color,
+      amount: p.amount,
+      coin: p.spentCoin,
+      deviceKey: p.deviceKey,
+    });
+    const deps = {
+      entitlements,
+      tx1: async () => ({ entryPoints: [WITHDRAW_ENTRY_POINT], outputs: [landing.commitment] }),
+      liveDevice: async () => true,
+    };
+    const token = await entitle(deps, ACCOUNT, p);
+    const held = entitlements.admit(token, ACCOUNT, landing.binding);
+    if (held.ok) held.finished?.({ ok: true, proved: true, requesterFault: false });
+    await expect(entitle(deps, ACCOUNT, p)).rejects.toMatchObject({ code: 'entitlement-used' });
+  });
+
+  it('a lock that lands after the wait is recorded spent once it is seen (a late landing)', async () => {
+    const bridge = await bridgeAt();
+    const owner = walletWith(bridge.colour, [50_000_000n]);
+    const entitlements = new LandingEntitlements({ key: KEY, network: NETWORK_ID });
+    const c = await lockCase({ bridge, owner, entitled: owner.coins[0]!, entitlements });
+    expect(c.out).toMatchObject({ ok: true });
+    const held = entitlements.admit(c.token, ACCOUNT, c.binding);
+    expect(held.ok).toBe(true);
+    let landLate!: (landed: boolean) => void;
+    const late = new Promise<boolean>((r) => (landLate = r));
+    const exec = bridgeOutExecutor({
+      ...admissionDeps(bridge, entitlements),
+      prove: async (tx: Any) => ({ bind: () => tx }),
+      submitWithDust: async () => 'fe'.repeat(32),
+      awaitLanded: async () => false,
+      lateLanding: () => late,
+      log: silent,
+    } as Any);
+    const ctx = { requestId: 'r1', log: silent, stage: () => undefined, prove: <T>(fn: () => Promise<T>) => fn() };
+    await expect(exec({ ...c.payload, account: ACCOUNT }, ctx as Any)).rejects.toMatchObject({
+      code: 'bridge-out-stale',
+    });
+    if (held.ok) held.finished?.({ ok: false, proved: true, requesterFault: false, code: 'bridge-out-stale' });
+    landLate(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(entitlements.admit(c.token, ACCOUNT, c.binding)).toMatchObject({ ok: false, code: 'entitlement-used' });
+  }, 60_000);
+});
+
+describe('D3: the re-issue evidence reads are bounded relay-wide (R-A3)', () => {
+  it('at most 2 history reads at once, 2 more wait their turn, and the rest are refused 503 busy', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const gates: Array<() => void> = [];
+    const deps = {
+      entitlements: new LandingEntitlements({ key: KEY, network: NETWORK_ID }),
+      tx1: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise<void>((r) => gates.push(r));
+        inFlight--;
+        return null;
+      },
+      liveDevice: async () => true,
+      readLimit: { max: 2, waiting: 2 },
+    };
+    const pre = entitlePreauth(deps as Any);
+    const body = () => ({
+      account: ACCOUNT,
+      payload: {
+        tx1Hash: randHex(),
+        spentCoin: { nonce: randHex(), color: 'c3'.repeat(32), value: '9' },
+        amount: '5',
+        landingCoinPublicKey: randHex(),
+        deviceKey: WALLET,
+        useCounter: '0',
+      },
+    });
+    const done: Any[] = [];
+    const all = Array.from({ length: 6 }, () => pre(body() as Any).then((o: Any) => done.push(o)));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(peak).toBe(2);
+    expect(done.filter((o) => o.status === 503 && o.code === 'busy')).toHaveLength(2);
+    while (done.length < 6) {
+      gates.shift()?.();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await Promise.all(all);
+    expect(peak).toBe(2);
+    expect(done.filter((o) => o.status === 403)).toHaveLength(4);
+  });
+});
+
+describe('D7: the relay fails closed when it cannot check the sealed mint (R-B5)', () => {
+  it('a bridge module that cannot be loaded, or has no ledger decoder, stops the start', async () => {
+    const mod: Any = await import('../src/bridge/registry-check.js');
+    expect(typeof mod.loadBridgeLedger).toBe('function');
+    await expect(
+      mod.loadBridgeLedger('/nowhere', async () => {
+        throw new Error('ENOENT');
+      }),
+    ).rejects.toThrow(/cannot check/);
+    await expect(mod.loadBridgeLedger('/m', async () => ({}))).rejects.toThrow(/cannot check/);
+    const ledgerFn = () => ({ sourceMint: new Uint8Array(32) });
+    expect(await mod.loadBridgeLedger('/m', async () => ({ ledger: ledgerFn }))).toBe(ledgerFn);
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

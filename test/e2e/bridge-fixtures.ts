@@ -10,7 +10,7 @@ import { expect, type Page } from '@playwright/test';
 import { bytesToHex } from '../../packages/core/src/hex.js';
 import { TOKEN_PROGRAM_ID } from '../../packages/core/src/solana/tx.js';
 import { associatedTokenAddress } from '../../packages/core/src/solana/pda.js';
-import { mockBridgeApi, type MockBridgeApi } from '../mocks/bridge-api.js';
+import { deploymentRecordOf, mockBridgeApi, type MockBridgeApi } from '../mocks/bridge-api.js';
 import { asFetch } from '../mocks/http.js';
 import { mockSolanaRpc, type MockSolanaRpc } from '../mocks/solana-rpc.js';
 import { MockIndexer, INDEXER, INDEXER_OVERRIDE, INDEXER_WS } from './mock-indexer.js';
@@ -62,7 +62,14 @@ export async function bridgeSite(
 ): Promise<Site> {
   await serveExchange(page);
   const rpc = mockSolanaRpc();
-  const bridge = mockBridgeApi();
+  // The bridge's own deployment record matches the site's registry (AA 00060 P10.4, audit D7: Bridge in
+  // refuses a bridge it cannot verify).
+  const bridge = mockBridgeApi({
+    deployment: deploymentRecordOf({
+      ...(X as unknown as Parameters<typeof deploymentRecordOf>[0]),
+      bridgeApi: BRIDGE,
+    }),
+  });
   const rpcFetch = asFetch(rpc.handler);
   const wallet = await installMockWallet(page, {
     profile: opts.profile ?? DEFAULT_PROFILE,

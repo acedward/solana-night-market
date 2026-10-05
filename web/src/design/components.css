@@ -2039,8 +2039,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
-/* Your own offer's row: the badge, then "Cancel your offer" (FR-027). In a narrow half (a phone)
-   the button's words wrap, so the row never runs past the book's edge. */
+/* Your own offer's row: the badge, then a short note (FR-027 as amended, questions Q9). In a narrow
+   half (a phone) they stack, so the row never runs past the book's edge. */
 .own-act {
   display: inline-flex;
   flex-wrap: wrap;
@@ -2053,11 +2053,9 @@
     flex-direction: column;
     align-items: flex-end;
   }
-  .own-act .btn {
-    white-space: normal;
-    text-align: center;
-    line-height: 1.2;
-    max-width: 6.5em;
+  .own-act [data-testid='own-offer-note'] {
+    text-align: right;
+    max-width: 9em;
   }
 }
 /* The ⇄ of "Order book <base> ⇄ <quote>", drawn (not every font has the glyph). */

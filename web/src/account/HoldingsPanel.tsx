@@ -25,6 +25,7 @@ import { Button, ButtonLink, Hash, Icon, Panel, TokenIcon } from '../design/inde
 import { useTokenRegistry } from '../market/MarketContext.js';
 import { useStore } from '../store/StoreContext.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
+import { useMidnightReadFailure } from '../passport/read-status.js';
 import { actionHref } from './PortfolioActions.js';
 import { useAccountView, useUnshieldedBalances } from './useAccountView.js';
 
@@ -45,11 +46,13 @@ export function BridgedHolding({
   const id = useId();
   const dec = row.entry.decimals;
   const mark =
-    row.solana.state === 'unavailable'
-      ? 'Solana unavailable'
-      : row.solana.state === 'loading'
-        ? 'Reading Solana…'
-        : null;
+    row.midnight === null
+      ? 'Midnight unavailable'
+      : row.solana.state === 'unavailable'
+        ? 'Solana unavailable'
+        : row.solana.state === 'loading'
+          ? 'Reading Solana…'
+          : null;
   return (
     <li
       className="holding-bridged"
@@ -72,7 +75,11 @@ export function BridgedHolding({
         <span className="sym">
           {symbol}
           {mark && (
-            <span className="kind-chip" data-testid="holding-solana-mark" data-state={row.solana.state}>
+            <span
+              className="kind-chip"
+              data-testid="holding-solana-mark"
+              data-state={row.midnight === null ? 'midnight-unavailable' : row.solana.state}
+            >
               {mark}
             </span>
           )}
@@ -84,7 +91,9 @@ export function BridgedHolding({
         <span className="sr-only">{open ? ' (hide Midnight and Solana)' : ' (show Midnight and Solana)'}</span>
       </button>
       <ul className="holding-versions" id={id} hidden={!open} data-testid="holding-versions">
-        <li data-testid="holding-midnight">{fmt(row.midnight, dec)} (Private) on Midnight</li>
+        <li data-testid="holding-midnight" data-state={row.midnight === null ? 'unavailable' : 'ok'}>
+          {row.midnight === null ? 'Midnight: unavailable' : `${fmt(row.midnight, dec)} (Private) on Midnight`}
+        </li>
         <li data-testid="holding-solana" data-state={row.solana.state}>
           {row.solana.state === 'ok'
             ? `${fmt(row.solana.amount, dec)} on Solana`
@@ -128,6 +137,8 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
   const unshielded = useUnshieldedBalances(chain, account && hasSecret ? account.address : null, revision);
   // FR-025: the same Solana lines as the Portfolio's rows (one read for both views).
   const solana = useSolanaHoldings(coins);
+  // P11 (light review L-B1): after a failed read on Midnight, no total from the stale coins.
+  const midnightFailure = useMidnightReadFailure(account && hasSecret ? account.address : null);
 
   const rows = useMemo(() => {
     const order = (colour: string) => {
@@ -141,8 +152,8 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
       .map((b) => ({ colour: b.colour, amount: BigInt(b.amount) }))
       .filter((b) => assets.showsColour(b.colour));
     const entries = solana.entries.filter((e) => assets.showsColour(e.colour));
-    return compactRows(shielded, open, entries, solana.lines, order);
-  }, [coins, unshielded.view, tokens, assets, solana.entries, solana.lines]);
+    return compactRows(shielded, open, entries, solana.lines, order, midnightFailure);
+  }, [coins, unshielded.view, tokens, assets, solana.entries, solana.lines, midnightFailure]);
 
   if (wallet.status !== 'connected' || !wallet.address) {
     return (

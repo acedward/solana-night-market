@@ -526,7 +526,9 @@ describe('AA 00047 P9.I: cancel-offers (questions Q30) is rotate_enc_key with th
     });
   });
 
-  it('the catalogue wires the executor (no longer the not-implemented placeholder)', async () => {
+  // AA 00060 spec FR-028 (owner, 2026-10-05; supersedes Q30): the market no longer offers it. The production
+  // catalogue marks it refused (the route answers 403 `offers-cannot-be-cancelled` before anything else).
+  it('the catalogue refuses it (offers cannot be cancelled, AA 00060 FR-028)', () => {
     const catalogue = accountCatalogue({
       runtime: () => null,
       arm,
@@ -538,10 +540,7 @@ describe('AA 00047 P9.I: cancel-offers (questions Q30) is rotate_enc_key with th
     });
     const def = catalogue.get('cancel-offers')!;
     expect(def.auth).toBe('passport-call');
-    expect(def.implementedBy).toBe('P9.I');
-    // Without a runtime the executor says so (not "not-implemented").
-    const ctx = { log: { info: () => {} } } as never;
-    await expect(def.executor({ account: 'ab'.repeat(32) }, ctx)).rejects.toMatchObject({ code: 'not-available' });
+    expect(def.refused).toMatchObject({ status: 403, code: 'offers-cannot-be-cancelled' });
   });
 });
 
@@ -578,13 +577,17 @@ describe('AA 00047 P10.R: restore-enc-key (audit round 2 R2-3) is rotate_enc_key
     const owner = wallet();
     const a = accountOf(owner);
     const rt = runtimeOf(a);
-    for (const key of [a.encKey, '00'.repeat(32)]) {
+    // AA 00060 spec FR-028: the account's own key again is an offer cancel, refused with its own code.
+    for (const [key, code] of [
+      [a.encKey, 'offers-cannot-be-cancelled'],
+      ['00'.repeat(32), 'malformed'],
+    ] as const) {
       const p = restore(a, key);
       // Even a valid signature over it is refused.
       const passportAuth = await browserGated(owner, a, restoreEncKeyRequest(p));
       expect(await arm.checkGatedCall(rt, 'restore-enc-key', a.account, p, passportAuth)).toMatchObject({
         ok: false,
-        code: 'malformed',
+        code,
       });
     }
   });

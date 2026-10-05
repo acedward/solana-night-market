@@ -27,7 +27,6 @@ export type ActivityKind =
   | 'withdraw'
   | 'withdraw-unshielded'
   | 'append-inbox'
-  | 'cancel-offers'
   | 'restore-enc-key';
 
 export const ACTIVITY_TITLE: Record<ActivityKind, string> = {
@@ -38,7 +37,6 @@ export const ACTIVITY_TITLE: Record<ActivityKind, string> = {
   withdraw: 'Withdrawing',
   'withdraw-unshielded': 'Withdrawing',
   'append-inbox': 'Saving your change',
-  'cancel-offers': 'Cancelling your offer',
   'restore-enc-key': 'Restoring your encryption key',
 };
 
@@ -96,13 +94,6 @@ export const ACTIVITY_FLOW: Record<ActivityKind, ActivityFlow> = {
     steps: ON_CHAIN_STEPS,
     note: `Signed. The market records the coin in your account's inbox on Midnight; this usually takes about 40 seconds. ${KEEP_BROWSING}`,
   },
-  // AA 00047 P9.S (audit C6, questions Q30): one transaction that moves the account's nonce, so the
-  // offer (and anything else signed before) can never be taken.
-  'cancel-offers': {
-    end: 'on-chain',
-    steps: ON_CHAIN_STEPS,
-    note: `Signed. The market sends one transaction to Midnight that makes every open offer of your account unusable; this usually takes about 40 seconds. ${KEEP_BROWSING}`,
-  },
   // AA 00047 P10 (audit round 2, R2-3): the same circuit, back to this browser's key.
   'restore-enc-key': {
     end: 'on-chain',
@@ -120,7 +111,6 @@ export const EXPECTED_SECONDS: Record<string, number> = {
   withdraw: 42,
   'withdraw-unshielded': 42,
   'append-inbox': 39,
-  'cancel-offers': 39,
   'restore-enc-key': 39,
 };
 

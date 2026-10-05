@@ -37,6 +37,7 @@ import {
   type BridgeOutContext,
 } from './operations.js';
 import { isFinalOut, putBridgeOut, readBridgeOuts, type BridgeOutRecord } from './records.js';
+import { confirmCancelsOffer } from '../../trade/operations.js';
 
 /** How often a lock is followed until it arrives on Solana (ms). */
 export const BRIDGE_OUT_POLL_MS = 6_000;
@@ -205,6 +206,9 @@ export function BridgeOut({
     const a = asking;
     setAsking(null);
     if (!a) return;
+    // Its withdrawal (tx1) moves the account's nonce, so it ends a live offer: ask first (spec FR-028; the
+    // same warning as a withdrawal's).
+    if (store && scope && !confirmCancelsOffer({ store, scope }, account, 'withdraw')) return;
     void run('bridge-out', async (c) => {
       const m = await master(c);
       const coin = chooseCoin(coins, a.entry.colour, a.raw);

@@ -12,8 +12,8 @@
 // Every make and take SIGNS a real expiry (AA 00047 P9.S, audit C6): a make lasts
 // OFFER_LIFETIME_SECONDS, a take TAKE_LIFETIME_SECONDS (@nightmarket/core). The circuit refuses the
 // call after it, whoever holds the approval, and the offer's status here follows that signed expiry
-// (never the relay's transaction TTL). "Cancel offer" ends it sooner (../passport/operations.ts
-// `cancelOpenApprovals`, questions Q30).
+// (never the relay's transaction TTL). Offers cannot be cancelled (AA 00060 spec FR-028, owner
+// 2026-10-05; supersedes 00047 Q30's "Cancel offer"): any other signed call of the account ends one sooner.
 //
 // An approval is marked ENDED only from what this browser reads on the CHAIN, and its own signed
 // expiry (AA 00047 P10, audit round 2 R2-4; spec FR-004b "Round 2"), never from the relay's or the
@@ -62,7 +62,6 @@ import { freshWantNonce, offerInboxEntriesPortable, predictChangeCoin } from '@n
 import {
   JobFailedError,
   OperationError,
-  cancelOpenApprovals,
   dropJob,
   gatedContext,
   putJob,
@@ -291,7 +290,7 @@ export function wantCoinOf(
  *              spending the approval's coin (`fillEvidence`); `settledTx` is that transaction;
  *   cancelled  the nonce moved, and the history, complete through the height the nonce was read at,
  *              holds no such transaction, and every candidate's raw calls were read and decoded: it can
- *              never execute (another signed call, or "Cancel offer");
+ *              never execute (another signed call of the account; before FR-028, also "Cancel offer");
  *   ended      the nonce moved, no such transaction was read, and the history is NOT complete, or a
  *              candidate fill's raw calls could not be read or decoded (AA 00047 P11.F, R4-4): it can
  *              never execute, but whether it filled is not known (decided again on the next read);
@@ -401,18 +400,6 @@ export function guardFor(
   now = Date.now(),
 ) {
   return guardSignedAction(action, liveOffer(readTrades(env.store, env.scope, account), now), now);
-}
-
-/**
- * "Cancel offer" (audit C6, questions Q30): land the nonce bump that ends every open approval of the
- * account. Done only when the CHAIN shows the new nonce (`cancelOpenApprovals`), and an offer shows
- * Cancelled only when, on that chain read, it was not filled instead (R2-4: a fill moves the nonce
- * too, and a relay can settle the offer it holds and report the cancel done).
- */
-export async function cancelOffers(env: OperationEnv, account: string): Promise<{ txId: string; cancelled: number }> {
-  const { txId } = await cancelOpenApprovals(env, account);
-  const changed = await reconcileOffers(env, account, null);
-  return { txId, cancelled: changed.filter((t) => t.status === 'cancelled').length };
 }
 
 /** After another signed call of the account (a withdrawal, a re-filed change, a key restore): decide

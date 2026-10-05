@@ -114,6 +114,7 @@ const job = z
       'open-swap',
       'take',
       'demo-tokens',
+      // Removed (AA 00060 FR-028), kept so older exports still import.
       'cancel-offers',
       'restore-enc-key',
     ]),

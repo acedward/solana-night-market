@@ -18,14 +18,14 @@ import { formatUnits, type JobView, type SplFaucetInfo, type SplFaucetResult } f
 import { Button, CopyField, Icon, Notice, Panel, shortHex } from '../../design/index.js';
 import { RelayClient } from '../../relay/client.js';
 import { useWallet } from '../../wallet/WalletContext.js';
-import { useBridges } from '../BridgeContext.js';
-import { SolanaRpc } from '../solana-rpc.js';
+import { useSolanaRpcGuard } from '../SolanaLinesContext.js';
 import {
   claimSolanaTokens,
   faucetAmountsText,
   faucetAvailability,
   faucetErrorText,
   faucetOffer,
+  faucetSolanaRpc,
   faucetTime,
   solanaBalances,
 } from './operations.js';
@@ -97,8 +97,11 @@ function useFaucetFlow(
   onDone?: () => void,
 ) {
   const { info, availability, reload, relay, wallet } = useSplFaucetOffer(relayUrl, walletAddress);
-  const bridges = useBridges();
-  const rpc = useMemo(() => (bridges.state === 'ready' ? new SolanaRpc(bridges.solana.rpcUrl) : null), [bridges]);
+  // P11 (light review L-B2): the same checked Solana RPC as the Portfolio's lines, never the injector.
+  const guard = useSolanaRpcGuard();
+  const target = useMemo(() => faucetSolanaRpc(guard), [guard]);
+  const rpc = target && 'rpc' in target ? target.rpc : null;
+  const rpcRefused = target && 'refused' in target ? target.refused : null;
   const [balances, setBalances] = useState<Map<string, bigint | null> | null>(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobView | null>(null);
@@ -153,6 +156,7 @@ function useFaucetFlow(
     availability,
     wallet,
     rpc,
+    rpcRefused,
     balances,
     busy,
     job,
@@ -178,9 +182,16 @@ function ClaimButton({ f }: { f: Flow }) {
 }
 
 function FlowBody({ f }: { f: Flow }): ReactNode {
-  const { info, availability, wallet, rpc, balances, busy, job, result, error, tokens, claimed, waiting } = f;
+  const { info, availability, wallet, rpc, rpcRefused, balances, busy, job, result, error, tokens, claimed, waiting } =
+    f;
   const balance = (mint: string, decimals: number) =>
-    balances ? amount(balances.get(mint), decimals) : rpc ? '…' : 'unavailable';
+    balances
+      ? amount(balances.get(mint), decimals)
+      : rpc
+        ? '…'
+        : rpcRefused
+          ? `unavailable (${rpcRefused})`
+          : 'unavailable';
   return (
     <>
       {!wallet && <p className="small">Connect a Solana wallet first.</p>}

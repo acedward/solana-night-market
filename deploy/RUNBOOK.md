@@ -3,8 +3,9 @@
 Night Market is a create-and-trade market on Midnight whose accounts are controlled by **Solana
 wallets** (Phantom): each account is a Passport account contract with the Ed25519 arm, and every
 account action is approved by ONE `signMessage` in the wallet. The relay proves, pays every DUST
-fee from its sponsor wallet, and submits. There is no bridge and no Sepolia. The tokens are native
-Midnight test tokens from the mint-test-tokens faucets.
+fee from its sponsor wallet, and submits. There is no Sepolia. The tokens are native Midnight test
+tokens from the mint-test-tokens faucets, plus, when bridging is configured (AA 00060, section 17),
+SPL tokens bridged in from Solana.
 
 This runbook deploys and runs the market on Midnight **stagenet**, a test network: nothing here
 carries real value. Every command runs from the repository root unless it says otherwise.
@@ -46,7 +47,7 @@ Go through it before the market goes on a production server; each item names its
   same fingerprint; the first account opened after the start must show as open, with no refusal.
 - [ ] **The caps** (9): keep the defaults of `deploy/.env.example` unless a pattern shows:
   registrations 100 a day, 3 per client address, 1 at a time; per account 1 job at a time, 3 open
-  offers, 20 makes, 5 cancels, 3 key restores, 100 withdrawals (then one whole-coin exit per
+  offers, 20 makes, 3 key restores, 100 withdrawals (then one whole-coin exit per
   token), 20 change re-filings and 10 unsettled takes a day; 5 failures a day per key and per
   account; 100 demo-token claims a day; fee margin 20; low DUST at 10; the prover lane's order
   (takes, then makes, then the rest: `PROVER_PRIORITY_BURST` 4, `PROVER_USAGE_WINDOW_SECONDS` 3600,
@@ -69,6 +70,11 @@ Go through it before the market goes on a production server; each item names its
   minutes old (section 7).
 - [ ] **After the first start**: `/health` is `ok`; watch the contract prover's memory
   (`docker stats`) for the first days, and restart it more often if it climbs past 12 GiB.
+- [ ] **Bridging, only if you bridge** (17): the journey registry generated once for the site and the
+  relay (`scripts/bridge-tokens.ts`), `BRIDGE_REGISTRY_FILE` and `RELAY_DATA_DIR` on the relay, the
+  bridge bundle in the key volume, the site's `solana` (and `injector`) settings, and every bridge's
+  `GET /deployment` reachable from the browser. On any shared network, the test faucet holds a
+  dedicated faucet key, never a bridge operator's (17.6).
 
 ## Contents
 
@@ -88,6 +94,7 @@ Go through it before the market goes on a production server; each item names its
 14. [Reference: pins and addresses](#14-reference-pins-and-addresses)
 15. [Several domains: one build, one relay](#15-several-domains-one-build-one-relay)
 16. [The browser reads the chain itself; the Content-Security-Policy](#16-the-browser-reads-the-chain-itself-the-content-security-policy)
+17. [Bridging and the Solana side (AA 00060)](#17-bridging-and-the-solana-side-aa-00060)
 
 ## 1. What runs
 
@@ -754,9 +761,15 @@ day is about 41 DUST.
   account. The page computes the change itself; a market that reports another one is named.
 - **Your browser checks your account on Midnight itself** (section 16): an account that is not this
   market's own, or that has any device besides your wallet, is refused, and nothing is signed for it.
-- **Offers expire**: an offer can be taken for one hour after you approve it (a take for ten
-  minutes), whoever holds the approval. **Cancel offer** ends it sooner (one approval, one
-  transaction).
+- **Offers expire, and cannot be cancelled** (AA 00060 FR-028): an offer can be taken for one hour
+  after you approve it (a take for ten minutes), whoever holds the approval. Any other approval of
+  the account (a take, a withdrawal, a Bridge out, saving a change, restoring the key) ends it
+  sooner; the page asks first. A future Offer Files feature will provide cancellation for every
+  client.
+- **Bridging** (when configured, section 17): Bridge in is one Solana transaction; Bridge out asks
+  for the landing-key text twice in a fresh tab, then one withdrawal approval, plus one more to save
+  the change when only part of a coin goes out. The landing-key signature is a key: sign it only on
+  this site.
 - **Demo tokens**: once per wallet. These are test networks and test tokens.
 - **The About page** (`/#about`, linked from every page's footer) lists the known limitations in
   plain words, as the README's "Known limitations" does. It says nothing about the withdrawal
@@ -807,7 +820,11 @@ adds the operator's side.
   approval (audit R3-9; questions Q50): the relay lands only a restore to the opening key, but the
   circuit accepts any key, so such a page reads the sealed notes filed after it (privacy, not funds).
 - **The contract prover's memory grows** (plan risk R7): 14g and the periodic restart (sections 2
-  and 12.1).
+  and 12.1). With bridging, a bridge-out proves two transactions; the AA 00060 owner session hit a
+  12 GiB cap after several proofs. Give the container `restart: on-failure` as well.
+- **Bridging** (section 17): the README's "Bridging (AA 00060)" limitations, and for the operator:
+  the relay's landing entitlements live in `RELAY_DATA_DIR` (keep it with the backups), and the site
+  trusts its Solana RPC (17.3).
 
 ## 12. Start, stop, upgrade and re-pin
 
@@ -1074,3 +1091,127 @@ for it). The relay is the same-origin `/relay` here; a relay on another origin (
 indexer set in `config.json` must be added to `connect-src` (the indexer with both its `https:` and
 its `wss:` endpoint; a `config.json` that moves only `indexerUrl` gets the WebSocket at the same host
 and path plus `/ws`).
+
+## 17. Bridging and the Solana side (AA 00060)
+
+Optional. Without a journey registry the market runs exactly as before. With one, customers can:
+- **Bridge in** an SPL token from Solana (one Solana transaction, a lock in that token's bridge);
+- **Bridge out** to Solana (a landing key derived from the wallet's signature, then two Midnight
+  transactions the market proves and pays for);
+- use **Show in my wallet** (the account's Midnight tokens in Nightly, through an RPC injector);
+- use **Mint Solana tokens** (a test faucet for the bridged SPL tokens).
+
+What follows states what each part needs. A packaged deployment is a later step (the owner,
+2026-10-05: "we will start working on the deployment once all is working 100% locally"); the local
+stacks in `test/stack/p6` and the AA 00060 / 00057 harnesses run all of it today.
+
+### 17.1 The journey registry, and the generator
+
+One file, the **journey registry** (I-1, `journey-tokens.<network>.json`, made by the 00057
+journey's tooling), lists every bridged token: its Midnight colour, SPL mint, bridge program, bridge
+contract, bridge API, name, symbol (1–8 printable characters, no space) and decimals. The site and
+the relay must agree on the token lists, so generate both from it with:
+
+```sh
+bun scripts/bridge-tokens.ts journey-tokens.json \
+  --site-config web/public/config.json --relay-tokens tokens.json \
+  --pairs X/Y --solana-rpc https://api.devnet.solana.com
+```
+
+It writes the site's `tokens`, `pairs` and `bridges` into the site's `config.json`, and the relay's
+token list (`TOKENS_FILE`). With `--solana-rpc` it also checks each mint on that RPC (a classic SPL
+Token mint with the registry's decimals) and the RPC's genesis hash. It prints the lists' digest,
+which `GET /v1/config` reports as `tokensDigest`. Exit codes: 0 written, 65 refused (the reason is
+named), 64 usage. `--icons none` leaves the icons out; by default the bundled set
+(`scripts/token-icons.json`) is used.
+
+### 17.2 The site
+
+`config.json` (README, Configuration):
+- `solana`: the site's Solana RPC and cluster. The page refuses to bridge when its genesis hash
+  differs from the registry's.
+- `bridges`: the generated registry.
+- `injector`: Show in my wallet's RPC injector, if offered.
+
+The Content-Security-Policy's `connect-src` must also name:
+- the Solana RPC's origin;
+- each bridge API's origin (the page reads `GET /transfers/:id` and, before every Bridge in,
+  `GET /deployment`: a bridge that does not answer gets no lock);
+- the injector's origin.
+
+### 17.3 The relay
+
+- `BRIDGE_REGISTRY_FILE`: the same journey registry, mounted read-only (compose: add the variable
+  and the file mount to the `relay` service in an override file). Every bridged token must be in
+  `TOKENS_FILE` with the same colour, symbol and decimals, or the relay refuses to start.
+- **The key volume holds the bridge bundle** as `<key volume>/bridge/`: the 00050 template's
+  compiled bridge (`packages/contracts-midnight/contract-bridge/src/managed`, unchanged, `bridge.compact`
+  sha256 `b6150529…`). At start the relay checks:
+  - each bridge's deployed `lockForSolana` verifier key against `bridge/keys/lockForSolana.verifier`;
+  - each bridge's sealed SPL mint against the registry, through `bridge/contract/index.js`.
+
+  It refuses to start (exit 78) on a mismatch, or when the module or its ledger decoder does not
+  load.
+- `RELAY_DATA_DIR` is required with bridges: `landing-entitlements.json` there remembers every
+  landing coin locked or returned (so a coin cannot be sponsored twice) and the failed attempts.
+  Back it up with the rest of `relay-data`.
+- The landing entitlements' MAC key is derived from the sponsor seed: there is no separate secret.
+- `RATE_LIMIT_UNAUTHENTICATED_PER_MIN` (default 6): the per-client budget for the unsigned actions
+  (`bridge-out`, `bridge-out-entitle`, `spl-faucet`). A re-issue's history reads run at most 2 at once
+  (8 more wait; then `503 busy`).
+- **DUST per bridge-out** (P9.6, local stack): about 0.70–0.75 DUST (tx1 0.34–0.36, the lock
+  0.33–0.41). The stack's peak memory was 15.9 GiB. A bridge-out takes about 45 s for tx1, 25 s for
+  the lock, and 20–25 s more to arrive on Solana.
+
+### 17.4 The bridges and the injector
+
+Each bridge (the 00058 bridge node) and the injector (00059) are separate services with their own
+runbooks. Night Market only reads them. It never sends their operators' keys anywhere, and it never
+reads a Solana balance through the injector: a `solana.rpcUrl` on the injector's origin is refused.
+
+### 17.5 What the market cannot do with bridging
+
+The README's "Bridging (AA 00060)" limitations, in short:
+- the market's prover sees one transfer's landing key while it proves;
+- the landing-key signature is a permanent key for that site, network and wallet;
+- one coin per Bridge out;
+- the site's Solana RPC is trusted to report honestly and to honour `minContextSlot`;
+- finding a landing coin replays the chain's Zswap history.
+
+### 17.6 Mint Solana tokens: the test SPL faucet
+
+Off unless `SPL_FAUCET_KEYS_FILE` is set (`deploy/.env.example` lists every `SPL_FAUCET_*` setting).
+It mints each registry mint's configured amount (default 1,000) to the requesting wallet, once per
+wallet per period (default 24 h, kept in `<RELAY_DATA_DIR>/spl-faucet-claims.json`). It creates the
+wallet's token accounts if needed and pays the fee itself; the wallet is asked for nothing. It is
+refused on Solana mainnet-beta, and whenever a mint's on-chain mint authority is not the key held
+(checked at start and before every claim).
+
+**Which key it holds (00060 Q7, owner decision A):**
+- On a **local** chain thrown away after the run, the bridges' operator keys (each mint's authority
+  in the 00050 template's deploy) may be used as they are.
+- On **any shared network**, first hand each test mint's authority to a dedicated faucet key, once,
+  signed by the operator: `spl-token authorize <mint> mint <faucet pubkey>`. Then give the relay only
+  that key. Never give the relay a bridge operator's key there: that key also signs the bridge's
+  releases and upgrades its program.
+
+`relay/src/tools/spl-faucet-keys.ts` writes the keys file (mode 600) from the keypair that the
+chain names as each mint's authority.
+
+### 17.7 Nightly, for support
+
+- Nightly joins the lines of the text it shows; the amounts in base units and the token ids stay
+  visible.
+- Nightly loads a new token's name only when it is reopened: after Show in my wallet, close and
+  reopen Nightly.
+- The page asks the wallet for one approval at a time, with a short pause between them. If no window
+  appears, open the wallet from the browser's toolbar.
+
+### 17.8 Breaking changes (AA 00060)
+
+The README's "Breaking changes in AA 00060" lists them for deployments and for page-driving scripts.
+For the operator:
+- `RELAY_DATA_DIR` is required with `BRIDGE_REGISTRY_FILE`.
+- The relay refuses to start (exit 78) when the bridge module or its ledger decoder does not load.
+- Offers cannot be cancelled: `cancel-offers` answers `403 offers-cannot-be-cancelled`, and
+  `CANCELS_PER_ACCOUNT_PER_DAY` is unused.

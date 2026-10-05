@@ -69,12 +69,13 @@ test.describe('R2-4: an approval ends on the chain’s word, never the relay’s
     await expect(myMake(page)).toHaveAttribute('data-state', 'cancelled');
   });
 
-  test('a cancel the relay lands as the offer’s FILL shows Filled, never Cancelled', async ({ page }) => {
+  test('an offer someone settles shows Filled from the chain, never Cancelled', async ({ page }) => {
     const { relay } = await setup(page, { seeded: true });
     await makeAnOffer(page);
-    relay.settleOnCancel = true;
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('Your offer was taken before the cancel landed');
+    // AA 00060 FR-028: the page cancels nothing; someone settles the offer this relay holds.
+    await relay.settleHeldOfferBySomeone();
+    await page.reload();
+    await connectPhantom(page);
     await expect(myMake(page)).toHaveAttribute('data-state', 'filled');
     await expect(myMake(page).getByTestId('my-trade-tx')).not.toContainText('—');
   });

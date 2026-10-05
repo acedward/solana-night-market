@@ -32,6 +32,7 @@ import {
   followBridgeIn,
   isFinal,
   nothingLockedText,
+  notSentEvidence,
   pageBalance,
   precheckBridgeIn,
   sendBridgeIn,
@@ -204,6 +205,8 @@ export function BridgeIn({
     setWorking('send');
     // Audit E2: whether the lock has left the page. After that, no failure may say "Nothing was locked".
     let sent: BridgeInRecord | null = null;
+    // Audit F1: whether the wallet has been handed the lock (its record saved, the wallet about to be asked).
+    let walletAsked = false;
     const stillOpen = (r: BridgeInRecord) =>
       readBridgeIns(store, scope, account).find((x) => bridgeInId(x) === bridgeInId(r));
     try {
@@ -212,6 +215,7 @@ export function BridgeIn({
         onPrepared: (r) => {
           inFlight.current = bridgeInId(r);
           putBridgeIn(store, scope, account, r);
+          walletAsked = true;
         },
         onWithdrawn: (r) => removeBridgeIn(store, scope, account, r),
         // The wallet's late answer: kept unless the page already found the lock (or followed it further).
@@ -250,12 +254,17 @@ export function BridgeIn({
           setError(`${err.message} This page could not save the lock's record either: ${errorText(saveErr)}`);
         }
         setCheck(null);
+      } else if (err instanceof BridgeInRefused) {
+        setError(err.message);
       } else {
-        // Before the lock left the page (a refusal, or the wallet declined): definitely not sent.
+        // "Nothing was locked" only on definite evidence (audit E1/F1): the error says it never left the page,
+        // or the wallet was never handed the lock.
+        const evidence = notSentEvidence(err) ?? (walletAsked ? null : ({ kind: 'never-sent' } as const));
+        const said = evidence ? nothingLockedText(evidence) : null;
         setError(
-          err instanceof BridgeInRefused
-            ? err.message
-            : `${errorText(err)} ${nothingLockedText({ kind: 'never-sent' }) ?? ''}`.trim(),
+          said
+            ? `${errorText(err)} ${said}`
+            : `${errorText(err)} The lock may have been sent: this page keeps checking Solana for it.`,
         );
       }
     } finally {

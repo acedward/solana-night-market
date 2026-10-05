@@ -32,7 +32,7 @@ import { followBridgeIn, precheckBridgeIn, sendBridgeIn, type BridgeInContext } 
 import type { BridgeInRecord } from '../src/bridge/in/records.js';
 import type { BridgeOutRecord } from '../src/bridge/out/records.js';
 import { SolanaRpc } from '../src/bridge/solana-rpc.js';
-import { WalletError } from '../src/wallet/wallet-errors.js';
+import { WalletError, walletErrorFrom } from '../src/wallet/wallet-errors.js';
 import journeyFixture from '../../test/fixtures/journey-registry.undeployed.json';
 import { deploymentRecordOf, mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
 import { asFetch } from '../../test/mocks/http.js';
@@ -176,7 +176,7 @@ describe('C3: a timed-out sign-and-send may have sent the lock (F-A4, F-B3)', ()
     const removed: BridgeInRecord[] = [];
     s.ctx.transactions = {
       signAndSend: async () => {
-        throw new WalletError('rejected');
+        throw walletErrorFrom({ code: 4001, message: 'User rejected the request.' }, 'sign');
       },
     };
     await expect(
@@ -660,6 +660,84 @@ describe('E1: ONE decision says "definitely not sent", and only on definite evid
     expect(r.state).toBe('failed');
     expect(r.progress).toMatch(/Nothing was locked/);
     expect(ops.blocksNewBridgeIn([r], entry.colour)).toBe(false);
+  });
+});
+
+// ── Round 4 (AA 00060 P10.6): the audit's round-4 consolidation, F1 (owner Q8 = B) ────────────────────────
+
+describe('F1: only an explicit 4001, or a refusal before the wallet call, means never sent (R4-A1, R4-B4)', () => {
+  /** The wallet broadcasts the lock, then answers the page with `error` (as the adapter maps it). */
+  function afterBroadcast(error: unknown) {
+    const s = setup();
+    s.ctx.transactions = {
+      signAndSend: async (tx: Uint8Array) => {
+        await s.ctx.rpc.sendTransaction(s.signWire(tx));
+        throw walletErrorFrom(error, 'sign');
+      },
+    };
+    return s;
+  }
+
+  it.each([
+    ['4900 "Disconnected"', { code: 4900, message: 'Disconnected' }],
+    ['a message containing "cancelled" (no code)', new Error('The request was cancelled')],
+    ['4100 "Unauthorized"', { code: 4100, message: 'Unauthorized' }],
+    ['an unknown error', new Error('boom')],
+  ])('the wallet broadcast the lock, then answered %s: unknown, kept, blocking; then found', async (_n, error) => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const s = afterBroadcast(error);
+    const withdrawn: BridgeInRecord[] = [];
+    const err: Any = await sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, {
+      onWithdrawn: (r: BridgeInRecord) => withdrawn.push(r),
+    } as never).catch((e: unknown) => e);
+    expect(s.chain.sent).toHaveLength(1);
+    expect(withdrawn).toHaveLength(0);
+    expect(err).toBeInstanceOf(ops.BridgeInUncertain);
+    expect(String(err.message)).not.toMatch(/Nothing was (sent|locked)/i);
+    expect(err.record.state).toBe('unknown');
+    expect(ops.blocksNewBridgeIn([err.record], entry.colour)).toBe(true);
+    expect(await ops.reconcileBridgeIn(err.record, s.ctx)).toMatchObject({ state: 'sent' });
+  });
+
+  it('an explicit 4001 rejection: never sent, through the decision (the record is withdrawn)', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const s = setup();
+    s.ctx.transactions = {
+      signAndSend: async () => {
+        throw walletErrorFrom({ code: 4001, message: 'User rejected the request.' }, 'sign');
+      },
+    };
+    const withdrawn: BridgeInRecord[] = [];
+    const err: Any = await sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, {
+      onWithdrawn: (r: BridgeInRecord) => withdrawn.push(r),
+    } as never).catch((e: unknown) => e);
+    expect(withdrawn).toHaveLength(1);
+    expect(s.chain.sent).toEqual([]);
+    expect(typeof ops.notSentEvidence).toBe('function');
+    const evidence = ops.notSentEvidence(err);
+    expect(evidence).toEqual({ kind: 'never-sent' });
+    expect(ops.definitelyNotSent(evidence)).toBe(true);
+    expect(ops.nothingLockedText(evidence)).toMatch(/Nothing was locked/);
+  });
+
+  it('a refusal before the wallet call (the site paused): never sent; the same kind AFTER the call is unknown', async () => {
+    const ops: Any = await import('../src/bridge/in/operations.js');
+    const before = setup();
+    before.ctx.transactions = {
+      signAndSend: async () => {
+        throw new (WalletError as Any)('paused', 'The token lists differ.', { beforeCall: true });
+      },
+    };
+    const withdrawn: BridgeInRecord[] = [];
+    const err: Any = await sendBridgeIn(before.ctx, entry, 500_000_000n, 0n, 1000, {
+      onWithdrawn: (r: BridgeInRecord) => withdrawn.push(r),
+    } as never).catch((e: unknown) => e);
+    expect(withdrawn).toHaveLength(1);
+    expect(ops.notSentEvidence?.(err)).toEqual({ kind: 'never-sent' });
+    // A "locked"-kind answer the wallet gives after it was called is not a refusal before the call.
+    const after = afterBroadcast({ code: 4900, message: 'Disconnected' });
+    const e2: Any = await sendBridgeIn(after.ctx, entry, 500_000_000n, 0n, 1000, {} as never).catch((e: unknown) => e);
+    expect(ops.notSentEvidence?.(e2) ?? null).toBeNull();
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

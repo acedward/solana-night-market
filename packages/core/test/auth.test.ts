@@ -76,6 +76,7 @@ describe('the RelayAction envelope', () => {
       'restore-enc-key', // AA 00047 P10 (audit round 2, R2-3)
       'bridge-out', // AA 00060 P6.3
       'bridge-out-entitle', // AA 00060 P6.3
+      'spl-faucet', // AA 00060 P13
     ]);
   });
 

@@ -38,13 +38,28 @@ const TEXT: Record<Exclude<WalletErrorKind, 'failed' | 'unavailable' | 'timeout'
 
 export class WalletError extends Error {
   override name = 'WalletError';
+  /** The wallet's own numeric error code (EIP-1193 style: 4001 rejected, 4100 unauthorised, 4900
+   *  disconnected), when it gave one (AA 00060 P10.6, audit F1). */
+  readonly code?: number;
+  /** True when the PAGE refused before it called the wallet at all (AA 00060 P10.6, audit F1). */
+  readonly beforeCall?: boolean;
   constructor(
     readonly kind: WalletErrorKind,
     message?: string,
+    opts: { code?: number; beforeCall?: boolean } = {},
   ) {
     super(message ?? (kind in TEXT ? TEXT[kind as keyof typeof TEXT] : 'The wallet could not complete the request.'));
+    if (opts.code !== undefined) this.code = opts.code;
+    if (opts.beforeCall) this.beforeCall = true;
   }
 }
+
+/** The ONLY wallet answers after which a sign-and-send certainly sent nothing (AA 00060 P10.6, audit F1:
+ *  R4-A1, owner Q8 = B): the page refused before calling the wallet, or the wallet answered an explicit
+ *  user rejection (code 4001). Any other answer, a free-text "cancelled" or "rejected", 4100, 4900
+ *  ("disconnected"), a timeout or anything else, may come after the wallet broadcast. */
+export const walletSentNothing = (e: unknown): boolean =>
+  e instanceof WalletError && (e.beforeCall === true || e.code === 4001);
 
 export const timeoutError = (seconds: number) =>
   new WalletError(
@@ -66,19 +81,22 @@ export function walletErrorFrom(e: unknown, during: 'connect' | 'sign' = 'sign')
       : e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string'
         ? (e as { message: string }).message
         : '';
+  const withCode = code !== null ? { code } : {};
   if (code === 4001 || /reject|denied|declin|cancel/i.test(raw))
     return new WalletError(
       'rejected',
       during === 'connect' ? 'You declined the connection in your wallet. Nothing was shared.' : undefined,
+      withCode,
     );
   if (code === 4100 || code === 4900 || /locked|unauthori[sz]ed|not connected|disconnected/i.test(raw))
-    return new WalletError('locked');
+    return new WalletError('locked', undefined, withCode);
   const said = raw.trim() ? ` (the wallet said: ${raw.trim().slice(0, 160)})` : '';
   return new WalletError(
     'failed',
     during === 'connect'
       ? `The wallet did not connect${said}.`
       : `The wallet could not sign${said}. Nothing was sent; try again.`,
+    withCode,
   );
 }
 

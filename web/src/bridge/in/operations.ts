@@ -50,7 +50,7 @@ import {
 
 import type { TransactionFacts } from '../../wallet/sign-prompt.js';
 import type { SolanaTransactions } from '../../wallet/transactions.js';
-import { WalletError } from '../../wallet/wallet-errors.js';
+import { WalletError, walletSentNothing } from '../../wallet/wallet-errors.js';
 import { verifyDeployment } from '../registry.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
@@ -67,11 +67,19 @@ export class BridgeInRefused extends Error {
 export const BRIDGE_IN_UNKNOWN_TEXT =
   'Your wallet did not answer in time, so the lock may or may not have been sent. If your wallet still shows the request, decline it. This page is checking Solana for the lock: wait until it has before you bridge this token in again.';
 
+/** The words for a lock whose sign-and-send the wallet answered with an error (audit F1): it may have
+ *  broadcast first, so they never say that nothing was sent. */
+export const bridgeInWalletErrorText = (code?: number): string =>
+  `Your wallet answered with an error after it was asked to send the lock${code !== undefined ? ` (code ${code})` : ''}, so the lock may or may not have been sent. This page is checking Solana for the lock: wait until it has before you bridge this token in again.`;
+
 /** A lock that may have been sent: its record (`unknown`) is kept and followed (audit C3). */
 export class BridgeInUncertain extends Error {
   override name = 'BridgeInUncertain';
-  constructor(readonly record: BridgeInRecord) {
-    super(BRIDGE_IN_UNKNOWN_TEXT);
+  constructor(
+    readonly record: BridgeInRecord,
+    message = BRIDGE_IN_UNKNOWN_TEXT,
+  ) {
+    super(message);
   }
 }
 
@@ -83,10 +91,18 @@ export interface BridgeInHooks {
   onWithdrawn?(r: BridgeInRecord): void;
 }
 
-/** Wallet answers after which nothing was sent (the wallet said no, or was never reached). A timeout or an
- *  unknown failure of a sign-and-send is NOT one: the wallet may have sent the lock anyway. */
-const nothingSent = (e: unknown) =>
-  e instanceof WalletError && ['rejected', 'locked', 'hardware', 'paused', 'unavailable'].includes(e.kind);
+/** Mark an error as definite evidence that the lock never left the page (audit E1/F1): read back with
+ *  `notSentEvidence`, and turned into words only by `nothingLockedText`. */
+function neverSent(e: unknown): Error {
+  const err = e instanceof Error ? e : new Error(String(e));
+  return Object.assign(err, { evidence: { kind: 'never-sent' } as LockEvidence });
+}
+
+/** The "never sent" evidence an error of `sendBridgeIn` carries, or null (then the lock may have been sent). */
+export function notSentEvidence(e: unknown): LockEvidence | null {
+  const ev = (e as { evidence?: LockEvidence } | null)?.evidence;
+  return ev && ev.kind === 'never-sent' ? { kind: 'never-sent' } : null;
+}
 
 export interface BridgeInContext {
   rpc: SolanaRpc;
@@ -228,14 +244,17 @@ export async function sendBridgeIn(
     state: 'signing',
   };
   hooks.onPrepared?.(pending);
-  const uncertain = (signature?: string) =>
-    new BridgeInUncertain({
-      ...pending,
-      ...(signature ? { signature } : {}),
-      state: 'unknown',
-      progress: 'Checking Solana for the lock',
-      checkedAt: now,
-    });
+  const uncertain = (signature?: string, message?: string) =>
+    new BridgeInUncertain(
+      {
+        ...pending,
+        ...(signature ? { signature } : {}),
+        state: 'unknown',
+        progress: 'Checking Solana for the lock',
+        checkedAt: now,
+      },
+      message,
+    );
   let signature: string;
   if (ctx.transactions.signAndSend) {
     try {
@@ -243,9 +262,11 @@ export async function sendBridgeIn(
         await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
       );
     } catch (e) {
-      if (nothingSent(e)) {
+      // Audit F1 (R4-A1, owner Q8 = B): only a refusal before the wallet was called, or an explicit 4001
+      // rejection, means nothing was sent. Any other answer may come after the wallet broadcast.
+      if (walletSentNothing(e)) {
         hooks.onWithdrawn?.(pending);
-        throw e;
+        throw neverSent(e);
       }
       // The wallet may still send it, or may have: keep its late answer.
       const late = (e as { late?: Promise<Uint8Array> } | null)?.late;
@@ -255,7 +276,11 @@ export async function sendBridgeIn(
           () => undefined,
         );
       }
-      throw uncertain();
+      const timedOut = e instanceof WalletError && e.kind === 'timeout';
+      throw uncertain(
+        undefined,
+        timedOut ? undefined : bridgeInWalletErrorText(e instanceof WalletError ? e.code : undefined),
+      );
     }
   } else {
     let signed: Uint8Array;
@@ -265,11 +290,10 @@ export async function sendBridgeIn(
       // signTransaction never sends: whatever the wallet does later, the page sends nothing.
       hooks.onWithdrawn?.(pending);
       if (e instanceof WalletError && e.kind === 'timeout')
-        throw new WalletError(
-          'timeout',
-          `${e.message} Nothing was sent: this page sends the lock itself, and it has not.`,
+        throw neverSent(
+          new WalletError('timeout', `${e.message} Nothing was sent: this page sends the lock itself, and it has not.`),
         );
-      throw e;
+      throw neverSent(e);
     }
     // The wallet must sign exactly the page's transaction: nothing added, nothing changed.
     try {

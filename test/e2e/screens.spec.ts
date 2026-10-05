@@ -28,6 +28,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { connectPhantom } from './mock-phantom.js';
 import { serveExchange } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -186,6 +187,7 @@ for (const vp of VIEWPORTS) {
       await connectPhantom(page);
       await page.getByTestId('open-account').click();
       await expect(page.getByTestId('masthead-account')).toBeVisible();
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-pack')).toHaveText('1,000.00 twUSDC · 0.10 twBTC · 1.00 twETH');
       await page.getByTestId('accounts-message').getByRole('button', { name: 'Dismiss' }).click();
       await page.getByTestId('demo-tokens').scrollIntoViewIfNeeded();

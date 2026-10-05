@@ -31,8 +31,8 @@ import {
 } from '../src/bridge/in/operations.js';
 import type { BridgeInRecord } from '../src/bridge/in/records.js';
 import { SolanaRpc } from '../src/bridge/solana-rpc.js';
-import { WalletError } from '../src/wallet/wallet-errors.js';
-import { mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
+import { WalletError, walletErrorFrom } from '../src/wallet/wallet-errors.js';
+import { deploymentRecordOf, mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
 import { asFetch } from '../../test/mocks/http.js';
 import { mockSolanaRpc } from '../../test/mocks/solana-rpc.js';
 
@@ -62,7 +62,8 @@ function setup(opts: { features?: 'both' | 'send' | 'sign' | 'none'; spl?: bigin
   const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(3));
   const depositor = solanaAddressOf(bytesToHex(kp.publicKey));
   const chain = mockSolanaRpc();
-  const bridge = mockBridgeApi();
+  // The bridge's deployment record matches the entry (P10.4, audit D7: Bridge in verifies it first).
+  const bridge = mockBridgeApi({ deployment: deploymentRecordOf(entry) });
   const rpc = new SolanaRpc('http://rpc.test', asFetch(chain.handler));
   chain.accounts.set(entry.splMint, { owner: TOKEN_PROGRAM_ID, data: mintData(6) });
   const ata = associatedTokenAddress(depositor, entry.splMint);
@@ -88,7 +89,9 @@ function setup(opts: { features?: 'both' | 'send' | 'sign' | 'none'; spl?: bigin
     return out;
   };
   const refuse = () => {
-    if (wallet.mode === 'reject') throw new WalletError('rejected');
+    // A wallet's explicit rejection: code 4001 (P10.6, audit F1: only that, or a refusal before the call, is
+    // "never sent").
+    if (wallet.mode === 'reject') throw walletErrorFrom({ code: 4001, message: 'User rejected the request.' }, 'sign');
   };
   const signAndSend = async (tx: Uint8Array, c: string) => {
     wallet.asked.push(`signAndSend ${c}`);
@@ -165,8 +168,20 @@ describe('P7 Bridge in: the checks before the wallet is asked (FR-002)', () => {
     expect(await refusal(precheckBridgeIn(s.ctx, entry, 1n))).toContain(UNDELIVERABLE_TEXT['authority-live']);
     s.bridge.setVerdict(ACCOUNT, 'retry');
     expect((await precheckBridgeIn(s.ctx, entry, 1n)).note).toMatch(/not read your account yet/);
+    // P10.4 (audit D7, R-B5): a bridge that does not answer at all cannot be verified, so no lock.
     const down = { ...s.ctx, fetchImpl: (async () => new Response('', { status: 503 })) as typeof fetch };
-    expect((await precheckBridgeIn(down, entry, 1n)).note).toMatch(/could not be read; this page's check passed/);
+    expect(await refusal(precheckBridgeIn(down, entry, 1n))).toMatch(/cannot be verified/);
+    // Its deployment verified but its own account verdict unreadable: the page's check stands, with a note.
+    const verdictDown = {
+      ...s.ctx,
+      fetchImpl: (async (u: RequestInfo | URL) =>
+        String(u).endsWith('/deployment')
+          ? Response.json(deploymentRecordOf(entry))
+          : new Response('', { status: 503 })) as typeof fetch,
+    };
+    expect((await precheckBridgeIn(verdictDown, entry, 1n)).note).toMatch(
+      /could not be read; this page's check passed/,
+    );
     expect(s.wallet.asked).toEqual([]);
   });
 
@@ -290,15 +305,15 @@ describe('P7 Bridge in: following the lock (T7.5); completion by the page', () =
     expect(await followBridgeIn(r, ctx, async () => [])).toBe(r);
   });
 
-  it('completion by the balance alone (the bridge cannot be read)', async () => {
+  it('P10.3 (audit C10): a balance alone never completes it, while the bridge cannot be read', async () => {
     const { ctx, rec } = await sent();
     const down = { ...ctx, fetchImpl: (async () => new Response('', { status: 500 })) as typeof fetch };
     let r = await followBridgeIn(rec, down, async () => []);
     expect(r).toMatchObject({ state: 'locked', progress: "The bridge's progress cannot be read right now" });
     const other = stored({ nonce: '77'.repeat(32), colour: entry.colour, value: '500000000' });
-    r = await followBridgeIn(r, down, async () => [other]);
-    expect(r.state).toBe('completed');
     expect(pageBalance([other], entry.colour)).toBe(500_000_000n);
+    r = await followBridgeIn(r, down, async () => [other]);
+    expect(r.state).toBe('locked');
   });
 
   it('undeliverable, for every code: the plain reason and "stay locked"', async () => {

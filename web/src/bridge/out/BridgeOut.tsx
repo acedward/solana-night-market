@@ -29,6 +29,7 @@ import {
   adoptTransfer,
   finishLock,
   findTransfers,
+  transfersToAdopt,
   followBridgeOut,
   landingMasterFor,
   returnToAccount,
@@ -49,7 +50,7 @@ const STATE_TEXT: Record<BridgeOutRecord['state'], string> = {
   arrived: 'In your wallet on Solana',
   returning: 'Returning to your account',
   returned: 'Back in your account',
-  failed: 'Not sent: nothing moved',
+  failed: 'Stopped',
 };
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong.');
@@ -93,6 +94,8 @@ export function BridgeOut({
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
+  /** P12.2 (FR-021): what the customer should know after the flow (the change not saved yet). */
+  const [note, setNote] = useState<string | null>(null);
   const masterRef = useRef<LandingMaster | null>(null);
   const [hasMaster, setHasMaster] = useState(false);
   const chosen = entries.find((e) => e.colour === colour) ?? entries[0] ?? null;
@@ -121,6 +124,7 @@ export function BridgeOut({
       deviceKey: owner,
       rpc: new SolanaRpc(ready.solana.rpcUrl),
       onProgress: setProgress,
+      onNote: setNote,
     };
   }, [env, ready, wallet.address, owner, network]);
 
@@ -137,6 +141,7 @@ export function BridgeOut({
     if (!c) return;
     setError(null);
     setOk(null);
+    setNote(null);
     setWorking(label);
     try {
       const msg = await fn(c);
@@ -212,6 +217,14 @@ export function BridgeOut({
   };
 
   const entryOf = (r: BridgeOutRecord) => ready.registry.byColour(r.colour);
+  /** P12.2 (FR-021): whether the coin this Bridge out spends is larger than the amount (it leaves change). */
+  const leavesChange = (a: { entry: BridgeEntry; raw: bigint }): boolean => {
+    try {
+      return BigInt(chooseCoin(coins, a.entry.colour, a.raw).value) > a.raw;
+    } catch {
+      return false;
+    }
+  };
   const open = records.filter((r) => !isFinalOut(r) && r.state !== 'locked');
 
   return (
@@ -219,7 +232,8 @@ export function BridgeOut({
       <form onSubmit={review}>
         <p className="panel-intro small muted">
           Send a bridged token back to its SPL form in your Solana wallet. Your wallet signs a landing-key text twice
-          and approves one withdrawal; the market pays every Midnight fee.
+          and approves one withdrawal, plus one more approval to save the change when only part of a coin goes out; the
+          market pays every Midnight fee.
         </p>
         {!accountChecked && (
           <Notice tone="warning" role="status" className="panel-intro" data-testid="bridge-out-waiting">
@@ -274,6 +288,11 @@ export function BridgeOut({
             {ok}
           </Notice>
         )}
+        {note && (
+          <Notice tone="warning" role="status" className="panel-intro" data-testid="bridge-out-note">
+            {note}
+          </Notice>
+        )}
         {entries.length > 0 && !asking && (
           <Button
             type="submit"
@@ -290,12 +309,20 @@ export function BridgeOut({
           <ul className="small">
             <li>
               <strong>Two signatures of the same landing-key text.</strong> They create the private key your tokens land
-              on for a moment. Sign it only on this site.
+              on for a moment. The key is permanent for this site, network and wallet: anyone who gets this signature
+              can take the tokens in transit now and in every future Bridge out from this wallet on this site. Sign it
+              only on this site.
             </li>
             <li>
               <strong>One approval</strong> of a withdrawal of {formatUnits(asking.raw, asking.entry.decimals)}{' '}
               {asking.entry.symbol} to that key.
             </li>
+            {leavesChange(asking) && (
+              <li data-testid="bridge-out-confirm-change">
+                <strong>One more approval</strong> to save the change of that coin in your inbox, as every withdrawal
+                does, so your other browsers and a backup can always find it.
+              </li>
+            )}
             <li>
               Then the market locks it in the bridge for your wallet {wallet.address}. It sees this one transfer&apos;s
               key while it proves the lock (a known limitation).
@@ -364,9 +391,8 @@ export function BridgeOut({
             void run('find', async (c) => {
               const m = await master(c);
               const found = await findTransfers(c, m, account);
-              const known = new Set(readBridgeOuts(c.env.store, c.env.scope, account).map((r) => r.authNonce));
               let adopted = 0;
-              for (const f of found.filter((x) => x.open && !known.has(x.authNonce))) {
+              for (const f of transfersToAdopt(found, readBridgeOuts(c.env.store, c.env.scope, account))) {
                 const e = ready.registry.byColour(f.spentCoin.color);
                 if (!e) continue;
                 await adoptTransfer(c, m, account, f, e);

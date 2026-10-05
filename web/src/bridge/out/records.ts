@@ -25,7 +25,8 @@ export const BRIDGE_OUT_STATES = [
   'returning',
   /** The coin is back in the account (the page's own decode). */
   'returned',
-  /** tx1 never paid the landing key (refused or failed): nothing moved. */
+  /** tx1 stopped (refused, failed, or its answer was lost): usually nothing moved; "Find my transfers"
+   *  adopts it again when its landing coin is there (audit C7). */
   'failed',
 ] as const;
 export type BridgeOutState = (typeof BRIDGE_OUT_STATES)[number];
@@ -78,5 +79,9 @@ export function readBridgeOuts(store: LocalStore, scope: WalletScope, account: s
   return out.sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** Audit D6 (R-B4): a stored record always fits the backup format (its progress at most 300 characters). */
 export const putBridgeOut = (store: LocalStore, scope: WalletScope, account: string, r: BridgeOutRecord) =>
-  store.put(scope, 'bridge', r, { account, id: `out-${r.authNonce}` });
+  store.put(scope, 'bridge', r.progress !== undefined ? { ...r, progress: r.progress.slice(0, 300) } : r, {
+    account,
+    id: `out-${r.authNonce}`,
+  });

@@ -38,8 +38,11 @@ import type { BridgeOutEntitleResult } from '@nightmarket/core/bridge/out';
 import { bridgeReleaseReceiptAddress } from '@nightmarket/core/solana';
 
 import {
+  CHANGE_PENDING,
   JobFailedError,
   OperationError,
+  awaitChange,
+  secureChange,
   syncAccount,
   withdrawToWallet,
   type OperationEnv,
@@ -71,6 +74,8 @@ export interface BridgeOutContext {
   WebSocketImpl?: typeof WebSocket;
   /** Progress words for the panel (no secrets). */
   onProgress?: (text: string) => void;
+  /** A note the customer should read after the flow (AA 00060 P12.2: the change could not be saved yet). */
+  onNote?: (text: string) => void;
 }
 
 export class BridgeOutError extends OperationError {
@@ -97,7 +102,57 @@ async function landingKeys(master: LandingMaster, account: string, authNonce: st
   return landingKeyFor(master, account, BigInt(authNonce));
 }
 
-/** tx1: the record first, then ONE approval of the withdrawal to the landing key. */
+/** What a stopped tx1 record adds (audit C7): its tokens may have moved anyway. */
+export const TX1_MAY_HAVE_MOVED =
+  'If the tokens left your account anyway, use "Find my transfers": it finds them and lets you finish or return them.';
+
+/** A stopped tx1 record's progress (audit D6: R-B4): the error, cut so that the advice above always fits the
+ *  record's 300 characters (an export holding a longer one would not import). */
+export function tx1StoppedProgress(e: unknown): string {
+  const room = 300 - TX1_MAY_HAVE_MOVED.length - 1;
+  const why = (e instanceof Error ? e.message : 'failed').replace(/\s+/g, ' ').trim();
+  const cut = why.length > room ? `${why.slice(0, room - 1)}…` : why;
+  return `${cut} ${TX1_MAY_HAVE_MOVED}`;
+}
+
+/** Whether an entitlement's expiry (its 4th field, unix seconds) has passed (audit D4: R-A4, R-B3). */
+export function entitlementExpired(token: string | undefined, nowSeconds = Math.floor(Date.now() / 1000)): boolean {
+  if (!token) return false;
+  const exp = Number(token.split('.')[3]);
+  return Number.isFinite(exp) && exp <= nowSeconds;
+}
+
+/**
+ * AA 00060 P12.2 (spec FR-021, session finding S-1): a PARTIAL Bridge out's change, saved in the inbox right
+ * after tx1, with one more approval, as a withdrawal does (Accounts' send: `awaitChange`, then
+ * `secureChange`). The injector and other browsers then see it. Never fails the Bridge out: if the change
+ * cannot be saved now, the account's "Save it now" item is the fallback, and the note says so.
+ */
+async function saveBridgeOutChange(ctx: BridgeOutContext, account: string, change: StoredCoin): Promise<void> {
+  try {
+    ctx.onProgress?.('Waiting for Midnight to show the change of your withdrawal');
+    const outcome = await awaitChange(ctx.env, account, change.commitment);
+    if (outcome.state === 'pending') {
+      ctx.onNote?.(`${CHANGE_PENDING} Then use "Save it now" under your account.`);
+      return;
+    }
+    if (outcome.state === 'void') {
+      ctx.onNote?.('Midnight shows that the withdrawal to your landing key never happened: nothing left your account.');
+      return;
+    }
+    ctx.onProgress?.('Approve saving the change in your inbox in your wallet (one more approval)');
+    await secureChange(ctx.env, account, outcome.coin);
+    // As Accounts does after saving a change: read the account again, so the page sees the entry.
+    await syncAccount(ctx.env, account);
+  } catch (e) {
+    ctx.onNote?.(
+      `The change of this Bridge out is not saved in your inbox yet (${e instanceof Error ? e.message : 'failed'}). It is kept in this browser: use "Save it now" under your account.`,
+    );
+  }
+}
+
+/** tx1: the record first, then ONE approval of the withdrawal to the landing key; for a partial withdrawal,
+ *  one more approval to save its change (P12.2, FR-021). */
 export async function startBridgeOut(
   ctx: BridgeOutContext,
   master: LandingMaster,
@@ -133,6 +188,7 @@ export async function startBridgeOut(
       ctx.network,
     );
     let r = record;
+    let change: StoredCoin | null = null;
     try {
       const done = await withdrawToWallet(
         ctx.env,
@@ -145,6 +201,7 @@ export async function startBridgeOut(
           onPrepared: () => putBridgeOut(ctx.env.store, ctx.env.scope, o.account, record),
         },
       );
+      change = done.change;
       r = {
         ...record,
         state: 'tx1-sent',
@@ -154,18 +211,22 @@ export async function startBridgeOut(
         checkedAt: Date.now(),
       };
     } catch (e) {
-      // Refused before or by the market: nothing paid the landing key (a refused approval writes no record).
+      // Usually refused before or by the market, so nothing paid the landing key (a refused approval
+      // writes no record). But an interrupted answer can hide a tx1 that landed (audit C7 / F-B4): the
+      // record says so, and "Find my transfers" adopts such a record again when its coin is there.
       if (readBridgeOuts(ctx.env.store, ctx.env.scope, o.account).some((x) => x.authNonce === n)) {
         putBridgeOut(ctx.env.store, ctx.env.scope, o.account, {
           ...record,
           state: 'failed',
-          progress: e instanceof Error ? e.message.slice(0, 300) : 'failed',
+          progress: tx1StoppedProgress(e),
           checkedAt: Date.now(),
         });
       }
       throw e;
     }
     putBridgeOut(ctx.env.store, ctx.env.scope, o.account, r);
+    // FR-021: a partial withdrawal left change in the account; save it in the inbox now.
+    if (change) await saveBridgeOutChange(ctx, o.account, change);
     return r;
   } finally {
     keys.clear();
@@ -226,6 +287,10 @@ async function secondTransaction(
   kind: 'lock' | 'return',
 ): Promise<BridgeOutRecord> {
   if (!r.entitlement) throw new BridgeOutError('This transfer has no entitlement yet: use "Find my transfers".');
+  if (entitlementExpired(r.entitlement)) {
+    // Audit D4: "Find my transfers" renews it (the market re-issues it from tx1's evidence).
+    throw new BridgeOutError('This transfer\'s entitlement has expired: use "Find my transfers" to renew it.');
+  }
   const keys = await landingKeys(master, account, r.authNonce);
   try {
     if (keys.coinPublicKey !== r.landingCoinPublicKey) {
@@ -233,6 +298,7 @@ async function secondTransaction(
     }
     const { buildLock, buildReturn, balanceAndCheck } = await import('./build.js');
     const { readChainStates } = await import('./states.js');
+    const { landingCoinSecretKeyHex } = await import('@nightmarket/core/bridge/landing-wallet');
     ctx.onProgress?.('Reading your landing key');
     const { state, coin } = await computedState(ctx, keys, r);
     for (let attempt = 1; ; attempt++) {
@@ -289,6 +355,8 @@ async function secondTransaction(
           tx: hex,
           proven: false,
           blockHash: draft.blockHash,
+          // Audit C1: which coin it spends (its public nonce, and the key the witness already carries).
+          spend: { nonce: r.landingNonce, coinSecretKey: landingCoinSecretKeyHex(keys) },
         });
         const done: BridgeOutRecord = {
           ...sending,
@@ -459,6 +527,32 @@ export async function findTransfers(
     }
   }
   return found;
+}
+
+/**
+ * Which found transfers "Find my transfers" adopts (P10.3, audit C7 / F-B4): every OPEN one whose record
+ * this browser lacks, or holds without an entitlement (tx1 landed but its answer was lost), or marked
+ * failed or still signing after an interrupted tx1, or (P10.4, audit D4) whose entitlement has EXPIRED.
+ * Adopting re-issues the entitlement and overwrites that record. A record with a live entitlement is left
+ * alone (its own Finish / Return works).
+ */
+export function transfersToAdopt<F extends Pick<FoundTransfer, 'authNonce' | 'open'>>(
+  found: readonly F[],
+  records: readonly Pick<BridgeOutRecord, 'authNonce' | 'state' | 'entitlement'>[],
+  nowSeconds = Math.floor(Date.now() / 1000),
+): F[] {
+  const byNonce = new Map(records.map((r) => [r.authNonce, r]));
+  return found.filter((f) => {
+    if (!f.open) return false;
+    const r = byNonce.get(f.authNonce);
+    return (
+      !r ||
+      !r.entitlement ||
+      entitlementExpired(r.entitlement, nowSeconds) ||
+      r.state === 'failed' ||
+      r.state === 'tx1-signing'
+    );
+  });
 }
 
 /** Re-issue a found transfer's entitlement (`bridge-out-entitle`, indexer evidence) and record it. */

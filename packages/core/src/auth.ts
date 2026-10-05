@@ -48,6 +48,9 @@ export const RELAY_ACTIONS = [
   // (./bridge/out.ts).
   'bridge-out',
   'bridge-out-entitle',
+  // AA 00060 P13 (spec FR-024): "Mint Solana tokens", the test SPL faucet; unsigned, charged to the
+  // requesting client only (./spl-faucet.ts).
+  'spl-faucet',
 ] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 

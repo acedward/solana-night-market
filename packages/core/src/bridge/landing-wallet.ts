@@ -68,3 +68,21 @@ export function landingKeyFor(
     master instanceof Uint8Array ? landingSeed(master, account, authNonce) : master.seedFor(account, authNonce);
   return landingKeysFromSeed(seed);
 }
+
+/**
+ * AA 00060 P10.3 (audit C1): keys_t's coin SECRET key (32 bytes, 64 hex), which a bridge-out names so the
+ * market can check that its one input is the entitled landing coin. The unproven call's spend witness,
+ * which the market proves (questions Q2 A), already carries this key: naming it adds no exposure. It opens
+ * only this transfer's landing key, never the master key or another transfer's.
+ */
+export function landingCoinSecretKeyHex(keys: Pick<LandingKeys, 'shieldedSecretKeys'>): string {
+  const raw = (
+    keys.shieldedSecretKeys.coinSecretKey as unknown as {
+      yesIKnowTheSecurityImplicationsOfThis_serialize(): Uint8Array;
+    }
+  ).yesIKnowTheSecurityImplicationsOfThis_serialize();
+  const key = raw.slice(-32);
+  const hex = Array.from(key, (b) => b.toString(16).padStart(2, '0')).join('');
+  wipe(raw, key);
+  return hex;
+}

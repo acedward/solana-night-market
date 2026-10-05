@@ -105,6 +105,8 @@ export interface MockWallet {
   timings: { at: number; answeredAt: number | null; dropped: boolean }[];
   /** Keep the NEXT request waiting (its window "open"); call the returned function to let it answer. */
   holdNext(): () => void;
+  /** AA 00060 P10.3 C3: `signAndSendTransaction` sends at once but ANSWERS this many ms later (0: at once). */
+  lateAnswerMs: number;
 }
 
 function hedgedSign(message: Uint8Array, seed: Uint8Array, publicKey: Uint8Array): Uint8Array {
@@ -139,6 +141,7 @@ export async function installMockWallet(
     requests: [],
     signatures: [],
     dropWithinMs: 0,
+    lateAnswerMs: 0,
     timings: [],
     holdNext() {
       let release!: () => void;
@@ -219,6 +222,7 @@ export async function installMockWallet(
     if (!send) return { signedTransaction: bytesToHex(signed) };
     if (!opts.send) return { error: { code: -32603, message: 'the mock wallet has no RPC' } };
     await opts.send(Buffer.from(signed).toString('base64'));
+    if (wallet.lateAnswerMs > 0) await new Promise((r) => setTimeout(r, wallet.lateAnswerMs));
     return { signature: bytesToHex(splitTransaction(signed).signatures[0]!) };
   });
 

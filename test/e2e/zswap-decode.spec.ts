@@ -276,7 +276,7 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     const { relay } = await setup(page, { seeded: true });
     relay.landButFail.add('withdraw');
     relay.omitWithdrawalsFromReport = true; // the input's spend and the change's leaf: hidden
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     await page.getByTestId('withdraw-kind-shielded').click();
@@ -303,7 +303,7 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     page,
   }) => {
     const { relay } = await setup(page, { seeded: true });
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     await page.getByTestId('withdraw-kind-shielded').click();

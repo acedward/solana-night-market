@@ -10,7 +10,7 @@ import { expect, type Page } from '@playwright/test';
 import { bytesToHex } from '../../packages/core/src/hex.js';
 import { TOKEN_PROGRAM_ID } from '../../packages/core/src/solana/tx.js';
 import { associatedTokenAddress } from '../../packages/core/src/solana/pda.js';
-import { mockBridgeApi, type MockBridgeApi } from '../mocks/bridge-api.js';
+import { deploymentRecordOf, mockBridgeApi, type MockBridgeApi } from '../mocks/bridge-api.js';
 import { asFetch } from '../mocks/http.js';
 import { mockSolanaRpc, type MockSolanaRpc } from '../mocks/solana-rpc.js';
 import { MockIndexer, INDEXER, INDEXER_OVERRIDE, INDEXER_WS } from './mock-indexer.js';
@@ -24,6 +24,7 @@ import {
   type MockWallet,
   type WalletProfile,
 } from './mock-wallet.js';
+import { openAction, type PortfolioAction } from './portfolio-fixtures.js';
 import { serveExchange } from './visual-fixtures.js';
 import { seedAccount } from './wallet-fixtures.js';
 
@@ -38,6 +39,9 @@ const fixture = JSON.parse(
   readFileSync(new URL('../fixtures/journey-registry.undeployed.json', import.meta.url), 'utf8'),
 ) as { tokens: Array<Record<string, unknown> & { colour: string; splMint: string; bridgeProgram: string }> };
 export const X = fixture.tokens[0]!;
+/** AA 00060 P12.1: the second bridged token (`withY`), on its own mock bridge. */
+export const Y = fixture.tokens[1]!;
+export const BRIDGE_Y = 'http://bridge-y.test';
 
 export const mintData = (decimals: number) => {
   const d = new Uint8Array(82);
@@ -50,16 +54,39 @@ export interface Site {
   wallet: MockWallet;
   rpc: MockSolanaRpc;
   bridge: MockBridgeApi;
+  /** Y's bridge (`withY`), else null. */
+  bridgeY: MockBridgeApi | null;
   relay: MockRelay;
   indexer: MockIndexer;
   ata: string;
 }
 
-/** A seeded stagenet account, a site that bridges X, and a wallet holding 600 X and 1 SOL. */
-export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; genesis?: string } = {}): Promise<Site> {
+/** A seeded stagenet account, a site that bridges X, and a wallet holding 600 X and 1 SOL.
+ *  AA 00060 P12.1: `withY` bridges Y too (no SPL in the wallet yet); `injectorUrl` names an RPC injector
+ *  (not routed here); `tokens` is the site's `tokens` config; `splIcons` gives the I-1 entries their
+ *  SPL icons (FR-022). */
+export async function bridgeSite(
+  page: Page,
+  opts: {
+    profile?: WalletProfile;
+    genesis?: string;
+    walletTimeoutSeconds?: number;
+    withY?: boolean;
+    injectorUrl?: string;
+    tokens?: unknown;
+    splIcons?: boolean;
+  } = {},
+): Promise<Site> {
   await serveExchange(page);
   const rpc = mockSolanaRpc();
-  const bridge = mockBridgeApi();
+  // The bridge's own deployment record matches the site's registry (AA 00060 P10.4, audit D7: Bridge in
+  // refuses a bridge it cannot verify).
+  const bridge = mockBridgeApi({
+    deployment: deploymentRecordOf({
+      ...(X as unknown as Parameters<typeof deploymentRecordOf>[0]),
+      bridgeApi: BRIDGE,
+    }),
+  });
   const rpcFetch = asFetch(rpc.handler);
   const wallet = await installMockWallet(page, {
     profile: opts.profile ?? DEFAULT_PROFILE,
@@ -96,6 +123,24 @@ export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; ge
       body: await res.text(),
     });
   });
+  const bridgeY = opts.withY
+    ? mockBridgeApi({
+        deployment: deploymentRecordOf({
+          ...(Y as unknown as Parameters<typeof deploymentRecordOf>[0]),
+          bridgeApi: BRIDGE_Y,
+        }),
+      })
+    : null;
+  if (bridgeY) {
+    await page.route(`${BRIDGE_Y}/**`, async (route) => {
+      const res = await bridgeY.handler(new Request(route.request().url(), { method: route.request().method() }));
+      return route.fulfill({
+        status: res.status,
+        headers: { ...CORS, 'content-type': 'application/json' },
+        body: await res.text(),
+      });
+    });
+  }
   const relay = new MockRelay();
   const indexer = new MockIndexer(relay);
   await page.route(`${RELAY}/**`, (r) => relay.handle(r));
@@ -104,7 +149,10 @@ export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; ge
   const journey = {
     midnightNetwork: 'stagenet',
     solanaGenesisHash: opts.genesis ?? rpc.genesisHash,
-    tokens: [{ ...X, bridgeApi: BRIDGE }],
+    tokens: [
+      { ...X, bridgeApi: BRIDGE, ...(opts.splIcons ? { icon: 'token-icons/x.png' } : {}) },
+      ...(opts.withY ? [{ ...Y, bridgeApi: BRIDGE_Y, ...(opts.splIcons ? { icon: 'token-icons/y.png' } : {}) }] : []),
+    ],
   };
   await page.route('**/config.json', (r) =>
     r.fulfill({
@@ -112,9 +160,11 @@ export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; ge
         network: 'stagenet',
         relayUrl: RELAY,
         overrides: INDEXER_OVERRIDE,
-        walletTimeoutSeconds: 20,
+        walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20,
         solana: { rpcUrl: RPC, cluster: 'solana:localnet' },
         bridges: journey,
+        ...(opts.injectorUrl ? { injector: { url: opts.injectorUrl } } : {}),
+        ...(opts.tokens !== undefined ? { tokens: opts.tokens } : {}),
       },
     }),
   );
@@ -122,9 +172,10 @@ export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; ge
   await seedAccount(page, { deviceKey: bytesToHex(wallet.publicKey) } as MockPhantom, relay);
   rpc.accounts.set(X.splMint, { owner: TOKEN_PROGRAM_ID, data: mintData(6) });
   const ata = associatedTokenAddress(wallet.address, X.splMint);
-  rpc.tokenBalances.set(ata, { amount: 600_000_000n, decimals: 6 });
+  rpc.tokenBalances.set(ata, { amount: 600_000_000n, decimals: 6, owner: wallet.address, mint: X.splMint });
+  if (opts.withY) rpc.accounts.set(Y.splMint, { owner: TOKEN_PROGRAM_ID, data: mintData(6) });
   rpc.balances.set(wallet.address, 1_000_000_000);
-  return { wallet, rpc, bridge, relay, indexer, ata };
+  return { wallet, rpc, bridge, bridgeY, relay, indexer, ata };
 }
 
 export const txRequests = (w: MockWallet) => w.requests.filter((r) => r.kind !== 'signMessage');
@@ -135,11 +186,18 @@ export async function connectWallet(page: Page, name: string): Promise<void> {
   await page.getByTestId('wallet-option').filter({ hasText: name }).click();
 }
 
-export async function openPortfolio(page: Page, walletName = DEFAULT_PROFILE.name) {
+/** The Portfolio with the wallet connected and the account checked, then the action's flow open (FR-023:
+ *  each flow is its own sub-page; default Bridge in). */
+export async function openPortfolio(
+  page: Page,
+  walletName = DEFAULT_PROFILE.name,
+  action: PortfolioAction = 'bridge-in',
+) {
   await page.goto('/#account');
   await connectWallet(page, walletName);
   await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'ok');
-  await expect(page.getByTestId('bridge-in-section')).toBeVisible();
+  await openAction(page, action);
+  if (action === 'bridge-in') await expect(page.getByTestId('bridge-in-section')).toBeVisible();
 }
 
 export async function review(page: Page, amount: string) {

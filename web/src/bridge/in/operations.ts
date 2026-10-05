@@ -8,16 +8,23 @@
 //                     say it cannot deliver there (I-3 recognition, beside the page's own check)
 //   sendBridgeIn      builds ONE LockToContract (core bridge-in.ts) on a fresh blockhash and asks the
 //                     wallet: `signAndSendTransaction`, or `signTransaction` + the page's own send of a
-//                     transaction that must come back UNCHANGED and validly signed; the record is
-//                     written only once the wallet has signed (a refusal records nothing, T7.8)
+//                     transaction that must come back UNCHANGED and validly signed. P10.3 (audit C3):
+//                     the record is written BEFORE the wallet is asked (`signing`); a wallet that declines
+//                     withdraws it (nothing was sent, T7.8); a sign-and-send that times out (or a send
+//                     that fails) may still have sent the lock, so the record becomes `unknown`, the page
+//                     says so (never "nothing was sent"), keeps the wallet's late answer, and refuses a
+//                     new Bridge in of that token until `reconcileBridgeIn` has found the lock on Solana by
+//                     its exact message, or its blockhash has expired
 //   followBridgeIn    one step: the signature's confirmation, then the lock nonce from the program log
 //                     (I-2), then the bridge's progress (I-3 `s2m:<nonce>`); COMPLETION only by the
-//                     page's own decode of the account (the coin the bridge says it delivered, or the
-//                     balance), never by the bridge's word (FR-003)
+//                     page's own decode of the account: the coin the bridge says it delivered, matched
+//                     by its commitment (P10.3, audit C10: never a balance another coin raised), never
+//                     by the bridge's word (FR-003)
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import nacl from 'tweetnacl';
 
-import { contractCoinCommitment, formatUnits, holdingsByColour, type StoredCoin } from '@nightmarket/core';
+import { bytesToHex, contractCoinCommitment, formatUnits, holdingsByColour, type StoredCoin } from '@nightmarket/core';
 import {
   BridgeInError,
   UNDELIVERABLE_TEXT,
@@ -38,10 +45,13 @@ import {
   decodeKey,
   encodeKey,
   splitTransaction,
+  toBase64,
 } from '@nightmarket/core/solana';
 
 import type { TransactionFacts } from '../../wallet/sign-prompt.js';
 import type { SolanaTransactions } from '../../wallet/transactions.js';
+import { WalletError, walletSentNothing } from '../../wallet/wallet-errors.js';
+import { verifyDeployment } from '../registry.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
 
@@ -51,6 +61,47 @@ const U64_MAX = (1n << 64n) - 1n;
 
 export class BridgeInRefused extends Error {
   override name = 'BridgeInRefused';
+}
+
+/** The words for a lock whose fate is not known yet (audit C3). */
+export const BRIDGE_IN_UNKNOWN_TEXT =
+  'Your wallet did not answer in time, so the lock may or may not have been sent. If your wallet still shows the request, decline it. This page is checking Solana for the lock: wait until it has before you bridge this token in again.';
+
+/** The words for a lock whose sign-and-send the wallet answered with an error (audit F1): it may have
+ *  broadcast first, so they never say that nothing was sent. */
+export const bridgeInWalletErrorText = (code?: number): string =>
+  `Your wallet answered with an error after it was asked to send the lock${code !== undefined ? ` (code ${code})` : ''}, so the lock may or may not have been sent. This page is checking Solana for the lock: wait until it has before you bridge this token in again.`;
+
+/** A lock that may have been sent: its record (`unknown`) is kept and followed (audit C3). */
+export class BridgeInUncertain extends Error {
+  override name = 'BridgeInUncertain';
+  constructor(
+    readonly record: BridgeInRecord,
+    message = BRIDGE_IN_UNKNOWN_TEXT,
+  ) {
+    super(message);
+  }
+}
+
+/** What `sendBridgeIn` reports on the way (audit C3): the record before the wallet is asked, the record
+ *  with the wallet's LATE answer (after a timeout), and a record withdrawn because nothing was sent. */
+export interface BridgeInHooks {
+  onPrepared?(r: BridgeInRecord): void;
+  onLate?(r: BridgeInRecord): void;
+  onWithdrawn?(r: BridgeInRecord): void;
+}
+
+/** Mark an error as definite evidence that the lock never left the page (audit E1/F1): read back with
+ *  `notSentEvidence`, and turned into words only by `nothingLockedText`. */
+function neverSent(e: unknown): Error {
+  const err = e instanceof Error ? e : new Error(String(e));
+  return Object.assign(err, { evidence: { kind: 'never-sent' } as LockEvidence });
+}
+
+/** The "never sent" evidence an error of `sendBridgeIn` carries, or null (then the lock may have been sent). */
+export function notSentEvidence(e: unknown): LockEvidence | null {
+  const ev = (e as { evidence?: LockEvidence } | null)?.evidence;
+  return ev && ev.kind === 'never-sent' ? { kind: 'never-sent' } : null;
 }
 
 export interface BridgeInContext {
@@ -96,6 +147,19 @@ export async function precheckBridgeIn(ctx: BridgeInContext, entry: BridgeEntry,
     refuse(`${entry.symbol}'s mint is not a classic SPL token, so it can't be bridged.`);
   if (mint!.data.length < 45 || mint!.data[44] !== entry.decimals) {
     refuse(`${entry.symbol}'s mint does not have the decimals this site lists (${entry.decimals}).`);
+  }
+  // P10.4 (audit D7, R-B5): the bridge's own deployment record must name this mint, program, contract,
+  // colour and decimals; a bridge that cannot be verified gets no lock (fail closed).
+  const deployment = await verifyDeployment(entry, ctx.fetchImpl);
+  if (deployment.kind === 'unavailable') {
+    refuse(
+      `The ${entry.symbol} bridge cannot be verified right now (${deployment.why} with its deployment record), so this page will not lock tokens for it. Try again later.`,
+    );
+  }
+  if (deployment.kind === 'mismatch') {
+    refuse(
+      `The ${entry.symbol} bridge names another ${deployment.fields.join(', ')} than this site's token list, so this page will not lock tokens for it.`,
+    );
   }
   const facts = lockToAccountFacts({ entry, depositor: ctx.depositor, amount, account: ctx.account });
   const spl = await ctx.rpc.tokenBalance(facts.source);
@@ -147,8 +211,12 @@ export async function sendBridgeIn(
   amount: bigint,
   balanceBefore: bigint,
   now = Date.now(),
+  hooks: BridgeInHooks = {},
 ): Promise<BridgeInRecord> {
-  const blockhash = await ctx.rpc.latestBlockhash();
+  if (!ctx.transactions?.signAndSend && !ctx.transactions?.sign) {
+    throw new BridgeInRefused('Your wallet cannot sign Solana transactions here.');
+  }
+  const { blockhash, lastValidBlockHeight, slot } = await ctx.rpc.latestBlockhashInfo();
   const built = buildLockToAccount({
     entry,
     depositor: ctx.depositor,
@@ -157,17 +225,81 @@ export async function sendBridgeIn(
     recentBlockhash: blockhash,
   });
   checkLockToAccount(built.transaction, built.facts);
-  let signature: string;
-  if (ctx.transactions?.signAndSend) {
-    signature = encodeKey(
-      await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
+  const message = built.message.bytes;
+  // Audit C3: the record exists BEFORE the wallet is asked.
+  const pending: BridgeInRecord = {
+    direction: 'in',
+    key: bytesToHex(sha256(message)),
+    message: toBase64(message),
+    lastValidBlockHeight: lastValidBlockHeight.toString(10),
+    fromSlot: slot.toString(10),
+    source: built.facts.source,
+    colour: entry.colour,
+    mint: entry.splMint,
+    symbol: entry.symbol,
+    amount: amount.toString(10),
+    bridgeApi: entry.bridgeApi,
+    balanceBefore: balanceBefore.toString(10),
+    createdAt: now,
+    state: 'signing',
+  };
+  hooks.onPrepared?.(pending);
+  const uncertain = (signature?: string, message?: string) =>
+    new BridgeInUncertain(
+      {
+        ...pending,
+        ...(signature ? { signature } : {}),
+        state: 'unknown',
+        progress: 'Checking Solana for the lock',
+        checkedAt: now,
+      },
+      message,
     );
-  } else if (ctx.transactions?.sign) {
-    const signed = await ctx.transactions.sign(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts));
+  let signature: string;
+  if (ctx.transactions.signAndSend) {
+    try {
+      signature = encodeKey(
+        await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
+      );
+    } catch (e) {
+      // Audit F1 (R4-A1, owner Q8 = B): only a refusal before the wallet was called, or an explicit 4001
+      // rejection, means nothing was sent. Any other answer may come after the wallet broadcast.
+      if (walletSentNothing(e)) {
+        hooks.onWithdrawn?.(pending);
+        throw neverSent(e);
+      }
+      // The wallet may still send it, or may have: keep its late answer.
+      const late = (e as { late?: Promise<Uint8Array> } | null)?.late;
+      if (late) {
+        void late.then(
+          (sig) => hooks.onLate?.({ ...pending, signature: encodeKey(sig), state: 'sent', checkedAt: Date.now() }),
+          () => undefined,
+        );
+      }
+      const timedOut = e instanceof WalletError && e.kind === 'timeout';
+      throw uncertain(
+        undefined,
+        timedOut ? undefined : bridgeInWalletErrorText(e instanceof WalletError ? e.code : undefined),
+      );
+    }
+  } else {
+    let signed: Uint8Array;
+    try {
+      signed = await ctx.transactions.sign!(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts));
+    } catch (e) {
+      // signTransaction never sends: whatever the wallet does later, the page sends nothing.
+      hooks.onWithdrawn?.(pending);
+      if (e instanceof WalletError && e.kind === 'timeout')
+        throw neverSent(
+          new WalletError('timeout', `${e.message} Nothing was sent: this page sends the lock itself, and it has not.`),
+        );
+      throw neverSent(e);
+    }
     // The wallet must sign exactly the page's transaction: nothing added, nothing changed.
     try {
       checkLockToAccount(signed, built.facts);
     } catch (e) {
+      hooks.onWithdrawn?.(pending);
       throw new BridgeInRefused(
         `Your wallet returned another transaction than the lock (${(e as Error).message}). Nothing was sent.`,
       );
@@ -176,29 +308,254 @@ export async function sendBridgeIn(
     if (
       parts.signatures.length !== 1 ||
       !nacl.sign.detached.verify(parts.message, parts.signatures[0]!, decodeKey(ctx.depositor)) ||
-      encodeKey(parts.message) !== encodeKey(built.message.bytes)
+      encodeKey(parts.message) !== encodeKey(message)
     ) {
+      hooks.onWithdrawn?.(pending);
       throw new BridgeInRefused('Your wallet returned a transaction the page cannot verify. Nothing was sent.');
     }
-    signature = await ctx.rpc.sendTransaction(signed);
-  } else {
-    throw new BridgeInRefused('Your wallet cannot sign Solana transactions here.');
+    try {
+      signature = await ctx.rpc.sendTransaction(signed);
+    } catch {
+      // The RPC may have taken it before the error: its signature is known, so look for it.
+      throw uncertain(encodeKey(parts.signatures[0]!));
+    }
   }
+  return { ...pending, signature, state: 'sent' };
+}
+
+/** Whether a new Bridge in of `colour` must wait: an earlier lock of it may have been sent (audit C3). */
+export const blocksNewBridgeIn = (records: readonly BridgeInRecord[], colour: string): boolean =>
+  records.some((r) => r.colour === colour && (r.state === 'signing' || r.state === 'unknown'));
+
+/** How far back one look searches the source token account's transactions (pages of 100). */
+export const BRIDGE_IN_SEARCH_PAGES = 10;
+
+/** What a record says while Solana cannot be read (audit D1): never that nothing was locked. */
+export const BRIDGE_IN_UNREADABLE_TEXT =
+  'Solana could not be read right now, so this page cannot tell yet whether the lock was sent. It checks again shortly; until then, Bridge in of this token waits.';
+
+/** After `n` failed lookups in a row, how long the page waits before asking Solana again (audit D1). */
+export const bridgeInBackoffMs = (n: number): number => (n <= 0 ? 0 : Math.min(5_000 * 2 ** (n - 1), 300_000));
+
+/** Whether a record still being checked is due for its next look (audit D1: back off after errors). */
+export const bridgeInCheckDue = (r: BridgeInRecord, now = Date.now()): boolean =>
+  !r.lookupErrors || now >= (r.checkedAt ?? 0) + bridgeInBackoffMs(r.lookupErrors);
+
+/**
+ * What Solana shows about a lock (P10.5, audit E1: R3-B1, R3-A1/E5). Built ONLY by `lockEvidence` (and, for
+ * a lock the page never handed to anything that could send it, by the send path), and read ONLY through
+ * `definitelyNotSent` / `nothingLockedText`.
+ */
+export type LockEvidence =
+  /** The page never handed the lock to the wallet's send, nor sent it itself. */
+  | { kind: 'never-sent' }
+  /** The lock is on Solana (confirmed): this signature. */
+  | { kind: 'found'; signature: string }
+  /** The lock's transaction landed and FAILED: the program locked nothing. */
+  | { kind: 'failed-on-chain'; signature: string }
+  /** The blockhash had expired at `expirySlot`, and well-formed answers from nodes at or past that slot
+   *  list every transaction of the token account back to the lock's slot, none of them the lock. */
+  | { kind: 'absent'; expirySlot: string }
+  /** Anything else: not definite. `error`: a lookup failed or answered something not well-formed. */
+  | { kind: 'unknown'; expired: boolean; error: boolean; cursor?: string };
+
+/** THE decision (audit E1): whether nothing was locked. Every "Nothing was locked" text, every `failed`
+ *  Bridge-in record and so every replacement it unblocks comes from here. */
+export const definitelyNotSent = (e: LockEvidence): boolean =>
+  e.kind === 'never-sent' || e.kind === 'failed-on-chain' || e.kind === 'absent';
+
+/** The ONLY source of the words "nothing was locked": null unless `definitelyNotSent(e)`. */
+export function nothingLockedText(e: LockEvidence): string | null {
+  if (!definitelyNotSent(e)) return null;
+  if (e.kind === 'failed-on-chain') return 'The Solana transaction failed: nothing was locked.';
+  if (e.kind === 'absent')
+    return "Not sent: your wallet's request expired before it reached Solana. Nothing was locked.";
+  return 'Nothing was locked.';
+}
+
+/** A record that ends "nothing was locked": only on definite evidence (throws otherwise). */
+function notLockedRecord(r: BridgeInRecord, e: LockEvidence, now: number): BridgeInRecord {
+  const text = nothingLockedText(e);
+  if (text === null) throw new BridgeInError('not definite: the lock may have been sent');
+  const { lookupErrors: _e, searchBefore: _c, ...rest } = r;
   return {
-    direction: 'in',
-    signature,
-    colour: entry.colour,
-    mint: entry.splMint,
-    symbol: entry.symbol,
-    amount: amount.toString(10),
-    bridgeApi: entry.bridgeApi,
-    balanceBefore: balanceBefore.toString(10),
-    createdAt: now,
-    state: 'sent',
+    ...rest,
+    state: 'failed',
+    ...(e.kind === 'absent' ? { blockhashExpired: true } : {}),
+    progress: text,
+    checkedAt: now,
   };
 }
 
-const FINAL: ReadonlySet<BridgeInRecord['state']> = new Set(['completed', 'undeliverable', 'failed']);
+/**
+ * Gather what Solana shows about a lock whose wallet answer was lost (audit C3, D1, D5, E1): by its signature
+ * when known, and among the source token account's transactions back to the slot its blockhash was read
+ * at, by its exact message.
+ *
+ * `absent` (audit E1) needs ALL of:
+ *  - the expiry, read with its slot in ONE answer (`epochPosition`): block height past the blockhash's last
+ *    valid height, at slot S;
+ *  - the history from nodes at or past S (`minContextSlot`; a lagging node refuses, never answers short);
+ *  - every listed transaction returned, well-formed (`splitTransaction` parses the whole message), carrying
+ *    the very signature it was listed under, and not the lock;
+ *  - the search reaching the lock's slot (or the account's first transaction);
+ *  - when the signature is known, its status "no such transaction" from a node at or past S.
+ * Any lookup that fails or answers something not well-formed is `unknown` with `error`.
+ *
+ * Once the blockhash has expired, a search stopped at the page limit returns its cursor; the next look
+ * resumes there (audit D5): any lock landed before the expiry, so newer transactions need no second look.
+ */
+export async function lockEvidence(r: BridgeInRecord, rpc: SolanaRpc): Promise<LockEvidence> {
+  let expired = r.blockhashExpired === true;
+  const unknown = (error: boolean, cursor?: string): LockEvidence => ({
+    kind: 'unknown',
+    expired,
+    error,
+    ...(cursor ? { cursor } : {}),
+  });
+  try {
+    let expirySlot: bigint | null = null;
+    if (r.lastValidBlockHeight) {
+      const at = await rpc.epochPosition();
+      if (at.blockHeight > BigInt(r.lastValidBlockHeight)) {
+        expired = true;
+        expirySlot = at.slot;
+      }
+    }
+    let signatureAbsentAt: bigint | null = null;
+    if (r.signature) {
+      const st = await rpc.signatureStatusAt(r.signature);
+      if (st.status === 'failed') return { kind: 'failed-on-chain', signature: r.signature };
+      if (st.status === 'confirmed' || st.status === 'finalized') return { kind: 'found', signature: r.signature };
+      if (st.status === null) signatureAbsentAt = st.slot;
+    }
+    if (!r.message || !r.source) return unknown(false);
+    const from = r.fromSlot ? BigInt(r.fromSlot) : null;
+    // Resume only a search that began after the expiry (its cursor is kept only then).
+    let before = expirySlot !== null && r.blockhashExpired ? r.searchBefore : undefined;
+    let complete = false;
+    search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
+      const sigs = await rpc.signaturesForAddress(r.source, 100, before, expirySlot ?? undefined);
+      for (const { signature, slot } of sigs) {
+        if (from !== null && slot < from) {
+          complete = true;
+          break search;
+        }
+        const wire = await rpc.transactionWire(signature);
+        if (!wire) return unknown(true);
+        let parts: { signatures: Uint8Array[]; message: Uint8Array };
+        try {
+          parts = splitTransaction(wire);
+        } catch {
+          return unknown(true);
+        }
+        // The body must be the transaction it was listed under (an inconsistent answer proves nothing).
+        if (parts.signatures.length === 0 || encodeKey(parts.signatures[0]!) !== signature) return unknown(true);
+        if (toBase64(parts.message) === r.message) return { kind: 'found', signature };
+      }
+      if (sigs.length < 100) {
+        complete = true;
+        break;
+      }
+      before = sigs[sigs.length - 1]!.signature;
+    }
+    if (!complete) return unknown(false, expirySlot !== null ? before : undefined);
+    if (expirySlot === null) return unknown(false);
+    if (r.signature && !(signatureAbsentAt !== null && signatureAbsentAt >= expirySlot)) return unknown(false);
+    return { kind: 'absent', expirySlot: expirySlot.toString(10) };
+  } catch {
+    return unknown(true);
+  }
+}
+
+/**
+ * One look on Solana for a lock whose wallet answer was lost: `lockEvidence`, then the record. Found: `sent`
+ * (then followed as usual). `failed` ("Nothing was locked") only when `definitelyNotSent`. Otherwise still
+ * `unknown`, blocking a new Bridge in of the token; a failed lookup counts an error (the page backs off,
+ * `bridgeInCheckDue`).
+ */
+export async function reconcileBridgeIn(
+  r: BridgeInRecord,
+  ctx: Pick<BridgeInContext, 'rpc'>,
+  now = Date.now(),
+): Promise<BridgeInRecord> {
+  if (r.state !== 'signing' && r.state !== 'unknown') return r;
+  const e = await lockEvidence(r, ctx.rpc);
+  const { lookupErrors: _errors, searchBefore: _cursor, ...rest } = r;
+  if (e.kind === 'found') {
+    const { blockhashExpired: _x, ...clean } = rest;
+    return { ...clean, signature: e.signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
+  }
+  if (definitelyNotSent(e)) return notLockedRecord(r, e, now);
+  const u = e as Extract<LockEvidence, { kind: 'unknown' }>;
+  if (u.error) {
+    return {
+      ...r,
+      state: 'unknown',
+      ...(u.expired ? { blockhashExpired: true } : {}),
+      lookupErrors: (r.lookupErrors ?? 0) + 1,
+      progress: BRIDGE_IN_UNREADABLE_TEXT,
+      checkedAt: now,
+    };
+  }
+  return {
+    ...rest,
+    state: 'unknown',
+    ...(u.expired ? { blockhashExpired: true } : {}),
+    ...(u.cursor ? { searchBefore: u.cursor } : {}),
+    progress: 'Checking Solana for the lock',
+    checkedAt: now,
+  };
+}
+
+/**
+ * "Stop checking" (audit D5: R-A5): the customer, having checked their wallet's activity against the
+ * evidence the page shows (`bridgeInEvidence`), ends a check the page cannot finish. Only once the request
+ * has expired (the wallet can no longer send it). The record is kept, final, and no longer blocks the token;
+ * if the lock was in fact sent, the bridge still delivers its tokens to the account.
+ */
+export function dismissBridgeIn(r: BridgeInRecord, now = Date.now()): BridgeInRecord {
+  if (r.state !== 'unknown' && r.state !== 'signing') {
+    throw new BridgeInError('Only a lock this page is still checking can be dismissed.');
+  }
+  if (!r.blockhashExpired) {
+    throw new BridgeInError(
+      'This request has not expired yet, so your wallet may still send it. Wait until it has expired.',
+    );
+  }
+  const { lookupErrors: _e, searchBefore: _c, ...rest } = r;
+  return {
+    ...rest,
+    state: 'dismissed',
+    progress:
+      'You stopped this check. If the lock was sent after all, the bridge still delivers its tokens to your account.',
+    checkedAt: now,
+  };
+}
+
+/** What the customer checks in their wallet before "Stop checking" (audit D5). */
+export function bridgeInEvidence(r: BridgeInRecord, decimals: number): { label: string; value: string }[] {
+  const out = [{ label: 'Amount', value: `${formatUnits(BigInt(r.amount), decimals)} ${r.symbol}` }];
+  if (r.source) out.push({ label: 'From your token account', value: r.source });
+  out.push({ label: 'Mint', value: r.mint });
+  if (r.signature) out.push({ label: 'Transaction signature', value: r.signature });
+  if (r.key) out.push({ label: 'Request id (SHA-256 of the lock message)', value: r.key });
+  if (r.lastValidBlockHeight) {
+    out.push({ label: 'Valid until Solana block height', value: `${r.lastValidBlockHeight} (expired)` });
+  }
+  out.push({ label: 'Asked at', value: new Date(r.createdAt).toISOString() });
+  out.push({
+    label: 'What this page could check',
+    value: r.lookupErrors
+      ? `Solana could not be read (${r.lookupErrors} time${r.lookupErrors === 1 ? '' : 's'} in a row)`
+      : r.searchBefore
+        ? "Part of your token account's history; the search had not finished"
+        : 'Not finished yet',
+  });
+  return out;
+}
+
+const FINAL: ReadonlySet<BridgeInRecord['state']> = new Set(['completed', 'undeliverable', 'failed', 'dismissed']);
 export const isFinal = (r: BridgeInRecord): boolean => FINAL.has(r.state);
 
 /** The page's balance of a colour by its own decode (confirmed coins only). */
@@ -213,10 +570,13 @@ export async function followBridgeIn(
   now = Date.now(),
 ): Promise<BridgeInRecord> {
   if (isFinal(r)) return r;
-  if (r.state === 'sent') {
+  if (r.state === 'signing' || r.state === 'unknown') {
+    // Back off after failed lookups (audit D1); the record is unchanged until its next look is due.
+    return bridgeInCheckDue(r, now) ? reconcileBridgeIn(r, ctx, now) : r;
+  }
+  if (r.state === 'sent' && r.signature) {
     const status = await ctx.rpc.signatureStatus(r.signature);
-    if (status === 'failed')
-      return { ...r, state: 'failed', progress: 'The Solana transaction failed: nothing was locked.', checkedAt: now };
+    if (status === 'failed') return notLockedRecord(r, { kind: 'failed-on-chain', signature: r.signature }, now);
     if (!status) return { ...r, progress: 'Waiting for Solana to confirm the lock', checkedAt: now };
     const logs = await ctx.rpc.logMessages(r.signature);
     if (!logs) return { ...r, progress: 'Waiting for Solana to confirm the lock', checkedAt: now };
@@ -264,8 +624,9 @@ export async function followBridgeIn(
             ctx.account,
           ),
     );
-  const balanceArrived = pageBalance(coins, r.colour) >= BigInt(r.balanceBefore) + BigInt(r.amount);
-  if (coinArrived || balanceArrived) {
+  // Audit C10 (F-A7): ONLY the delivered coin completes the lock; a balance that another coin of the
+  // token raised (a second Bridge in, a trade) says nothing about this one.
+  if (coinArrived) {
     return { ...r, state: 'completed', progress: 'In your account', checkedAt: now };
   }
   return { ...r, state: read?.kind === 'view' ? 'bridging' : r.state, progress, checkedAt: now };

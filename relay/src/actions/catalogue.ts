@@ -24,6 +24,7 @@ import {
   RELAY_ACTIONS,
   RegisterPayloadSchema,
   RestoreEncKeyPayloadSchema,
+  SplFaucetPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
@@ -33,7 +34,7 @@ import {
 
 import type { AuthKind } from '../auth/verifiers.js';
 import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type AccountCaps } from './account-caps.js';
-import { admitAll, type AdmissionCheck } from './admission.js';
+import { admitAll, type AdmissionCheck, type PreauthCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
@@ -43,6 +44,8 @@ import {
   bridgeOutAdmission,
   bridgeOutEntitleExecutor,
   bridgeOutExecutor,
+  bridgeOutPreauth,
+  entitlePreauth,
   type BridgeOutDeps,
   type EntitleDeps,
 } from '../bridge/out-actions.js';
@@ -69,12 +72,27 @@ export interface ActionDefinition {
   /** AA 00060: false while the deployment does not offer the action (an `entitlement` action without its
    *  executor: no journey registry or no key volume); the route refuses it before anything else. */
   available?: boolean;
+  /** AA 00060 P10.3 (audit C2): for an unsigned action, what must hold BEFORE the named owner and account
+   *  are charged anything (./admission.ts `PreauthCheck`). */
+  preauth?: PreauthCheck;
+  /** AA 00060 P10.3 (audit C2): false when the action does not take the account's one-job gate (a
+   *  read-only, instant action an unsigned caller may send for any account). Default true. */
+  accountGate?: boolean;
 }
 
 /** The actions authorised by what their body carries (AA 00060 P6.3), not by a wallet signature. */
 export const ENTITLEMENT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
   'bridge-out',
   'bridge-out-entitle',
+]);
+
+/** The actions with no authorisation at all, charged to the requesting client only (AA 00060 P13). */
+export const OPEN_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>(['spl-faucet']);
+
+/** Every action that carries no wallet signature. */
+export const UNSIGNED_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
+  ...ENTITLEMENT_ACTIONS,
+  ...OPEN_ACTIONS,
 ]);
 
 import {
@@ -132,6 +150,14 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     // ../bridge/out-actions.ts, wired by `withBridgeOut`).
     { ...def('bridge-out', 'prover', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
     { ...def('bridge-out-entitle', 'relay', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
+    // AA 00060 P13 (spec FR-024): "Mint Solana tokens", the test SPL faucet (executor: ../faucet/spl-faucet.ts,
+    // wired by `withSplFaucet` only when SPL_FAUCET_KEYS_FILE is set). No DUST, no prover, no account.
+    {
+      ...def('spl-faucet', 'relay', 'AA 00060 P13', { auth: 'unsigned', requiresAccount: false }),
+      requiresSponsor: false,
+      accountGate: false,
+      available: false,
+    },
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -235,6 +261,7 @@ export function withBridgeOut(
     available: true,
     auth: 'entitlement',
     payload: BridgeOutPayloadSchema as never,
+    preauth: bridgeOutPreauth(deps.entitlements),
     admit: bridgeOutAdmission(deps),
     executor: bridgeOutExecutor(deps),
   });
@@ -244,7 +271,29 @@ export function withBridgeOut(
     auth: 'entitlement',
     requiresSponsor: false,
     payload: BridgeOutEntitlePayloadSchema as never,
-    executor: bridgeOutEntitleExecutor(deps),
+    // Audit C2: the whole check runs before anything is charged, and the job takes no account gate.
+    preauth: entitlePreauth(deps),
+    accountGate: false,
+    executor: bridgeOutEntitleExecutor(),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with the test SPL faucet (AA 00060 P13, spec FR-024; ../faucet/spl-faucet.ts): unsigned,
+ * on the relay lane, admitted only for a wallet that has not claimed this period, under the per-client and
+ * per-period caps, while the faucet's chain checks hold.
+ */
+export function withSplFaucet(
+  map: Map<RelayActionName, ActionDefinition>,
+  faucet: { admit: AdmissionCheck; executor: JobExecutor },
+): Map<RelayActionName, ActionDefinition> {
+  map.set('spl-faucet', {
+    ...map.get('spl-faucet')!,
+    available: true,
+    payload: SplFaucetPayloadSchema,
+    admit: faucet.admit,
+    executor: faucet.executor,
   });
   return map;
 }

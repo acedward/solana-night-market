@@ -132,7 +132,18 @@ const base58 = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,90}$/);
 const bridgeIn = z
   .object({
     direction: z.literal('in'),
-    signature: base58,
+    signature: base58.optional(),
+    key: hex32.optional(),
+    message: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]{1,4000}={0,2}$/)
+      .optional(),
+    lastValidBlockHeight: decimal.optional(),
+    fromSlot: decimal.optional(),
+    lookupErrors: z.number().int().min(0).max(100_000).optional(),
+    blockhashExpired: z.boolean().optional(),
+    searchBefore: base58.optional(),
+    source: base58.optional(),
     colour: hex32,
     mint: base58,
     symbol: text(16),
@@ -140,7 +151,17 @@ const bridgeIn = z
     bridgeApi: z.string().regex(/^https?:\/\/[^\s/]{1,200}$/),
     balanceBefore: decimal,
     createdAt: ms,
-    state: z.enum(['sent', 'locked', 'bridging', 'completed', 'undeliverable', 'failed']),
+    state: z.enum([
+      'signing',
+      'unknown',
+      'sent',
+      'locked',
+      'bridging',
+      'completed',
+      'undeliverable',
+      'failed',
+      'dismissed',
+    ]),
     lockNonce: decimal.optional(),
     progress: text(300).optional(),
     reason: z
@@ -188,7 +209,7 @@ const bridgeOut = z
       .optional(),
     entitlement: z
       .string()
-      .regex(/^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9]{1,12}\.[0-9a-f]{64}$/)
+      .regex(/^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[1-9][0-9]{0,11}\.[0-9a-f]{64}$/)
       .optional(),
     tx2Id: z
       .string()
@@ -242,7 +263,11 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
       if (key.id !== d.requestId) return 'a job record does not match its key';
       break;
     case 'bridge':
-      if (d.direction === 'out' ? key.id !== `out-${String(d.authNonce)}` : key.id !== `in-${String(d.signature)}`)
+      if (
+        d.direction === 'out'
+          ? key.id !== `out-${String(d.authNonce)}`
+          : key.id !== `in-${String(d.key ?? d.signature)}` || (d.key === undefined && d.signature === undefined)
+      )
         return 'a bridge record does not match its key';
       break;
     case 'secret':

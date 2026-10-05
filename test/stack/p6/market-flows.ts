@@ -85,6 +85,8 @@
 //                       lands and the refused one's record drops, then `whole-coin-exit-used`
 //   large-history       R3-5: a third party's cheap deposits into B, timed; past 500 actions only when the
 //                       extrapolation fits LARGE_HISTORY_BUDGET_S
+//   make-b              AA 00060 P9.5: B lists GIVE for WANT (the counterparty of the owner's by-hand session)
+//   recipient           AA 00060 P9.5: prints the throwaway withdrawal recipient's shielded address
 //
 // State that must survive between runs (the two device seeds, the accounts' inbox keys, the
 // withdrawal recipient's seed) lives in $STATE_DIR/state.json (mode 600, never printed). Public
@@ -239,6 +241,8 @@ interface State {
   /** P11.I: A's offer X (planted notes, the spent-coin take, then cancelled), and the commitments of
    *  counterfeit notes planted in A's inbox (never confirmed: not waited for). */
   offerX?: OfferRec;
+  /** AA 00060 P9.5: B's offer (make-b), the owner's counterparty. */
+  offerB?: OfferRec;
   counterfeits?: string[];
 }
 interface OfferRec {
@@ -2566,6 +2570,32 @@ async function historyStep() {
 }
 
 /** A's offer X (kept live for the spent-coin take and the planted notes; `cancel` then ends it). */
+/** AA 00060 P9.5 (G-NIGHTLY part B): B lists GIVE_AMOUNT of GIVE for WANT_AMOUNT of WANT (one prompt), as the
+ *  counterparty the owner takes in Nightly. B alone: A need not exist (the owner's account is A). */
+async function makeB() {
+  step(
+    `make-b: B gives ${GIVE_AMOUNT} ${GIVE_SYMBOL} base units for ${WANT_AMOUNT} ${WANT_SYMBOL}, valid ${MAKE_LIFETIME} s`,
+  );
+  const m = await signMake(MAKE_LIFETIME, undefined, 'B');
+  const { t, offer } = await postMake('open-swap B', m);
+  if (!offer) throw new Error(`B's open-swap failed: ${JSON.stringify(t.job.error)}`);
+  state.offerB = offer;
+  saveState();
+  put('makeB', { offer, seconds: t.seconds, walletText: m.auth.text });
+  process.stdout.write(`OFFER_B ${json(offer)}\n`);
+}
+
+/** AA 00060 P9.5: the throwaway recipient's shielded address (a sink for a by-hand withdrawal). */
+async function recipient() {
+  const rk = await recipientKeys();
+  const address = formatShieldedAddress(
+    { coinPublicKey: rk.coinPublicKey, encryptionPublicKey: rk.encryptionPublicKey },
+    NETWORK,
+  );
+  put('recipient', { address });
+  process.stdout.write(`RECIPIENT ${address}\n`);
+}
+
 async function makeX() {
   step('make-x: A offers X (one prompt); the page keeps its record');
   const m = await signMake(CANCEL_MAKE_LIFETIME);
@@ -3122,6 +3152,12 @@ async function main() {
         break;
       case 'large-history':
         await largeHistory();
+        break;
+      case 'make-b':
+        await makeB();
+        break;
+      case 'recipient':
+        await recipient();
         break;
       default:
         throw new Error(`unknown step ${st}`);

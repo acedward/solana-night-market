@@ -95,7 +95,18 @@ test('T7.6: a reload after sending shows the record and resumes following it', a
   await expect(record).toContainText('1.5 X');
   s.bridge.setTransfer(transferView({ id: 's2m:9', status: 'submitted', amount: '1500000', recipient: ACCOUNT }));
   await expect(record).toContainText('The bridge is delivering', { timeout: 15_000 });
-  await s.relay.deposit([{ nonce: '61'.repeat(32), color: X.colour, value: 1_500_000n }]);
+  // P10.3 (audit C10): only the delivered coin completes it, so the bridge names the coin it delivered.
+  const coin = { nonce: '61'.repeat(32), colour: X.colour, value: '1500000' };
+  s.bridge.setTransfer(
+    transferView({
+      id: 's2m:9',
+      status: 'completed',
+      amount: '1500000',
+      recipient: ACCOUNT,
+      delivery: { adapter: 'passport-ed25519@21493588', account: ACCOUNT, coin, tx: null },
+    }),
+  );
+  await s.relay.deposit([{ nonce: coin.nonce, color: X.colour, value: 1_500_000n }]);
   await expect(record).toHaveAttribute('data-state', 'completed', { timeout: 20_000 });
   expect(txRequests(s.wallet)).toHaveLength(1);
 });
@@ -145,11 +156,17 @@ test('T7.2 / T7.4: Token-2022, too little SPL, too little SOL: refused before th
 test("T7.3: an account that fails the page's check: refused, with no wallet request", async ({ page }) => {
   const s = await bridgeSite(page);
   s.indexer.tamper = { extraDevice: true };
-  await page.goto('/#account');
+  await page.goto('/#account?action=bridge-in');
   await connectPhantom(page);
   await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'failed');
-  await review(page, '1');
-  await expect(page.getByTestId('bridge-in-error')).toContainText('check of your account on Midnight failed');
+  // The page may re-check the account meanwhile ("waits until this page has checked" while it runs, which is
+  // also a refusal); review again until the failed check is what refuses (CI flake at bd35a43, AA 00060 P10.6).
+  await expect(async () => {
+    await review(page, '1');
+    await expect(page.getByTestId('bridge-in-error')).toContainText('check of your account on Midnight failed', {
+      timeout: 2_000,
+    });
+  }).toPass({ timeout: 30_000 });
   expect(txRequests(s.wallet)).toHaveLength(0);
 });
 
@@ -217,4 +234,97 @@ test('a wallet without transaction features: Bridge in is off with the reason; n
   await expect(page.getByTestId('bridge-in-no-transactions')).toBeVisible();
   await expect(page.getByTestId('bridge-in-check')).toBeDisabled();
   expect(txRequests(s.wallet)).toHaveLength(0);
+});
+
+// AA 00060 P10.3 C3 (F-A4, F-B3): the wallet SENDS the lock but answers after the page's timeout. The page
+// must not say "Nothing was sent / Nothing was locked"; it keeps the lock's record from before it asked,
+// finds the lock on Solana, and refuses a second Bridge in of the token until it has.
+test('C3: a sign-and-send that answers after the timeout: status unknown, the lock found and tracked, no second lock meanwhile', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const s = await bridgeSite(page, { walletTimeoutSeconds: 5 });
+  s.rpc.logsFor = () => ['Program x invoke [1]', lockc(s, 4), 'Program x success'];
+  s.wallet.lateAnswerMs = 8_000;
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  const error = page.getByTestId('bridge-in-error');
+  await expect(error).toBeVisible({ timeout: 15_000 });
+  await expect(error).not.toContainText('Nothing was');
+  await expect(error).toContainText('checking');
+  expect(s.rpc.sent).toHaveLength(1);
+  // A second Bridge in of X is refused before the wallet is asked, while the first is unknown.
+  const record = page.getByTestId('bridge-in-record');
+  await expect(record).toHaveCount(1);
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-error')).toContainText('wait until this page has checked');
+  expect(txRequests(s.wallet)).toHaveLength(1);
+  // The page finds the lock on Solana (or the wallet's late answer): the first transfer is tracked.
+  await expect(record).toHaveAttribute('data-state', 'locked', { timeout: 30_000 });
+  expect(s.rpc.sent).toHaveLength(1);
+});
+
+// AA 00060 P10.4 D1 + D5 (R-A2, R-B1, R-A5): the wallet SENT the lock and never answers, and Solana cannot
+// return the lock's transaction. The page must not say "Nothing was locked": the record stays "checking" and
+// blocks a second Bridge in of the token. Once the request has expired, "Stop checking" shows the evidence the
+// customer checks in their wallet, and unblocks the token.
+test('D1/D5: a lost lock Solana cannot return stays "checking" and blocks the token; once expired, "stop checking" shows the evidence and unblocks', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const s = await bridgeSite(page, { walletTimeoutSeconds: 5 });
+  s.wallet.lateAnswerMs = 600_000;
+  s.rpc.failing.add('getTransaction');
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  await expect(page.getByTestId('bridge-in-error')).toContainText('checking', { timeout: 15_000 });
+  expect(s.rpc.sent).toHaveLength(1);
+  s.rpc.advanceBlockHeight(1_000);
+  const record = page.getByTestId('bridge-in-record');
+  await expect(record).toContainText('could not be read', { timeout: 30_000 });
+  await expect(record).toHaveAttribute('data-state', 'unknown');
+  await expect(record).not.toContainText('Nothing was locked');
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-error')).toContainText('wait until this page has checked');
+  expect(txRequests(s.wallet)).toHaveLength(1);
+  await page.getByTestId('bridge-in-dismiss').click();
+  const evidence = page.getByTestId('bridge-in-dismiss-evidence');
+  await expect(evidence).toContainText('500 X');
+  await expect(evidence).toContainText(s.ata);
+  await page.getByTestId('bridge-in-dismiss-confirm').click();
+  await expect(record).toHaveAttribute('data-state', 'dismissed');
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-facts')).toBeVisible();
+});
+
+// AA 00060 P10.5 E2 (R3-B4): the wallet sent the lock, but the browser could not save its record (storage
+// full). The lock WAS sent: the page says so, with the signature, and never "Nothing was locked".
+test('E2: the lock was sent but its record could not be saved: the page says so, with the signature', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const s = await bridgeSite(page);
+  s.rpc.logsFor = () => ['Program x invoke [1]', lockc(s, 4), 'Program x success'];
+  await page.addInitScript(() => {
+    let once = false;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (!once && key.includes('bridge') && value.includes('signature')) {
+        once = true;
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+      return original.call(this, key, value);
+    };
+  });
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  const error = page.getByTestId('bridge-in-error');
+  await expect(error).toBeVisible({ timeout: 15_000 });
+  expect(s.rpc.sent).toHaveLength(1);
+  await expect(error).not.toContainText('Nothing was');
+  await expect(error).toContainText('could not be saved');
+  await expect(error).toContainText(s.rpc.sent[0]!.signature);
 });

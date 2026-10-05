@@ -108,14 +108,18 @@ export type TransferRead = { kind: 'not-seen' } | { kind: 'view'; view: Transfer
 
 const base = (api: string) => api.replace(/\/+$/, '');
 
-/** `GET <api>/transfers/<id>`. A 404 is "not seen yet" (the node's sync has not passed the lock), and so
- *  is a view whose `recipientKind` is null (00058 Q6: the lock itself is not seen yet). */
+/** `GET <api>/transfers/<id>`. The node answers the view WRAPPED, `{ "transfer": TransferView }` (00058
+ *  `packages/node/api.ts` @ 1c9f4959; AA 00060 P10.3 C13: the page once read it bare, so every progress
+ *  read failed and `undeliverable` was never shown). A 404 is "not seen yet" (the node's sync has not
+ *  passed the lock), and so is a view whose `recipientKind` is null (00058 Q6: the lock itself is not
+ *  seen yet). */
 export async function readTransfer(api: string, id: string, fetchImpl: typeof fetch = fetch): Promise<TransferRead> {
   if (!/^(s2m|m2s):(0|[1-9][0-9]*)$/.test(id)) throw new BridgeApiError(`not a transfer id: ${id}`);
   const res = await fetchImpl(`${base(api)}/transfers/${encodeURIComponent(id)}`, { cache: 'no-store' });
   if (res.status === 404) return { kind: 'not-seen' };
   if (!res.ok) throw new BridgeApiError(`the bridge answered ${res.status}`, res.status);
-  const parsed = TransferViewSchema.safeParse(await res.json());
+  const body = (await res.json().catch(() => null)) as { transfer?: unknown } | null;
+  const parsed = TransferViewSchema.safeParse(body && typeof body === 'object' ? body.transfer : undefined);
   if (!parsed.success) throw new BridgeApiError('the bridge answered a transfer in an unknown shape');
   if (parsed.data.id !== id) throw new BridgeApiError('the bridge answered another transfer');
   if (parsed.data.recipientKind === null) return { kind: 'not-seen' };

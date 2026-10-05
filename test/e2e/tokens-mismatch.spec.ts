@@ -14,6 +14,7 @@ import { tokensDigest } from '../../packages/core/src/tokens/digest.js';
 import { asFetch } from '../mocks/http.js';
 import { mockSolanaRpc } from '../mocks/solana-rpc.js';
 import { connectPhantom } from './mock-phantom.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 // The site's list here is stagenet's built-in one: the vendored mint-test-tokens registry, each token's
@@ -51,10 +52,16 @@ test('T4.3: another token list at the market pauses every signed action before t
   await expect(page.getByTestId('market-tokens-mismatch')).toContainText(
     'This site and the market list different tokens.',
   );
-  // Every signed action the page offers here: none may reach the wallet.
-  for (const id of ['get-demo-tokens', 'withdraw-submit', 'secure-change']) {
+  // Every signed action the page offers here, each in its own flow (FR-023): none may reach the wallet.
+  for (const [action, id] of [
+    ['mint-midnight', 'get-demo-tokens'],
+    ['send', 'send-submit'],
+    [null, 'secure-change'],
+  ] as const) {
+    if (action) await openAction(page, action);
     const b = page.getByTestId(id);
-    if ((await b.count()) > 0 && (await b.first().isEnabled())) await b.first().click();
+    if ((await b.count()) > 0 && (await b.first().isVisible()) && (await b.first().isEnabled()))
+      await b.first().click();
   }
   await page.getByTestId('tab-trade').click();
   const make = page.getByTestId('make-submit');

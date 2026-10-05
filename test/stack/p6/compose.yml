@@ -83,6 +83,8 @@ services:
       PORT: '9999'
       BATCHER_PORT: '3334'
       MOCK_BATCHER_SEED_FILE: /run/nm/batcher.seed
+      # AA 00060 P9.5: the offers' legs for the page's order book (the owner's by-hand session only).
+      MOCK_COMPUTE_LEGS: '${MOCK_COMPUTE_LEGS:-}'
     volumes: ['app:/app:ro', '${RUN_DIR:?}:/run/nm:ro']
     mem_limit: ${KERNEL_MEM_LIMIT:-2g}
     networks:

@@ -1415,10 +1415,10 @@ function outCtx(page: HeadlessPage, signing?: Any): BridgeOutContext {
 }
 
 /** The bridge's withdrawals as the chain has them now. */
-async function bridgeWithdrawals(): Promise<{ nonce: bigint; get(id: bigint): Any }> {
+async function bridgeWithdrawals(contract = gate.bridge!.contract): Promise<{ nonce: bigint; get(id: bigint): Any }> {
   const rt = await runtime();
   const bridge = await bridgeRuntime();
-  const st: Any = await (rt.publicDataProvider as Any).queryContractState(gate.bridge!.contract);
+  const st: Any = await (rt.publicDataProvider as Any).queryContractState(norm(contract));
   const l = bridge.ledger(st.data);
   return {
     nonce: BigInt(l.withdrawalNonce),
@@ -1673,6 +1673,91 @@ async function outCase(c: string) {
       record('out:partial', res);
       if (done.state !== 'locked' || rec.state !== 'arrived' || ataAfter - ataBefore !== amount || !change?.inInbox)
         throw new Error(`partial: not as expected: ${json(res)}`);
+      return res;
+    }
+    case 'whole': {
+      // AA 00057 P5R.0 (gate b): a Bridge out of a WHOLE coin of OUT_SYMBOL (default X): the coin is exactly
+      // OUT_AMOUNT, so tx1 leaves no change. The page's own operations: tx1, the lock (the bridge's
+      // withdrawal names the wallet and the amount), then the release followed until it ARRIVES in the
+      // wallet's token account. A's page balance drops by exactly OUT_AMOUNT.
+      const entry = gate.journey?.[process.env.OUT_SYMBOL ?? 'X'];
+      if (!entry) throw new Error(`no journey entry ${process.env.OUT_SYMBOL ?? 'X'}`);
+      const colour = norm(entry.colour);
+      const amount = BigInt(need('OUT_AMOUNT'));
+      await pageY((v) => v >= amount, 60, colour);
+      const pageTotal = async () => {
+        const sync = await syncAccount(pg, account());
+        pg.flush();
+        return holdingsByColour(sync.coins).find((h) => h.color === colour)?.total ?? 0n;
+      };
+      const coin = chooseCoin(readCoins(pg.store, pg.scope, account()), colour, amount);
+      if (BigInt(coin.value) !== amount)
+        throw new Error(`whole: the coin chosen (${coin.value}) is not exactly ${amount}`);
+      const notes: string[] = [];
+      const pctx: BridgeOutContext = { ...ctx, onNote: (t) => notes.push(t) };
+      const before = { page: await pageTotal(), wallet: await walletTokenBalance(entry) };
+      const t0 = Date.now();
+      const m = await landingMasterFor(pctx, account());
+      const r = await startBridgeOut(pctx, m, { account: account(), entry, amount, coin });
+      pg.flush();
+      res.tx1 = {
+        authNonce: r.authNonce,
+        state: r.state,
+        tx1Id: r.tx1Id,
+        seconds: (Date.now() - t0) / 1000,
+        fees: r.tx1Id ? ((await indexerTx(r.tx1Id))?.fees ?? null) : null,
+      };
+      record('out:whole', res);
+      const nonceBefore = (await bridgeWithdrawals(entry.bridgeContract)).nonce;
+      const t1 = Date.now();
+      const done = await finishLock(pctx, m, account(), r);
+      pg.flush();
+      const ledgerAfter = await bridgeWithdrawals(entry.bridgeContract);
+      const w =
+        done.withdrawalId !== undefined && done.withdrawalId !== null
+          ? ledgerAfter.get(BigInt(done.withdrawalId))
+          : null;
+      res.lock = {
+        state: done.state,
+        withdrawalId: done.withdrawalId,
+        tx2Id: done.tx2Id,
+        seconds: (Date.now() - t1) / 1000,
+        fees: done.tx2Id ? ((await indexerTx(done.tx2Id))?.fees ?? null) : null,
+        recorded: w
+          ? { solanaRecipient: bytesToHex(Uint8Array.from(w.solanaRecipient)), amount: String(w.amount) }
+          : null,
+        nonceBefore: nonceBefore.toString(),
+        nonceAfter: ledgerAfter.nonce.toString(),
+      };
+      record('out:whole', res);
+      const t2 = Date.now();
+      let rec = readBridgeOuts(pg.store, pg.scope, account()).find((x) => x.authNonce === r.authNonce)!;
+      const progress: string[] = [];
+      while (rec.state !== 'arrived' && Date.now() - t2 < 1_800_000) {
+        rec = await followBridgeOut(pctx, rec);
+        putBridgeOut(pg.store, pg.scope, account(), rec);
+        pg.flush();
+        if (rec.progress && progress[progress.length - 1] !== rec.progress) progress.push(rec.progress);
+        if (rec.state !== 'arrived') await new Promise((ok) => setTimeout(ok, 10_000));
+      }
+      const after = { page: await pageTotal(), wallet: await walletTokenBalance(entry) };
+      res.arrival = { state: rec.state, seconds: (Date.now() - t2) / 1000, progress };
+      res.before = before;
+      res.after = after;
+      res.notes = notes;
+      record('out:whole', res);
+      const lockOk =
+        done.state === 'locked' &&
+        !!w &&
+        bytesToHex(Uint8Array.from(w.solanaRecipient)) === signerA.deviceKey &&
+        BigInt(w.amount) === amount;
+      if (
+        !lockOk ||
+        rec.state !== 'arrived' ||
+        after.wallet - before.wallet !== amount ||
+        before.page - after.page !== amount
+      )
+        throw new Error(`whole: not as expected: ${json(res)}`);
       return res;
     }
     case 'b-start':
@@ -1974,8 +2059,15 @@ async function walletTokenBalance(entry: BridgeEntry, owner = signerA.address): 
 function adoptBridges() {
   const j = JSON.parse(readFileSync(need('JOURNEY_FILE'), 'utf8')) as { tokens: BridgeEntry[] };
   gate.journey = Object.fromEntries(j.tokens.map((t) => [t.symbol, t]));
-  const y = gate.journey.Y;
-  if (!y || !gate.journey.X) throw new Error('the journey registry has no X or no Y');
+  // AA 00057 P5R: BRIDGES names the symbols the registry must hold (default X,Y; the stagenet gate: X).
+  const wanted = (process.env.BRIDGES ?? 'X,Y')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const missing = wanted.filter((sym) => !gate.journey![sym]);
+  if (missing.length > 0) throw new Error(`the journey registry has no ${missing.join(', ')}`);
+  // The gate's single-bridge helpers (colourY, entryY, case a) use Y, or X when the registry has only X.
+  const y = gate.journey.Y ?? gate.journey.X!;
   gate.bridge = {
     contract: norm(y.bridgeContract),
     colour: norm(y.colour),
@@ -2066,7 +2158,8 @@ async function bridgeIn() {
   let prompts = 0;
   const ctx = {
     rpc,
-    chain: 'solana:localnet',
+    // AA 00057 P5R: the Wallet Standard chain the wallet is asked to sign for (devnet in the stagenet rehearsal).
+    chain: process.env.SOLANA_CLUSTER ?? 'solana:localnet',
     depositor: who.address,
     account: who.account,
     accountCheck: 'ok' as const,
@@ -2091,7 +2184,8 @@ async function bridgeIn() {
   const sentSeconds = (Date.now() - t0) / 1000;
   const progress: string[] = [];
   while (rec.state !== 'completed' && rec.state !== 'failed' && rec.state !== 'undeliverable') {
-    if (Date.now() - t0 > 900_000) break;
+    // AA 00057 P5R: BRIDGE_IN_TIMEOUT_MS (default 15 min; devnet + stagenet take longer than the localnet).
+    if (Date.now() - t0 > Number(process.env.BRIDGE_IN_TIMEOUT_MS ?? 900_000)) break;
     rec = await followBridgeIn(rec, ctx, async () => {
       const sync = await syncAccount(pg, who.account);
       pg.flush();

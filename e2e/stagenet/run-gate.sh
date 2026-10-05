@@ -198,6 +198,19 @@ except Exception as e:
     print(json.dumps({"error": str(e)}))
 PY
 }
+# Any 12- or 24-word line a Solana CLI prints (a recovery phrase) is replaced in the given files.
+redact_phrases() {
+  python3 - "$@" <<'PY'
+import re, sys
+for f in sys.argv[1:]:
+    try:
+        lines = open(f).read().split("\n")
+    except FileNotFoundError:
+        continue
+    out = ["[REDACTED: a recovery phrase]" if re.fullmatch(r"\s*([a-z]+ ){11}[a-z]+\s*|\s*([a-z]+ ){23}[a-z]+\s*", l) else l for l in lines]
+    open(f, "w").write("\n".join(out))
+PY
+}
 # The bridge node's Solana sync against devnet's tip, every 15 s (the node's /block-heights, devnet getSlot).
 sync_sampler() {
   while :; do
@@ -347,12 +360,35 @@ gate() {
   if "$AGAVE/solana" account "$X_PROGRAM" --url "$DEVNET" >"$OUT/program-account-before.txt" 2>&1; then
     say "program $X_PROGRAM already deployed (kept)"
   else
-    local l0; l0="$(sol_balance "$X_OPERATOR")"
+    # Q14 A (run 1: `--use-rpc` through the public devnet RPC failed, "Max retries exceeded"): the write
+    # transactions go to the leaders' TPU ports (the CLI's default, QUIC), with a small priority fee, into a
+    # buffer whose KEYPAIR FILE we hold (so the CLI never prints a recovery phrase; a failed deploy resumes
+    # into the same buffer, writing only what is missing). Anything phrase-like it prints is redacted anyway.
+    local l0 buf rc
+    buf="$CONF/devnet/x-buffer.json"
+    if [[ ! -f "$buf" ]]; then
+      "$AGAVE/solana-keygen" new --no-bip39-passphrase --silent --outfile "$buf" >/dev/null 2>&1 || fail "the buffer keypair"
+      chmod 600 "$buf"
+    fi
+    echo "buffer $(pub "$buf")" >>"$OUT/pins.txt"
+    l0="$(sol_balance "$X_OPERATOR")"
     "$AGAVE/solana" program deploy "$TPL/packages/contracts-solana/build/bridge.so" --url "$DEVNET" \
       --keypair "$RUN/secrets-x/solana-operator.json" --upgrade-authority "$RUN/secrets-x/solana-operator.json" \
-      --program-id "$RUN/secrets-x/solana-bridge-program.json" --commitment confirmed --use-rpc --output json \
-      >"$OUT/deploy-x-program.json" 2>"$OUT/deploy-x-program.err" || { tail -20 "$OUT/deploy-x-program.err"; fail "the devnet program deploy"; }
-    printf '{"lamportsBefore":%s,"lamportsAfter":%s}\n' "$l0" "$(sol_balance "$X_OPERATOR")" >"$OUT/deploy-x-program-cost.json"
+      --program-id "$RUN/secrets-x/solana-bridge-program.json" --buffer "$buf" --commitment confirmed \
+      --with-compute-unit-price "${CU_PRICE:-20000}" --max-sign-attempts "${MAX_SIGN_ATTEMPTS:-30}" --output json \
+      >"$OUT/deploy-x-program.json" 2>"$OUT/deploy-x-program.err"
+    rc=$?
+    redact_phrases "$OUT/deploy-x-program.json" "$OUT/deploy-x-program.err"
+    printf '{"lamportsBefore":%s,"lamportsAfter":%s,"exit":%s}\n' "$l0" "$(sol_balance "$X_OPERATOR")" "$rc" >"$OUT/deploy-x-program-cost.json"
+    if [[ $rc != 0 ]]; then
+      tail -20 "$OUT/deploy-x-program.err"
+      # Q14: on a second failure, the buffer's SOL goes back to x-operator, and the gate stops.
+      "$AGAVE/solana" program close --buffers --keypair "$RUN/secrets-x/solana-operator.json" \
+        --authority "$RUN/secrets-x/solana-operator.json" --recipient "$X_OPERATOR" --url "$DEVNET" \
+        >"$OUT/close-buffers.log" 2>&1
+      echo "close-buffers exit $? lamportsAfterClose $(sol_balance "$X_OPERATOR")" >>"$OUT/close-buffers.log"
+      fail "the devnet program deploy (TPU path, buffer $(pub "$buf")); the buffers are closed"
+    fi
   fi
   mark program end
   tmpl deploy-sol packages/contracts-solana bun run scripts/deploy-devnet.ts --out "$DEPLOYMENT" --user-tokens 0 2>&1 | tee "$OUT/deploy-x-solana.log"

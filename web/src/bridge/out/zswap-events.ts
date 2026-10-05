@@ -23,8 +23,9 @@ const fromHex = (h: string): Uint8Array => {
 
 /**
  * Every Zswap event from `fromId` (default: the first) up to the newest one the indexer had when the
- * stream reached it (`maxId`), in order. Rejects on a gap in the ids (an event missed would misplace
- * every later commitment).
+ * stream reached it (`maxId`), in order. The ids are the indexer's ledger-event ids, shared with the
+ * DUST events, so they are increasing but not contiguous (G-LANDING Q5 gate run 1: the first Zswap
+ * event of a localnet is id 2). Rejects ids that do not increase.
  */
 export async function readZswapEvents(
   wsUrl: string,
@@ -42,7 +43,6 @@ export async function readZswapEvents(
       const e = (data as { zswapLedgerEvents?: { id: number; raw: string; maxId: number } } | null)?.zswapLedgerEvents;
       if (!e) throw new Error('the indexer sent no Zswap event');
       if (e.id < next) return false; // a repeat of the boundary
-      if (e.id !== next) throw new Error(`the indexer skipped Zswap events ${next}–${e.id - 1}`);
       out.push({ id: e.id, raw: fromHex(e.raw) });
       next = e.id + 1;
       return e.id >= e.maxId;

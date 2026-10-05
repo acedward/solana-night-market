@@ -88,8 +88,10 @@ describe('T6.1 the landing entitlement', () => {
         binding,
       ).ok,
     ).toBe(false);
-    // A forged MAC, a malformed token.
-    expect(e.verify(`${token.slice(0, -1)}0`, account, binding).ok).toBe(false);
+    // A forged MAC (its last digit changed: never the same digit), a malformed token.
+    const forged = `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`;
+    expect(forged).not.toBe(token);
+    expect(e.verify(forged, account, binding).ok).toBe(false);
     expect(e.verify('le1.nope', account, binding).ok).toBe(false);
   });
 

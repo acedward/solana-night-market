@@ -1678,14 +1678,56 @@ async function outCase(c: string) {
       return res;
     }
     case 'i': {
-      // Two transfers at the landing key, both locks built on the SAME bridge state, sent at once.
+      // A concurrent lock between tx2's build and its submission. Two transfers at the landing key; both
+      // locks are BUILT on the same bridge state. Transfer one is held at its first submission until
+      // transfer two's lock has landed, so one's first draft is stale when the market reads it: it must be
+      // refused at admission (409 bridge-out-stale: no proof, no DUST, the entitlement released), and the
+      // page must rebuild it on the new state and land it. (Sending both at once would only meet the
+      // relay's one-job-per-account gate, `429 account-busy`, before any check of the transaction.)
       const one = await start(4n * UNIT, 'tx1One');
       const two = await start(2n * UNIT, 'tx1Two');
       const before = await bridgeWithdrawals();
+      let oneReady!: () => void;
+      const oneAtSubmit = new Promise<void>((r) => (oneReady = r));
+      let twoLanded!: () => void;
+      const twoDone = new Promise<void>((r) => (twoLanded = r));
+      const attempts: { transfer: string; outcome: string }[] = [];
+      const gated = (label: 'one' | 'two') => {
+        let calls = 0;
+        const relay = Object.create(pg.relay) as typeof pg.relay;
+        relay.submit = (async (action: string, body: Any) => {
+          calls += 1;
+          if (action === 'bridge-out' && label === 'one' && calls === 1) {
+            oneReady();
+            await twoDone;
+          }
+          if (action === 'bridge-out' && label === 'two') await oneAtSubmit;
+          try {
+            const job = await pg.relay.submit(action as never, body);
+            attempts.push({ transfer: label, outcome: 'admitted' });
+            return job;
+          } catch (e) {
+            attempts.push({
+              transfer: label,
+              outcome: `refused ${String((e as Any).status ?? '')} ${String((e as Any).code ?? (e as Error).message)}`,
+            });
+            throw e;
+          }
+        }) as typeof pg.relay.submit;
+        relay.waitForJob = (async (id: string, onJob: Any) => {
+          const done = await pg.relay.waitForJob(id, onJob);
+          attempts.push({
+            transfer: label,
+            outcome: `job ${done.state}${done.error?.code ? ` ${done.error.code}` : ''}`,
+          });
+          return done;
+        }) as typeof pg.relay.waitForJob;
+        return { ...ctx, env: { ...ctx.env, relay } };
+      };
       const t0 = Date.now();
       const [a, b] = await Promise.all([
-        finishLock(ctx, one.m, account(), one.r),
-        finishLock(ctx, two.m, account(), two.r),
+        finishLock(gated('one'), one.m, account(), one.r),
+        finishLock(gated('two'), two.m, account(), two.r).finally(() => twoLanded()),
       ]);
       pg.flush();
       const after = await bridgeWithdrawals();
@@ -1695,9 +1737,18 @@ async function outCase(c: string) {
         withdrawalIds: [a.withdrawalId, b.withdrawalId],
         nonceBefore: before.nonce.toString(),
         nonceAfter: after.nonce.toString(),
+        attempts,
       };
       record('out:i', res);
-      if (a.state !== 'locked' || b.state !== 'locked' || after.nonce !== before.nonce + 2n)
+      // Transfer one: refused at admission as stale (nothing proven, nothing spent), then admitted and landed.
+      const oneAttempts = attempts.filter((x) => x.transfer === 'one').map((x) => x.outcome);
+      if (
+        a.state !== 'locked' ||
+        b.state !== 'locked' ||
+        after.nonce !== before.nonce + 2n ||
+        json(oneAttempts) !== json([oneAttempts[0], 'admitted', 'job succeeded']) ||
+        !/^refused 409 bridge-out-stale$/.test(oneAttempts[0] ?? '')
+      )
         throw new Error(`i: ${json(res.locks)}`);
       return res;
     }

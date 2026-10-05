@@ -128,10 +128,17 @@ print("relay sponsor synced", s.get("synced"), "state", s.get("state"), "DUST", 
 }
 
 down() {
-  # Bridge node X, when a gate ran on this preview (ATTACH=preview run-gate.sh): its compose project.
-  docker ps -a --filter "label=com.docker.compose.project=$P-x" -q | xargs -r docker rm -f >/dev/null 2>&1
-  docker volume ls -q --filter "label=com.docker.compose.project=$P-x" | xargs -r docker volume rm >/dev/null 2>&1
-  docker network rm "$P-x_default" >/dev/null 2>&1
+  # Bridge nodes X and Y, when a gate / P5R.1 ran on this preview (ATTACH=preview run-gate.sh): their compose projects.
+  local w
+  for w in x y; do
+    docker ps -a --filter "label=com.docker.compose.project=$P-$w" -q | xargs -r docker rm -f >/dev/null 2>&1
+    docker volume ls -q --filter "label=com.docker.compose.project=$P-$w" | xargs -r docker volume rm >/dev/null 2>&1
+    docker network rm "$P-${w}_default" >/dev/null 2>&1
+  done
+  # P5R.1: the injector, its data volume and image, the devnet RPC proxy.
+  docker rm -f "$P-injector" "$P-devnet-rpc" >/dev/null 2>&1
+  docker volume rm "$P-injector-data" >/dev/null 2>&1
+  docker image rm s00059/service:aa00057-preview >/dev/null 2>&1
   docker rm -f "$P-site" "$P-relay" "$P-ps8" "$P-ps6" >/dev/null 2>&1
   docker volume rm "$P-relay-data" >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1

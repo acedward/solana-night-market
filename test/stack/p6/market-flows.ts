@@ -164,6 +164,7 @@ import { RelayClient, RelayError } from '../../../web/src/relay/client.js';
 import { jobErrorText } from '../../../web/src/relay/messages.js';
 import { reconcileOffers, wantCoinOf } from '../../../web/src/trade/operations.js';
 import { putTrade, readTrades, type TradeRecord } from '../../../web/src/trade/records.js';
+import { logPrompt } from '../../../e2e/prompt-log.js';
 import { headlessPage, type HeadlessPage } from './page.js';
 import { BOMB_ROUND, openThirdParty, type StackToken, type ThirdParty } from './third-party.js';
 
@@ -309,7 +310,11 @@ function wallet(p: Party) {
   const signer = {
     deviceKey: bytesToHex(kp.publicKey),
     address: '',
-    signMessage: async (m: Uint8Array) => nacl.sign.detached(m, kp.secretKey),
+    // AA 00057 P3 (SC-005): each signature is one wallet prompt, recorded when PROMPT_LOG is set.
+    signMessage: async (m: Uint8Array) => {
+      logPrompt(kp.publicKey, 'message', m);
+      return nacl.sign.detached(m, kp.secretKey);
+    },
   };
   return { signer, device: ed25519DeviceOf(signer, display), secretKey: kp.secretKey };
 }

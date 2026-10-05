@@ -122,6 +122,7 @@ import { SolanaRpc } from '../../../web/src/bridge/solana-rpc.js';
 import { putBridgeOut, readBridgeOuts, type BridgeOutRecord } from '../../../web/src/bridge/out/records.js';
 import { recordKey } from '../../../web/src/store/schema.js';
 import { ed25519ActionSigning } from '../../../web/src/wallet/signing.js';
+import { logPrompt } from '../../../e2e/prompt-log.js';
 import { headlessPage, type HeadlessPage } from '../../stack/p6/page.js';
 import { landingCoinCommitment, paidOutNonce } from './coins.js';
 
@@ -175,6 +176,8 @@ const errorChain = (e: unknown): string => {
 interface FlowsState {
   network: string;
   A: { seed: string; encSecret: string; encPublic: string; account?: string; txs?: Any };
+  /** AA 00057: B, for B's own Bridge in (WHO=B). */
+  B?: { seed: string; encSecret: string; encPublic: string; account?: string; txs?: Any };
 }
 let flowsCache: FlowsState | null = null;
 function flowsState(): FlowsState {
@@ -228,8 +231,15 @@ const signerA = {
   get address() {
     return base58.encode(kpA.publicKey);
   },
-  signMessage: async (m: Uint8Array) => nacl.sign.detached(m, kpA.secretKey),
+  // AA 00057 P3 (SC-005): every signature the PAGE (or a step acting as the user) asks of A's wallet
+  // is one prompt, recorded when PROMPT_LOG is set. The gate's own re-derivations (landingMaster, used
+  // to verify, never by the page) sign with `rawSignA` and are not prompts.
+  signMessage: async (m: Uint8Array) => {
+    logPrompt(kpA.publicKey, 'message', m);
+    return nacl.sign.detached(m, kpA.secretKey);
+  },
 };
+const rawSignA = async (m: Uint8Array) => nacl.sign.detached(m, kpA.secretKey);
 const flows = {
   get A() {
     return flowsState().A;
@@ -302,6 +312,51 @@ function pageA(): HeadlessPage {
   }));
 }
 
+/** AA 00057: B's wallet and page (B's own Bridge in, WHO=B), as market-flows.ts opened B. */
+const flowsB = () => {
+  const b = flowsState().B;
+  if (!b?.account) throw new Error('account B is not open (run market-flows.ts STEPS=open-b)');
+  return b;
+};
+let kpBCache: nacl.SignKeyPair | null = null;
+const kpOfB = () => (kpBCache ??= nacl.sign.keyPair.fromSeed(hexToBytes(flowsB().seed, 32)));
+const signerB = {
+  get deviceKey() {
+    return bytesToHex(kpOfB().publicKey);
+  },
+  get address() {
+    return base58.encode(kpOfB().publicKey);
+  },
+  signMessage: async (m: Uint8Array) => {
+    logPrompt(kpOfB().publicKey, 'message', m);
+    return nacl.sign.detached(m, kpOfB().secretKey);
+  },
+};
+let pageBP: HeadlessPage | undefined;
+function pageB(): HeadlessPage {
+  const b = flowsB();
+  return (pageBP ??= headlessPage({
+    network: NETWORK,
+    relayUrl: RELAY,
+    chain: new ChainReader({ indexerUrl: INDEXER_URL, networkId: PROFILE.midnightNetworkId }),
+    signer: signerB,
+    tokens,
+    storePath: join(STATE_DIR, 'page-B.json'),
+    account: {
+      address: norm(b.account),
+      encSecret: b.encSecret,
+      encPublic: b.encPublic,
+      ...(b.txs ? { txs: b.txs } : {}),
+    },
+  }));
+}
+/** The party a WHO=A|B step acts for: its wallet key, page and account. */
+function party(who: 'A' | 'B') {
+  return who === 'B'
+    ? { who, kp: kpOfB(), address: signerB.address, page: pageB(), account: norm(flowsB().account) }
+    : { who, kp: kpOfA(), address: signerA.address, page: pageA(), account: account() };
+}
+
 /** The page's balance of Y on A (its own decode), waiting until `until` holds. */
 async function pageY(until: (v: bigint) => boolean = () => true, tries = 60, colour = colourY()) {
   const pg = pageA();
@@ -328,7 +383,7 @@ async function landingMaster(): Promise<{ master: LandingMaster; ms: number; pro
   const master = await deriveLandingMaster(
     async (m) => {
       prompts += 1;
-      return signerA.signMessage(m);
+      return rawSignA(m);
     },
     { origin: ORIGIN, midnightNetwork: NETWORK, solanaGenesisHash: GENESIS, walletAddress: signerA.address },
     kpA.publicKey,
@@ -1196,10 +1251,12 @@ async function returnCoin(label: string) {
 async function negRelay() {
   step('neg-relay (L.9 a): another recipient with the original approval, at the live relay');
   const pg = pageA();
-  await pageY((v) => v > 0n);
+  // AA 00057: NEG_SYMBOL picks the journey token the approval spends (default Y, as in P3/P9).
+  const negColour = process.env.NEG_SYMBOL ? norm(gate.journey![process.env.NEG_SYMBOL]!.colour) : colourY();
+  await pageY((v) => v > 0n, 60, negColour);
   const st = await pg.chain.accountState(account());
   const coins = readCoins(pg.store, pg.scope, account());
-  const coin = chooseCoin(coins, colourY(), 1n * UNIT);
+  const coin = chooseCoin(coins, negColour, 1n * UNIT);
   const { master } = await landingMaster();
   const t = landingOf(master, BigInt(st!.authNonce), coin, 1n * UNIT);
   master.wipe();
@@ -1917,28 +1974,35 @@ async function bridgeIn() {
   if (!entry) throw new Error(`no journey entry ${process.env.SYMBOL}`);
   const amount = BigInt(need('AMOUNT'));
   const rpc = new SolanaRpc(need('SOLANA_RPC_URL'));
-  const pg = pageA();
-  step(`T7.9: A's page bridges ${amount} base units of ${entry.symbol} in from its wallet`);
+  // AA 00057: WHO=B runs the same page operations for B (B's own Bridge in of the journey's Y).
+  const who = process.env.WHO === 'B' ? party('B') : party('A');
+  const pg = who.page;
+  step(`T7.9: ${who.who}'s page bridges ${amount} base units of ${entry.symbol} in from its wallet`);
   const vault = bridgeVaultAddress(entry.bridgeProgram, entry.splMint);
-  const balanceOf = async () => (await pageY(() => true, 1, norm(entry.colour))).total;
+  const balanceOf = async () => {
+    const sync = await syncAccount(pg, who.account);
+    pg.flush();
+    return holdingsByColour(sync.coins).find((h) => h.color === norm(entry.colour))?.total ?? 0n;
+  };
   const before = {
     page: await balanceOf(),
-    wallet: await walletTokenBalance(entry),
+    wallet: await walletTokenBalance(entry, who.address),
     vault: (await rpc.tokenBalance(vault)) ?? 0n,
   };
   let prompts = 0;
   const ctx = {
     rpc,
     chain: 'solana:localnet',
-    depositor: signerA.address,
-    account: account(),
+    depositor: who.address,
+    account: who.account,
     accountCheck: 'ok' as const,
     transactions: {
       // `solana:signTransaction`: the wallet signs the page's transaction; the page sends it.
       async sign(tx: Uint8Array) {
         prompts += 1;
         const { message } = splitTransaction(tx);
-        const sig = nacl.sign.detached(message, kpA.secretKey);
+        logPrompt(who.kp.publicKey, 'transaction', message);
+        const sig = nacl.sign.detached(message, who.kp.secretKey);
         const out = new Uint8Array(shortvec(1).length + 64 + message.length);
         out.set(shortvec(1), 0);
         out.set(sig, shortvec(1).length);
@@ -1955,7 +2019,7 @@ async function bridgeIn() {
   while (rec.state !== 'completed' && rec.state !== 'failed' && rec.state !== 'undeliverable') {
     if (Date.now() - t0 > 900_000) break;
     rec = await followBridgeIn(rec, ctx, async () => {
-      const sync = await syncAccount(pg, account());
+      const sync = await syncAccount(pg, who.account);
       pg.flush();
       return sync.coins;
     });
@@ -1964,10 +2028,11 @@ async function bridgeIn() {
   }
   const after = {
     page: await balanceOf(),
-    wallet: await walletTokenBalance(entry),
+    wallet: await walletTokenBalance(entry, who.address),
     vault: (await rpc.tokenBalance(vault)) ?? 0n,
   };
   const res = {
+    who: who.who,
     symbol: entry.symbol,
     amount: amount.toString(),
     prompts,

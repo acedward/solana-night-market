@@ -11,7 +11,7 @@
 # is removed at `down`.
 #
 # The two bridge nodes are NOT here: each is 00058's reusable `deploy/standin/compose.bridge.yml`
-# (effectstream @ 1c9f4959db1a9f004820c01fb321225bb255916c), started by run-local.sh as its own compose
+# (effectstream @ 01bb99b889b760ed7947e4384ebfbf19985aa3fd; the final local runs used 1c9f4959), started by run-local.sh as its own compose
 # project (aa00057-<run>-x, aa00057-<run>-y) on this stack's network. The Solana validator is native
 # (Agave 3.0.14 on the host, random 127.0.0.1 ports); the containers reach it as host.docker.internal.
 #

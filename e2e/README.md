@@ -28,6 +28,8 @@ decision of 2026-10-05: stagenet and devnet were dropped for now; deployment is 
 | acedward/solana-token-injector (#2) | `00059-injector-passport-accounts` | `459c904fc7f6e1180ad48bd4d3b8bc64971e1909` |
 | Token icons | `https://midnight-solana-token-icons.ac-edward.workers.dev/v3/` | `registry/token-icons.json` (`SHA256SUMS-v3`; published versions are never overwritten) |
 
+Since P5R (the stagenet rehearsal, 2026-10-05) `run-local.sh` pins 00058 at `01bb99b889b760ed7947e4384ebfbf19985aa3fd`: #937's branch with the seed fix #941 (seed files take 64-byte BIP-39 seeds and mnemonics; the template's other files are unchanged since `1c9f4959`).
+
 ## The registry generator
 
 ```sh

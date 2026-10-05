@@ -84,7 +84,8 @@ import { isFinal as isFinalIn } from '../bridge/in/operations.js';
 import { readBridgeIns } from '../bridge/in/records.js';
 import { BridgeOut } from '../bridge/out/BridgeOut.js';
 import { isFinalOut, readBridgeOuts } from '../bridge/out/records.js';
-import { bridgedHoldings, solanaLineRpc, useSolanaLines } from '../bridge/portfolio.js';
+import { bridgedHoldings } from '../bridge/portfolio.js';
+import { useSolanaHoldings } from '../bridge/SolanaLinesContext.js';
 import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
@@ -463,23 +464,9 @@ export function Accounts({
       bridgeState.state === 'ready' ? bridgeState.registry.entries.filter((e) => assets.showsColour(e.colour)) : [],
     [bridgeState, assets],
   );
-  const lineRpc = useMemo(
-    () => (bridgeState.state === 'ready' ? solanaLineRpc(bridgeState.solana, injectorUrl) : null),
-    [bridgeState, injectorUrl],
-  );
-  const [solanaRefresh, setSolanaRefresh] = useState(0);
-  // The Solana line is read again when the account's coins of a bridged token change (a bridge in or out
-  // landed) and on "Refresh balances".
-  const bridgedCoins = coins
-    .filter((c) => bridgeEntries.some((e) => e.colour === c.color))
-    .map((c) => `${c.commitment}:${c.spent ? 1 : 0}:${c.mtIndex ?? ''}`)
-    .join(',');
-  const solanaLines = useSolanaLines(
-    lineRpc,
-    wallet.status === 'connected' ? wallet.address : null,
-    bridgeEntries,
-    `${solanaRefresh}|${bridgedCoins}`,
-  );
+  // P12.1d (FR-025): ONE Solana read shared with the compact list beside the books (../bridge/
+  // SolanaLinesContext.tsx), read again when the account's bridged coins change and on "Refresh balances".
+  const { lines: solanaLines, refresh: refreshSolana } = useSolanaHoldings(coins);
   const bridged = useMemo(
     () => bridgedHoldings(bridgeEntries, hasSecret ? shownCoins : null, solanaLines),
     [bridgeEntries, hasSecret, shownCoins, solanaLines],
@@ -554,7 +541,6 @@ export function Accounts({
     const e = env();
     if (!e || !account || !hasSecret) return;
     setSyncing(true);
-    setSolanaRefresh((n) => n + 1);
     try {
       const r = await syncAccount(e, account.address);
       setHistoryGap(r.history.complete ? null : (r.history.gap ?? 'the read did not finish'));
@@ -759,7 +745,10 @@ export function Accounts({
               variant="secondary"
               data-testid="refresh-balances"
               disabled={syncing || !!busy}
-              onClick={() => void sync()}
+              onClick={() => {
+                refreshSolana();
+                void sync();
+              }}
             >
               {syncing ? 'Refreshing…' : 'Refresh balances'}
             </Button>
@@ -948,11 +937,7 @@ export function Accounts({
           )}
           {account && hasSecret && splFaucet?.offered && (
             <div data-flow="mint-solana" hidden={action !== 'mint-solana'}>
-              <splFaucet.Flow
-                account={account.address}
-                walletAddress={wallet.address}
-                onDone={() => setSolanaRefresh((n) => n + 1)}
-              />
+              <splFaucet.Flow account={account.address} walletAddress={wallet.address} onDone={refreshSolana} />
             </div>
           )}
           {!account && (

@@ -234,3 +234,61 @@ test('FR-023: an open transfer stays one click away (the action says so), and it
   await openAction(page, 'bridge-in');
   await expect(record).toContainText('The bridge has seen the lock', { timeout: 15_000 });
 });
+
+test('FR-025: the compact "Your tokens" shows full values, expands a bridged token (keyboard too), hides zero, shares the read', async ({
+  page,
+}) => {
+  const { s, injector } = await portfolioSite(page);
+  // X: 50 private on Midnight + 550 in the wallet on Solana = 600. Y: nothing anywhere (hidden here).
+  await s.relay.deposit([{ nonce: '7c'.repeat(32), color: X.colour, value: 50n * M }]);
+  s.rpc.tokenBalances.set(s.ata, { amount: 550n * M, decimals: 6, owner: s.wallet.address, mint: X.splMint });
+  await openPortfolioPage(page);
+  await expect(bridgedRow(page, 'X').getByTestId('bridged-total')).toHaveText('600.00');
+  // The full Portfolio list keeps its zero row (FR-020 unchanged).
+  await expect(bridgedRow(page, 'Y').getByTestId('bridged-total')).toHaveText('0.00');
+  const reads = s.rpc.calls.filter((c) => c === 'getTokenAccountsByOwner').length;
+
+  await page.getByTestId('tab-markets').click();
+  await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');
+  const x = page.locator('[data-testid=holding][data-symbol="X"]');
+  await expect(x).toHaveAttribute('data-kind', 'bridged');
+  await expect(x.getByTestId('holding-value')).toHaveText('600.00');
+  await expect(x).toHaveAttribute('data-total', 'yes');
+  await expect(page.locator('[data-testid=holding][data-symbol="Y"]')).toHaveCount(0);
+  // A token with one version: its value, no toggle.
+  const usdc = page.locator('[data-testid=holding][data-symbol="twUSDC"]');
+  await expect(usdc).toContainText('1,000.00');
+  await expect(usdc.getByTestId('holding-toggle')).toHaveCount(0);
+  await expect(usdc.locator('button')).toHaveCount(0);
+  // One Solana read served both views: moving to Markets read nothing again.
+  expect(s.rpc.calls.filter((c) => c === 'getTokenAccountsByOwner').length).toBe(reads);
+
+  // Expand and collapse with the keyboard (a disclosure button), then with a click.
+  const toggle = x.getByTestId('holding-toggle');
+  const versions = x.getByTestId('holding-versions');
+  await expect(versions).toBeHidden();
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(versions).toBeVisible();
+  await expect(x.getByTestId('holding-midnight')).toHaveText('50.00 (Private) on Midnight');
+  await expect(x.getByTestId('holding-solana')).toContainText('550.00 on Solana (cGfHiC…QPizuN');
+  await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(versions).toBeHidden();
+  await toggle.click();
+  await expect(versions).toBeVisible();
+  await x.getByTestId('holding-mint').getByRole('button').click();
+  expect(await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied)).toEqual([X.splMint]);
+
+  // The Solana read fails: the Midnight value, marked "Solana unavailable", never a total.
+  s.rpc.failing.add('getTokenAccountsByOwner');
+  await page.getByTestId('tab-account').click();
+  await page.getByTestId('refresh-balances').click();
+  await expect(bridgedRow(page, 'X').getByTestId('bridged-solana')).toHaveAttribute('data-state', 'unavailable');
+  await page.getByTestId('tab-markets').click();
+  await expect(x.getByTestId('holding-value')).toHaveText('50.00');
+  await expect(x).toHaveAttribute('data-total', 'no');
+  await expect(x.getByTestId('holding-solana-mark')).toHaveText('Solana unavailable');
+  expect(injector.filter((r) => (r.postData() ?? '').includes('getTokenAccountsByOwner'))).toEqual([]);
+});

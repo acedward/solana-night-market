@@ -16,6 +16,7 @@ import { ActivityProvider } from './activity/ActivityContext.js';
 import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
 import { BridgeNotice, BridgeProvider, useBridges } from './bridge/BridgeContext.js';
+import { SolanaLinesProvider } from './bridge/SolanaLinesContext.js';
 import { ChainProvider } from './chain/ChainContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
@@ -487,17 +488,19 @@ export function App() {
         <RelayStatusProvider relayUrl={config.relayUrl} siteTokensDigest={siteDigest}>
           <SigningGate />
           <BridgeProvider bridges={config.bridges} network={config.network.name} solana={config.solana}>
-            <ChainProvider network={config.network}>
-              <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
-                <AssetFilterProvider site={config.assets}>
-                  <ActivityProvider store={activity}>
-                    <ToastProvider>
-                      <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
-                    </ToastProvider>
-                  </ActivityProvider>
-                </AssetFilterProvider>
-              </MarketProvider>
-            </ChainProvider>
+            <SolanaLinesProvider injectorUrl={config.injector?.url ?? null}>
+              <ChainProvider network={config.network}>
+                <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
+                  <AssetFilterProvider site={config.assets}>
+                    <ActivityProvider store={activity}>
+                      <ToastProvider>
+                        <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                      </ToastProvider>
+                    </ActivityProvider>
+                  </AssetFilterProvider>
+                </MarketProvider>
+              </ChainProvider>
+            </SolanaLinesProvider>
           </BridgeProvider>
         </RelayStatusProvider>
       </WalletProvider>

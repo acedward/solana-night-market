@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bytesToHex, contractCoinCommitment, registryFor, type StoredCoin } from '@nightmarket/core';
 import { parseJourneyRegistry, type BridgeEntry } from '@nightmarket/core/bridge';
 
+import { BridgedHolding } from '../src/account/HoldingsPanel.js';
 import { BridgedHoldingRow, PassportHoldings } from '../src/account/PassportHoldings.js';
 import {
   NOT_ON_THIS_MARKET,
@@ -29,8 +30,10 @@ import {
   type ActionState,
   type PortfolioActionId,
 } from '../src/account/PortfolioActions.js';
+import { SolanaLinesSource, useSolanaHoldings } from '../src/bridge/SolanaLinesContext.js';
 import {
   bridgedHoldings,
+  compactRows,
   readSolanaLines,
   solanaLineRpc,
   useSolanaLines,
@@ -411,5 +414,145 @@ describe('FR-023: the Portfolio’s actions', () => {
     expect(actionFromHash('#account?action=nope')).toBeNull();
     expect(actionFromHash('#trade?action=send')).toBeNull();
     expect(actionHref('mint-midnight')).toBe('#account?action=mint-midnight');
+  });
+});
+
+describe('FR-025: the compact "Your tokens" list', () => {
+  const order = (colour: string) => [TWUSDC, X.colour, Y.colour].indexOf(colour);
+  const midnight = [
+    { colour: TWUSDC, amount: 1_000n * M },
+    { colour: X.colour, amount: 50n * M },
+  ];
+  const ok = (amount: bigint): LineRead => ({ state: 'ok', amount });
+
+  it('a bridged token shows its full value (Midnight + Solana); only values above zero are listed', () => {
+    const lines = new Map<string, LineRead>([
+      [X.splMint, ok(550n * M)],
+      [Y.splMint, ok(0n)],
+    ]);
+    const rows = compactRows(midnight, [], registry.entries, lines, order);
+    expect(rows.map((r) => [r.kind, r.colour, r.kind === 'bridged' ? r.value : r.amount])).toEqual([
+      ['shielded', TWUSDC, 1_000n * M],
+      ['bridged', X.colour, 600n * M],
+    ]);
+    const x = rows[1] as Extract<(typeof rows)[number], { kind: 'bridged' }>;
+    expect(x.total).toBe(true);
+    // Y with SPL only: listed, its value the Solana part.
+    const onlySolana = compactRows(midnight, [], registry.entries, new Map([[Y.splMint, ok(25n * M)]]), order);
+    expect(onlySolana.find((r) => r.colour === Y.colour)).toMatchObject({
+      kind: 'bridged',
+      value: 25n * M,
+      total: true,
+    });
+  });
+
+  it('a Solana read that failed (or is running): the Midnight value alone, never a total; nothing to show: hidden', () => {
+    for (const solana of [{ state: 'unavailable', why: 'down' }, { state: 'loading' }] as LineRead[]) {
+      const rows = compactRows(midnight, [], registry.entries, new Map([[X.splMint, solana]]), order);
+      const x = rows.find((r) => r.colour === X.colour) as Extract<(typeof rows)[number], { kind: 'bridged' }>;
+      expect(x).toMatchObject({ value: 50n * M, total: false, solana });
+      expect(rows.some((r) => r.colour === Y.colour)).toBe(false);
+    }
+  });
+
+  it('expands on click into its two versions (a disclosure button), with the mint copyable; collapses again', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const [, x] = compactRows(midnight, [], registry.entries, new Map([[X.splMint, ok(550n * M)]]), order);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () =>
+      root.render(
+        <ul>
+          <BridgedHolding row={x as Extract<typeof x, { kind: 'bridged' }>} symbol="X" icon={null} />
+        </ul>,
+      ),
+    );
+    const toggle = host.querySelector<HTMLButtonElement>('button[data-testid=holding-toggle]')!;
+    const versions = host.querySelector<HTMLElement>('[data-testid=holding-versions]')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-controls')).toBe(versions.id);
+    expect(versions.hidden).toBe(true);
+    expect(host.querySelector('[data-testid=holding-value]')!.textContent).toBe('600.00');
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(versions.hidden).toBe(false);
+    expect(host.querySelector('[data-testid=holding-midnight]')!.textContent).toBe('50.00 (Private) on Midnight');
+    expect(host.querySelector('[data-testid=holding-solana]')!.textContent).toContain(
+      '550.00 on Solana (cGfHiC…QPizuN',
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-testid=holding-mint] button')!.click());
+    expect(writeText).toHaveBeenCalledWith(X.splMint);
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(versions.hidden).toBe(true);
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it('a failed Solana read is marked "Solana unavailable" on the Midnight value', () => {
+    const [, x] = compactRows(
+      midnight,
+      [],
+      registry.entries,
+      new Map([[X.splMint, { state: 'unavailable', why: 'down' } as LineRead]]),
+      order,
+    );
+    const out = html(
+      <ul>
+        <BridgedHolding row={x as Extract<typeof x, { kind: 'bridged' }>} symbol="X" icon={null} />
+      </ul>,
+    );
+    expect(out).toContain('data-total="no"');
+    expect(out).toContain('Solana unavailable');
+    expect(out).toContain('data-testid="holding-value">50.00<');
+    expect(out).toContain('Solana: unavailable');
+  });
+
+  it('ONE Solana read serves both views; a view mounted later reads nothing again; refresh reads once', async () => {
+    const s = solana();
+    const ready = {
+      state: 'ready' as const,
+      registry,
+      genesisHash: registry.solanaGenesisHash,
+      solana: { rpcUrl: RPC, cluster: 'solana:localnet', genesisHash: null },
+    };
+    const seen: Record<string, ReadonlyMap<string, LineRead>> = {};
+    let refresh = () => undefined as void;
+    const held = coins().slice(0, 2); // the account's coins, as the store gives them (the same on every render)
+    function View({ name }: { name: string }) {
+      const h = useSolanaHoldings(held);
+      seen[name] = h.lines;
+      refresh = h.refresh;
+      return null;
+    }
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    const render = (views: string[]) =>
+      root.render(
+        <SolanaLinesSource bridges={ready} walletAddress={WALLET} injectorUrl={INJECTOR} fetchImpl={s.fetchImpl}>
+          {views.map((v) => (
+            <View key={v} name={v} />
+          ))}
+        </SolanaLinesSource>,
+      );
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
+    };
+    await act(async () => render(['portfolio', 'compact']));
+    await settle();
+    expect(seen.portfolio!.get(X.splMint)).toEqual({ state: 'ok', amount: 90_000n * M });
+    expect(seen.compact!.get(X.splMint)).toEqual({ state: 'ok', amount: 90_000n * M });
+    expect(s.rpc.calls).toEqual(['getTokenAccountsByOwner', 'getTokenAccountsByOwner']); // one per mint, not per view
+    await act(async () => render(['compact-2']));
+    await settle();
+    expect(seen['compact-2']!.get(Y.splMint)).toEqual({ state: 'ok', amount: 25n * M });
+    expect(s.rpc.calls).toHaveLength(2);
+    await act(async () => refresh());
+    await settle();
+    expect(s.rpc.calls).toHaveLength(4);
+    expect(new Set(s.urls)).toEqual(new Set([RPC]));
+    await act(async () => root.unmount());
   });
 });

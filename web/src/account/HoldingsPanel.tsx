@@ -7,13 +7,21 @@
 // AA 00060 FR-023 (owner, 2026-10-05: "Keep Free demo tokens only in the Portfolio View"): the free demo
 // pack is no longer claimed here; this panel links to the Portfolio's "Mint Midnight tokens". FR-022:
 // each token shows its configured icon (the wallet's own image), else its text badge.
+//
+// AA 00060 P12.1d (spec FR-025): each token's FULL value. A bridged token (an I-1 entry) is ONE row whose
+// value is the FR-020 total (Midnight private + the wallet's SPL on Solana, read once for every view:
+// ../bridge/SolanaLinesContext.tsx); a click (or Enter / Space) expands it into its two versions, with the
+// mint shortened and copyable. A token with one version does not expand. Only values above zero show. When
+// the Solana read failed, the row shows the Midnight value marked "Solana unavailable", never a total.
 
-import { useMemo } from 'react';
+import { useId, useMemo, useState } from 'react';
 
 import { formatUnits, holdingsByColour, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
 
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
-import { Button, ButtonLink, Icon, Panel, TokenIcon } from '../design/index.js';
+import { compactRows, type CompactRow } from '../bridge/portfolio.js';
+import { useSolanaHoldings } from '../bridge/SolanaLinesContext.js';
+import { Button, ButtonLink, Hash, Icon, Panel, TokenIcon } from '../design/index.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import { useStore } from '../store/StoreContext.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
@@ -21,6 +29,76 @@ import { actionHref } from './PortfolioActions.js';
 import { useAccountView, useUnshieldedBalances } from './useAccountView.js';
 
 const short = (s: string) => (s.length <= 15 ? s : `${s.slice(0, 8)}…${s.slice(-6)}`);
+const fmt = (raw: bigint, decimals: number) => formatUnits(raw, decimals, { minFractionDigits: 2, grouping: true });
+
+/** A bridged token: its full value; expands (a disclosure button) into Midnight and Solana. */
+export function BridgedHolding({
+  row,
+  symbol,
+  icon,
+}: {
+  row: Extract<CompactRow, { kind: 'bridged' }>;
+  symbol: string;
+  icon: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const dec = row.entry.decimals;
+  const mark =
+    row.solana.state === 'unavailable'
+      ? 'Solana unavailable'
+      : row.solana.state === 'loading'
+        ? 'Reading Solana…'
+        : null;
+  return (
+    <li
+      className="holding-bridged"
+      data-testid="holding"
+      data-symbol={symbol}
+      data-kind="bridged"
+      data-raw={row.value.toString()}
+      data-total={row.total ? 'yes' : 'no'}
+      data-expanded={open ? 'true' : 'false'}
+    >
+      <button
+        type="button"
+        className="holding-toggle"
+        aria-expanded={open}
+        aria-controls={id}
+        data-testid="holding-toggle"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <TokenIcon symbol={symbol} src={icon} small />
+        <span className="sym">
+          {symbol}
+          {mark && (
+            <span className="kind-chip" data-testid="holding-solana-mark" data-state={row.solana.state}>
+              {mark}
+            </span>
+          )}
+        </span>
+        <span className="num" data-testid="holding-value">
+          {fmt(row.value, dec)}
+        </span>
+        <Icon name="chevron" className={open ? 'holding-chevron is-open' : 'holding-chevron'} />
+        <span className="sr-only">{open ? ' (hide Midnight and Solana)' : ' (show Midnight and Solana)'}</span>
+      </button>
+      <ul className="holding-versions" id={id} hidden={!open} data-testid="holding-versions">
+        <li data-testid="holding-midnight">{fmt(row.midnight, dec)} (Private) on Midnight</li>
+        <li data-testid="holding-solana" data-state={row.solana.state}>
+          {row.solana.state === 'ok'
+            ? `${fmt(row.solana.amount, dec)} on Solana`
+            : row.solana.state === 'loading'
+              ? 'Solana: reading…'
+              : 'Solana: unavailable'}{' '}
+          <span className="holding-mint">
+            (<Hash value={row.entry.splMint} head={6} tail={6} data-testid="holding-mint" />)
+          </span>
+        </li>
+      </ul>
+    </li>
+  );
+}
 
 /** The three steps from a visit to a first trade. */
 function Onboarding({ done }: { done: 0 | 1 }) {
@@ -48,26 +126,23 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
   const assets = useAssetFilter();
   const connect = useConnectPrompt();
   const unshielded = useUnshieldedBalances(chain, account && hasSecret ? account.address : null, revision);
+  // FR-025: the same Solana lines as the Portfolio's rows (one read for both views).
+  const solana = useSolanaHoldings(coins);
 
   const rows = useMemo(() => {
     const order = (colour: string) => {
       const i = tokens?.tokens.findIndex((t) => t.midnightColour === colour) ?? -1;
       return i < 0 ? Number.MAX_SAFE_INTEGER : i;
     };
-    const shielded = holdingsByColour(coins).map((h) => ({
-      colour: h.color,
-      amount: h.total,
-      kind: 'shielded' as const,
-    }));
-    const open = (unshielded.view?.balances ?? []).map((b) => ({
-      colour: b.colour,
-      amount: BigInt(b.amount),
-      kind: 'unshielded' as const,
-    }));
-    return [...shielded, ...open]
-      .filter((r) => assets.showsColour(r.colour) && r.amount > 0n)
-      .sort((a, b) => order(a.colour) - order(b.colour) || a.kind.localeCompare(b.kind));
-  }, [coins, unshielded.view, tokens, assets]);
+    const shielded = holdingsByColour(coins)
+      .map((h) => ({ colour: h.color, amount: h.total }))
+      .filter((h) => assets.showsColour(h.colour));
+    const open = (unshielded.view?.balances ?? [])
+      .map((b) => ({ colour: b.colour, amount: BigInt(b.amount) }))
+      .filter((b) => assets.showsColour(b.colour));
+    const entries = solana.entries.filter((e) => assets.showsColour(e.colour));
+    return compactRows(shielded, open, entries, solana.lines, order);
+  }, [coins, unshielded.view, tokens, assets, solana.entries, solana.lines]);
 
   if (wallet.status !== 'connected' || !wallet.address) {
     return (
@@ -144,6 +219,15 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
           <ul className="holdings-list">
             {rows.map((r) => {
               const t = tokens?.byColour(r.colour);
+              if (r.kind === 'bridged')
+                return (
+                  <BridgedHolding
+                    key={`bridged-${r.colour}`}
+                    row={r}
+                    symbol={t?.symbol ?? r.entry.symbol}
+                    icon={t?.icon ?? null}
+                  />
+                );
               const symbol = t?.symbol ?? short(r.colour);
               return (
                 <li

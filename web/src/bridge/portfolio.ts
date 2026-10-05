@@ -150,3 +150,74 @@ export function useSolanaLines(
 }
 
 const EMPTY: ReadonlyMap<string, LineRead> = new Map();
+
+/** The account's coins of the bridged colours, as a key: a Solana read follows when it changes (a bridge in
+ *  or out landed). Every view computes it the same way, over the whole registry. */
+export function bridgedCoinsKey(coins: readonly StoredCoin[], entries: readonly BridgeEntry[]): string {
+  const colours = new Set(entries.map((e) => e.colour));
+  return coins
+    .filter((c) => colours.has(c.color))
+    .map((c) => `${c.commitment}:${c.spent ? 1 : 0}:${c.mtIndex ?? ''}`)
+    .sort()
+    .join(',');
+}
+
+// ── P12.1d (spec FR-025): the compact "Your tokens" list beside the books ─────────────────────────────
+
+/** One row of the compact list: a token with one version (a private or a public balance), or a bridged
+ *  token with its two (Midnight private + Solana). */
+export type CompactRow =
+  | { kind: 'shielded' | 'unshielded'; colour: string; amount: bigint }
+  | {
+      kind: 'bridged';
+      colour: string;
+      entry: BridgeEntry;
+      midnight: bigint;
+      solana: LineRead;
+      /** The value shown: the total when the Solana read succeeded, else the Midnight value alone. */
+      value: bigint;
+      /** Whether `value` is the total (both reads succeeded). */
+      total: boolean;
+    };
+
+/**
+ * The compact list's rows (FR-025): every token's FULL value, a bridged one as ONE row whose value is the
+ * FR-020 total, and only rows whose value is above zero. When the Solana read failed or is still running,
+ * a bridged row shows its Midnight value alone (marked by the view), never a total; with no Midnight value
+ * either, it is not shown. `shielded` are the chain-confirmed holdings by colour, `unshielded` the public
+ * balances; `order` sorts by the market's token order.
+ */
+export function compactRows(
+  shielded: ReadonlyArray<{ colour: string; amount: bigint }>,
+  unshielded: ReadonlyArray<{ colour: string; amount: bigint }>,
+  entries: readonly BridgeEntry[],
+  lines: ReadonlyMap<string, LineRead>,
+  order: (colour: string) => number,
+): CompactRow[] {
+  const bridgedColours = new Set(entries.map((e) => e.colour));
+  const rows: CompactRow[] = [
+    ...shielded
+      .filter((h) => !bridgedColours.has(h.colour))
+      .map((h) => ({ kind: 'shielded' as const, colour: h.colour, amount: h.amount })),
+    ...entries.map((entry): CompactRow => {
+      const midnight = shielded.find((h) => h.colour === entry.colour)?.amount ?? 0n;
+      const solana = lines.get(entry.splMint) ?? { state: 'loading' };
+      const total = solana.state === 'ok';
+      return {
+        kind: 'bridged',
+        colour: entry.colour,
+        entry,
+        midnight,
+        solana,
+        value: total ? midnight + solana.amount : midnight,
+        total,
+      };
+    }),
+    ...unshielded.map((u) => ({ kind: 'unshielded' as const, colour: u.colour, amount: u.amount })),
+  ];
+  const value = (r: CompactRow) => (r.kind === 'bridged' ? r.value : r.amount);
+  const rank = { shielded: 0, bridged: 0, unshielded: 1 } as const;
+  return rows
+    .filter((r) => value(r) > 0n)
+    .sort((a, b) => order(a.colour) - order(b.colour) || rank[a.kind] - rank[b.kind]);
+}

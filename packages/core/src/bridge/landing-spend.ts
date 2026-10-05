@@ -57,18 +57,17 @@ export function landingLocalState(
     value: coin.value,
   } as never);
   const events: ledger.Event[] = [];
-  try {
-    for (const bytes of raw) {
-      try {
-        events.push(ledger.Event.deserialize(bytes));
-      } catch (e) {
-        throw new LandingSpendError('bad-event', `a Zswap event did not decode: ${(e as Error).message}`);
-      }
+  for (const bytes of raw) {
+    try {
+      events.push(ledger.Event.deserialize(bytes));
+    } catch (e) {
+      // Not replayed: free what was decoded so far. (`replayEvents` takes ownership of the events it is
+      // given: freeing them afterwards is "null pointer passed to rust", G-LANDING Q5 gate run 2.)
+      for (const ev of events) (ev as unknown as { free?: () => void }).free?.();
+      throw new LandingSpendError('bad-event', `a Zswap event did not decode: ${(e as Error).message}`);
     }
-    return watched.replayEvents(keys.shieldedSecretKeys, events);
-  } finally {
-    for (const ev of events) (ev as unknown as { free?: () => void }).free?.();
   }
+  return watched.replayEvents(keys.shieldedSecretKeys, events);
 }
 
 /** The landing coin with its position, as the local state holds it (spendable), or null. */

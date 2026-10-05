@@ -450,8 +450,13 @@ PY
 }
 health() { printf '{"service":"%s","seconds":%s}\n' "$1" "$(( $(date +%s) - T_UP ))" >>"$OUT/health.jsonl"; }
 save_env() {
-  { declare -p CP RUN OUT NODE_PORT INDEXER_PORT RELAY_PORT SOL_RPC SOL_FAUCET SOL_GOSSIP DYN_LO X_API_PORT Y_API_PORT \
-      INJECTOR_PORT INJECTOR_IMAGE RELAY_IMAGE VPID MEM_PID GENESIS T_UP; } >"$RUN/stack.env" 2>/dev/null
+  # Plain assignments (not `declare -p`): load_current sources this inside a function, where `declare`
+  # would make locals, and macOS's bash 3.2 has no `declare -g`.
+  local v
+  for v in CP RUN OUT NODE_PORT INDEXER_PORT RELAY_PORT SOL_RPC SOL_FAUCET SOL_GOSSIP DYN_LO X_API_PORT Y_API_PORT \
+    INJECTOR_PORT INJECTOR_IMAGE RELAY_IMAGE VPID MEM_PID GENESIS T_UP; do
+    printf '%s=%q\n' "$v" "${!v-}"
+  done >"$RUN/stack.env"
   chmod 600 "$RUN/stack.env"
 }
 export_env() {

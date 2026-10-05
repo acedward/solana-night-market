@@ -149,3 +149,13 @@ condition = "AND"
 paths = ['''(^|/)relay/src/passport/arm\.ts$''']
 regexTarget = "match"
 regexes = ['''^rotateEncKey:\s*'rotate_enc_key_with_ed25519'$''']
+
+# AA 00057 P1: two REAL bridge deployment records (I-3, e2e/registry/fixtures/PROVENANCE.md), the
+# journey registry generator's test fixtures: the values the rule flags there are PUBLIC (the bridge
+# operator's Solana public key and the Passport adapter's key-set fingerprint). Scoped to that rule,
+# those two files AND those fields, as for 00058's vectors above.
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''(^|/)e2e/registry/fixtures/standin-[xy]\.record\.json$''']
+regexTarget = "match"
+regexes = ['''^(?:operatorKey|keySet)"''']

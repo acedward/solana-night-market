@@ -595,6 +595,9 @@ PY
     --genesis "$DEVNET_GENESIS" --out /run/nm/journey-tokens.stagenet.json \
     --site-icons-out /run/nm/site-icons.json "/out/$DEPLOYMENT.record.json" 2>&1 | tee "$OUT/registry-build.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "the journey registry"
+  # Fresh lists every run (run 4: a reused run directory still held the relay's list with X, and bridge-tokens
+  # refused the duplicate colour).
+  rm -f "$RUN/nm/tokens.json"
   echo '{"network":"stagenet","relayUrl":"http://relay:8080"}' >"$RUN/nm/site-config.json"
   bun_nm -v "$RUN/nm:/run/nm" --env-file "$RUN/devnet.env" "$BUN_IMAGE" sh -c \
     'exec bun scripts/bridge-tokens.ts "$@" --solana-rpc "$SOLANA_RPC_URL"' _ /run/nm/journey-tokens.stagenet.json \

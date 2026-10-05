@@ -58,8 +58,9 @@ describe('what counts against the budget (unit)', () => {
     expect(countsAgainstBudget(new Error('anything'), false)).toBe(false); // before any proof
   });
 
-  it('withdrawals, unshielded withdrawals, cancels and key restores are exempt', () => {
+  it('withdrawals, unshielded withdrawals, cancels, key restores and bridge-outs are exempt', () => {
     expect([...BUDGET_EXEMPT_ACTIONS].sort()).toEqual([
+      'bridge-out',
       'cancel-offers',
       'restore-enc-key',
       'withdraw',

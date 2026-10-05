@@ -83,7 +83,7 @@ export interface AppDeps {
   now?: () => number;
 }
 
-type ErrorStatus = 400 | 401 | 403 | 404 | 413 | 429 | 500 | 501 | 503;
+type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 501 | 503;
 
 const apiError = (c: Context, status: ErrorStatus, code: string, message: string, detail?: string) =>
   c.json({ error: { code, message, ...(detail ? { detail } : {}) } }, status);
@@ -344,6 +344,17 @@ export function createApp(deps: AppDeps): Hono {
           nonces: deps.nonces,
           now: now(),
         });
+      } else if (def.auth === 'entitlement' && def.available === false) {
+        outcome = { ok: false, code: 'not-supported', reason: 'this market does not offer Bridge out' };
+      } else if (def.auth === 'entitlement') {
+        // AA 00060 P6.3: no signature; what authorises the request is in its body (a single-use landing
+        // entitlement, or the public-indexer evidence of an entitlement re-issue), checked by the action's
+        // admission before any queue slot. The device key the body names keys the owner limiter.
+        const p = payload.data as { landing?: { deviceKey?: string }; deviceKey?: string };
+        const named = (p.landing?.deviceKey ?? p.deviceKey ?? '').toLowerCase();
+        outcome = /^[0-9a-f]{64}$/.test(named)
+          ? { ok: true, signer: named, kind: 'entitlement', ...(account ? { account } : {}) }
+          : { ok: false, code: 'malformed', reason: 'the request names no device key' };
       } else if (deps.passportCall) {
         outcome = await deps.passportCall(def, request);
       } else {

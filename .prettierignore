@@ -21,3 +21,5 @@ test/fixtures/bridge-tokens/*.out.json
 test/fixtures/00058-interfaces.json
 # AA 00060 P8.2: 00059's frozen I-4 vectors, copied byte for byte (00059-account-registration-vectors.PROVENANCE.md); never reformat
 test/fixtures/00059-account-registration-vectors.json
+# AA 00060 P6.2: the vendored bridge contract, byte for byte (web/src/bridge/vendor/bridge/PROVENANCE.md); never reformat
+web/src/bridge/vendor/bridge/

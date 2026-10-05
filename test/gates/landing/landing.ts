@@ -29,6 +29,25 @@
 // of the wallet SDK's sync, so it works whatever key tx1 sealed the coin to. STEP=return (TX1_LABEL=…)
 // returns that transfer's coin to A (`deposit_shielded`, sealed to A's on-chain key).
 //
+// AA 00060 P6 (T6.5, T6.4), STEP=out with OUT_CASE: the PAGE's own Bridge out (web/src/bridge/out/
+// operations.ts, the page's signing seam over A's test key) through the REAL relay's `withdraw` (purpose
+// `bridge-out`), `bridge-out` and `bridge-out-entitle`, the relay started with BRIDGE_REGISTRY_FILE and
+// the bridge bundle in its key volume:
+//   a           50 Y: derive (2 prompts), tx1 (1 prompt), the lock: the bridge records {A's wallet, 50 Y};
+//               every request the page made is captured, and no landing secret is in any of them or in
+//               the page's store (T6.4, SC-005)
+//   b-start/b   30 Y: tx1, then a NEW process finishes the lock from the stored record
+//   c-start/c   20 Y: tx1, then the coin is returned to A (the page sees it)
+//   d-start/d   15 Y: tx1, then an EMPTY store finds the transfer from the chain alone, the relay re-issues
+//               its entitlement (`bridge-out-entitle`), and the lock lands
+//   e           (WITHDRAWS_DAILY_CAP=1) a partial bridge-out past the allowance → 429 withdraws-daily-cap;
+//               the whole coin → admitted as the exit, and locked
+//   f           a hedged signer: refused at the landing key (`not-deterministic`) before tx1
+//   g           a stored check that does not match → `landing-key-changed`, before tx1
+//   i           two locks built on the same bridge state at once: one lands, the other is refused before
+//               any proof (`bridge-out-stale`), rebuilt on the new state, and lands
+//   j           `bridge-out-entitle` for a coin tx1 never paid → `entitle-not-found`
+//
 // SECRETS: A's test device seed is market-flows.ts's (state.json, mode 600); the landing master is
 // re-derived from it in every process and never written; the operator's throwaway key is in
 // landing-state.json (mode 600). Everything written to $OUT is public.
@@ -38,7 +57,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { sha256 } from '@noble/hashes/sha2.js';
+import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
 
@@ -80,6 +99,18 @@ import { decodeEvent } from '../../../web/src/chain/ledger-decode.js';
 import { syncAccount, withdrawToWallet } from '../../../web/src/passport/operations.js';
 import { readCoins } from '../../../web/src/passport/records.js';
 import { readZswapEvents } from '../../../web/src/bridge/out/zswap-events.js';
+import {
+  adoptTransfer,
+  findTransfers,
+  finishLock,
+  landingMasterFor,
+  returnToAccount,
+  startBridgeOut,
+  type BridgeOutContext,
+} from '../../../web/src/bridge/out/operations.js';
+import { putBridgeOut, readBridgeOuts, type BridgeOutRecord } from '../../../web/src/bridge/out/records.js';
+import { recordKey } from '../../../web/src/store/schema.js';
+import { ed25519ActionSigning } from '../../../web/src/wallet/signing.js';
 import { headlessPage, type HeadlessPage } from '../../stack/p6/page.js';
 import { landingCoinCommitment, paidOutNonce } from './coins.js';
 
@@ -522,7 +553,9 @@ async function bridgeDeploy() {
     };
     record('bridgeDeploy', r);
     if (!r.colourMatchesCore) throw new Error('core bridgeColourOf differs from the contract tokenColor');
-    process.stdout.write(`BRIDGE ${json({ contract, colour, symbol: 'Y', decimals: 6 })}\n`);
+    process.stdout.write(
+      `BRIDGE ${json({ contract, colour, symbol: 'Y', decimals: 6, sourceMint: base58.encode(sourceMint) })}\n`,
+    );
   } finally {
     await tp.stop().catch(() => undefined);
   }
@@ -1270,6 +1303,434 @@ async function negCircuit() {
   }
 }
 
+// ── P6 (T6.5, T6.4): the page's own Bridge out through the real relay ─────────────────────────
+
+/** Y's journey-registry entry (I-1), as the site and the relay both read it. */
+function entryY(): Any {
+  const b = gate.bridge!;
+  return {
+    colour: b.colour,
+    splMint: base58.encode(hexToBytes(b.sourceMint, 32)),
+    bridgeContract: b.contract,
+    bridgeProgram: base58.encode(new Uint8Array(32).fill(9)),
+    bridgeApi: 'http://bridge.invalid',
+    name: 'Bridged Y',
+    symbol: 'Y',
+    decimals: 6,
+  };
+}
+
+/** The page's Bridge-out context (A's page, A's test key as the wallet). */
+function outCtx(page: HeadlessPage, signing?: Any): BridgeOutContext {
+  return {
+    env: signing ? { ...page, signing } : page,
+    network: NETWORK,
+    networkId: PROFILE.midnightNetworkId,
+    indexerUrl: INDEXER_URL,
+    indexerWsUrl: INDEXER_WS_URL,
+    origin: ORIGIN,
+    solanaGenesisHash: GENESIS,
+    wallet: signerA.address,
+    deviceKey: signerA.deviceKey,
+    onProgress: (t) => say(`page: ${t}`),
+  };
+}
+
+/** The bridge's withdrawals as the chain has them now. */
+async function bridgeWithdrawals(): Promise<{ nonce: bigint; get(id: bigint): Any }> {
+  const rt = await runtime();
+  const bridge = await bridgeRuntime();
+  const st: Any = await (rt.publicDataProvider as Any).queryContractState(gate.bridge!.contract);
+  const l = bridge.ledger(st.data);
+  return {
+    nonce: BigInt(l.withdrawalNonce),
+    get: (id: bigint) => (l.withdrawals.member(id) ? l.withdrawals.lookup(id) : null),
+  };
+}
+
+/** Whether keys_t of `r` still holds its landing coin (the computed path). */
+async function landingHolds(r: BridgeOutRecord): Promise<boolean> {
+  const { master } = await landingMaster();
+  const keys = landingKeyFor(master, account(), BigInt(r.authNonce));
+  master.wipe();
+  try {
+    const c = await computedLanding(keys, { nonce: r.landingNonce, color: r.colour, value: BigInt(r.amount) });
+    return c.holds;
+  } finally {
+    keys.clear();
+  }
+}
+
+/** Capture every request the page makes (fetch bodies and URLs, WebSocket frames): T6.4. */
+function captureRequests(): { requests: { url: string; body: string }[]; stop(): void } {
+  const requests: { url: string; body: string }[] = [];
+  const g = globalThis as Any;
+  const origFetch = g.fetch;
+  g.fetch = async (input: Any, init?: Any) => {
+    const url = String(input instanceof Request ? input.url : input);
+    let body = '';
+    if (init?.body !== undefined)
+      body = typeof init.body === 'string' ? init.body : Buffer.from(init.body).toString('hex');
+    else if (input instanceof Request)
+      body = await input
+        .clone()
+        .text()
+        .catch(() => '');
+    requests.push({ url, body });
+    return origFetch(input, init);
+  };
+  const WS = g.WebSocket;
+  const origSend = WS?.prototype?.send;
+  if (origSend) {
+    WS.prototype.send = function (data: Any) {
+      requests.push({
+        url: String(this.url ?? 'ws'),
+        body: typeof data === 'string' ? data : Buffer.from(data).toString('hex'),
+      });
+      return origSend.call(this, data);
+    };
+  }
+  return {
+    requests,
+    stop() {
+      g.fetch = origFetch;
+      if (origSend) WS.prototype.send = origSend;
+    },
+  };
+}
+
+async function outCase(c: string) {
+  const pg = pageA();
+  const ctx = outCtx(pg);
+  const res: Record<string, Any> = { case: c };
+  const start = async (amount: bigint, label: string) => {
+    await pageY((v) => v >= amount);
+    const coin = chooseCoin(readCoins(pg.store, pg.scope, account()), colourY(), amount);
+    const t0 = Date.now();
+    const m = await landingMasterFor(ctx, account());
+    const r = await startBridgeOut(ctx, m, { account: account(), entry: entryY(), amount, coin });
+    pg.flush();
+    res[label] = {
+      authNonce: r.authNonce,
+      state: r.state,
+      entitlement: !!r.entitlement,
+      tx1Id: r.tx1Id,
+      seconds: (Date.now() - t0) / 1000,
+    };
+    return { r, m };
+  };
+  const lock = async (r: BridgeOutRecord, m: LandingMaster, label: string) => {
+    const before = await bridgeWithdrawals();
+    const t0 = Date.now();
+    const done = await finishLock(ctx, m, account(), r);
+    pg.flush();
+    const after = await bridgeWithdrawals();
+    const id = BigInt(done.withdrawalId!);
+    const w = after.get(id);
+    const holds = await landingHolds(done);
+    res[label] = {
+      state: done.state,
+      withdrawalId: done.withdrawalId,
+      tx2Id: done.tx2Id,
+      seconds: (Date.now() - t0) / 1000,
+      recorded: w
+        ? { solanaRecipient: bytesToHex(Uint8Array.from(w.solanaRecipient)), amount: String(w.amount) }
+        : null,
+      nonceBefore: before.nonce.toString(),
+      nonceAfter: after.nonce.toString(),
+      landingStillHolds: holds,
+    };
+    const ok =
+      done.state === 'locked' &&
+      w &&
+      bytesToHex(Uint8Array.from(w.solanaRecipient)) === signerA.deviceKey &&
+      BigInt(w.amount) === BigInt(r.amount) &&
+      !holds;
+    if (!ok) throw new Error(`${label}: the lock is not as expected: ${json(res[label])}`);
+    return done;
+  };
+  switch (c) {
+    case 'a': {
+      const cap = captureRequests();
+      let r: BridgeOutRecord;
+      let m: LandingMaster;
+      try {
+        ({ r, m } = await start(50n * UNIT, 'tx1'));
+        await lock(r, m, 'lock');
+      } finally {
+        cap.stop();
+      }
+      // T6.4 (SC-005): no landing secret in any request, nor in the page's store.
+      const message = (await import('@nightmarket/core/bridge')).landingMessage({
+        origin: ORIGIN,
+        midnightNetwork: PROFILE.midnightNetworkId,
+        solanaGenesisHash: GENESIS,
+        walletAddress: signerA.address,
+      });
+      const sig = nacl.sign.detached(message, kpA.secretKey);
+      const core = await import('@nightmarket/core/bridge');
+      const masterKey = core.landingMasterFromSignature(sig);
+      const seed = core.landingSeed(masterKey, account(), BigInt(r!.authNonce));
+      const forms = (b: Uint8Array) => [
+        bytesToHex(b),
+        Buffer.from(b).toString('base64'),
+        Buffer.from(b).toString('base64url'),
+      ];
+      const secrets: Record<string, string[]> = { sig1: forms(sig), master: forms(masterKey), seed_t: forms(seed) };
+      const store = readFileSync(join(STATE_DIR, 'page-A.json'), 'utf8');
+      const leaks: string[] = [];
+      for (const [name, fs] of Object.entries(secrets)) {
+        for (const f of fs) {
+          for (const q of cap.requests) if (q.url.includes(f) || q.body.includes(f)) leaks.push(`${name} in ${q.url}`);
+          if (store.includes(f)) leaks.push(`${name} in the page's store`);
+        }
+      }
+      res.t64 = {
+        requests: cap.requests.length,
+        hosts: [...new Set(cap.requests.map((q) => q.url.replace(/^(\w+:\/\/[^/]+).*$/, '$1')))],
+        bridgeOutRequests: cap.requests.filter((q) => q.url.endsWith('/v1/actions/bridge-out')).length,
+        leaks,
+      };
+      record('out:a', res);
+      if (leaks.length > 0) throw new Error(`T6.4: a landing secret left the tab: ${leaks.join('; ')}`);
+      void m!;
+      return res;
+    }
+    case 'b-start':
+    case 'c-start':
+    case 'd-start': {
+      const amount = { 'b-start': 30n, 'c-start': 20n, 'd-start': 15n }[c]! * UNIT;
+      await start(amount, 'tx1');
+      return record(`out:${c}`, res);
+    }
+    case 'b': {
+      // A NEW process: the record from the page's store, the master derived again (2 prompts).
+      const open = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.amount === String(30n * UNIT) && x.state === 'tx1-sent',
+      );
+      if (!open) throw new Error('no stored transfer of 30 Y to finish');
+      const m = await landingMasterFor(ctx, account());
+      await lock(open, m, 'lock');
+      return record('out:b', res);
+    }
+    case 'c': {
+      const open = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.amount === String(20n * UNIT) && x.state === 'tx1-sent',
+      );
+      if (!open) throw new Error('no stored transfer of 20 Y to return');
+      const before = await pageY();
+      const m = await landingMasterFor(ctx, account());
+      const done = await returnToAccount(ctx, m, account(), open);
+      pg.flush();
+      const after = await pageY((v) => v >= before.total + BigInt(open.amount));
+      res.return = {
+        state: done.state,
+        tx2Id: done.tx2Id,
+        pageY: { before: before.total.toString(), after: after.total.toString() },
+      };
+      record('out:c', res);
+      if (after.total !== before.total + BigInt(open.amount))
+        throw new Error(`the page does not see the returned coin: ${json(res.return)}`);
+      return res;
+    }
+    case 'd': {
+      // An EMPTY store for the same wallet and account (the records a browser that opened A holds, but no
+      // bridge-out record): find the transfer from the chain alone, re-entitle, lock.
+      const fresh = headlessPage({
+        network: NETWORK,
+        relayUrl: RELAY,
+        chain: new ChainReader({ indexerUrl: INDEXER_URL, networkId: PROFILE.midnightNetworkId }),
+        signer: signerA,
+        tokens,
+        storePath: join(STATE_DIR, `page-A-empty-${Date.now()}.json`),
+        account: {
+          address: account(),
+          encSecret: flows.A.encSecret,
+          encPublic: flows.A.encPublic,
+          ...(flows.A.txs ? { txs: flows.A.txs } : {}),
+        },
+      });
+      const fctx = outCtx(fresh);
+      if (readBridgeOuts(fresh.store, fresh.scope, account()).length !== 0)
+        throw new Error('the fresh store is not empty');
+      const m = await landingMasterFor(fctx, account());
+      const t0 = Date.now();
+      const found = await findTransfers(fctx, m, account());
+      res.found = found.map((f) => ({ authNonce: f.authNonce, amount: f.amount.toString(), open: f.open }));
+      res.findSeconds = (Date.now() - t0) / 1000;
+      const target = found.find((f) => f.open && f.amount === 15n * UNIT);
+      if (!target) throw new Error(`the 15 Y transfer was not found open: ${json(res.found)}`);
+      const r = await adoptTransfer(fctx, m, account(), target, entryY());
+      res.adopted = { state: r.state, entitlement: !!r.entitlement };
+      const before = await bridgeWithdrawals();
+      const done = await finishLock(fctx, m, account(), r);
+      const after = await bridgeWithdrawals();
+      const w = after.get(BigInt(done.withdrawalId!));
+      res.lock = {
+        state: done.state,
+        nonceBefore: before.nonce.toString(),
+        nonceAfter: after.nonce.toString(),
+        recorded: w
+          ? { solanaRecipient: bytesToHex(Uint8Array.from(w.solanaRecipient)), amount: String(w.amount) }
+          : null,
+      };
+      record('out:d', res);
+      if (!w || BigInt(w.amount) !== 15n * UNIT || bytesToHex(Uint8Array.from(w.solanaRecipient)) !== signerA.deviceKey)
+        throw new Error(`d: the lock is not as expected: ${json(res.lock)}`);
+      return res;
+    }
+    case 'e': {
+      // The relay runs with WITHDRAWS_DAILY_CAP=1 and was restarted (its counts are in memory): A holds
+      // a 5 Y and a 3 Y coin. 1 Y of the 5 Y coin is the day's one withdrawal; 1 Y of the 3 Y coin is
+      // refused (429); the whole 3 Y coin is admitted as the exit and locked.
+      const coins = readCoins(pg.store, pg.scope, account());
+      const five = coins.find((x) => x.color === colourY() && !x.spent && x.value === String(5n * UNIT));
+      const three = coins.find((x) => x.color === colourY() && !x.spent && x.value === String(3n * UNIT));
+      if (!five || !three) throw new Error('A does not hold the 5 Y and 3 Y coins');
+      const m = await landingMasterFor(ctx, account());
+      const first = await startBridgeOut(ctx, m, {
+        account: account(),
+        entry: entryY(),
+        amount: 1n * UNIT,
+        coin: five as Any,
+      });
+      pg.flush();
+      res.first = { state: first.state };
+      let refused: Any = null;
+      try {
+        await startBridgeOut(ctx, m, { account: account(), entry: entryY(), amount: 1n * UNIT, coin: three as Any });
+      } catch (e) {
+        refused = {
+          name: (e as Error).name,
+          code: (e as Any).code ?? null,
+          status: (e as Any).status ?? null,
+          message: (e as Error).message.slice(0, 300),
+        };
+      }
+      pg.flush();
+      res.partial = refused;
+      if (!refused || refused.code !== 'withdraws-daily-cap')
+        throw new Error(`e: the partial bridge-out past the cap was not refused: ${json(refused)}`);
+      const exit = await startBridgeOut(ctx, m, {
+        account: account(),
+        entry: entryY(),
+        amount: 3n * UNIT,
+        coin: three as Any,
+      });
+      pg.flush();
+      res.exit = { state: exit.state };
+      await lock(exit, m, 'exitLock');
+      return record('out:e', res);
+    }
+    case 'f': {
+      // A hedged signer (valid signatures that differ each time): refused at the landing key, before tx1.
+      let asked = 0;
+      const { ed25519 } = await import('@noble/curves/ed25519.js');
+      const hedged = {
+        deviceKey: signerA.deviceKey,
+        address: signerA.address,
+        signMessage: async (msg: Uint8Array) => {
+          asked += 1;
+          const L = ed25519.Point.Fn.ORDER;
+          const le = (b: Uint8Array) => b.reduceRight((v, x) => (v << 8n) | BigInt(x), 0n);
+          const toLe = (v: bigint) =>
+            Uint8Array.from({ length: 32 }, (_, i) => Number((v >> (8n * BigInt(i))) & 0xffn));
+          const { scalar } = ed25519.utils.getExtendedPublicKey(kpA.secretKey.slice(0, 32));
+          const rr = le(new Uint8Array(randomBytes(64))) % L;
+          const R = ed25519.Point.BASE.multiply(rr).toBytes();
+          const k = le(sha512(new Uint8Array([...R, ...kpA.publicKey, ...msg]))) % L;
+          return new Uint8Array([...R, ...toLe((rr + k * scalar) % L)]);
+        },
+      };
+      const signing = ed25519ActionSigning(hedged, { network: NETWORK, tokens });
+      let err: Any = null;
+      try {
+        await landingMasterFor(outCtx(pg, signing), account());
+      } catch (e) {
+        err = { code: (e as Any).code ?? null, message: (e as Error).message };
+      }
+      res.refusal = err;
+      res.walletAsked = asked;
+      record('out:f', res);
+      if (err?.code !== 'not-deterministic' || asked !== 2) throw new Error(`f: ${json(res)}`);
+      return res;
+    }
+    case 'g': {
+      // A stored check that does not match (another master): refused before tx1.
+      const fake: BridgeOutRecord = {
+        ...(readBridgeOuts(pg.store, pg.scope, account())[0] as BridgeOutRecord),
+        authNonce: '999999',
+        check: '00'.repeat(16),
+        state: 'failed',
+      };
+      putBridgeOut(pg.store, pg.scope, account(), { ...fake, createdAt: Date.now() + 10_000 });
+      let err: Any = null;
+      try {
+        await landingMasterFor(ctx, account());
+      } catch (e) {
+        err = { code: (e as Any).code ?? null, message: (e as Error).message };
+      }
+      pg.store.remove(recordKey(pg.scope, 'bridge', { account: account(), id: 'out-999999' }));
+      pg.flush();
+      res.refusal = err;
+      record('out:g', res);
+      if (err?.code !== 'landing-key-changed') throw new Error(`g: ${json(res)}`);
+      return res;
+    }
+    case 'i': {
+      // Two transfers at the landing key, both locks built on the SAME bridge state, sent at once.
+      const one = await start(4n * UNIT, 'tx1One');
+      const two = await start(2n * UNIT, 'tx1Two');
+      const before = await bridgeWithdrawals();
+      const t0 = Date.now();
+      const [a, b] = await Promise.all([
+        finishLock(ctx, one.m, account(), one.r),
+        finishLock(ctx, two.m, account(), two.r),
+      ]);
+      pg.flush();
+      const after = await bridgeWithdrawals();
+      res.locks = {
+        seconds: (Date.now() - t0) / 1000,
+        states: [a.state, b.state],
+        withdrawalIds: [a.withdrawalId, b.withdrawalId],
+        nonceBefore: before.nonce.toString(),
+        nonceAfter: after.nonce.toString(),
+      };
+      record('out:i', res);
+      if (a.state !== 'locked' || b.state !== 'locked' || after.nonce !== before.nonce + 2n)
+        throw new Error(`i: ${json(res.locks)}`);
+      return res;
+    }
+    case 'j': {
+      // bridge-out-entitle for a coin tx1 never paid (another landing key): entitle-not-found.
+      const r = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.state === 'locked' && x.amount === String(50n * UNIT),
+      );
+      if (!r) throw new Error('no 50 Y transfer to borrow the tx1 from');
+      const st = await pg.chain.accountState(account());
+      const counter = pg.signing.useCounter(st!, 0n);
+      const job = await pg.relay.submit('bridge-out-entitle', {
+        account: account(),
+        payload: {
+          tx1Hash: (await indexerTx(r.tx1Id!))?.hash?.replace(/^0x/, '') ?? r.tx1Id,
+          spentCoin: r.spentCoin,
+          amount: r.amount,
+          landingCoinPublicKey: '77'.repeat(32),
+          deviceKey: signerA.deviceKey,
+          useCounter: String(counter),
+        },
+      });
+      const done = await pg.relay.waitForJob(job.requestId, () => undefined);
+      res.job = { state: done.state, code: done.error?.code ?? null };
+      record('out:j', res);
+      if (done.state !== 'failed' || done.error?.code !== 'entitle-not-found') throw new Error(`j: ${json(res.job)}`);
+      return res;
+    }
+    default:
+      throw new Error(`unknown OUT_CASE ${c}`);
+  }
+}
+
 async function main() {
   out.network = NETWORK;
   if (STEP !== 'bridge-deploy') {
@@ -1296,6 +1757,8 @@ async function main() {
     }
     case 'return':
       return returnCoin(process.env.TX1_LABEL ?? 'tx1');
+    case 'out':
+      return outCase(process.env.OUT_CASE ?? 'a');
     case 'resume-lock':
       return resumeLock();
     case 'resume-return':

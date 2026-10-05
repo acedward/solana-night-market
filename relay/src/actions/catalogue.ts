@@ -37,6 +37,15 @@ import { admitAll, type AdmissionCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import {
+  BridgeOutEntitlePayloadSchema,
+  BridgeOutPayloadSchema,
+  bridgeOutAdmission,
+  bridgeOutEntitleExecutor,
+  bridgeOutExecutor,
+  type BridgeOutDeps,
+  type EntitleDeps,
+} from '../bridge/out-actions.js';
 import { expiryAdmission } from '../trade/expiry.js';
 
 export interface ActionDefinition {
@@ -57,7 +66,16 @@ export interface ActionDefinition {
   executor: JobExecutor;
   /** The plan lane that implements the executor. */
   implementedBy: string;
+  /** AA 00060: false while the deployment does not offer the action (an `entitlement` action without its
+   *  executor: no journey registry or no key volume); the route refuses it before anything else. */
+  available?: boolean;
 }
+
+/** The actions authorised by what their body carries (AA 00060 P6.3), not by a wallet signature. */
+export const ENTITLEMENT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
+  'bridge-out',
+  'bridge-out-entitle',
+]);
 
 import {
   appendInboxExecutor,
@@ -110,6 +128,10 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('cancel-offers', 'prover', 'P9.I'),
     // AA 00047 P10 (audit round 2, R2-3): the site's "Restore my encryption key" (executor: P10.R).
     def('restore-enc-key', 'prover', 'P10.R'),
+    // AA 00060 P6.3: Bridge out's second transaction and the entitlement's re-issue (executors:
+    // ../bridge/out-actions.ts, wired by `withBridgeOut`).
+    { ...def('bridge-out', 'prover', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
+    { ...def('bridge-out-entitle', 'relay', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -194,6 +216,35 @@ export function withTrade(
     payload: TakePayloadSchema,
     admit: deps.cooldown ? admitAll(takeExpiry, cooldownAdmission(deps.cooldown)) : takeExpiry,
     executor: takeExecutor(deps),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with Bridge out (AA 00060 P6.3, ../bridge/out-actions.ts): `bridge-out` (one sponsored
+ * second transaction against a single-use landing entitlement, every check before any slot, proof or
+ * DUST) on the prover lane, and `bridge-out-entitle` (no DUST: the indexer evidence re-issues an
+ * entitlement) on the relay lane.
+ */
+export function withBridgeOut(
+  map: Map<RelayActionName, ActionDefinition>,
+  deps: BridgeOutDeps & EntitleDeps,
+): Map<RelayActionName, ActionDefinition> {
+  map.set('bridge-out', {
+    ...map.get('bridge-out')!,
+    available: true,
+    auth: 'entitlement',
+    payload: BridgeOutPayloadSchema as never,
+    admit: bridgeOutAdmission(deps),
+    executor: bridgeOutExecutor(deps),
+  });
+  map.set('bridge-out-entitle', {
+    ...map.get('bridge-out-entitle')!,
+    available: true,
+    auth: 'entitlement',
+    requiresSponsor: false,
+    payload: BridgeOutEntitlePayloadSchema as never,
+    executor: bridgeOutEntitleExecutor(deps),
   });
   return map;
 }

@@ -23,7 +23,12 @@ import {
 
 import type { NonceStore } from './nonces.js';
 
-export type AuthKind = 'relay-action' | 'passport-call';
+/** 3. `entitlement` (AA 00060 P6.3): no signature; the action's body carries what authorises it (a
+ *  bridge-out's single-use landing entitlement, a relay MAC over every bound field; an entitlement
+ *  re-issue's public-indexer evidence), checked by the action's own admission before any queue slot,
+ *  proof or DUST. The "signer" is the device key the body names (for the owner limiter and the
+ *  failure budget). */
+export type AuthKind = 'relay-action' | 'passport-call' | 'entitlement';
 
 export type VerifyOutcome =
   | {

@@ -48,6 +48,9 @@ export const SOLANA_ENVELOPE_PURPOSES: Readonly<Record<RelayActionName, string>>
   take: 'Approve a Night Market request',
   'cancel-offers': 'Approve a Night Market request',
   'restore-enc-key': 'Approve a Night Market request',
+  // AA 00060: never signed (a landing entitlement authorises them); listed so every action has one.
+  'bridge-out': 'Approve a Night Market request',
+  'bridge-out-entitle': 'Approve a Night Market request',
 };
 
 /** The envelope digest: SHA-256 over the domain and the envelope's canonical JSON, 64 hex. */

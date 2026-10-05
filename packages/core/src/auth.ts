@@ -43,6 +43,11 @@ export const RELAY_ACTIONS = [
   // AA 00047 P10 (audit round 2, R2-3; questions Q36): put THIS browser's encryption key back on an
   // account whose on-chain key was changed, with the same circuit to another key (./accounts.ts).
   'restore-enc-key',
+  // AA 00060 P6.3: Bridge out's second transaction (the lock, or the return to the account), paid for by
+  // a single-use landing entitlement, and the entitlement's re-issue after an indexer check
+  // (./bridge/out.ts).
+  'bridge-out',
+  'bridge-out-entitle',
 ] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 

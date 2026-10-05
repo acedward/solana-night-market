@@ -5,9 +5,12 @@
 // ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, and serve.
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { KernelClient } from '@nightmarket/core';
 
+import { addDustAndSubmit } from './bridge/dust-submit.js';
+import { LandingEntitlements, landingEntitlementKey } from './bridge/out-actions.js';
 import { bridgeKeyProblems, type ReadContractState } from './bridge/registry-check.js';
 import { AccountCaps } from './actions/account-caps.js';
 import { AccountGate } from './actions/account-gate.js';
@@ -17,6 +20,7 @@ import {
   withAccountCaps,
   withDemoTokens,
   withRegistrationCaps,
+  withBridgeOut,
   withTrade,
 } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
@@ -26,7 +30,7 @@ import { createApp } from './app.js';
 import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
 import { DigestReplayGuard } from './auth/verifiers.js';
-import { IndexerClient } from './chain/indexer.js';
+import { IndexerClient, ledgerEventDecoder } from './chain/indexer.js';
 import {
   IndexerChainReader,
   notImplementedChainReader,
@@ -45,6 +49,8 @@ import { cachedKeyCheck, checkKeyVolume, keyVolumeProblems } from './prover/keys
 import { DEMO_TOKEN_PROVEN_CIRCUITS, RELAY_PROVEN_CIRCUITS } from './prover/required.js';
 import { accountKeysChecker, type OnChainAccountState } from './passport/account-keys.js';
 import { wiredArm } from './passport/arm.js';
+import { isLiveDevice } from './passport/ed25519-arm.js';
+import type { SponsorWalletHandle } from './passport/wallet-provider.js';
 import { PassportRuntime, PassportRuntimeError } from './passport/runtime.js';
 import { JobQueue } from './queue/jobs.js';
 import { FacadeSponsorSession, openFacadeWallet } from './sponsor/facade.js';
@@ -269,6 +275,18 @@ async function main(): Promise<void> {
     ttlSeconds: config.limits.appendEntitlementTtlSeconds,
     maxPerAccountPerDay: config.limits.appendsPerAccountPerDay,
   });
+  // AA 00060 P6.3: Bridge out's single-use landing entitlements (./bridge/out-actions.ts), MAC'd with a
+  // key from the seed so they survive a restart; only with a journey registry and the key volume.
+  const landing =
+    config.bridges && runtime && config.managedPath
+      ? {
+          entitlements: new LandingEntitlements({
+            key: landingEntitlementKey(secrets.sponsorSeedHex),
+            network: config.network.name,
+          }),
+          bridges: config.bridges,
+        }
+      : undefined;
   // Stateless nonces (AA 00047 P10, R2-8): only used ones are remembered.
   const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   // Audit C4 (AA 00047 P9): registration caps and the failure budget (RUNBOOK section 9).
@@ -323,6 +341,7 @@ async function main(): Promise<void> {
           withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
           replay,
           entitlements,
+          ...(landing ? { landing } : {}),
           log: log.child({ component: 'accounts' }),
           // AA 00047 P11 (R3-7): a coin is checked unspent before a proof is spent on it.
           ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
@@ -370,6 +389,68 @@ async function main(): Promise<void> {
   }
   catalogue = withRegistrationCaps(catalogue, registrationCaps);
   catalogue = withAccountCaps(catalogue, accountCaps);
+  // AA 00060 P6.3: Bridge out's second transaction and the entitlement re-issue.
+  if (landing && wired && runtime && config.managedPath) {
+    const rt = runtime;
+    const managed = config.managedPath;
+    const pdp = rt.publicDataProvider as {
+      queryZSwapAndContractState(a: string, c: unknown): Promise<[unknown, unknown, unknown] | null>;
+      queryContractState(a: string): Promise<unknown>;
+    };
+    const display = { network: config.network.name, tokens: config.tokens };
+    catalogue = withBridgeOut(catalogue, {
+      bridges: landing.bridges,
+      entitlements: landing.entitlements,
+      ledger: () => import('@midnightntwrk/ledger-v9'),
+      transcripts: async () => ({
+        runtime: (await import('@midnight-ntwrk/compact-runtime-0.20')) as never,
+        bridgeLedger: (
+          (await import(join(managed, 'bridge', 'contract', 'index.js'))) as { ledger: (s: unknown) => never }
+        ).ledger,
+        stateAt: async (address, blockHash) =>
+          (await pdp.queryZSwapAndContractState(address, { type: 'blockHash', blockHash }))?.[1] ?? null,
+        latestState: (address) => pdp.queryContractState(address),
+      }),
+      prove: (tx) =>
+        (rt.proofProvider as { proveTx(t: unknown, o: unknown): Promise<unknown> }).proveTx(tx, { timeout: 900_000 }),
+      awaitLanded: async (txId) => {
+        const watch = (pdp as unknown as { watchForTxData(id: string): Promise<{ status?: unknown }> }).watchForTxData(
+          txId,
+        );
+        const out = await Promise.race([
+          watch.catch(() => null),
+          new Promise<null>((r) => setTimeout(() => r(null), 180_000)),
+        ]);
+        return out !== null && String(out.status) === 'SucceedEntirely';
+      },
+      submitWithDust: (tx) =>
+        sponsor.withWallet((w) =>
+          addDustAndSubmit(w as SponsorWalletHandle, tx, {
+            onWait: () => log.info('waiting for the sponsor wallet to generate enough DUST'),
+          }),
+        ),
+      tx1: async (account, tx1Hash) => {
+        const txs = await indexer.accountTransactions(account);
+        const tx = txs?.txs.find((t) => t.hash.replace(/^0x/, '').toLowerCase() === tx1Hash);
+        if (!tx) return null;
+        const decode = await ledgerEventDecoder();
+        const outputs: string[] = [];
+        for (const ev of tx.events) {
+          const d = decode(ev.raw) as { tag?: string; commitment?: string };
+          if (d.tag === 'zswapOutput' && d.commitment) outputs.push(d.commitment);
+        }
+        return { entryPoints: tx.entryPoints ?? [], outputs };
+      },
+      liveDevice: async (account, deviceKey, useCounter) => {
+        const l = await rt.ledgerState(account);
+        if (!l) return false;
+        const { ed25519DeviceForKey } = await import('@nightmarket/core/passport');
+        return isLiveDevice(l, ed25519DeviceForKey(deviceKey, display), account, useCounter);
+      },
+      log: log.child({ component: 'bridge-out' }),
+    });
+    log.info('bridge out enabled', { bridges: landing.bridges.entries.map((b) => b.symbol) });
+  }
   const app = createApp({
     config,
     version: RELAY_VERSION,

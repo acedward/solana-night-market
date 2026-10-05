@@ -64,6 +64,7 @@ import {
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useBridges } from '../bridge/BridgeContext.js';
 import { BridgeIn } from '../bridge/in/BridgeIn.js';
+import { BridgeOut } from '../bridge/out/BridgeOut.js';
 import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
@@ -899,6 +900,16 @@ export function Accounts({
                     : 'pending'
               }
               pageCoins={bridgePageCoins}
+              busy={!!busy}
+            />
+          )}
+          {account && hasSecret && bridging && (
+            <BridgeOut
+              network={network}
+              account={account.address}
+              accountChecked={accountCheck.status === 'ok'}
+              coins={coins}
+              env={env}
               busy={!!busy}
             />
           )}

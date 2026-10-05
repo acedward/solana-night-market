@@ -18,6 +18,7 @@ export * from './offer-expiry.js';
 export * from './shielded-address.js';
 export * from './signing.js';
 export * from './solana-signature.js';
+export * from './spl-faucet.js';
 export * from './tokens/digest.js';
 export * from './tokens/icon.js';
 export * from './tokens/pairs.js';

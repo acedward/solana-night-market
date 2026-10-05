@@ -28,7 +28,11 @@ import type { NonceStore } from './nonces.js';
  *  re-issue's public-indexer evidence), checked by the action's own admission before any queue slot,
  *  proof or DUST. The "signer" is the device key the body names (for the owner limiter and the
  *  failure budget). */
-export type AuthKind = 'relay-action' | 'passport-call' | 'entitlement';
+export type AuthKind = 'relay-action' | 'passport-call' | 'entitlement' | 'unsigned';
+
+/** 4. `unsigned` (AA 00060 P13, the test SPL faucet): no signature and no entitlement. The request is charged
+ *  to the CLIENT only (its own unsigned budget, the action's per-client and per-period caps), never to the
+ *  wallet or account it names (the C2 lesson of the P10 audit): the route's "signer" is `client:<address>`. */
 
 export type VerifyOutcome =
   | {

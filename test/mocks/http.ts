@@ -12,10 +12,10 @@ export const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...CORS } });
 
 /** A `fetch` that answers every request with `handler` (any host). */
-export const asFetch =
-  (handler: Handler): typeof fetch =>
-  async (input: RequestInfo | URL, init?: RequestInit) =>
-    handler(input instanceof Request ? input : new Request(String(input), init));
+export const asFetch = (handler: Handler): typeof fetch =>
+  // A cast: Bun's `typeof fetch` also has `preconnect` (the relay's type-check sees Bun's, AA 00060 P13).
+  (async (input: RequestInfo | URL, init?: RequestInit) =>
+    handler(input instanceof Request ? input : new Request(String(input), init))) as typeof fetch;
 
 /** Serve `handler` on 127.0.0.1; resolves with the base URL and a close function. */
 export async function serveHandler(handler: Handler, port = 0): Promise<{ url: string; close(): Promise<void> }> {

@@ -125,6 +125,10 @@ services:
       WITHDRAWS_DAILY_CAP: '${CAP_WITHDRAWS_PER_DAY:-100}'
       # AA 00060 P6: Bridge out (the journey registry; empty: no bridging).
       BRIDGE_REGISTRY_FILE: '${BRIDGE_REGISTRY_FILE:-}'
+      # AA 00060 P13: the test SPL faucet ("Mint Solana tokens"; empty: off). A harness writes the keys file
+      # into RUN_DIR (mounted at /run/nm) with `bun relay/src/tools/spl-faucet-keys.ts`, mode 600.
+      SPL_FAUCET_KEYS_FILE: '${SPL_FAUCET_KEYS_FILE:-}'
+      SPL_FAUCET_RPC_URL: '${SPL_FAUCET_RPC_URL:-}'
       LOG_LEVEL: info
     volumes:
       - '${KEYS_DIR:?}:/app/vendor/passport/contract/contracts/managed:ro'

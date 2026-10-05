@@ -11,6 +11,7 @@
 //   GET  /v1/accounts/:account/zswap    the account's Zswap leaves (exact positions) and spends (L-ACC)
 //   GET  /v1/accounts/:account/unshielded  the account's unshielded balances (B3, for B2's holdings)
 //   GET  /v1/demo-tokens[?owner=<key>]  the demo-token pack, its limits, and whether a key claimed (B3)
+//   GET  /v1/spl-faucet[?wallet=<b58>]  the test SPL faucet: what a claim mints, and a wallet's last claim (AA 00060 P13)
 //
 // Request bodies are never logged. Errors are JSON: {"error": {"code", "message", "detail"?}}.
 
@@ -29,6 +30,7 @@ import {
   type RelayActionName,
   NOT_SUPPORTED_REASON,
   type RelayActionScheme,
+  type SplFaucetInfo,
   tokensDigest,
 } from '@nightmarket/core';
 
@@ -71,6 +73,8 @@ export interface AppDeps {
   passportCall?: (def: ActionDefinition, request: ActionRequest) => Promise<VerifyOutcome>;
   /** The demo-token pack and limits (GET /v1/demo-tokens, B3); absent: the endpoint is off. */
   demoTokens?: (owner?: string) => DemoTokensInfo;
+  /** The test SPL faucet's offer (GET /v1/spl-faucet, AA 00060 P13); absent: not configured. */
+  splFaucet?: (wallet?: string) => SplFaucetInfo;
   /** The failure budget per owner and per account (AA 00047 P9, audit C4: ./actions/failure-budget.ts);
    *  absent: none. */
   failures?: FailureBudget;
@@ -235,6 +239,23 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(body);
   });
 
+  // AA 00060 P13 (spec FR-024): what "Mint Solana tokens" mints, whether it is on, and a wallet's last claim.
+  app.get(API_PATHS.splFaucet, (c) => {
+    const refused = limited(readLimiter, clientAddress(c), c);
+    if (refused) return refused;
+    const wallet = c.req.query('wallet');
+    if (wallet !== undefined && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet))
+      return apiError(c, 400, 'bad-request', 'wallet must be a Solana address (base58)');
+    c.header('Cache-Control', 'no-store');
+    const body: SplFaucetInfo = deps.splFaucet?.(wallet) ?? {
+      enabled: false,
+      reason: 'not-configured',
+      tokens: [],
+      periodHours: 24,
+    };
+    return c.json(body);
+  });
+
   app.get(API_PATHS.queue, (c) => {
     const refused = limited(readLimiter, clientAddress(c), c);
     if (refused) return refused;
@@ -380,6 +401,15 @@ export function createApp(deps: AppDeps): Hono {
         outcome = /^[0-9a-f]{64}$/.test(named)
           ? { ok: true, signer: named, kind: 'entitlement', ...(account ? { account } : {}) }
           : { ok: false, code: 'malformed', reason: 'the request names no device key' };
+      } else if (def.auth === 'unsigned' && def.available === false) {
+        outcome = { ok: false, code: 'not-supported', reason: NOT_OFFERED[def.action] ?? NOT_SUPPORTED_REASON };
+      } else if (def.auth === 'unsigned') {
+        // AA 00060 P13: no authorisation at all. Charged to the requesting CLIENT only (audit C2): its own
+        // unsigned budget here and the action's per-client caps at admission. The route's "signer" (its owner
+        // limiter and failure budget key) names the client, never the wallet or account the body names.
+        const unauthRefused = limited(unauthLimiter, client, c);
+        if (unauthRefused) return unauthRefused;
+        outcome = { ok: true, signer: `client:${client}`, kind: 'unsigned' };
       } else if (deps.passportCall) {
         outcome = await deps.passportCall(def, request);
       } else {
@@ -553,6 +583,11 @@ export function createApp(deps: AppDeps): Hono {
 
   return app;
 }
+
+/** Why an unsigned action is refused when this relay does not offer it. */
+const NOT_OFFERED: Partial<Record<RelayActionName, string>> = {
+  'spl-faucet': 'this market does not offer Mint Solana tokens: its test SPL faucet is not configured',
+};
 
 /** Seconds a busy account is told to wait (`429 account-busy`): about one proof. */
 export const ACCOUNT_BUSY_RETRY_SECONDS = 30;

@@ -81,7 +81,7 @@ test('requests are paced: a wallet that drops one asked within 500 ms of its las
 }) => {
   const { wallet, relay } = await nightlySite(page, { seeded: true });
   wallet.dropWithinMs = 500;
-  await page.goto('/#account');
+  await page.goto('/#account?action=send');
   await connectWallet(page, 'Nightly');
   await expect(page.locator('[data-testid=passport-row][data-symbol="twUSDC"]')).toContainText('1,000.00');
   await page.getByTestId('send-token').selectOption(COLOUR.twUSDC);

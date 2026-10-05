@@ -4,6 +4,7 @@
 //
 //   bun scripts/bridge-tokens.ts <journey-tokens.json> --site-config <config.json> --relay-tokens <tokens.json>
 //       [--pairs X/Y,…] [--mode extend|replace] [--solana-rpc <url>] [--out-site <file>] [--out-relay <file>]
+//       [--icons <icons.json>|none]
 //
 // It reads the site's config.json (its `network`, and the tokens/pairs already there) and the relay's
 // TOKENS_FILE (when it exists; `extend` keeps what it lists), and writes both back (or to --out-*): the
@@ -11,15 +12,24 @@
 // on that RPC (the classic SPL Token program owns it, its decimals are I-1's) and the RPC's genesis hash.
 // It prints the lists' digest (`GET /v1/config` `tokensDigest`). Exit codes: 0 written; 65 refused (the
 // reason is named: `bridge-tokens: refused: <reason>: …`); 64 usage.
+//
+// AA 00060 P12.1b (spec FR-022): the site's token entries and `bridges` entries that name no icon get one
+// by symbol from `--icons` (default ./token-icons.json: the images the site bundles under
+// web/public/token-icons/, the wallet's own set); `--icons none` writes no icons. The relay's list is
+// written without icons (display only; not in the digest).
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-import { BridgeTokensError, bridgeTokenLists, type SolanaFacts } from '@nightmarket/core/bridge';
+import { BridgeTokensError, bridgeTokenLists, type SolanaFacts, type TokenIconMap } from '@nightmarket/core/bridge';
+
+/** The default icon map: the site's bundled set (web/public/token-icons/). */
+export const DEFAULT_ICONS = fileURLToPath(new URL('./token-icons.json', import.meta.url));
 
 const usage = (m: string): never => {
   console.error(`bridge-tokens: ${m}`);
   console.error(
-    'usage: bun scripts/bridge-tokens.ts <journey-tokens.json> --site-config <config.json> --relay-tokens <tokens.json> [--pairs X/Y,…] [--mode extend|replace] [--solana-rpc <url>] [--out-site <file>] [--out-relay <file>]',
+    'usage: bun scripts/bridge-tokens.ts <journey-tokens.json> --site-config <config.json> --relay-tokens <tokens.json> [--pairs X/Y,…] [--mode extend|replace] [--solana-rpc <url>] [--out-site <file>] [--out-relay <file>] [--icons <icons.json>|none]',
   );
   process.exit(64);
 };
@@ -33,6 +43,8 @@ export interface CliArgs {
   solanaRpc: string | null;
   outSite: string;
   outRelay: string;
+  /** The icon map's file, or null (`--icons none`). */
+  icons: string | null;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -49,7 +61,7 @@ export function parseArgs(argv: string[]): CliArgs {
   }
   if (positional.length !== 1) usage('give exactly one journey registry file');
   for (const f of Object.keys(flags)) {
-    if (!['site-config', 'relay-tokens', 'pairs', 'mode', 'solana-rpc', 'out-site', 'out-relay'].includes(f))
+    if (!['site-config', 'relay-tokens', 'pairs', 'mode', 'solana-rpc', 'out-site', 'out-relay', 'icons'].includes(f))
       usage(`unknown flag --${f}`);
   }
   if (!flags['site-config'] || !flags['relay-tokens']) usage('--site-config and --relay-tokens are required');
@@ -69,7 +81,26 @@ export function parseArgs(argv: string[]): CliArgs {
     solanaRpc: flags['solana-rpc'] ?? null,
     outSite: flags['out-site'] ?? flags['site-config']!,
     outRelay: flags['out-relay'] ?? flags['relay-tokens']!,
+    icons: flags.icons === 'none' ? null : (flags.icons ?? DEFAULT_ICONS),
   };
+}
+
+/** An icon map file: `{"midnight": {SYMBOL: path}, "solana": {SYMBOL: path}}`. */
+export function readIcons(path: string): TokenIconMap {
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const side = (v: unknown): Record<string, string> | undefined => {
+    if (v === undefined) return undefined;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) usage(`${path}: each side is an object of symbol → path`);
+    const out: Record<string, string> = {};
+    for (const [k, p] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof p !== 'string') usage(`${path}: the icon of ${k} is not a path`);
+      out[k] = p as string;
+    }
+    return out;
+  };
+  const midnight = side(raw.midnight);
+  const solana = side(raw.solana);
+  return { ...(midnight ? { midnight } : {}), ...(solana ? { solana } : {}) };
 }
 
 /** The Solana RPC's facts for every mint of the registry: its genesis hash, and each mint's owner and decimals. */
@@ -125,6 +156,7 @@ export async function main(argv: string[], fetchImpl: typeof fetch = fetch): Pro
       pairs: args.pairs,
       mode: args.mode,
       ...(solana ? { solana } : {}),
+      ...(args.icons ? { icons: readIcons(args.icons) } : {}),
     });
     write(args.outSite, lists.siteConfig);
     write(args.outRelay, lists.relayTokens);

@@ -7,12 +7,14 @@
 // Methods: getGenesisHash, getAccountInfo (owner, lamports, data as base64), getTokenAccountBalance,
 // getBalance, getLatestBlockhash, sendTransaction (base64), getSignatureStatuses, getTransaction,
 // getSignaturesForAddress (the sent transactions naming the address, newest first) and getBlockHeight
-// (AA 00060 P10.3 C3: the page finds a lock whose wallet answer it lost, or learns its blockhash expired).
+// (AA 00060 P10.3 C3: the page finds a lock whose wallet answer it lost, or learns its blockhash expired),
+// and getTokenAccountsByOwner with a mint filter (P12.1, the Portfolio's Solana line: the token accounts
+// of `tokenBalances` that name an owner and a mint, as classic SPL Token accounts in base64).
 
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
 
-import { splitTransaction } from '../../packages/core/src/solana/tx.js';
+import { TOKEN_PROGRAM_ID, splitTransaction } from '../../packages/core/src/solana/tx.js';
 import { json, type Handler } from './http.js';
 
 export interface MockAccount {
@@ -34,8 +36,9 @@ export interface MockSolanaRpc {
   handler: Handler;
   genesisHash: string;
   accounts: Map<string, MockAccount>;
-  /** SPL token balances by token-account address: base units and decimals. */
-  tokenBalances: Map<string, { amount: bigint; decimals: number }>;
+  /** SPL token balances by token-account address: base units and decimals; with `owner` and `mint`,
+   *  getTokenAccountsByOwner lists the account too (`program`: its owning program, default SPL Token). */
+  tokenBalances: Map<string, { amount: bigint; decimals: number; owner?: string; mint?: string; program?: string }>;
   /** SOL balances in lamports by address. */
   balances: Map<string, number>;
   sent: SentTransaction[];
@@ -153,6 +156,32 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
         }
         case 'getBlockHeight':
           return ok(slot);
+        case 'getTokenAccountsByOwner': {
+          const owner = String(p[0]);
+          const mint = (p[1] as { mint?: string } | undefined)?.mint;
+          if (!mint) return err(-32602, 'Invalid params: a mint filter is required by this mock');
+          const value = [...rpc.tokenBalances.entries()]
+            .filter(([, t]) => t.owner === owner && t.mint === mint)
+            .map(([pubkey, t]) => {
+              const data = new Uint8Array(165);
+              data.set(base58.decode(t.mint!), 0);
+              data.set(base58.decode(t.owner!), 32);
+              new DataView(data.buffer).setBigUint64(64, t.amount, true);
+              data[108] = 1; // initialized
+              return {
+                pubkey,
+                account: {
+                  owner: t.program ?? TOKEN_PROGRAM_ID,
+                  lamports: 2_039_280,
+                  data: [b64(data), 'base64'],
+                  executable: false,
+                  rentEpoch: 0,
+                  space: 165,
+                },
+              };
+            });
+          return ok({ context, value });
+        }
         case 'getEpochInfo':
           // The head node: its slot and block height in ONE answer (the mock's height is its slot).
           return ok({ absoluteSlot: slot, blockHeight: slot, epoch: 0, slotIndex: slot, slotsInEpoch: 432_000 });

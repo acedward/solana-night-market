@@ -26,6 +26,7 @@ import { INDEXER, type Tamper } from './mock-indexer.js';
 import { connectPhantom } from './mock-phantom.js';
 import { ACCOUNT, RELAY } from './mock-relay.js';
 import { KERNEL } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
@@ -48,7 +49,8 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
     expect(indexer.queries).toContain(`state:${ACCOUNT}`);
     await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'ok');
     await expect(page.getByTestId('account-check')).toContainText('your wallet as its only device');
-    // Only then the deposit: the demo pack, one more approval.
+    // Only then the deposit: the demo pack (the Portfolio's "Mint Midnight tokens"), one more approval.
+    await openAction(page, 'mint-midnight');
     await page.getByTestId('get-demo-tokens').click();
     await expect(page.getByTestId('demo-message')).toContainText('Demo tokens delivered');
     expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
@@ -77,6 +79,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
       await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'failed');
       await expect(page.locator(`[data-testid=account-check-problem][data-code="${code}"]`)).toBeVisible();
       // No deposit into it: the demo tokens are refused before any approval.
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-account-refused')).toBeVisible();
       await expect(page.getByTestId('get-demo-tokens')).toBeDisabled();
       expect(phantom.requests).toHaveLength(1); // the registration's, nothing since
@@ -89,7 +92,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
   }) => {
     const { phantom, relay } = await setup(page, { seeded: true });
     relay.lies = true; // the relay's own account routes now misreport everything
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     // The chain's numbers: 25 utwUSDC (the lying relay says 25,000), the inbox's three coins.
     await expect(page.locator('[data-testid=passport-row][data-kind="unshielded"]')).toContainText('25.00');
@@ -213,7 +216,7 @@ test('a withdrawal’s change is computed in the page: a relay that reports anot
 }) => {
   const { phantom, relay } = await setup(page, { seeded: true });
   relay.misreportChange = true;
-  await page.goto('/#account');
+  await page.goto('/#account?action=send');
   await connectPhantom(page);
   await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
   await page.getByTestId('withdraw-kind-shielded').click();

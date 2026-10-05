@@ -1264,6 +1264,13 @@
 .token-icon-sm.token-icon-long {
   font-size: 0.4375rem;
 }
+/* AA 00060 FR-022: the token's own image (the wallet's icon), in the disc's place. */
+.token-icon-img {
+  display: inline-block;
+  object-fit: cover;
+  background: transparent;
+  box-shadow: none;
+}
 .pair-icon {
   position: relative;
   display: inline-flex;
@@ -2910,4 +2917,104 @@ select.input option {
   color: var(--muted);
   margin-top: var(--space-1);
   max-width: 90ch;
+}
+
+/* ── AA 00060 FR-020: a bridged token's row (total, Midnight line, Solana line) ── */
+.token-row-bridged {
+  flex-wrap: wrap;
+}
+.token-row-bridged .bridged-lines {
+  flex: 1 0 100%;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 calc(32px + var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+.token-row-bridged .bridged-lines > li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.token-row-bridged .bridged-lines .token-icon-img {
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.token-row-bridged .bridged-mint {
+  white-space: nowrap;
+}
+.token-row-bridged .bridged-lines .num {
+  font-weight: 600;
+}
+
+/* ── AA 00060 FR-023: the Portfolio's list of actions, each opening its own flow ── */
+.portfolio-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.portfolio-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 56px; /* a touch target well above 44 px */
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  color: var(--ink);
+  text-decoration: none;
+}
+a.portfolio-action:hover {
+  background: var(--surface-3);
+  border-color: var(--violet);
+}
+.portfolio-action.is-disabled {
+  border-style: dashed;
+  background: transparent;
+  color: var(--slate);
+}
+.portfolio-action-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.portfolio-action-label {
+  font-weight: 650;
+}
+.portfolio-action-hint {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.portfolio-action-pending {
+  color: var(--warn);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.portfolio-action-go {
+  flex: none;
+  color: var(--slate);
+}
+.portfolio-flow-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+}
+.portfolio-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  color: var(--link);
+  font-weight: 600;
 }

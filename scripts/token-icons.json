@@ -1,0 +1,12 @@
+{
+  "midnight": {
+    "X": "token-icons/x-midnight.png",
+    "Y": "token-icons/y-midnight.png",
+    "twUSDC": "token-icons/twusdc.png",
+    "twBTC": "token-icons/twbtc.png"
+  },
+  "solana": {
+    "X": "token-icons/x.png",
+    "Y": "token-icons/y.png"
+  }
+}

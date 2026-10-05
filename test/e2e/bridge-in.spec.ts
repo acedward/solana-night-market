@@ -95,7 +95,18 @@ test('T7.6: a reload after sending shows the record and resumes following it', a
   await expect(record).toContainText('1.5 X');
   s.bridge.setTransfer(transferView({ id: 's2m:9', status: 'submitted', amount: '1500000', recipient: ACCOUNT }));
   await expect(record).toContainText('The bridge is delivering', { timeout: 15_000 });
-  await s.relay.deposit([{ nonce: '61'.repeat(32), color: X.colour, value: 1_500_000n }]);
+  // P10.3 (audit C10): only the delivered coin completes it, so the bridge names the coin it delivered.
+  const coin = { nonce: '61'.repeat(32), colour: X.colour, value: '1500000' };
+  s.bridge.setTransfer(
+    transferView({
+      id: 's2m:9',
+      status: 'completed',
+      amount: '1500000',
+      recipient: ACCOUNT,
+      delivery: { adapter: 'passport-ed25519@21493588', account: ACCOUNT, coin, tx: null },
+    }),
+  );
+  await s.relay.deposit([{ nonce: coin.nonce, color: X.colour, value: 1_500_000n }]);
   await expect(record).toHaveAttribute('data-state', 'completed', { timeout: 20_000 });
   expect(txRequests(s.wallet)).toHaveLength(1);
 });

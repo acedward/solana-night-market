@@ -1,8 +1,13 @@
 // AA 00060 P7.3: the page's Solana JSON-RPC client (config.json `solana.rpcUrl`): the reads Bridge in
 // checks before the wallet is asked, the page's own send for `solana:signTransaction`, and the
 // confirmation and the program log it reads the lock nonce from. Browser-safe: fetch only.
+//
+// P12.1 (spec FR-020): the Portfolio's Solana line, the wallet's SPL balance of a bridged mint
+// (`ownerMintBalance`). It reads the SAME configured RPC as Bridge in (whose origin the site's
+// Content-Security-Policy `connect-src` must already name), never the RPC injector.
 
-import { toBase64 } from '@nightmarket/core/solana';
+import { base58Key32 } from '@nightmarket/core/bridge';
+import { TOKEN_PROGRAM_ID, toBase64 } from '@nightmarket/core/solana';
 
 export class SolanaRpcError extends Error {
   override name = 'SolanaRpcError';
@@ -63,6 +68,43 @@ export class SolanaRpc {
       if (e instanceof SolanaRpcError && /could not find account|Invalid param/i.test(e.message)) return null;
       throw e;
     }
+  }
+
+  /**
+   * The sum of `owner`'s SPL token accounts of `mint`, in base units (`getTokenAccountsByOwner` with a
+   * mint filter). Every account the RPC lists must be a classic SPL Token account (165 bytes) of exactly
+   * that mint and owner, and the answer must be a list: anything else throws (the page then says
+   * "unavailable"), so a malformed answer is never read as a balance of 0.
+   */
+  async ownerMintBalance(owner: string, mint: string): Promise<bigint> {
+    const ownerKey = base58Key32(owner);
+    const mintKey = base58Key32(mint);
+    if (!ownerKey || !mintKey) throw new SolanaRpcError('Not a Solana address.');
+    const r = await this.call<{ value?: unknown } | null>('getTokenAccountsByOwner', [
+      owner,
+      { mint },
+      { encoding: 'base64', commitment: 'confirmed' },
+    ]);
+    if (!r || !Array.isArray(r.value)) throw new SolanaRpcError('The Solana RPC answered no list of token accounts.');
+    const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+    let sum = 0n;
+    for (const item of r.value as unknown[]) {
+      const acc = (item as { account?: { owner?: unknown; data?: unknown } } | null)?.account;
+      const data = Array.isArray(acc?.data) && typeof acc.data[0] === 'string' ? fromBase64(acc.data[0]) : null;
+      if (
+        !acc ||
+        acc.owner !== TOKEN_PROGRAM_ID ||
+        !data ||
+        data.length !== 165 ||
+        !same(data.subarray(0, 32), mintKey) ||
+        !same(data.subarray(32, 64), ownerKey)
+      ) {
+        throw new SolanaRpcError('The Solana RPC listed a token account of another mint, owner or program.');
+      }
+      // The SPL Token account layout: mint (32), owner (32), amount u64 little-endian at 64.
+      sum += new DataView(data.buffer, data.byteOffset + 64, 8).getBigUint64(0, true);
+    }
+    return sum;
   }
 
   async balance(address: string): Promise<bigint> {

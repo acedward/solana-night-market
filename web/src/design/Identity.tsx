@@ -2,13 +2,17 @@
 //
 //   <Avatar seed={address} />                 a deterministic two-colour disc for a wallet address
 //   <TokenIcon symbol="twBTC" />              a coloured disc with the token's initials
+//   <TokenIcon symbol="X" src="token-icons/x-midnight.png" />
+//                                             the token's configured image (AA 00060 FR-022: the wallet's
+//                                             own icon, served from the site's origin); the disc when
+//                                             there is none or it cannot load
 //   <PairIcon base="twBTC" quote="twUSDC" />  two overlapping token discs
 //
 // The colours come from a small hash of the text, so the same wallet or token always looks the
 // same; they carry no meaning and are never the only way to tell two things apart (the text is
 // always next to them).
 
-import { useId, type CSSProperties } from 'react';
+import { useId, useState, type CSSProperties } from 'react';
 
 import { cx } from './format.js';
 
@@ -51,7 +55,32 @@ export function Avatar({ seed, size = 'md', className }: { seed: string; size?: 
 /** The token's initials: "twBTC" → "BTC", "utwUSDC" → "USDC", anything else its first letters. */
 const initials = (symbol: string) => symbol.replace(/^u?tw/, '').slice(0, 4) || symbol.slice(0, 4);
 
-export function TokenIcon({ symbol, small = false }: { symbol: string; small?: boolean }) {
+export function TokenIcon({
+  symbol,
+  small = false,
+  src = null,
+}: {
+  symbol: string;
+  small?: boolean;
+  /** The token's image (a path on the site's own origin, @nightmarket/core `siteIconPath`). */
+  src?: string | null;
+}) {
+  const [failed, setFailed] = useState<string | null>(null);
+  if (src && failed !== src) {
+    return (
+      <img
+        className={cx('token-icon', 'token-icon-img', small && 'token-icon-sm')}
+        src={src}
+        alt=""
+        aria-hidden="true"
+        width={small ? 24 : 32}
+        height={small ? 24 : 32}
+        decoding="async"
+        data-icon={src}
+        onError={() => setFailed(src)}
+      />
+    );
+  }
   const style = { '--tone': String(hash(symbol.replace(/^u/, '')) % 360) } as CSSProperties;
   const text = initials(symbol);
   return (

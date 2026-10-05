@@ -1,19 +1,23 @@
 // The portfolio panel beside the books (AA 00047 lane B2: "a create-and-trade market, not a bank":
 // the books and making or taking offers come first, holdings beside them; restyled in P8.1). What
 // the account holds (each token in its own units, shielded coins and unshielded balances; nothing
-// is totalled in a "home" token), the free demo pack, and the way to withdraw. Before a wallet or an
+// is totalled in a "home" token), and the way to the Portfolio's actions. Before a wallet or an
 // account exists it walks the newcomer through the three steps to their first trade.
+//
+// AA 00060 FR-023 (owner, 2026-10-05: "Keep Free demo tokens only in the Portfolio View"): the free demo
+// pack is no longer claimed here; this panel links to the Portfolio's "Mint Midnight tokens". FR-022:
+// each token shows its configured icon (the wallet's own image), else its text badge.
 
 import { useMemo } from 'react';
 
 import { formatUnits, holdingsByColour, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
 
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
-import { DemoTokens } from '../demo/DemoTokens.js';
 import { Button, ButtonLink, Icon, Panel, TokenIcon } from '../design/index.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import { useStore } from '../store/StoreContext.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
+import { actionHref } from './PortfolioActions.js';
 import { useAccountView, useUnshieldedBalances } from './useAccountView.js';
 
 const short = (s: string) => (s.length <= 15 ? s : `${s.slice(0, 8)}…${s.slice(-6)}`);
@@ -31,7 +35,7 @@ function Onboarding({ done }: { done: 0 | 1 }) {
         One approval. The market pays every network fee.
       </li>
       <li>
-        <strong>Get demo tokens</strong>A free pack of test tokens to trade with.
+        <strong>Get demo tokens</strong>A free pack of test tokens to trade with, on your Portfolio.
       </li>
     </ol>
   );
@@ -130,7 +134,11 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
       >
         {rows.length === 0 ? (
           <p className="small muted" data-testid="holdings-empty">
-            No tokens yet. Grab the free demo pack below to start trading.
+            No tokens yet. Get the free demo pack on your Portfolio (
+            <a href={actionHref('mint-midnight')} data-testid="holdings-get-demo">
+              Mint Midnight tokens
+            </a>
+            ) to start trading.
           </p>
         ) : (
           <ul className="holdings-list">
@@ -145,7 +153,7 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
                   data-kind={r.kind}
                   data-raw={r.amount.toString()}
                 >
-                  <TokenIcon symbol={symbol} small />
+                  <TokenIcon symbol={symbol} src={t?.icon ?? null} small />
                   <span className="sym">
                     {symbol}
                     {r.kind === 'unshielded' && <span className="kind-chip">public</span>}
@@ -159,7 +167,7 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
           </ul>
         )}
         <div className="btn-row gap-top">
-          <ButtonLink variant="secondary" size="small" href="#account" data-testid="holdings-withdraw">
+          <ButtonLink variant="secondary" size="small" href={actionHref('send')} data-testid="holdings-withdraw">
             <Icon name="arrowUp" /> Withdraw
           </ButtonLink>
           <a className="xsmall" href="#account">
@@ -167,7 +175,6 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
           </a>
         </div>
       </Panel>
-      <DemoTokens network={network} relayUrl={relayUrl} />
     </div>
   );
 }

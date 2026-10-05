@@ -21,6 +21,7 @@ import { z } from 'zod';
 
 import { isRenderableTokenDisplay } from '../../../../vendor/passport/contract/src/wallet/ed25519-message.js';
 import { normaliseHex32 } from '../hex.js';
+import { siteIconPath } from '../tokens/icon.js';
 import { bridgeColourOf } from './colour.js';
 import { base58Key32 } from './landing-key.js';
 
@@ -63,6 +64,9 @@ const EntrySchema = z.object({
   name: z.string().min(1).max(64),
   symbol: z.string(),
   decimals: z.number(),
+  /** AA 00060 FR-022 (optional): the SPL token's icon on the site's own origin (../tokens/icon.ts); a
+   *  value that is not one is ignored. */
+  icon: z.unknown().optional(),
 });
 
 export const JourneyRegistrySchema = z.object({
@@ -86,6 +90,8 @@ export interface BridgeEntry {
   name: string;
   symbol: string;
   decimals: number;
+  /** The SPL token's icon on the site's own origin (FR-022), when configured. Display only. */
+  icon?: string;
 }
 
 export class BridgeRegistry {
@@ -186,6 +192,7 @@ export function parseJourneyRegistry(file: unknown, expect: BridgeRegistryExpect
     mints.add(t.splMint);
     colours.add(colour);
     symbols.add(t.symbol.toLowerCase());
+    const icon = siteIconPath(t.icon);
     entries.push({
       colour,
       splMint: t.splMint,
@@ -195,6 +202,7 @@ export function parseJourneyRegistry(file: unknown, expect: BridgeRegistryExpect
       name: t.name,
       symbol: t.symbol,
       decimals: t.decimals,
+      ...(icon ? { icon } : {}),
     });
   });
   return new BridgeRegistry(f.midnightNetwork, f.solanaGenesisHash, entries);

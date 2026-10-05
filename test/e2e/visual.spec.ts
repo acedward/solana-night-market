@@ -22,6 +22,7 @@ import { E2E_WALLET_NAME, connectPhantom, installMockPhantom } from './mock-phan
 import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
 import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -139,8 +140,13 @@ for (const vp of VIEWPORTS) {
       await expect(page.getByTestId('wallet-address')).toBeVisible();
       await page.getByTestId('open-account').click();
       await expect(page.getByTestId('masthead-account')).toBeVisible();
+      await openAction(page, 'mint-midnight');
       await page.getByTestId('get-demo-tokens').click();
       await expect(page.getByTestId('demo-message')).toBeVisible();
+      await assertLayout(page, vp.touch);
+      await shot(page, `${vp.name}-account-mint-midnight`);
+      await page.getByTestId('portfolio-back').click();
+      await expect(page.getByTestId('portfolio-actions')).toBeVisible();
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-account-connected`);
       await page.getByTestId('tab-trade').click();
@@ -150,6 +156,7 @@ for (const vp of VIEWPORTS) {
       // The signing panel, while Phantom's window is open.
       const release = phantom.holdNext();
       await page.getByTestId('tab-account').click();
+      await openAction(page, 'send');
       await page.getByTestId('withdraw-kind-shielded').click();
       await page.getByTestId('send-amount').fill('1');
       await page

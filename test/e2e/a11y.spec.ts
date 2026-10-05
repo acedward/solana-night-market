@@ -17,6 +17,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { connectPhantom } from './mock-phantom.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const VIEWPORTS = [
@@ -124,10 +125,15 @@ for (const vp of VIEWPORTS) {
       await page.getByTestId('accounts-message').getByRole('button', { name: 'Dismiss' }).click();
       await page.getByTestId('open-account').click();
       await expect(page.getByTestId('masthead-account')).toBeVisible();
+      // AA 00060 FR-023: the Portfolio's list of actions, then the demo tokens (Mint Midnight tokens).
+      await expect(page.getByTestId('portfolio-actions')).toBeVisible();
+      await axe(page, 'portfolio, the list of actions');
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-pack')).toBeVisible();
       await axe(page, 'portfolio, the demo tokens');
       await page.getByTestId('get-demo-tokens').click();
       await expect(page.getByTestId('demo-message')).toContainText('Demo tokens delivered');
+      await page.getByTestId('portfolio-back').click();
       await axe(page, 'portfolio with balances');
       await page.getByTestId('tab-trade').click();
       await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');

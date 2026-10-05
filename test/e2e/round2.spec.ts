@@ -50,7 +50,7 @@ test.describe('R2-4: an approval ends on the chain’s word, never the relay’s
     page.on('dialog', (d) => void d.accept()); // "This withdrawal cancels your live offer. Continue?"
     await makeAnOffer(page);
     relay.fakeSuccess.add('withdraw-unshielded');
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await page.getByTestId('withdraw-kind-unshielded').click();
     await page.getByTestId('wu-amount').fill('5');
     await page.getByTestId('wu-recipient').fill(formatUnshieldedAddress('66'.repeat(32), 'stagenet'));
@@ -100,7 +100,7 @@ test.describe('R2-5: a withdrawal’s change survives a relay that lands it and 
   test('the change is kept as pending (a reload included) and counts once the chain shows it', async ({ page }) => {
     const { relay } = await setup(page, { seeded: true });
     relay.landButFail.add('withdraw');
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     await page.getByTestId('withdraw-kind-shielded').click();
@@ -128,7 +128,7 @@ test.describe('R2-6: the chain view survives seeded state, fake notes and a long
   test('a just-opened account with a note already in its inbox is refused, and stays refused', async ({ page }) => {
     const { relay, indexer, phantom } = await setup(page);
     indexer.tamper = { seededInbox: true };
-    await page.goto('/#account');
+    await page.goto('/#account?action=mint-midnight');
     await connectPhantom(page);
     await page.getByTestId('open-account').click();
     await expect(page.getByTestId('accounts-message')).toContainText("does not pass this site's checks");

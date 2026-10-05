@@ -95,7 +95,18 @@ test('T7.6: a reload after sending shows the record and resumes following it', a
   await expect(record).toContainText('1.5 X');
   s.bridge.setTransfer(transferView({ id: 's2m:9', status: 'submitted', amount: '1500000', recipient: ACCOUNT }));
   await expect(record).toContainText('The bridge is delivering', { timeout: 15_000 });
-  await s.relay.deposit([{ nonce: '61'.repeat(32), color: X.colour, value: 1_500_000n }]);
+  // P10.3 (audit C10): only the delivered coin completes it, so the bridge names the coin it delivered.
+  const coin = { nonce: '61'.repeat(32), colour: X.colour, value: '1500000' };
+  s.bridge.setTransfer(
+    transferView({
+      id: 's2m:9',
+      status: 'completed',
+      amount: '1500000',
+      recipient: ACCOUNT,
+      delivery: { adapter: 'passport-ed25519@21493588', account: ACCOUNT, coin, tx: null },
+    }),
+  );
+  await s.relay.deposit([{ nonce: coin.nonce, color: X.colour, value: 1_500_000n }]);
   await expect(record).toHaveAttribute('data-state', 'completed', { timeout: 20_000 });
   expect(txRequests(s.wallet)).toHaveLength(1);
 });
@@ -217,4 +228,33 @@ test('a wallet without transaction features: Bridge in is off with the reason; n
   await expect(page.getByTestId('bridge-in-no-transactions')).toBeVisible();
   await expect(page.getByTestId('bridge-in-check')).toBeDisabled();
   expect(txRequests(s.wallet)).toHaveLength(0);
+});
+
+// AA 00060 P10.3 C3 (F-A4, F-B3): the wallet SENDS the lock but answers after the page's timeout. The page
+// must not say "Nothing was sent / Nothing was locked"; it keeps the lock's record from before it asked,
+// finds the lock on Solana, and refuses a second Bridge in of the token until it has.
+test('C3: a sign-and-send that answers after the timeout: status unknown, the lock found and tracked, no second lock meanwhile', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const s = await bridgeSite(page, { walletTimeoutSeconds: 5 });
+  s.rpc.logsFor = () => ['Program x invoke [1]', lockc(s, 4), 'Program x success'];
+  s.wallet.lateAnswerMs = 8_000;
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  const error = page.getByTestId('bridge-in-error');
+  await expect(error).toBeVisible({ timeout: 15_000 });
+  await expect(error).not.toContainText('Nothing was');
+  await expect(error).toContainText('checking');
+  expect(s.rpc.sent).toHaveLength(1);
+  // A second Bridge in of X is refused before the wallet is asked, while the first is unknown.
+  const record = page.getByTestId('bridge-in-record');
+  await expect(record).toHaveCount(1);
+  await review(page, '500');
+  await expect(page.getByTestId('bridge-in-error')).toContainText('wait until this page has checked');
+  expect(txRequests(s.wallet)).toHaveLength(1);
+  // The page finds the lock on Solana (or the wallet's late answer): the first transfer is tracked.
+  await expect(record).toHaveAttribute('data-state', 'locked', { timeout: 30_000 });
+  expect(s.rpc.sent).toHaveLength(1);
 });

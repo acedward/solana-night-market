@@ -8,16 +8,23 @@
 //                     say it cannot deliver there (I-3 recognition, beside the page's own check)
 //   sendBridgeIn      builds ONE LockToContract (core bridge-in.ts) on a fresh blockhash and asks the
 //                     wallet: `signAndSendTransaction`, or `signTransaction` + the page's own send of a
-//                     transaction that must come back UNCHANGED and validly signed; the record is
-//                     written only once the wallet has signed (a refusal records nothing, T7.8)
+//                     transaction that must come back UNCHANGED and validly signed. P10.3 (audit C3):
+//                     the record is written BEFORE the wallet is asked (`signing`); a wallet that declines
+//                     withdraws it (nothing was sent, T7.8); a sign-and-send that times out (or a send
+//                     that fails) may still have sent the lock, so the record becomes `unknown`, the page
+//                     says so (never "nothing was sent"), keeps the wallet's late answer, and refuses a
+//                     new Bridge in of that token until `reconcileBridgeIn` has found the lock on Solana by
+//                     its exact message, or its blockhash has expired
 //   followBridgeIn    one step: the signature's confirmation, then the lock nonce from the program log
 //                     (I-2), then the bridge's progress (I-3 `s2m:<nonce>`); COMPLETION only by the
-//                     page's own decode of the account (the coin the bridge says it delivered, or the
-//                     balance), never by the bridge's word (FR-003)
+//                     page's own decode of the account: the coin the bridge says it delivered, matched
+//                     by its commitment (P10.3, audit C10: never a balance another coin raised), never
+//                     by the bridge's word (FR-003)
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import nacl from 'tweetnacl';
 
-import { contractCoinCommitment, formatUnits, holdingsByColour, type StoredCoin } from '@nightmarket/core';
+import { bytesToHex, contractCoinCommitment, formatUnits, holdingsByColour, type StoredCoin } from '@nightmarket/core';
 import {
   BridgeInError,
   UNDELIVERABLE_TEXT,
@@ -38,10 +45,12 @@ import {
   decodeKey,
   encodeKey,
   splitTransaction,
+  toBase64,
 } from '@nightmarket/core/solana';
 
 import type { TransactionFacts } from '../../wallet/sign-prompt.js';
 import type { SolanaTransactions } from '../../wallet/transactions.js';
+import { WalletError } from '../../wallet/wallet-errors.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
 
@@ -52,6 +61,31 @@ const U64_MAX = (1n << 64n) - 1n;
 export class BridgeInRefused extends Error {
   override name = 'BridgeInRefused';
 }
+
+/** The words for a lock whose fate is not known yet (audit C3). */
+export const BRIDGE_IN_UNKNOWN_TEXT =
+  'Your wallet did not answer in time, so the lock may or may not have been sent. If your wallet still shows the request, decline it. This page is checking Solana for the lock: wait until it has before you bridge this token in again.';
+
+/** A lock that may have been sent: its record (`unknown`) is kept and followed (audit C3). */
+export class BridgeInUncertain extends Error {
+  override name = 'BridgeInUncertain';
+  constructor(readonly record: BridgeInRecord) {
+    super(BRIDGE_IN_UNKNOWN_TEXT);
+  }
+}
+
+/** What `sendBridgeIn` reports on the way (audit C3): the record before the wallet is asked, the record
+ *  with the wallet's LATE answer (after a timeout), and a record withdrawn because nothing was sent. */
+export interface BridgeInHooks {
+  onPrepared?(r: BridgeInRecord): void;
+  onLate?(r: BridgeInRecord): void;
+  onWithdrawn?(r: BridgeInRecord): void;
+}
+
+/** Wallet answers after which nothing was sent (the wallet said no, or was never reached). A timeout or an
+ *  unknown failure of a sign-and-send is NOT one: the wallet may have sent the lock anyway. */
+const nothingSent = (e: unknown) =>
+  e instanceof WalletError && ['rejected', 'locked', 'hardware', 'paused', 'unavailable'].includes(e.kind);
 
 export interface BridgeInContext {
   rpc: SolanaRpc;
@@ -147,8 +181,12 @@ export async function sendBridgeIn(
   amount: bigint,
   balanceBefore: bigint,
   now = Date.now(),
+  hooks: BridgeInHooks = {},
 ): Promise<BridgeInRecord> {
-  const blockhash = await ctx.rpc.latestBlockhash();
+  if (!ctx.transactions?.signAndSend && !ctx.transactions?.sign) {
+    throw new BridgeInRefused('Your wallet cannot sign Solana transactions here.');
+  }
+  const { blockhash, lastValidBlockHeight, slot } = await ctx.rpc.latestBlockhashInfo();
   const built = buildLockToAccount({
     entry,
     depositor: ctx.depositor,
@@ -157,17 +195,73 @@ export async function sendBridgeIn(
     recentBlockhash: blockhash,
   });
   checkLockToAccount(built.transaction, built.facts);
+  const message = built.message.bytes;
+  // Audit C3: the record exists BEFORE the wallet is asked.
+  const pending: BridgeInRecord = {
+    direction: 'in',
+    key: bytesToHex(sha256(message)),
+    message: toBase64(message),
+    lastValidBlockHeight: lastValidBlockHeight.toString(10),
+    fromSlot: slot.toString(10),
+    source: built.facts.source,
+    colour: entry.colour,
+    mint: entry.splMint,
+    symbol: entry.symbol,
+    amount: amount.toString(10),
+    bridgeApi: entry.bridgeApi,
+    balanceBefore: balanceBefore.toString(10),
+    createdAt: now,
+    state: 'signing',
+  };
+  hooks.onPrepared?.(pending);
+  const uncertain = (signature?: string) =>
+    new BridgeInUncertain({
+      ...pending,
+      ...(signature ? { signature } : {}),
+      state: 'unknown',
+      progress: 'Checking Solana for the lock',
+      checkedAt: now,
+    });
   let signature: string;
-  if (ctx.transactions?.signAndSend) {
-    signature = encodeKey(
-      await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
-    );
-  } else if (ctx.transactions?.sign) {
-    const signed = await ctx.transactions.sign(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts));
+  if (ctx.transactions.signAndSend) {
+    try {
+      signature = encodeKey(
+        await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
+      );
+    } catch (e) {
+      if (nothingSent(e)) {
+        hooks.onWithdrawn?.(pending);
+        throw e;
+      }
+      // The wallet may still send it, or may have: keep its late answer.
+      const late = (e as { late?: Promise<Uint8Array> } | null)?.late;
+      if (late) {
+        void late.then(
+          (sig) => hooks.onLate?.({ ...pending, signature: encodeKey(sig), state: 'sent', checkedAt: Date.now() }),
+          () => undefined,
+        );
+      }
+      throw uncertain();
+    }
+  } else {
+    let signed: Uint8Array;
+    try {
+      signed = await ctx.transactions.sign!(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts));
+    } catch (e) {
+      // signTransaction never sends: whatever the wallet does later, the page sends nothing.
+      hooks.onWithdrawn?.(pending);
+      if (e instanceof WalletError && e.kind === 'timeout')
+        throw new WalletError(
+          'timeout',
+          `${e.message} Nothing was sent: this page sends the lock itself, and it has not.`,
+        );
+      throw e;
+    }
     // The wallet must sign exactly the page's transaction: nothing added, nothing changed.
     try {
       checkLockToAccount(signed, built.facts);
     } catch (e) {
+      hooks.onWithdrawn?.(pending);
       throw new BridgeInRefused(
         `Your wallet returned another transaction than the lock (${(e as Error).message}). Nothing was sent.`,
       );
@@ -176,26 +270,83 @@ export async function sendBridgeIn(
     if (
       parts.signatures.length !== 1 ||
       !nacl.sign.detached.verify(parts.message, parts.signatures[0]!, decodeKey(ctx.depositor)) ||
-      encodeKey(parts.message) !== encodeKey(built.message.bytes)
+      encodeKey(parts.message) !== encodeKey(message)
     ) {
+      hooks.onWithdrawn?.(pending);
       throw new BridgeInRefused('Your wallet returned a transaction the page cannot verify. Nothing was sent.');
     }
-    signature = await ctx.rpc.sendTransaction(signed);
-  } else {
-    throw new BridgeInRefused('Your wallet cannot sign Solana transactions here.');
+    try {
+      signature = await ctx.rpc.sendTransaction(signed);
+    } catch {
+      // The RPC may have taken it before the error: its signature is known, so look for it.
+      throw uncertain(encodeKey(parts.signatures[0]!));
+    }
   }
-  return {
-    direction: 'in',
-    signature,
-    colour: entry.colour,
-    mint: entry.splMint,
-    symbol: entry.symbol,
-    amount: amount.toString(10),
-    bridgeApi: entry.bridgeApi,
-    balanceBefore: balanceBefore.toString(10),
-    createdAt: now,
-    state: 'sent',
-  };
+  return { ...pending, signature, state: 'sent' };
+}
+
+/** Whether a new Bridge in of `colour` must wait: an earlier lock of it may have been sent (audit C3). */
+export const blocksNewBridgeIn = (records: readonly BridgeInRecord[], colour: string): boolean =>
+  records.some((r) => r.colour === colour && (r.state === 'signing' || r.state === 'unknown'));
+
+/** How far back one look searches the source token account's transactions (pages of 100). */
+export const BRIDGE_IN_SEARCH_PAGES = 10;
+
+/**
+ * One look on Solana for a lock whose wallet answer was lost (audit C3): by its signature when known, else
+ * among the source token account's transactions back to the slot its blockhash was read at, by its exact
+ * message. Found: `sent` (then followed as usual). Not found, the search complete, and its blockhash
+ * already expired (read FIRST, so a lock that lands later cannot be missed): `failed`, nothing was locked.
+ * Otherwise still `unknown` (a search cut short never says "nothing was locked").
+ */
+export async function reconcileBridgeIn(
+  r: BridgeInRecord,
+  ctx: Pick<BridgeInContext, 'rpc'>,
+  now = Date.now(),
+): Promise<BridgeInRecord> {
+  if (r.state !== 'signing' && r.state !== 'unknown') return r;
+  const height = r.lastValidBlockHeight ? await ctx.rpc.blockHeight() : null;
+  if (r.signature && (await ctx.rpc.signatureStatus(r.signature))) {
+    return { ...r, state: 'sent', progress: 'Found on Solana', checkedAt: now };
+  }
+  let complete = !r.message || !r.source;
+  if (r.message && r.source) {
+    const from = r.fromSlot ? BigInt(r.fromSlot) : null;
+    let before: string | undefined;
+    search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
+      const sigs = await ctx.rpc.signaturesForAddress(r.source, 100, before);
+      for (const { signature, slot } of sigs) {
+        if (from !== null && slot < from) {
+          complete = true;
+          break search;
+        }
+        const wire = await ctx.rpc.transactionWire(signature).catch(() => null);
+        if (!wire) continue;
+        let sent: Uint8Array;
+        try {
+          sent = splitTransaction(wire).message;
+        } catch {
+          continue;
+        }
+        if (toBase64(sent) === r.message)
+          return { ...r, signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
+      }
+      if (sigs.length < 100) {
+        complete = true;
+        break;
+      }
+      before = sigs[sigs.length - 1]!.signature;
+    }
+  }
+  if (complete && height !== null && height > BigInt(r.lastValidBlockHeight!)) {
+    return {
+      ...r,
+      state: 'failed',
+      progress: "Not sent: your wallet's request expired before it reached Solana. Nothing was locked.",
+      checkedAt: now,
+    };
+  }
+  return { ...r, state: 'unknown', progress: 'Checking Solana for the lock', checkedAt: now };
 }
 
 const FINAL: ReadonlySet<BridgeInRecord['state']> = new Set(['completed', 'undeliverable', 'failed']);
@@ -213,7 +364,8 @@ export async function followBridgeIn(
   now = Date.now(),
 ): Promise<BridgeInRecord> {
   if (isFinal(r)) return r;
-  if (r.state === 'sent') {
+  if (r.state === 'signing' || r.state === 'unknown') return reconcileBridgeIn(r, ctx, now);
+  if (r.state === 'sent' && r.signature) {
     const status = await ctx.rpc.signatureStatus(r.signature);
     if (status === 'failed')
       return { ...r, state: 'failed', progress: 'The Solana transaction failed: nothing was locked.', checkedAt: now };
@@ -264,8 +416,9 @@ export async function followBridgeIn(
             ctx.account,
           ),
     );
-  const balanceArrived = pageBalance(coins, r.colour) >= BigInt(r.balanceBefore) + BigInt(r.amount);
-  if (coinArrived || balanceArrived) {
+  // Audit C10 (F-A7): ONLY the delivered coin completes the lock; a balance that another coin of the
+  // token raised (a second Bridge in, a trade) says nothing about this one.
+  if (coinArrived) {
     return { ...r, state: 'completed', progress: 'In your account', checkedAt: now };
   }
   return { ...r, state: read?.kind === 'view' ? 'bridging' : r.state, progress, checkedAt: now };

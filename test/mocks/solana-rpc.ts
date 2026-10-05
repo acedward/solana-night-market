@@ -5,7 +5,9 @@
 // the bridge's LOCKC line for the lock it sent.
 //
 // Methods: getGenesisHash, getAccountInfo (owner, lamports, data as base64), getTokenAccountBalance,
-// getBalance, getLatestBlockhash, sendTransaction (base64), getSignatureStatuses, getTransaction.
+// getBalance, getLatestBlockhash, sendTransaction (base64), getSignatureStatuses, getTransaction,
+// getSignaturesForAddress (the sent transactions naming the address, newest first) and getBlockHeight
+// (AA 00060 P10.3 C3: the page finds a lock whose wallet answer it lost, or learns its blockhash expired).
 
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
@@ -24,6 +26,8 @@ export interface SentTransaction {
   wire: Uint8Array;
   message: Uint8Array;
   accountKeys: string[];
+  /** The slot it was sent at (getSignaturesForAddress answers it). */
+  slot?: number;
 }
 
 export interface MockSolanaRpc {
@@ -39,6 +43,8 @@ export interface MockSolanaRpc {
   logsFor: (tx: SentTransaction) => string[];
   /** Every JSON-RPC method called, in order. */
   calls: string[];
+  /** Move the block height on by `n` (blockhashes handed out before then expire). */
+  advanceBlockHeight(n: number): void;
 }
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
@@ -69,6 +75,9 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
     sent: [],
     logsFor: () => [],
     calls: [],
+    advanceBlockHeight(n) {
+      slot += n;
+    },
     handler: async (req) => {
       const body = (await req.json()) as { id: unknown; method: string; params?: unknown[] };
       rpc.calls.push(body.method);
@@ -130,8 +139,27 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
             }
           }
           const signature = base58.encode(parts.signatures[0]!);
-          rpc.sent.push({ signature, wire, message: parts.message, accountKeys });
+          rpc.sent.push({ signature, wire, message: parts.message, accountKeys, slot });
           return ok(signature);
+        }
+        case 'getBlockHeight':
+          return ok(slot);
+        case 'getSignaturesForAddress': {
+          const address = String(p[0]);
+          const o = (p[1] as { limit?: number; before?: string } | undefined) ?? {};
+          const limit = Number(o.limit ?? 1000);
+          const naming = rpc.sent.filter((t) => t.accountKeys.includes(address)).reverse();
+          const start = o.before ? naming.findIndex((t) => t.signature === o.before) + 1 : 0;
+          return ok(
+            naming.slice(start, start + limit).map((t) => ({
+              signature: t.signature,
+              slot: t.slot ?? slot,
+              err: null,
+              memo: null,
+              blockTime: null,
+              confirmationStatus: 'confirmed',
+            })),
+          );
         }
         case 'getSignatureStatuses': {
           const sigs = (p[0] as string[]) ?? [];

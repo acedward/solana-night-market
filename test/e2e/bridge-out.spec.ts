@@ -69,3 +69,22 @@ test('Bridge out asks for the landing-key text first (twice, said so); declining
   expect(s.relay.submitted.map((x) => x.action)).not.toContain('withdraw');
   await expect(page.getByTestId('bridge-out-record')).toHaveCount(0);
 });
+
+// AA 00060 P10.3 C8 (F-A5): the landing key does not change: one leaked signature opens every future
+// Bridge out of this wallet on this site. The confirmation and the wallet panel say so.
+test('C8: the confirmation and the wallet panel say the landing key is permanent for this site, network and wallet', async ({
+  page,
+}) => {
+  const s = await withX(page);
+  await page.getByTestId('bridge-out-amount').fill('5');
+  await page.getByTestId('bridge-out-review').click();
+  await expect(page.getByTestId('bridge-out-confirm')).toContainText(
+    'every future Bridge out from this wallet on this site',
+  );
+  const release = s.wallet.holdNext();
+  await page.getByTestId('bridge-out-send').click();
+  await expect(page.getByTestId('sign-prompt-kind')).toContainText('permanent');
+  s.wallet.mode = 'reject';
+  release();
+  await expect(page.getByTestId('bridge-out-error')).toBeVisible();
+});

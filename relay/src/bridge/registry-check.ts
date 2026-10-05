@@ -6,12 +6,15 @@
 //   2. a bridge's DEPLOYED `lockForSolana` verifier key differs from the one in the key volume's bridge
 //      bundle (`<managedPath>/bridge/keys/lockForSolana.verifier`), or the bridge is not deployed on
 //      this network: Bridge out's second transaction would be proven with keys the contract does not
-//      accept (`bridgeKeyProblems`, checked in ../main.ts once the key volume is loaded).
+//      accept (`bridgeKeyProblems`, checked in ../main.ts once the key volume is loaded);
+//   3. (AA 00060 P10.3, audit C11 / F-A10) a bridge's sealed `sourceMint` is not the registry's SPL mint:
+//      the site would lock SPL tokens the bridge never mints.
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { TokenRegistry } from '@nightmarket/core';
+import { encodeKey } from '@nightmarket/core/solana';
 import type { BridgeRegistry } from '@nightmarket/core/bridge';
 
 import { deployedVerifierDigests, verifierDigests } from '../prover/key-volume.js';
@@ -44,6 +47,7 @@ export function tokenListProblems(bridges: BridgeRegistry, tokens: TokenRegistry
 export type ReadContractState = (address: string) => Promise<{
   operations(): unknown[];
   operation(op: never): { verifierKey?: Uint8Array } | undefined;
+  data?: unknown;
 } | null>;
 
 /** Check 2: each bridge's deployed `lockForSolana` verifier key equals the key volume's. */
@@ -51,6 +55,8 @@ export async function bridgeKeyProblems(
   bridges: BridgeRegistry,
   managedPath: string,
   readState: ReadContractState,
+  /** The bridge module's `ledger(state.data)` (check 3); without it the mint is not checked. */
+  bridgeLedger?: (data: unknown) => { sourceMint: Uint8Array },
 ): Promise<string[]> {
   const bundle = join(managedPath, BRIDGE_BUNDLE);
   if (!existsSync(join(bundle, 'keys'))) {
@@ -72,6 +78,19 @@ export async function bridgeKeyProblems(
       problems.push(
         `${b.symbol}: the bridge at ${b.bridgeContract} was deployed with another ${BRIDGE_LOCK_CIRCUIT} verifier key than the key volume's`,
       );
+    }
+    if (bridgeLedger) {
+      let sealed: string | null = null;
+      try {
+        sealed = encodeKey(Uint8Array.from(bridgeLedger(state.data).sourceMint));
+      } catch {
+        problems.push(`${b.symbol}: the bridge at ${b.bridgeContract} has no readable source mint`);
+      }
+      if (sealed !== null && sealed !== b.splMint) {
+        problems.push(
+          `${b.symbol}: the bridge at ${b.bridgeContract} seals another SPL mint (${sealed}) than the registry's ${b.splMint}`,
+        );
+      }
     }
   }
   return problems;

@@ -149,6 +149,9 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
       // AA 00060 (Bridge in): the wallet's transaction features, behind the same gate and timeout as its
       // messages (the page builds and checks every transaction before it asks; ../bridge/in/operations.ts).
       // The signing panel shows the transaction's decoded facts while the wallet is open (P5.3).
+      // P10.3 (audit C3): a timeout here does NOT mean nothing was sent: a sign-and-send may still send.
+      // The timeout error carries the wallet's own request as `late`, so the caller keeps its answer, and
+      // its words claim nothing about what was sent (the caller says that, ../bridge/in/operations.ts).
       const guarded =
         (fn: (t: Uint8Array, c: string) => Promise<Uint8Array>) =>
         (t: Uint8Array, c: string, facts?: TransactionFacts): Promise<Uint8Array> =>
@@ -157,12 +160,22 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
             if (paused) throw new WalletError('paused', paused);
             if (facts) opts.prompts.openTransaction(facts, handle.name);
             let signed = false;
+            const request = fn(t, c);
+            request.catch(() => undefined); // a late failure is nobody's unhandled rejection
             try {
-              const out = await withWalletTimeout(fn(t, c), opts.timeoutMs);
+              const out = await withWalletTimeout(request, opts.timeoutMs);
               signed = true;
               return out;
             } catch (e) {
-              throw walletErrorFrom(e, 'sign');
+              const error = walletErrorFrom(e, 'sign');
+              if (error.kind !== 'timeout') throw error;
+              throw Object.assign(
+                new WalletError(
+                  'timeout',
+                  `Your wallet did not answer within ${Math.round(opts.timeoutMs / 1000)} seconds.`,
+                ),
+                { late: request },
+              );
             } finally {
               if (facts) opts.prompts.close(signed ? 'signed' : 'ended');
             }

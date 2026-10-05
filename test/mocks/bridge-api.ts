@@ -1,5 +1,6 @@
 // A MOCK of the bridge node's API (I-3, 00058's proposed `TransferView` v2; AA 00060 P1.5): the transfer
-// views the test sets (`GET /transfers/:id`, 404 until set), the recognition verdicts
+// views the test sets (`GET /transfers/:id`, 404 until set, answered WRAPPED as `{ transfer: view }` exactly as
+// the real node does, 00058 `packages/node/api.ts` @ 1c9f4959; AA 00060 P10.3 C13), the recognition verdicts
 // (`GET /recipients/contract/:address`), and `GET /deployment` when a record is given. CORS `*`, as the
 // effectstream runtime serves the real one. Every request is recorded.
 
@@ -52,7 +53,9 @@ export function mockBridgeApi(opts: { deployment?: unknown } = {}): MockBridgeAp
     const t = /^\/transfers\/((?:s2m|m2s)(?::|%3A)\d+)$/.exec(url.pathname);
     if (t) {
       const view = transfers.get(decodeURIComponent(t[1]!));
-      return view ? json(view) : json({ error: 'transfer not found' }, 404);
+      return view
+        ? json({ transfer: view })
+        : json({ error: 'transfer not found', id: decodeURIComponent(t[1]!) }, 404);
     }
     const r = /^\/recipients\/contract\/([0-9a-f]{64})$/.exec(url.pathname);
     if (r) {

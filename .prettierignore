@@ -23,3 +23,5 @@ test/fixtures/00058-interfaces.json
 test/fixtures/00059-account-registration-vectors.json
 # AA 00060 P6.2: the vendored bridge contract, byte for byte (web/src/bridge/vendor/bridge/PROVENANCE.md); never reformat
 web/src/bridge/vendor/bridge/
+# AA 00060 P10.3 C13: a live bridge-node answer, copied byte for byte (00058-live-transfer-s2m-1.PROVENANCE.md); never reformat
+test/fixtures/00058-live-transfer-s2m-1.json

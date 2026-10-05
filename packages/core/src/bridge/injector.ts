@@ -200,7 +200,11 @@ async function errorOf(res: Response): Promise<InjectorError> {
 }
 
 export async function readRegistrationInfo(url: string, fetchImpl: typeof fetch = fetch): Promise<RegistrationInfo> {
-  const res = await fetchImpl(`${base(url)}/api/accounts/registration-info`, { cache: 'no-store' });
+  const res = await fetchImpl(`${base(url)}/api/accounts/registration-info`, {
+    cache: 'no-store',
+    redirect: 'error',
+    credentials: 'omit',
+  });
   if (!res.ok) throw await errorOf(res);
   const parsed = RegistrationInfoSchema.safeParse(await res.json());
   if (!parsed.success) throw new InjectorError('the injector answered an unknown registration format', 'unknown');
@@ -221,10 +225,15 @@ export async function postRegistration(
   body: RegistrationBody,
   fetchImpl: typeof fetch = fetch,
 ): Promise<RegistrationView> {
+  // AA 00060 P10.3 C5 (F-A9, F-B6): this body carries the account's viewing key. It goes to the configured
+  // injector's origin and nowhere else: a redirect is an error (a 307/308 would re-POST it), and no
+  // cookies or credentials ride along.
   const res = await fetchImpl(`${base(url)}/api/accounts`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    redirect: 'error',
+    credentials: 'omit',
   });
   if (!res.ok) throw await errorOf(res);
   const parsed = RegistrationViewSchema.safeParse(await res.json());

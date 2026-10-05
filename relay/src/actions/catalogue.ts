@@ -33,7 +33,7 @@ import {
 
 import type { AuthKind } from '../auth/verifiers.js';
 import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type AccountCaps } from './account-caps.js';
-import { admitAll, type AdmissionCheck } from './admission.js';
+import { admitAll, type AdmissionCheck, type PreauthCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
@@ -43,6 +43,8 @@ import {
   bridgeOutAdmission,
   bridgeOutEntitleExecutor,
   bridgeOutExecutor,
+  bridgeOutPreauth,
+  entitlePreauth,
   type BridgeOutDeps,
   type EntitleDeps,
 } from '../bridge/out-actions.js';
@@ -69,6 +71,12 @@ export interface ActionDefinition {
   /** AA 00060: false while the deployment does not offer the action (an `entitlement` action without its
    *  executor: no journey registry or no key volume); the route refuses it before anything else. */
   available?: boolean;
+  /** AA 00060 P10.3 (audit C2): for an unsigned action, what must hold BEFORE the named owner and account
+   *  are charged anything (./admission.ts `PreauthCheck`). */
+  preauth?: PreauthCheck;
+  /** AA 00060 P10.3 (audit C2): false when the action does not take the account's one-job gate (a
+   *  read-only, instant action an unsigned caller may send for any account). Default true. */
+  accountGate?: boolean;
 }
 
 /** The actions authorised by what their body carries (AA 00060 P6.3), not by a wallet signature. */
@@ -235,6 +243,7 @@ export function withBridgeOut(
     available: true,
     auth: 'entitlement',
     payload: BridgeOutPayloadSchema as never,
+    preauth: bridgeOutPreauth(deps.entitlements),
     admit: bridgeOutAdmission(deps),
     executor: bridgeOutExecutor(deps),
   });
@@ -244,7 +253,10 @@ export function withBridgeOut(
     auth: 'entitlement',
     requiresSponsor: false,
     payload: BridgeOutEntitlePayloadSchema as never,
-    executor: bridgeOutEntitleExecutor(deps),
+    // Audit C2: the whole check runs before anything is charged, and the job takes no account gate.
+    preauth: entitlePreauth(deps),
+    accountGate: false,
+    executor: bridgeOutEntitleExecutor(),
   });
   return map;
 }

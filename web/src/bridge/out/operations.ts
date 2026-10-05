@@ -97,6 +97,10 @@ async function landingKeys(master: LandingMaster, account: string, authNonce: st
   return landingKeyFor(master, account, BigInt(authNonce));
 }
 
+/** What a stopped tx1 record adds (audit C7): its tokens may have moved anyway. */
+export const TX1_MAY_HAVE_MOVED =
+  'If the tokens left your account anyway, use "Find my transfers": it finds them and lets you finish or return them.';
+
 /** tx1: the record first, then ONE approval of the withdrawal to the landing key. */
 export async function startBridgeOut(
   ctx: BridgeOutContext,
@@ -154,12 +158,14 @@ export async function startBridgeOut(
         checkedAt: Date.now(),
       };
     } catch (e) {
-      // Refused before or by the market: nothing paid the landing key (a refused approval writes no record).
+      // Usually refused before or by the market, so nothing paid the landing key (a refused approval
+      // writes no record). But an interrupted answer can hide a tx1 that landed (audit C7 / F-B4): the
+      // record says so, and "Find my transfers" adopts such a record again when its coin is there.
       if (readBridgeOuts(ctx.env.store, ctx.env.scope, o.account).some((x) => x.authNonce === n)) {
         putBridgeOut(ctx.env.store, ctx.env.scope, o.account, {
           ...record,
           state: 'failed',
-          progress: e instanceof Error ? e.message.slice(0, 300) : 'failed',
+          progress: `${(e instanceof Error ? e.message : 'failed').slice(0, 240)} ${TX1_MAY_HAVE_MOVED}`,
           checkedAt: Date.now(),
         });
       }
@@ -233,6 +239,7 @@ async function secondTransaction(
     }
     const { buildLock, buildReturn, balanceAndCheck } = await import('./build.js');
     const { readChainStates } = await import('./states.js');
+    const { landingCoinSecretKeyHex } = await import('@nightmarket/core/bridge/landing-wallet');
     ctx.onProgress?.('Reading your landing key');
     const { state, coin } = await computedState(ctx, keys, r);
     for (let attempt = 1; ; attempt++) {
@@ -289,6 +296,8 @@ async function secondTransaction(
           tx: hex,
           proven: false,
           blockHash: draft.blockHash,
+          // Audit C1: which coin it spends (its public nonce, and the key the witness already carries).
+          spend: { nonce: r.landingNonce, coinSecretKey: landingCoinSecretKeyHex(keys) },
         });
         const done: BridgeOutRecord = {
           ...sending,
@@ -459,6 +468,24 @@ export async function findTransfers(
     }
   }
   return found;
+}
+
+/**
+ * Which found transfers "Find my transfers" adopts (P10.3, audit C7 / F-B4): every OPEN one whose record
+ * this browser lacks, or holds without an entitlement (tx1 landed but its answer was lost), or marked
+ * failed or still signing after an interrupted tx1. Adopting re-issues the entitlement and overwrites
+ * that record. A record with an entitlement is left alone (its own Finish / Return works).
+ */
+export function transfersToAdopt<F extends Pick<FoundTransfer, 'authNonce' | 'open'>>(
+  found: readonly F[],
+  records: readonly Pick<BridgeOutRecord, 'authNonce' | 'state' | 'entitlement'>[],
+): F[] {
+  const byNonce = new Map(records.map((r) => [r.authNonce, r]));
+  return found.filter((f) => {
+    if (!f.open) return false;
+    const r = byNonce.get(f.authNonce);
+    return !r || !r.entitlement || r.state === 'failed' || r.state === 'tx1-signing';
+  });
 }
 
 /** Re-issue a found transfer's entitlement (`bridge-out-entitle`, indexer evidence) and record it. */

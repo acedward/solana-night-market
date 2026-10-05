@@ -4,6 +4,10 @@
 // units and with the site's decimals, the token account it leaves, and the Midnight account it goes to)
 // BEFORE the wallet is asked; then one Solana transaction; then its record, followed until the page's
 // own decode shows the tokens (or the bridge says it cannot deliver, and that the SPL stays locked).
+//
+// P10.3 (audit C3): the record is written before the wallet is asked; a wallet that does not answer in
+// time leaves it `unknown` ("checking"), never "nothing was sent"; its late answer is kept; and a new
+// Bridge in of that token waits until the page has found the lock on Solana or its blockhash expired.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
@@ -17,6 +21,8 @@ import { useBridges } from '../BridgeContext.js';
 import { SolanaRpc } from '../solana-rpc.js';
 import {
   BridgeInRefused,
+  BridgeInUncertain,
+  blocksNewBridgeIn,
   followBridgeIn,
   isFinal,
   pageBalance,
@@ -25,12 +31,14 @@ import {
   type BridgeInContext,
   type Precheck,
 } from './operations.js';
-import { putBridgeIn, readBridgeIns, type BridgeInRecord } from './records.js';
+import { bridgeInId, putBridgeIn, readBridgeIns, removeBridgeIn, type BridgeInRecord } from './records.js';
 
 /** How often an open Bridge-in record is followed (ms). */
 export const BRIDGE_IN_POLL_MS = 4_000;
 
 const STATE_TEXT: Record<BridgeInRecord['state'], string> = {
+  signing: 'Waiting for your wallet',
+  unknown: 'Checking Solana',
   sent: 'Sent to Solana',
   locked: 'Locked on Solana',
   bridging: 'Bridging',
@@ -40,6 +48,9 @@ const STATE_TEXT: Record<BridgeInRecord['state'], string> = {
 };
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong.');
+/** Why a new Bridge in of a token must wait (audit C3). */
+export const BRIDGE_IN_WAIT_TEXT =
+  'An earlier Bridge in of this token may have been sent: wait until this page has checked Solana for it (it does so every few seconds) before you bridge this token in again.';
 /** The same record but for when it was last checked. */
 const sameRecord = (a: BridgeInRecord, b: BridgeInRecord) =>
   JSON.stringify({ ...a, checkedAt: 0 }) === JSON.stringify({ ...b, checkedAt: 0 });
@@ -98,9 +109,11 @@ export function BridgeIn({
   useEffect(() => {
     latest.current = { ctx, pageCoins };
   });
+  // The record whose wallet request is open right now: not reconciled while the wallet may still answer.
+  const inFlight = useRef<string | null>(null);
   const openKey = records
     .filter((r) => !isFinal(r))
-    .map((r) => r.signature)
+    .map((r) => bridgeInId(r))
     .join(',');
   useEffect(() => {
     if (!openKey || !store || !scope) return;
@@ -113,6 +126,7 @@ export function BridgeIn({
       try {
         for (const r of readBridgeIns(store, scope, account).filter((x) => !isFinal(x))) {
           if (!live) return;
+          if (bridgeInId(r) === inFlight.current) continue;
           const next = await followBridgeIn(r, c, latest.current.pageCoins).catch((e: unknown): BridgeInRecord => ({
             ...r,
             progress: errorText(e).slice(0, 300),
@@ -140,6 +154,10 @@ export function BridgeIn({
     setCheck(null);
     const c = ctx();
     if (!c || !chosen) return;
+    if (blocksNewBridgeIn(records, chosen.colour)) {
+      setError(BRIDGE_IN_WAIT_TEXT);
+      return;
+    }
     let raw: bigint;
     try {
       raw = parseUnits(amount, chosen.decimals);
@@ -161,10 +179,27 @@ export function BridgeIn({
     const c = ctx();
     if (!c || !check || !store || !scope) return;
     setError(null);
+    if (blocksNewBridgeIn(readBridgeIns(store, scope, account), check.entry.colour)) {
+      setError(BRIDGE_IN_WAIT_TEXT);
+      return;
+    }
     setWorking('send');
+    const stillOpen = (r: BridgeInRecord) =>
+      readBridgeIns(store, scope, account).find((x) => bridgeInId(x) === bridgeInId(r));
     try {
       const before = pageBalance(await pageCoins(), check.entry.colour);
-      const rec = await sendBridgeIn(c, check.entry, check.raw, before);
+      const rec = await sendBridgeIn(c, check.entry, check.raw, before, Date.now(), {
+        onPrepared: (r) => {
+          inFlight.current = bridgeInId(r);
+          putBridgeIn(store, scope, account, r);
+        },
+        onWithdrawn: (r) => removeBridgeIn(store, scope, account, r),
+        // The wallet's late answer: kept unless the page already found the lock (or settled it) itself.
+        onLate: (r) => {
+          const now = stillOpen(r);
+          if (!now || now.state === 'signing' || now.state === 'unknown') putBridgeIn(store, scope, account, r);
+        },
+      });
       putBridgeIn(store, scope, account, rec);
       setOk(
         `Sent: ${formatUnits(check.raw, check.entry.decimals)} ${check.entry.symbol} are on their way to your account.`,
@@ -172,8 +207,15 @@ export function BridgeIn({
       setCheck(null);
       setAmount('');
     } catch (err) {
-      setError(err instanceof BridgeInRefused ? err.message : `${errorText(err)} Nothing was locked.`);
+      if (err instanceof BridgeInUncertain) {
+        putBridgeIn(store, scope, account, err.record);
+        setError(err.message);
+        setCheck(null);
+      } else {
+        setError(err instanceof BridgeInRefused ? err.message : `${errorText(err)} Nothing was locked.`);
+      }
     } finally {
+      inFlight.current = null;
       setWorking(null);
     }
   };
@@ -284,7 +326,7 @@ export function BridgeIn({
       {records.length > 0 && (
         <ul className="small" data-testid="bridge-in-records">
           {records.map((r) => (
-            <li key={r.signature} data-testid="bridge-in-record" data-state={r.state}>
+            <li key={bridgeInId(r)} data-testid="bridge-in-record" data-state={r.state}>
               {formatUnits(BigInt(r.amount), entries.find((e) => e.colour === r.colour)?.decimals ?? 0)} {r.symbol}:{' '}
               <strong>{STATE_TEXT[r.state]}</strong>
               {r.progress && r.state !== 'completed' ? ` · ${r.progress}` : ''}

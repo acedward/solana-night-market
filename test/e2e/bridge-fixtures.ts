@@ -56,7 +56,10 @@ export interface Site {
 }
 
 /** A seeded stagenet account, a site that bridges X, and a wallet holding 600 X and 1 SOL. */
-export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; genesis?: string } = {}): Promise<Site> {
+export async function bridgeSite(
+  page: Page,
+  opts: { profile?: WalletProfile; genesis?: string; walletTimeoutSeconds?: number } = {},
+): Promise<Site> {
   await serveExchange(page);
   const rpc = mockSolanaRpc();
   const bridge = mockBridgeApi();
@@ -112,7 +115,7 @@ export async function bridgeSite(page: Page, opts: { profile?: WalletProfile; ge
         network: 'stagenet',
         relayUrl: RELAY,
         overrides: INDEXER_OVERRIDE,
-        walletTimeoutSeconds: 20,
+        walletTimeoutSeconds: opts.walletTimeoutSeconds ?? 20,
         solana: { rpcUrl: RPC, cluster: 'solana:localnet' },
         bridges: journey,
       },

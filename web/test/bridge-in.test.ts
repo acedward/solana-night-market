@@ -290,15 +290,15 @@ describe('P7 Bridge in: following the lock (T7.5); completion by the page', () =
     expect(await followBridgeIn(r, ctx, async () => [])).toBe(r);
   });
 
-  it('completion by the balance alone (the bridge cannot be read)', async () => {
+  it('P10.3 (audit C10): a balance alone never completes it, while the bridge cannot be read', async () => {
     const { ctx, rec } = await sent();
     const down = { ...ctx, fetchImpl: (async () => new Response('', { status: 500 })) as typeof fetch };
     let r = await followBridgeIn(rec, down, async () => []);
     expect(r).toMatchObject({ state: 'locked', progress: "The bridge's progress cannot be read right now" });
     const other = stored({ nonce: '77'.repeat(32), colour: entry.colour, value: '500000000' });
-    r = await followBridgeIn(r, down, async () => [other]);
-    expect(r.state).toBe('completed');
     expect(pageBalance([other], entry.colour)).toBe(500_000_000n);
+    r = await followBridgeIn(r, down, async () => [other]);
+    expect(r.state).toBe('locked');
   });
 
   it('undeliverable, for every code: the plain reason and "stay locked"', async () => {

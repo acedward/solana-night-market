@@ -25,7 +25,8 @@ export const BRIDGE_OUT_STATES = [
   'returning',
   /** The coin is back in the account (the page's own decode). */
   'returned',
-  /** tx1 never paid the landing key (refused or failed): nothing moved. */
+  /** tx1 stopped (refused, failed, or its answer was lost): usually nothing moved; "Find my transfers"
+   *  adopts it again when its landing coin is there (audit C7). */
   'failed',
 ] as const;
 export type BridgeOutState = (typeof BRIDGE_OUT_STATES)[number];

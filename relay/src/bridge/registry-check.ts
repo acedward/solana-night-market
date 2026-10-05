@@ -8,7 +8,9 @@
 //      this network: Bridge out's second transaction would be proven with keys the contract does not
 //      accept (`bridgeKeyProblems`, checked in ../main.ts once the key volume is loaded);
 //   3. (AA 00060 P10.3, audit C11 / F-A10) a bridge's sealed `sourceMint` is not the registry's SPL mint:
-//      the site would lock SPL tokens the bridge never mints.
+//      the site would lock SPL tokens the bridge never mints;
+//   4. (AA 00060 P10.4, audit D7 / R-B5) check 3 cannot run: the key volume's bridge module, or its ledger
+//      decoder, cannot be loaded (`loadBridgeLedger`). The relay fails closed instead of skipping the check.
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -41,6 +43,31 @@ export function tokenListProblems(bridges: BridgeRegistry, tokens: TokenRegistry
     }
   }
   return problems;
+}
+
+/** The key volume's bridge module's ledger decoder (check 3), or an Error saying why the relay cannot check
+ *  the sealed mint (check 4: the caller refuses to start). */
+export async function loadBridgeLedger(
+  managedPath: string,
+  importer: (path: string) => Promise<unknown> = (path) => import(path),
+): Promise<(data: unknown) => { sourceMint: Uint8Array }> {
+  const path = join(managedPath, BRIDGE_BUNDLE, 'contract', 'index.js');
+  let mod: unknown;
+  try {
+    mod = await importer(path);
+  } catch (e) {
+    throw new Error(
+      `the relay cannot check the bridges' sealed SPL mints: the key volume's bridge module (${path}) does not load (${(e as Error).message})`,
+      { cause: e },
+    );
+  }
+  const ledger = (mod as { ledger?: unknown } | null)?.ledger;
+  if (typeof ledger !== 'function') {
+    throw new Error(
+      `the relay cannot check the bridges' sealed SPL mints: the key volume's bridge module (${path}) has no ledger decoder`,
+    );
+  }
+  return ledger as (data: unknown) => { sourceMint: Uint8Array };
 }
 
 /** A deployed contract's state, as the indexer's public data provider gives it (or null: none). */

@@ -11,6 +11,8 @@ function assert(value: unknown, message?: string): asserts value {
 }
 
 assert.ok = assert;
+// Node's `assert.equal` is loose equality on purpose.
+// eslint-disable-next-line eqeqeq
 assert.equal = (a: unknown, b: unknown, message?: string) => assert(a == b, message ?? `${String(a)} == ${String(b)}`);
 assert.strictEqual = (a: unknown, b: unknown, message?: string) =>
   assert(Object.is(a, b), message ?? `${String(a)} === ${String(b)}`);

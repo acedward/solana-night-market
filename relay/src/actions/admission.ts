@@ -45,7 +45,7 @@ export type AdmissionOutcome =
     }
   | {
       ok: false;
-      status: 400 | 401 | 403 | 429 | 503;
+      status: 400 | 401 | 403 | 409 | 429 | 503;
       /** The error code the route answers with (`unauthorised` for a signer refusal). */
       code: string;
       reason: string;

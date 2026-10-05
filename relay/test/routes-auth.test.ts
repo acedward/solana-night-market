@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { RELAY_ACTIONS } from '@nightmarket/core';
 
+import { ENTITLEMENT_ACTIONS } from '../src/actions/catalogue.js';
 import { STATE_CHANGING_ROUTES } from '../src/app.js';
 import { ACCOUNT, FakeSponsor, harness, newWallet, post, samplePayload, signedBody, testConfig } from './harness.js';
 
@@ -18,7 +19,10 @@ describe('the relay routes', () => {
   });
 });
 
-describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
+/** The signed actions (AA 00060's entitlement actions carry no signature: relay/test/bridge-out.test.ts). */
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => !ENTITLEMENT_ACTIONS.has(a));
+
+describe.each(SIGNED_ACTIONS)('POST /v1/actions/%s', (action) => {
   const expect401 = async (res: Response, detail: string) => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: { code: string; detail?: string } };
@@ -119,7 +123,7 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s', (action) => {
 });
 
 describe('a relay without the Ed25519 arm (no key volume: no scheme, no Passport-call check)', () => {
-  it.each(RELAY_ACTIONS)('refuses %s as not supported, whatever it carries, and queues nothing', async (action) => {
+  it.each(SIGNED_ACTIONS)('refuses %s as not supported, whatever it carries, and queues nothing', async (action) => {
     const h = harness({ scheme: null });
     const body = await signedBody(h, action, newWallet());
     const res = await post(h, action, body);
@@ -127,6 +131,42 @@ describe('a relay without the Ed25519 arm (no key volume: no scheme, no Passport
     const err = ((await res.json()) as { error: { code: string; detail?: string; message: string } }).error;
     expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
     expect(err.message).toMatch(/does not accept wallet signatures/);
+    expect(h.queue.stats().jobs).toBe(0);
+  });
+});
+
+describe('AA 00060: Bridge out on a relay that does not offer it', () => {
+  it.each([...ENTITLEMENT_ACTIONS])('refuses %s as not supported and queues nothing', async (action) => {
+    const h = harness();
+    const res = await post(h, action, {
+      account: ACCOUNT,
+      payload:
+        action === 'bridge-out'
+          ? {
+              kind: 'lock',
+              entitlement: `le1.${'5e'.repeat(32)}.${'11'.repeat(32)}.9999999999.${'22'.repeat(32)}`,
+              landing: {
+                deviceKey: '33'.repeat(32),
+                coinPublicKey: '44'.repeat(32),
+                colour: '55'.repeat(32),
+                amount: '1',
+              },
+              tx: '00',
+              proven: false,
+              blockHash: '66'.repeat(32),
+            }
+          : {
+              tx1Hash: '77'.repeat(32),
+              spentCoin: { nonce: '88'.repeat(32), color: '55'.repeat(32), value: '5' },
+              amount: '1',
+              landingCoinPublicKey: '44'.repeat(32),
+              deviceKey: '33'.repeat(32),
+              useCounter: '0',
+            },
+    });
+    expect(res.status).toBe(401);
+    const err = ((await res.json()) as { error: { code: string; detail?: string } }).error;
+    expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
     expect(h.queue.stats().jobs).toBe(0);
   });
 });

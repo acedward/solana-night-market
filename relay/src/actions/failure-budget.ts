@@ -55,6 +55,8 @@ export const BUDGET_EXEMPT_ACTIONS: ReadonlySet<RelayActionName> = new Set<Relay
   'withdraw-unshielded',
   'cancel-offers',
   'restore-enc-key',
+  // AA 00060: finishing (or returning) a bridge-out moves the customer's own coin out of transit.
+  'bridge-out',
 ]);
 
 /**

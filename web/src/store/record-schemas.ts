@@ -129,7 +129,7 @@ const job = z
 
 /** AA 00060 P7.3: a Bridge-in record (../bridge/in/records.ts); no secret. */
 const base58 = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,90}$/);
-const bridge = z
+const bridgeIn = z
   .object({
     direction: z.literal('in'),
     signature: base58,
@@ -150,6 +150,57 @@ const bridge = z
     checkedAt: ms.optional(),
   })
   .strict();
+
+/** AA 00060 P6.2: a Bridge-out record (../bridge/out/records.ts). Public values only: the landing key's
+ *  PUBLIC coin key and check value, the predicted landing coin, the relay's entitlement (a MAC, not a
+ *  secret of the customer's); never a signature, the master key or a per-transfer key (spec SC-005). */
+const bridgeOut = z
+  .object({
+    direction: z.literal('out'),
+    authNonce: decimal,
+    colour: hex32,
+    symbol: text(16),
+    amount: decimal,
+    bridgeContract: hex32,
+    bridgeProgram: base58,
+    bridgeApi: z.string().regex(/^https?:\/\/[^\s/]{1,200}$/),
+    wallet: base58,
+    spentCoin: z.object({ nonce: hex32, color: hex32, value: decimal }).strict(),
+    landingCoinPublicKey: hex32,
+    landingNonce: hex32,
+    landingCommitment: hex32,
+    check: z.string().regex(/^[0-9a-f]{32}$/),
+    createdAt: ms,
+    state: z.enum([
+      'tx1-signing',
+      'tx1-sent',
+      'landed',
+      'tx2-sent',
+      'locked',
+      'arrived',
+      'returning',
+      'returned',
+      'failed',
+    ]),
+    tx1Id: z
+      .string()
+      .regex(/^[0-9a-fA-F]{1,200}$/)
+      .optional(),
+    entitlement: z
+      .string()
+      .regex(/^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9]{1,12}\.[0-9a-f]{64}$/)
+      .optional(),
+    tx2Id: z
+      .string()
+      .regex(/^[0-9a-fA-F]{1,200}$/)
+      .optional(),
+    withdrawalId: decimal.optional(),
+    progress: text(300).optional(),
+    checkedAt: ms.optional(),
+  })
+  .strict();
+
+const bridge = z.union([bridgeIn, bridgeOut]);
 
 export const RECORD_DATA_SCHEMAS: Record<RecordKind, z.ZodType> = {
   bridge,
@@ -191,7 +242,8 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
       if (key.id !== d.requestId) return 'a job record does not match its key';
       break;
     case 'bridge':
-      if (key.id !== `in-${String(d.signature)}`) return 'a bridge record does not match its key';
+      if (d.direction === 'out' ? key.id !== `out-${String(d.authNonce)}` : key.id !== `in-${String(d.signature)}`)
+        return 'a bridge record does not match its key';
       break;
     case 'secret':
       // A secret and its public key must be one pair (security review F-B5).

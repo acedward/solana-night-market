@@ -7,7 +7,9 @@
 //   - I-3, the bridge's transfer API (./transfers.ts; FROZEN 00058 @ 6c07dab);
 //   - I-4, the injector's account registration (./injector.ts; FROZEN 2026-10-04 @ 00059 f4d215c).
 // The landing wallet's keys (wallet-sdk-hd + ledger-v9) are the separate entry
-// `@nightmarket/core/bridge/landing-wallet`, loaded only for Bridge out.
+// `@nightmarket/core/bridge/landing-wallet`, loaded only for Bridge out, as are the computed-coin spend
+// (`@nightmarket/core/bridge/landing-spend`, ledger-v9) and Bridge out's public facts and wire
+// (`@nightmarket/core/bridge/out`, compact-runtime).
 
 export * from './colour.js';
 export * from './injector.js';

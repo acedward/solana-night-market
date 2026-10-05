@@ -48,7 +48,7 @@ until mkdir "$LOCK" 2>/dev/null; do
   if (( waited >= LOCK_WAIT_S )); then echo "run-local: gave up waiting for the stack lock" >&2; exit 75; fi
   sleep 60; waited=$((waited + 60))
 done
-printf '00060 %s G-LANDING (P3) compose project %s\n' "$(date -u +%FT%TZ)" "$COMPOSE_PROJECT_NAME" >"$LOCK/holder"
+printf '00060 %s %s compose project %s\n' "$(date -u +%FT%TZ)" "${GATE_NAME:-G-LANDING (P3)}" "$COMPOSE_PROJECT_NAME" >"$LOCK/holder"
 
 mkdir -p "$OUT"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aa00060-landing.XXXXXX")"
@@ -60,6 +60,8 @@ export NODE_PORT="$(free_port)" INDEXER_PORT="$(free_port)" RELAY_PORT="$(free_p
 cp -Rc "$KEYS_DIR" "$RUN_DIR/keys-relay"
 cp -Rc "$KEYS_DIR" "$RUN_DIR/keys-harness"
 cp -Rc "$BRIDGE_MANAGED" "$RUN_DIR/keys-harness/bridge"
+# P6 (GATE=t65): the relay proves Bridge out's locks itself: its key volume carries the bridge bundle too.
+if [[ "${GATE:-}" == t65 ]]; then cp -Rc "$BRIDGE_MANAGED" "$RUN_DIR/keys-relay/bridge"; fi
 cp -Rc "$PS_PARAMS" "$RUN_DIR/ps-params"
 cp -Rc "$PS8_PARAMS" "$RUN_DIR/ps8-params"
 export KEYS_DIR="$RUN_DIR/keys-relay" PS_PARAMS="$RUN_DIR/ps-params" PS8_PARAMS="$RUN_DIR/ps8-params"
@@ -143,6 +145,137 @@ fresh_prover() {
 phase() { echo; echo "run-local: ==== $1 ($((SECONDS - T0)) s)"; }
 
 status=0
+# P6.0, the Q5 gate (GATE=q5): a coin sealed to ANOTHER encryption key is spent through the page's
+# computed path, (i) to finish the lock and (ii) to return it to A; the honest path, by the SDK wallet and
+# by the computed path, still lands.
+run_q5() {
+  phase 'bridge-deploy (third party, dev seed 3)'
+  landing STEP=bridge-deploy || return 1
+  local bridge
+  bridge="$(grep -h '^BRIDGE ' "$OUT/landing.log" | tail -1 | sed 's/^BRIDGE //')"
+  python3 - "$RUN_DIR/tokens.json" "$bridge" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); b = json.loads(sys.argv[2])
+t["tokens"].append({"symbol": "Y", "name": "Bridged Y", "decimals": 6, "privacy": "shielded",
+                    "midnightColour": b["colour"], "contract": b["contract"], "domainSeparator": ""})
+json.dump(t, open(sys.argv[1], "w"), indent=1)
+PY
+  cp "$RUN_DIR/tokens.json" "$OUT/tokens.json"
+  phase 'relay up; open account A (market-flows.ts STEPS=open-a)'
+  relay_up || return 1
+  bun_run -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN_DIR:/run/nm:ro" \
+    -v "$STATE_DIR:/state" -v "$OUT:/out" -w /app -e RELAY_URL=http://relay:8080 -e NETWORK=undeployed \
+    -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out -e OUT_NAME=market-flows-open-a.json \
+    -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS=open-a \
+    "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || return 1
+
+  phase 'honest, unchanged: 10 Y, tx1, tx2 by the SDK wallet'
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-h1 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-h1 || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=tx2 TX1_LABEL=tx1-h1 LABEL=tx2-h1-sdk || return 1
+
+  phase 'honest, computed path: 10 Y, tx1, tx2 by the computed coin'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-h2 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-h2 || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=tx2 TX1_LABEL=tx1-h2 LABEL=tx2-h2-computed COMPUTED=1 || return 1
+
+  phase 'Q5 (i): 15 Y, tx1 SEALED TO ANOTHER KEY; the SDK misses it; the computed coin finishes the lock'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=15000000 LABEL=fund-s1 || return 1
+  landing STEP=tx1 AMOUNT=15000000 LABEL=tx1-s1 SEAL_TO=other || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=neg-seal-check TX1_LABEL=tx1-s1 COMPUTED=1 || return 1
+  landing STEP=tx2 TX1_LABEL=tx1-s1 LABEL=tx2-s1-computed COMPUTED=1 || return 1
+
+  phase 'Q5 (ii): 10 Y, tx1 SEALED TO ANOTHER KEY; the computed coin returns it to A'
+  relay_up || return 1
+  landing STEP=fund FUND_AMOUNT=10000000 LABEL=fund-s2 || return 1
+  landing STEP=tx1 AMOUNT=10000000 LABEL=tx1-s2 SEAL_TO=other || return 1
+  relay_stop || return 1; fresh_prover
+  landing STEP=neg-seal-check TX1_LABEL=tx1-s2 COMPUTED=1 || return 1
+  landing STEP=return TX1_LABEL=tx1-s2 COMPUTED=1 || return 1
+}
+# P6 T6.5 (GATE=t65): the page's own Bridge out through the real relay (BRIDGE_REGISTRY_FILE, the bridge
+# bundle in its key volume): (a) the honest bridge-out with T6.4's secrecy capture, (b) resume and finish,
+# (c) resume and return, (d) an empty store finds and re-entitles, (f) a hedged signer, (g) a changed
+# check, (h) a tampered tx1 recipient, (i) two locks on one state, (j) an entitlement for a coin never
+# paid, and last (e) the withdrawal allowance's cap and whole-coin exit (relay restarted with cap 1).
+run_t65() {
+  phase 'bridge-deploy (third party, dev seed 3)'
+  landing STEP=bridge-deploy || return 1
+  local bridge
+  bridge="$(grep -h '^BRIDGE ' "$OUT/landing.log" | tail -1 | sed 's/^BRIDGE //')"
+  python3 - "$RUN_DIR/tokens.json" "$bridge" "$RUN_DIR/journey.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); b = json.loads(sys.argv[2])
+t["tokens"].append({"symbol": "Y", "name": "Bridged Y", "decimals": 6, "privacy": "shielded",
+                    "midnightColour": b["colour"], "contract": b["contract"], "domainSeparator": ""})
+json.dump(t, open(sys.argv[1], "w"), indent=1)
+# I-1, the journey registry the relay checks at start-up (the gate's fixed Solana genesis stand-in).
+import base64
+journey = {"midnightNetwork": "undeployed", "solanaGenesisHash": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+           "tokens": [{"colour": b["colour"], "splMint": b["sourceMint"], "bridgeContract": b["contract"],
+                       "bridgeProgram": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN", "bridgeApi": "http://bridge.invalid",
+                       "name": "Bridged Y", "symbol": "Y", "decimals": 6}]}
+json.dump(journey, open(sys.argv[3], "w"), indent=1)
+PY
+  cp "$RUN_DIR/tokens.json" "$OUT/tokens.json"; cp "$RUN_DIR/journey.json" "$OUT/journey.json"
+  export BRIDGE_REGISTRY_FILE=/run/nm/journey.json
+  phase 'relay up (with the journey registry); open account A'
+  relay_up || { dc --profile relay logs --no-color relay | tail -40; return 1; }
+  bun_run -v "$KEYS_DIR:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN_DIR:/run/nm:ro" \
+    -v "$STATE_DIR:/state" -v "$OUT:/out" -w /app -e RELAY_URL=http://relay:8080 -e NETWORK=undeployed \
+    -e TOKENS_FILE=/run/nm/tokens.json -e STATE_DIR=/state -e OUT=/out -e OUT_NAME=market-flows-open-a.json \
+    -e INDEXER_URL=http://indexer:8088/api/v4/graphql -e STEPS=open-a \
+    "$BUN_IMAGE" bun test/stack/p6/market-flows.ts 2>&1 | tee -a "$OUT/market-flows.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || return 1
+
+  phase 'T6.5 (a) + T6.4: 50 Y bridged out by the page (derive, tx1, the lock); no landing secret left the tab'
+  landing STEP=fund FUND_AMOUNT=50000000 LABEL=fund50 || return 1
+  landing STEP=out OUT_CASE=a || return 1
+  phase 'T6.5 (b): 30 Y, tx1; a new process finishes the lock from the stored record'
+  landing STEP=fund FUND_AMOUNT=30000000 LABEL=fund30 || return 1
+  landing STEP=out OUT_CASE=b-start || return 1
+  landing STEP=out OUT_CASE=b || return 1
+  phase 'T6.5 (c): 20 Y, tx1; returned to A'
+  landing STEP=fund FUND_AMOUNT=20000000 LABEL=fund20 || return 1
+  landing STEP=out OUT_CASE=c-start || return 1
+  landing STEP=out OUT_CASE=c || return 1
+  phase 'T6.5 (d): 15 Y, tx1; an EMPTY store finds it, the relay re-entitles it, the lock lands'
+  landing STEP=fund FUND_AMOUNT=15000000 LABEL=fund15 || return 1
+  landing STEP=out OUT_CASE=d-start || return 1
+  landing STEP=out OUT_CASE=d || return 1
+  phase 'T6.5 (f) a hedged signer; (g) a changed check; (h) a tampered tx1 recipient'
+  landing STEP=out OUT_CASE=f || return 1
+  landing STEP=out OUT_CASE=g || return 1
+  landing STEP=fund FUND_AMOUNT=1000000 LABEL=fund1 || return 1
+  landing STEP=neg-relay || return 1
+  phase 'T6.5 (i): two locks built on the same bridge state at once'
+  fresh_prover
+  landing STEP=fund FUND_AMOUNT=4000000 LABEL=fund4 || return 1
+  landing STEP=fund FUND_AMOUNT=2000000 LABEL=fund2 || return 1
+  landing STEP=out OUT_CASE=i || return 1
+  phase 'T6.5 (j): bridge-out-entitle for a coin tx1 never paid'
+  landing STEP=out OUT_CASE=j || return 1
+  phase 'T6.5 (e): WITHDRAWS_DAILY_CAP=1 (relay restarted): a partial past the cap → 429; the whole coin → the exit'
+  landing STEP=fund FUND_AMOUNT=5000000 LABEL=fund5 || return 1
+  landing STEP=fund FUND_AMOUNT=3000000 LABEL=fund3 || return 1
+  relay_stop || return 1; fresh_prover
+  CAP_WITHDRAWS_PER_DAY=1 dc --profile relay up -d --force-recreate relay >/dev/null && relay_ready || return 1
+  landing STEP=out OUT_CASE=e || return 1
+}
+if [[ "${GATE:-}" == t65 ]]; then
+  if run_t65; then echo "run-local: T6.5 PASS ($((SECONDS - T0)) s)"; else echo "run-local: T6.5 FAILED"; status=1; fi
+  exit $status
+fi
+if [[ "${GATE:-}" == q5 ]]; then
+  if run_q5; then echo "run-local: Q5 GATE PASS ($((SECONDS - T0)) s)"; else echo "run-local: Q5 GATE FAILED"; status=1; fi
+  exit $status
+fi
 run_phases() {
   phase 'bridge-deploy (third party, dev seed 3)'
   landing STEP=bridge-deploy || return 1

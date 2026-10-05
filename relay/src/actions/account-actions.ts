@@ -21,6 +21,9 @@ import {
 
 import type { DigestReplayGuard } from '../auth/verifiers.js';
 import { withdrawSpendCheck, type SpendReader } from '../chain/coin-spend.js';
+import type { BridgeRegistry } from '@nightmarket/core/bridge';
+
+import { landingOfWithdrawal, type LandingEntitlements } from '../bridge/out-actions.js';
 import type { AppendEntitlements } from './entitlements.js';
 import type { Logger } from '../log.js';
 import type { DeviceArm, GatedAction } from '../passport/arm.js';
@@ -50,6 +53,10 @@ export interface AccountActionDeps {
   /** The spent coins of an account (AA 00047 P11, R3-7): a shielded withdrawal's coin is checked
    *  unspent before its proof. Absent: no check. */
   coins?: SpendReader;
+  /** AA 00060 P6.3: Bridge out. A withdrawal with `purpose: 'bridge-out'` (only of a colour the journey
+   *  registry bridges) returns a single-use landing entitlement for its second transaction. Absent: no
+   *  bridging (such a withdrawal is refused). */
+  landing?: { entitlements: LandingEntitlements; bridges: BridgeRegistry };
 }
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
@@ -235,6 +242,12 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'withdraw', raw, ctx);
     const p = check.payload;
+    // AA 00060 P6.3: a bridge-out's tx1 only for a colour this market bridges (before any proof).
+    const landing = p.purpose === 'bridge-out' ? deps.landing : undefined;
+    if (p.purpose === 'bridge-out' && !landing?.bridges.byColour(p.color)) {
+      deps.replay.release(check.digestHex);
+      throw new PublicError('bad-request', 'this market does not bridge that token');
+    }
     if (p.recipientEncryptionKey && deps.withdrawRecipientEnvelope) {
       // Security review F-B6 (when the deployment turns it on, Q13): the encryption key the coin is
       // sealed to must be the one the device signed in the route's RelayAction envelope (the
@@ -308,6 +321,19 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
               // The change has no inbox entry: the market will pay for filing ONE (F-B3).
               ...(change
                 ? { changeEntitlement: deps.entitlements.issue(check.account, `withdraw:${String(out.txId)}`) }
+                : {}),
+              // AA 00060 P6.3: the landing coin's ONE sponsored second transaction (lock or return).
+              ...(landing
+                ? (() => {
+                    const l = landingOfWithdrawal({
+                      recipient: p.recipient,
+                      color: p.color,
+                      amount: p.amount,
+                      coin: p.coin,
+                      deviceKey: check.signer,
+                    });
+                    return { landingEntitlement: landing.entitlements.issue(check.account, l.binding, l.commitment) };
+                  })()
                 : {}),
             };
             return result as unknown as Record<string, unknown>;

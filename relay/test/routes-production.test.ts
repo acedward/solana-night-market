@@ -63,7 +63,7 @@ const ACCOUNT = '5e'.repeat(32);
 const AUTH_NONCE = 3n;
 const COLOUR_A = 'a1'.repeat(32);
 
-type Kind = 'relay-action' | 'passport-call';
+type Kind = 'relay-action' | 'passport-call' | 'entitlement';
 const KIND: Record<RelayActionName, Kind> = {
   register: 'relay-action',
   withdraw: 'passport-call',
@@ -75,7 +75,12 @@ const KIND: Record<RelayActionName, Kind> = {
   'cancel-offers': 'passport-call',
   // AA 00047 P10.R: "Restore my encryption key", authorised by its own signature (R2-3).
   'restore-enc-key': 'passport-call',
+  // AA 00060 P6.3: authorised by a landing entitlement (relay/test/bridge-out.test.ts tests them).
+  'bridge-out': 'entitlement',
+  'bridge-out-entitle': 'entitlement',
 };
+/** The signed actions this file walks through (the entitlement ones have their own test). */
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => KIND[a] !== 'entitlement');
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
 class CountingSponsor extends FakeSponsor {
@@ -242,6 +247,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
       };
       return action === 'take' ? ({ ...make, offerId: 'cd'.repeat(32) } satisfies TakePayload) : make;
     }
+    default:
+      throw new Error(`${action} is not a signed action`);
   }
 }
 
@@ -318,7 +325,7 @@ describe('the production catalogue', () => {
   });
 });
 
-describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (action) => {
+describe.each(SIGNED_ACTIONS)('POST /v1/actions/%s (production catalogue)', (action) => {
   const kind = KIND[action];
 
   it('accepts a correct call, and queues exactly one job', async () => {

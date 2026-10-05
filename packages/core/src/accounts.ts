@@ -112,6 +112,10 @@ export const WithdrawPayloadSchema = z
     coin: QualifiedCoinSchema,
     /** The auth nonce the signed challenge binds. */
     authNonce: decimal,
+    /** AA 00060 P6.3: unsigned metadata (the F3 bytes are unchanged). `bridge-out`: the recipient is a
+     *  Bridge-out landing key (I-5), so the relay returns a `landingEntitlement` with the result (one
+     *  sponsored tx2, ./bridge/out.ts). Only for a colour the relay's journey registry bridges. */
+    purpose: z.literal('bridge-out').optional(),
   })
   .strict();
 export type WithdrawPayload = z.infer<typeof WithdrawPayloadSchema>;
@@ -198,6 +202,9 @@ export interface WithdrawResult {
   change: { nonce: string; color: string; value: string } | null;
   /** The single-use entitlement to file the change's inbox entry (F-B3), when there is change. */
   changeEntitlement?: string;
+  /** AA 00060 P6.3: for `purpose: 'bridge-out'`, the single-use entitlement to ONE sponsored Bridge-out
+   *  second transaction (lock, or return to the account) of the landing coin this withdrawal paid. */
+  landingEntitlement?: string;
 }
 
 export interface AppendInboxResult {

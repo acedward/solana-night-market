@@ -53,6 +53,9 @@ test('the shell, the Connect menu without a Solana wallet, and Local data with a
   const { entries, secret } = customerRecords();
   const other = await context.newPage();
   await other.goto('/');
+  // The other tab's app must have opened its own store BEFORE the writes: a store opened after them
+  // marks the schema (store.ts openSchema), which this test then counts (a race that CI hit).
+  await expect(other.getByRole('heading', { name: 'Night Market' })).toBeVisible();
   await other.evaluate((pairs) => {
     for (const [k, v] of pairs) localStorage.setItem(k, v);
   }, entries);

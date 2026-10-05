@@ -22,6 +22,32 @@
 //   STEP=neg-node       L.9 (c) (relay stopped): tx2 with the Solana recipient changed after proving
 //   STEP=neg-seal       L.9 (d): tx1 sealed to another encryption key: does keys_t's wallet still see it?
 //
+// AA 00060 P6.0, the Q5 gate (owner decision A, the computed-coin spend): with COMPUTED=1, STEP=tx2 and
+// STEP=return balance the call with the landing coin built by the PAGE's own path
+// (@nightmarket/core/bridge/landing-spend: keys_t's ledger-v9 Zswap local state watches for the predicted
+// coin and replays every Zswap event from the public indexer, web/src/bridge/out/zswap-events.ts) instead
+// of the wallet SDK's sync, so it works whatever key tx1 sealed the coin to. STEP=return (TX1_LABEL=…)
+// returns that transfer's coin to A (`deposit_shielded`, sealed to A's on-chain key).
+//
+// AA 00060 P6 (T6.5, T6.4), STEP=out with OUT_CASE: the PAGE's own Bridge out (web/src/bridge/out/
+// operations.ts, the page's signing seam over A's test key) through the REAL relay's `withdraw` (purpose
+// `bridge-out`), `bridge-out` and `bridge-out-entitle`, the relay started with BRIDGE_REGISTRY_FILE and
+// the bridge bundle in its key volume:
+//   a           50 Y: derive (2 prompts), tx1 (1 prompt), the lock: the bridge records {A's wallet, 50 Y};
+//               every request the page made is captured, and no landing secret is in any of them or in
+//               the page's store (T6.4, SC-005)
+//   b-start/b   30 Y: tx1, then a NEW process finishes the lock from the stored record
+//   c-start/c   20 Y: tx1, then the coin is returned to A (the page sees it)
+//   d-start/d   15 Y: tx1, then an EMPTY store finds the transfer from the chain alone, the relay re-issues
+//               its entitlement (`bridge-out-entitle`), and the lock lands
+//   e           (WITHDRAWS_DAILY_CAP=1) a partial bridge-out past the allowance → 429 withdraws-daily-cap;
+//               the whole coin → admitted as the exit, and locked
+//   f           a hedged signer: refused at the landing key (`not-deterministic`) before tx1
+//   g           a stored check that does not match → `landing-key-changed`, before tx1
+//   i           two locks built on the same bridge state at once: one lands, the other is refused before
+//               any proof (`bridge-out-stale`), rebuilt on the new state, and lands
+//   j           `bridge-out-entitle` for a coin tx1 never paid → `entitle-not-found`
+//
 // SECRETS: A's test device seed is market-flows.ts's (state.json, mode 600); the landing master is
 // re-derived from it in every process and never written; the operator's throwaway key is in
 // landing-state.json (mode 600). Everything written to $OUT is public.
@@ -31,7 +57,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { sha256 } from '@noble/hashes/sha2.js';
+import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
 
@@ -45,6 +71,12 @@ import {
   type NetworkName,
 } from '@nightmarket/core';
 import { bridgeColourOf, deriveLandingMaster, type LandingMaster } from '@nightmarket/core/bridge';
+import {
+  balanceWithLandingCoin,
+  findLandingCoin,
+  landingLocalState,
+  type LandingCoinInfo,
+} from '@nightmarket/core/bridge/landing-spend';
 import { landingKeyFor, type LandingKeys } from '@nightmarket/core/bridge/landing-wallet';
 import {
   callContext,
@@ -66,6 +98,19 @@ import { ChainReader, indexerWsUrlFor } from '../../../web/src/chain/indexer.js'
 import { decodeEvent } from '../../../web/src/chain/ledger-decode.js';
 import { syncAccount, withdrawToWallet } from '../../../web/src/passport/operations.js';
 import { readCoins } from '../../../web/src/passport/records.js';
+import { readZswapEvents } from '../../../web/src/bridge/out/zswap-events.js';
+import {
+  adoptTransfer,
+  findTransfers,
+  finishLock,
+  landingMasterFor,
+  returnToAccount,
+  startBridgeOut,
+  type BridgeOutContext,
+} from '../../../web/src/bridge/out/operations.js';
+import { putBridgeOut, readBridgeOuts, type BridgeOutRecord } from '../../../web/src/bridge/out/records.js';
+import { recordKey } from '../../../web/src/store/schema.js';
+import { ed25519ActionSigning } from '../../../web/src/wallet/signing.js';
 import { headlessPage, type HeadlessPage } from '../../stack/p6/page.js';
 import { landingCoinCommitment, paidOutNonce } from './coins.js';
 
@@ -97,6 +142,8 @@ const UNIT = 1_000_000n;
 const ORIGIN = process.env.LANDING_ORIGIN ?? 'http://127.0.0.1:5173';
 /** No Solana chain in this gate: a fixed genesis hash stands in for the I-1 value. */
 const GENESIS = process.env.SOLANA_GENESIS ?? base58.encode(new Uint8Array(32).fill(7));
+/** P6.0 (Q5 A): balance with the page's computed-coin path instead of the SDK's sync. */
+const COMPUTED = process.env.COMPUTED === '1';
 
 const say = (s: string) => process.stdout.write(`   ${s}\n`);
 const step = (s: string) => process.stdout.write(`\n== ${new Date().toISOString()} ${s}\n`);
@@ -317,6 +364,44 @@ async function openLanding(keys: LandingKeys) {
   return { wallet, syncMs, firstState: state, balances, waitFor, stop: () => wallet.stop() };
 }
 
+/**
+ * P6.0 (Q5 A): keys_t's OWN Zswap local state (the page's computed path): every Zswap event from the
+ * public indexer, replayed into a ledger-v9 local state that watches for the predicted landing coin.
+ * No wallet SDK, no decryption: it finds the coin whatever key tx1 sealed it to.
+ */
+async function computedLanding(keys: LandingKeys, coin: LandingCoinInfo) {
+  if (!('WebSocket' in globalThis)) {
+    const { WebSocket } = await import('ws');
+    (globalThis as { WebSocket?: unknown }).WebSocket = WebSocket;
+  }
+  const t0 = Date.now();
+  const events = await readZswapEvents(INDEXER_WS_URL, { timeoutMs: 300_000 });
+  const readMs = Date.now() - t0;
+  const t1 = Date.now();
+  const state = landingLocalState(
+    keys,
+    coin,
+    events.map((e) => e.raw),
+  );
+  const replayMs = Date.now() - t1;
+  const q = findLandingCoin(state, coin);
+  return {
+    state,
+    events: events.length,
+    lastEventId: events.at(-1)?.id ?? null,
+    readMs,
+    replayMs,
+    holds: !!q,
+    mtIndex: q ? String((q as Any).mt_index) : null,
+  };
+}
+
+const coinOf = (label: string): LandingCoinInfo => {
+  const t = gate.tx1?.[label];
+  if (!t?.landingCoin) throw new Error(`no landing coin recorded for ${label}`);
+  return { nonce: t.landingCoin.nonce, color: t.landingCoin.color, value: BigInt(t.landingCoin.value) };
+};
+
 /** Building a call reads no key material (the browser holds none): anything that asks throws. */
 const NO_KEY_MATERIAL = (() => {
   const refuse = () => {
@@ -468,7 +553,9 @@ async function bridgeDeploy() {
     };
     record('bridgeDeploy', r);
     if (!r.colourMatchesCore) throw new Error('core bridgeColourOf differs from the contract tokenColor');
-    process.stdout.write(`BRIDGE ${json({ contract, colour, symbol: 'Y', decimals: 6 })}\n`);
+    process.stdout.write(
+      `BRIDGE ${json({ contract, colour, symbol: 'Y', decimals: 6, sourceMint: base58.encode(sourceMint) })}\n`,
+    );
   } finally {
     await tp.stop().catch(() => undefined);
   }
@@ -618,7 +705,14 @@ async function tx1(amount: bigint, label: string, opts: { sealTo?: string } = {}
     change: r.change ? r.change.value : null,
   };
   gate.tx1 = {
-    [label]: { authNonce: n.toString(), amount: amount.toString(), txHash: landed?.hash ?? null },
+    [label]: {
+      authNonce: n.toString(),
+      amount: amount.toString(),
+      txHash: landed?.hash ?? null,
+      // P6.0: the landing coin the page computes (public: from tx1's spend and the withdrawal).
+      landingCoin: { nonce: t.coin.nonce, color: t.coin.color, value: t.coin.value },
+      sealedElsewhere: epk !== t.keys.encryptionPublicKey,
+    },
     ...(gate.tx1 ?? {}),
   };
   saveGate();
@@ -630,19 +724,40 @@ async function tx1(amount: bigint, label: string, opts: { sealTo?: string } = {}
 }
 
 /** L.6 + L.7: tx2 `lockForSolana` (no key material, landing-key balancing, rc.8, DUST-only sponsor). */
-async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tamperRecipient?: boolean } = {}) {
-  step(`${label}: tx2 = lockForSolana(coin, <A's wallet key>), balanced by keys_t, DUST by the sponsor`);
+async function tx2(
+  authNonce: bigint,
+  amount: bigint,
+  label: string,
+  opts: { tamperRecipient?: boolean; coin?: LandingCoinInfo } = {},
+) {
+  const path = COMPUTED ? 'the COMPUTED coin (P6.0)' : 'the SDK wallet';
+  step(`${label}: tx2 = lockForSolana(coin, <A's wallet key>), balanced by keys_t via ${path}, DUST by the sponsor`);
   const { master } = await landingMaster();
   const keys = landingKeyFor(master, account(), authNonce);
   master.wipe();
   const rt = await runtime();
   const bridge = await bridgeRuntime();
-  const landing = await openLanding(keys);
+  if (COMPUTED && !opts.coin) throw new Error('COMPUTED needs the landing coin');
+  const landing = COMPUTED ? null : await openLanding(keys);
+  let comp: Awaited<ReturnType<typeof computedLanding>> | null = null;
   const sponsor = await openWallet(need('SPONSOR_SEED_FILE'));
-  const res: Record<string, Any> = { authNonce: authNonce.toString(), amount: amount.toString() };
+  const res: Record<string, Any> = { authNonce: authNonce.toString(), amount: amount.toString(), path };
   try {
-    res.landingSyncMs = landing.syncMs;
-    res.landingBalanceY = String(await landing.waitFor(colourY(), amount));
+    if (landing) {
+      res.landingSyncMs = landing.syncMs;
+      res.landingBalanceY = String(await landing.waitFor(colourY(), amount));
+    } else {
+      comp = await computedLanding(keys, opts.coin!);
+      res.computed = {
+        events: comp.events,
+        lastEventId: comp.lastEventId,
+        readMs: comp.readMs,
+        replayMs: comp.replayMs,
+        holds: comp.holds,
+        mtIndex: comp.mtIndex,
+      };
+      res.landingBalanceY = comp.holds ? amount.toString() : '0';
+    }
     if (BigInt(res.landingBalanceY) < amount) throw new Error(`keys_t holds ${res.landingBalanceY} Y, not ${amount}`);
     const contract = gate.bridge!.contract;
     const pdp: Any = rt.publicDataProvider;
@@ -693,9 +808,17 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     }
     const unproven = call.private.unprovenTx;
     const t1 = Date.now();
-    const balancing = await landing.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven);
-    if (!balancing) throw new Error('keys_t balanced nothing: the coin was not spent');
-    const merged = unproven.merge(balancing);
+    let merged: Any;
+    if (comp) {
+      const b = balanceWithLandingCoin(unproven, comp.state, keys, opts.coin!, PROFILE.midnightNetworkId);
+      merged = b.tx;
+      res.computed.segment = b.segment;
+      res.computed.spentMtIndex = b.mtIndex.toString();
+    } else {
+      const balancing = await landing!.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven);
+      if (!balancing) throw new Error('keys_t balanced nothing: the coin was not spent');
+      merged = unproven.merge(balancing);
+    }
     res.balanceMs = Date.now() - t1;
     res.shape = shapeOf(merged);
     if (
@@ -751,13 +874,21 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     };
     // keys_t after: no Y left (the landing coin spent), and never any DUST or NIGHT.
     await new Promise((r) => setTimeout(r, 6_000));
-    res.landingBalancesAfter = Object.fromEntries(
-      Object.entries(await landing.balances()).map(([k, v]) => [k.slice(0, 12), v.toString()]),
-    );
+    let yAfter: bigint;
+    if (landing) {
+      res.landingBalancesAfter = Object.fromEntries(
+        Object.entries(await landing.balances()).map(([k, v]) => [k.slice(0, 12), v.toString()]),
+      );
+      yAfter = BigInt(Object.entries(await landing.balances()).find(([k]) => k === colourY())?.[1] ?? 0n);
+    } else {
+      // The computed path again: the coin's nullifier is now in the chain's events, so it is gone.
+      const again = await computedLanding(keys, opts.coin!);
+      res.computedAfter = { events: again.events, holdsCoin: again.holds };
+      yAfter = again.holds ? amount : 0n;
+    }
     res.landingHoldsDustOrNight = false; // keys_t never derives a NIGHT key; its Dust key is never registered
     const dustAfter = await dustOf(sponsor.handle as SponsorWalletHandle);
     res.sponsorDust = { before: dustBefore?.toString() ?? null, after: dustAfter?.toString() ?? null };
-    const yAfter = BigInt(Object.entries(await landing.balances()).find(([k]) => k === colourY())?.[1] ?? 0n);
     res.landingYAfter = yAfter.toString();
     if (opts.tamperRecipient) {
       // L.9 (c): the node must refuse it, and nothing may change on the bridge.
@@ -787,7 +918,7 @@ async function tx2(authNonce: bigint, amount: bigint, label: string, opts: { tam
     return res;
   } finally {
     keys.clear();
-    await landing.stop().catch(() => undefined);
+    await landing?.stop().catch(() => undefined);
     await sponsor.stop().catch(() => undefined);
   }
 }
@@ -948,6 +1079,102 @@ async function resumeReturn() {
   }
 }
 
+/**
+ * P6.0 (Q5 A) (ii): return the coin of the transfer recorded as TX1_LABEL to A (`deposit_shielded`, the
+ * entry sealed to A's on-chain key), balanced by keys_t through the COMPUTED coin (or the SDK wallet
+ * without COMPUTED=1), DUST by the sponsor; the page must see the coin.
+ */
+async function returnCoin(label: string) {
+  const t = gate.tx1?.[label];
+  if (!t) throw new Error(`no ${label} recorded`);
+  const amount = BigInt(t.amount);
+  const path = COMPUTED ? 'the COMPUTED coin (P6.0)' : 'the SDK wallet';
+  step(`return ${label}: deposit_shielded into A (sealed to A), balanced by keys_t via ${path}`);
+  const { master } = await landingMaster();
+  const keys = landingKeyFor(master, account(), BigInt(t.authNonce));
+  master.wipe();
+  const rt = await runtime();
+  const coin = COMPUTED ? coinOf(label) : null;
+  const landing = COMPUTED ? null : await openLanding(keys);
+  const sponsor = await openWallet(need('SPONSOR_SEED_FILE'));
+  const res: Record<string, Any> = { tx1: label, authNonce: String(t.authNonce), amount: amount.toString(), path };
+  try {
+    let comp: Awaited<ReturnType<typeof computedLanding>> | null = null;
+    if (coin) {
+      comp = await computedLanding(keys, coin);
+      res.computed = {
+        events: comp.events,
+        readMs: comp.readMs,
+        replayMs: comp.replayMs,
+        holds: comp.holds,
+        mtIndex: comp.mtIndex,
+      };
+      if (!comp.holds) throw new Error('the computed path does not find the landing coin');
+    } else {
+      const bal = await landing!.waitFor(colourY(), amount, 60_000);
+      res.sdkBalance = bal.toString();
+      if (bal < amount) throw new Error(`the SDK wallet holds ${bal} Y, not ${amount}`);
+    }
+    const before = await pageY();
+    const l = await rt.ledgerState(account());
+    if (!l) throw new Error('A is not on chain');
+    const deposit = { nonce: new Uint8Array(randomBytes(32)), color: hexToBytes(colourY(), 32), value: amount };
+    const entry = await sealEntryPortable(Uint8Array.from(l.enc_key), deposit);
+    const pdp: Any = rt.publicDataProvider;
+    const block = await pdp.queryBlock();
+    const states = await pdp.queryZSwapAndContractState(account(), { type: 'blockHash', blockHash: block.hash });
+    const [zswapChainState, contractState, ledgerParameters] = states;
+    const { createUnprovenCallTxFromInitialStates } = (await import('@midnight-ntwrk/midnight-js-contracts')) as Any;
+    const call: Any = await createUnprovenCallTxFromInitialStates(
+      NO_KEY_MATERIAL,
+      {
+        compiledContract: rt.compiledAccount(),
+        contractAddress: account(),
+        circuitId: 'deposit_shielded',
+        args: [deposit, entry],
+        coinPublicKey: keys.coinPublicKey,
+        initialContractState: contractState,
+        initialZswapChainState: zswapChainState,
+        ledgerParameters,
+      },
+      keys.encryptionPublicKey,
+    );
+    const unproven = call.private.unprovenTx;
+    let merged: Any;
+    if (comp) {
+      const b = balanceWithLandingCoin(unproven, comp.state, keys, coin!, PROFILE.midnightNetworkId);
+      merged = b.tx;
+      res.computed.segment = b.segment;
+    } else {
+      merged = unproven.merge(await landing!.wallet.balanceTransaction(keys.shieldedSecretKeys, unproven));
+    }
+    res.shape = shapeOf(merged);
+    const t0 = Date.now();
+    const finalized = (await (rt.proofProvider as Any).proveTx(merged, { timeout: 900_000 })).bind();
+    res.proveMs = Date.now() - t0;
+    const submitted = await addDustAndSubmit(sponsor.handle as SponsorWalletHandle, finalized);
+    res.tx = submitted.txId;
+    const landed = await indexerTx(submitted.txId);
+    res.txHash = landed?.hash ?? null;
+    res.txStatus = landed?.transactionResult?.status ?? null;
+    const after = await pageY((v) => v >= before.total + amount);
+    res.pageY = { before: before.total.toString(), after: after.total.toString() };
+    res.returned = after.total === before.total + amount;
+    if (coin) {
+      const again = await computedLanding(keys, coin);
+      res.computedAfter = { holdsCoin: again.holds };
+    }
+    res.verdict = res.txStatus === 'SUCCESS' && res.returned && !res.computedAfter?.holdsCoin ? 'PASS' : 'FAIL';
+    record(`return:${label}`, res);
+    if (res.verdict !== 'PASS') throw new Error(`the return did not land as expected: ${json(res)}`);
+    return res;
+  } finally {
+    keys.clear();
+    await landing?.stop().catch(() => undefined);
+    await sponsor.stop().catch(() => undefined);
+  }
+}
+
 /** L.9 (a): tx1's payload with another recipient and the original approval → 401, nothing lands. */
 async function negRelay() {
   step('neg-relay (L.9 a): another recipient with the original approval, at the live relay');
@@ -1076,6 +1303,485 @@ async function negCircuit() {
   }
 }
 
+// ── P6 (T6.5, T6.4): the page's own Bridge out through the real relay ─────────────────────────
+
+/** Y's journey-registry entry (I-1), as the site and the relay both read it. */
+function entryY(): Any {
+  const b = gate.bridge!;
+  return {
+    colour: b.colour,
+    splMint: base58.encode(hexToBytes(b.sourceMint, 32)),
+    bridgeContract: b.contract,
+    bridgeProgram: base58.encode(new Uint8Array(32).fill(9)),
+    bridgeApi: 'http://bridge.invalid',
+    name: 'Bridged Y',
+    symbol: 'Y',
+    decimals: 6,
+  };
+}
+
+/** The page's Bridge-out context (A's page, A's test key as the wallet). */
+function outCtx(page: HeadlessPage, signing?: Any): BridgeOutContext {
+  return {
+    env: signing ? { ...page, signing } : page,
+    network: NETWORK,
+    networkId: PROFILE.midnightNetworkId,
+    indexerUrl: INDEXER_URL,
+    indexerWsUrl: INDEXER_WS_URL,
+    origin: ORIGIN,
+    solanaGenesisHash: GENESIS,
+    wallet: signerA.address,
+    deviceKey: signerA.deviceKey,
+    onProgress: (t) => say(`page: ${t}`),
+  };
+}
+
+/** The bridge's withdrawals as the chain has them now. */
+async function bridgeWithdrawals(): Promise<{ nonce: bigint; get(id: bigint): Any }> {
+  const rt = await runtime();
+  const bridge = await bridgeRuntime();
+  const st: Any = await (rt.publicDataProvider as Any).queryContractState(gate.bridge!.contract);
+  const l = bridge.ledger(st.data);
+  return {
+    nonce: BigInt(l.withdrawalNonce),
+    get: (id: bigint) => (l.withdrawals.member(id) ? l.withdrawals.lookup(id) : null),
+  };
+}
+
+/** Whether keys_t of `r` still holds its landing coin (the computed path). */
+async function landingHolds(r: BridgeOutRecord): Promise<boolean> {
+  const { master } = await landingMaster();
+  const keys = landingKeyFor(master, account(), BigInt(r.authNonce));
+  master.wipe();
+  try {
+    const c = await computedLanding(keys, { nonce: r.landingNonce, color: r.colour, value: BigInt(r.amount) });
+    return c.holds;
+  } finally {
+    keys.clear();
+  }
+}
+
+/** Capture every request the page makes (fetch bodies and URLs, WebSocket frames): T6.4. */
+function captureRequests(): { requests: { url: string; body: string }[]; stop(): void } {
+  const requests: { url: string; body: string }[] = [];
+  const g = globalThis as Any;
+  const origFetch = g.fetch;
+  g.fetch = async (input: Any, init?: Any) => {
+    const url = String(input instanceof Request ? input.url : input);
+    let body = '';
+    if (init?.body !== undefined)
+      body = typeof init.body === 'string' ? init.body : Buffer.from(init.body).toString('hex');
+    else if (input instanceof Request)
+      body = await input
+        .clone()
+        .text()
+        .catch(() => '');
+    requests.push({ url, body });
+    return origFetch(input, init);
+  };
+  const WS = g.WebSocket;
+  const origSend = WS?.prototype?.send;
+  if (origSend) {
+    WS.prototype.send = function (data: Any) {
+      requests.push({
+        url: String(this.url ?? 'ws'),
+        body: typeof data === 'string' ? data : Buffer.from(data).toString('hex'),
+      });
+      return origSend.call(this, data);
+    };
+  }
+  return {
+    requests,
+    stop() {
+      g.fetch = origFetch;
+      if (origSend) WS.prototype.send = origSend;
+    },
+  };
+}
+
+async function outCase(c: string) {
+  const pg = pageA();
+  const ctx = outCtx(pg);
+  const res: Record<string, Any> = { case: c };
+  const start = async (amount: bigint, label: string) => {
+    await pageY((v) => v >= amount);
+    const coin = chooseCoin(readCoins(pg.store, pg.scope, account()), colourY(), amount);
+    const t0 = Date.now();
+    const m = await landingMasterFor(ctx, account());
+    const r = await startBridgeOut(ctx, m, { account: account(), entry: entryY(), amount, coin });
+    pg.flush();
+    res[label] = {
+      authNonce: r.authNonce,
+      state: r.state,
+      entitlement: !!r.entitlement,
+      tx1Id: r.tx1Id,
+      seconds: (Date.now() - t0) / 1000,
+    };
+    return { r, m };
+  };
+  const lock = async (r: BridgeOutRecord, m: LandingMaster, label: string) => {
+    const before = await bridgeWithdrawals();
+    const t0 = Date.now();
+    const done = await finishLock(ctx, m, account(), r);
+    pg.flush();
+    const after = await bridgeWithdrawals();
+    const id = BigInt(done.withdrawalId!);
+    const w = after.get(id);
+    const holds = await landingHolds(done);
+    res[label] = {
+      state: done.state,
+      withdrawalId: done.withdrawalId,
+      tx2Id: done.tx2Id,
+      seconds: (Date.now() - t0) / 1000,
+      recorded: w
+        ? { solanaRecipient: bytesToHex(Uint8Array.from(w.solanaRecipient)), amount: String(w.amount) }
+        : null,
+      nonceBefore: before.nonce.toString(),
+      nonceAfter: after.nonce.toString(),
+      landingStillHolds: holds,
+    };
+    const ok =
+      done.state === 'locked' &&
+      w &&
+      bytesToHex(Uint8Array.from(w.solanaRecipient)) === signerA.deviceKey &&
+      BigInt(w.amount) === BigInt(r.amount) &&
+      !holds;
+    if (!ok) throw new Error(`${label}: the lock is not as expected: ${json(res[label])}`);
+    return done;
+  };
+  switch (c) {
+    case 'a': {
+      const cap = captureRequests();
+      let r: BridgeOutRecord;
+      let m: LandingMaster;
+      try {
+        ({ r, m } = await start(50n * UNIT, 'tx1'));
+        await lock(r, m, 'lock');
+      } finally {
+        cap.stop();
+      }
+      // T6.4 (SC-005): no landing secret in any request, nor in the page's store.
+      const message = (await import('@nightmarket/core/bridge')).landingMessage({
+        origin: ORIGIN,
+        midnightNetwork: PROFILE.midnightNetworkId,
+        solanaGenesisHash: GENESIS,
+        walletAddress: signerA.address,
+      });
+      const sig = nacl.sign.detached(message, kpA.secretKey);
+      const core = await import('@nightmarket/core/bridge');
+      const masterKey = core.landingMasterFromSignature(sig);
+      const seed = core.landingSeed(masterKey, account(), BigInt(r!.authNonce));
+      const forms = (b: Uint8Array) => [
+        bytesToHex(b),
+        Buffer.from(b).toString('base64'),
+        Buffer.from(b).toString('base64url'),
+      ];
+      const secrets: Record<string, string[]> = { sig1: forms(sig), master: forms(masterKey), seed_t: forms(seed) };
+      const store = readFileSync(join(STATE_DIR, 'page-A.json'), 'utf8');
+      const leaks: string[] = [];
+      for (const [name, fs] of Object.entries(secrets)) {
+        for (const f of fs) {
+          for (const q of cap.requests) if (q.url.includes(f) || q.body.includes(f)) leaks.push(`${name} in ${q.url}`);
+          if (store.includes(f)) leaks.push(`${name} in the page's store`);
+        }
+      }
+      res.t64 = {
+        requests: cap.requests.length,
+        hosts: [...new Set(cap.requests.map((q) => q.url.replace(/^(\w+:\/\/[^/]+).*$/, '$1')))],
+        bridgeOutRequests: cap.requests.filter((q) => q.url.endsWith('/v1/actions/bridge-out')).length,
+        leaks,
+      };
+      record('out:a', res);
+      if (leaks.length > 0) throw new Error(`T6.4: a landing secret left the tab: ${leaks.join('; ')}`);
+      void m!;
+      return res;
+    }
+    case 'b-start':
+    case 'c-start':
+    case 'd-start': {
+      const amount = { 'b-start': 30n, 'c-start': 20n, 'd-start': 15n }[c]! * UNIT;
+      await start(amount, 'tx1');
+      return record(`out:${c}`, res);
+    }
+    case 'b': {
+      // A NEW process: the record from the page's store, the master derived again (2 prompts).
+      const open = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.amount === String(30n * UNIT) && x.state === 'tx1-sent',
+      );
+      if (!open) throw new Error('no stored transfer of 30 Y to finish');
+      const m = await landingMasterFor(ctx, account());
+      await lock(open, m, 'lock');
+      return record('out:b', res);
+    }
+    case 'c': {
+      const open = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.amount === String(20n * UNIT) && x.state === 'tx1-sent',
+      );
+      if (!open) throw new Error('no stored transfer of 20 Y to return');
+      const before = await pageY();
+      const m = await landingMasterFor(ctx, account());
+      const done = await returnToAccount(ctx, m, account(), open);
+      pg.flush();
+      const after = await pageY((v) => v >= before.total + BigInt(open.amount));
+      res.return = {
+        state: done.state,
+        tx2Id: done.tx2Id,
+        pageY: { before: before.total.toString(), after: after.total.toString() },
+      };
+      record('out:c', res);
+      if (after.total !== before.total + BigInt(open.amount))
+        throw new Error(`the page does not see the returned coin: ${json(res.return)}`);
+      return res;
+    }
+    case 'd': {
+      // An EMPTY store for the same wallet and account (the records a browser that opened A holds, but no
+      // bridge-out record): find the transfer from the chain alone, re-entitle, lock.
+      const fresh = headlessPage({
+        network: NETWORK,
+        relayUrl: RELAY,
+        chain: new ChainReader({ indexerUrl: INDEXER_URL, networkId: PROFILE.midnightNetworkId }),
+        signer: signerA,
+        tokens,
+        storePath: join(STATE_DIR, `page-A-empty-${Date.now()}.json`),
+        account: {
+          address: account(),
+          encSecret: flows.A.encSecret,
+          encPublic: flows.A.encPublic,
+          ...(flows.A.txs ? { txs: flows.A.txs } : {}),
+        },
+      });
+      const fctx = outCtx(fresh);
+      if (readBridgeOuts(fresh.store, fresh.scope, account()).length !== 0)
+        throw new Error('the fresh store is not empty');
+      const m = await landingMasterFor(fctx, account());
+      const t0 = Date.now();
+      const found = await findTransfers(fctx, m, account());
+      res.found = found.map((f) => ({ authNonce: f.authNonce, amount: f.amount.toString(), open: f.open }));
+      res.findSeconds = (Date.now() - t0) / 1000;
+      const target = found.find((f) => f.open && f.amount === 15n * UNIT);
+      if (!target) throw new Error(`the 15 Y transfer was not found open: ${json(res.found)}`);
+      const r = await adoptTransfer(fctx, m, account(), target, entryY());
+      res.adopted = { state: r.state, entitlement: !!r.entitlement };
+      const before = await bridgeWithdrawals();
+      const done = await finishLock(fctx, m, account(), r);
+      const after = await bridgeWithdrawals();
+      const w = after.get(BigInt(done.withdrawalId!));
+      res.lock = {
+        state: done.state,
+        nonceBefore: before.nonce.toString(),
+        nonceAfter: after.nonce.toString(),
+        recorded: w
+          ? { solanaRecipient: bytesToHex(Uint8Array.from(w.solanaRecipient)), amount: String(w.amount) }
+          : null,
+      };
+      record('out:d', res);
+      if (!w || BigInt(w.amount) !== 15n * UNIT || bytesToHex(Uint8Array.from(w.solanaRecipient)) !== signerA.deviceKey)
+        throw new Error(`d: the lock is not as expected: ${json(res.lock)}`);
+      return res;
+    }
+    case 'e': {
+      // The relay runs with WITHDRAWS_DAILY_CAP=1 and was restarted (its counts are in memory): A holds
+      // a 5 Y and a 3 Y coin. 1 Y of the 5 Y coin is the day's one withdrawal; 1 Y of the 3 Y coin is
+      // refused (429); the whole 3 Y coin is admitted as the exit and locked.
+      const coins = readCoins(pg.store, pg.scope, account());
+      const five = coins.find((x) => x.color === colourY() && !x.spent && x.value === String(5n * UNIT));
+      const three = coins.find((x) => x.color === colourY() && !x.spent && x.value === String(3n * UNIT));
+      if (!five || !three) throw new Error('A does not hold the 5 Y and 3 Y coins');
+      const m = await landingMasterFor(ctx, account());
+      const first = await startBridgeOut(ctx, m, {
+        account: account(),
+        entry: entryY(),
+        amount: 1n * UNIT,
+        coin: five as Any,
+      });
+      pg.flush();
+      res.first = { state: first.state };
+      let refused: Any = null;
+      try {
+        await startBridgeOut(ctx, m, { account: account(), entry: entryY(), amount: 1n * UNIT, coin: three as Any });
+      } catch (e) {
+        refused = {
+          name: (e as Error).name,
+          code: (e as Any).code ?? null,
+          status: (e as Any).status ?? null,
+          message: (e as Error).message.slice(0, 300),
+        };
+      }
+      pg.flush();
+      res.partial = refused;
+      if (!refused || refused.code !== 'withdraws-daily-cap')
+        throw new Error(`e: the partial bridge-out past the cap was not refused: ${json(refused)}`);
+      const exit = await startBridgeOut(ctx, m, {
+        account: account(),
+        entry: entryY(),
+        amount: 3n * UNIT,
+        coin: three as Any,
+      });
+      pg.flush();
+      res.exit = { state: exit.state };
+      await lock(exit, m, 'exitLock');
+      return record('out:e', res);
+    }
+    case 'f': {
+      // A hedged signer (valid signatures that differ each time): refused at the landing key, before tx1.
+      let asked = 0;
+      const { ed25519 } = await import('@noble/curves/ed25519.js');
+      const hedged = {
+        deviceKey: signerA.deviceKey,
+        address: signerA.address,
+        signMessage: async (msg: Uint8Array) => {
+          asked += 1;
+          const L = ed25519.Point.Fn.ORDER;
+          const le = (b: Uint8Array) => b.reduceRight((v, x) => (v << 8n) | BigInt(x), 0n);
+          const toLe = (v: bigint) =>
+            Uint8Array.from({ length: 32 }, (_, i) => Number((v >> (8n * BigInt(i))) & 0xffn));
+          const { scalar } = ed25519.utils.getExtendedPublicKey(kpA.secretKey.slice(0, 32));
+          const rr = le(new Uint8Array(randomBytes(64))) % L;
+          const R = ed25519.Point.BASE.multiply(rr).toBytes();
+          const k = le(sha512(new Uint8Array([...R, ...kpA.publicKey, ...msg]))) % L;
+          return new Uint8Array([...R, ...toLe((rr + k * scalar) % L)]);
+        },
+      };
+      const signing = ed25519ActionSigning(hedged, { network: NETWORK, tokens });
+      let err: Any = null;
+      try {
+        await landingMasterFor(outCtx(pg, signing), account());
+      } catch (e) {
+        err = { code: (e as Any).code ?? null, message: (e as Error).message };
+      }
+      res.refusal = err;
+      res.walletAsked = asked;
+      record('out:f', res);
+      if (err?.code !== 'not-deterministic' || asked !== 2) throw new Error(`f: ${json(res)}`);
+      return res;
+    }
+    case 'g': {
+      // A stored check that does not match (another master): refused before tx1.
+      const fake: BridgeOutRecord = {
+        ...(readBridgeOuts(pg.store, pg.scope, account())[0] as BridgeOutRecord),
+        authNonce: '999999',
+        check: '00'.repeat(16),
+        state: 'failed',
+      };
+      putBridgeOut(pg.store, pg.scope, account(), { ...fake, createdAt: Date.now() + 10_000 });
+      let err: Any = null;
+      try {
+        await landingMasterFor(ctx, account());
+      } catch (e) {
+        err = { code: (e as Any).code ?? null, message: (e as Error).message };
+      }
+      pg.store.remove(recordKey(pg.scope, 'bridge', { account: account(), id: 'out-999999' }));
+      pg.flush();
+      res.refusal = err;
+      record('out:g', res);
+      if (err?.code !== 'landing-key-changed') throw new Error(`g: ${json(res)}`);
+      return res;
+    }
+    case 'i': {
+      // A concurrent lock between tx2's build and its submission. Two transfers at the landing key; both
+      // locks are BUILT on the same bridge state. Transfer one is held at its first submission until
+      // transfer two's lock has landed, so one's first draft is stale when the market reads it: it must be
+      // refused at admission (409 bridge-out-stale: no proof, no DUST, the entitlement released), and the
+      // page must rebuild it on the new state and land it. (Sending both at once would only meet the
+      // relay's one-job-per-account gate, `429 account-busy`, before any check of the transaction.)
+      const one = await start(4n * UNIT, 'tx1One');
+      const two = await start(2n * UNIT, 'tx1Two');
+      const before = await bridgeWithdrawals();
+      let oneReady!: () => void;
+      const oneAtSubmit = new Promise<void>((r) => (oneReady = r));
+      let twoLanded!: () => void;
+      const twoDone = new Promise<void>((r) => (twoLanded = r));
+      const attempts: { transfer: string; outcome: string }[] = [];
+      const gated = (label: 'one' | 'two') => {
+        let calls = 0;
+        const relay = Object.create(pg.relay) as typeof pg.relay;
+        relay.submit = (async (action: string, body: Any) => {
+          calls += 1;
+          if (action === 'bridge-out' && label === 'one' && calls === 1) {
+            oneReady();
+            await twoDone;
+          }
+          if (action === 'bridge-out' && label === 'two') await oneAtSubmit;
+          try {
+            const job = await pg.relay.submit(action as never, body);
+            attempts.push({ transfer: label, outcome: 'admitted' });
+            return job;
+          } catch (e) {
+            attempts.push({
+              transfer: label,
+              outcome: `refused ${String((e as Any).status ?? '')} ${String((e as Any).code ?? (e as Error).message)}`,
+            });
+            throw e;
+          }
+        }) as typeof pg.relay.submit;
+        relay.waitForJob = (async (id: string, onJob: Any) => {
+          const done = await pg.relay.waitForJob(id, onJob);
+          attempts.push({
+            transfer: label,
+            outcome: `job ${done.state}${done.error?.code ? ` ${done.error.code}` : ''}`,
+          });
+          return done;
+        }) as typeof pg.relay.waitForJob;
+        return { ...ctx, env: { ...ctx.env, relay } };
+      };
+      const t0 = Date.now();
+      const [a, b] = await Promise.all([
+        finishLock(gated('one'), one.m, account(), one.r),
+        finishLock(gated('two'), two.m, account(), two.r).finally(() => twoLanded()),
+      ]);
+      pg.flush();
+      const after = await bridgeWithdrawals();
+      res.locks = {
+        seconds: (Date.now() - t0) / 1000,
+        states: [a.state, b.state],
+        withdrawalIds: [a.withdrawalId, b.withdrawalId],
+        nonceBefore: before.nonce.toString(),
+        nonceAfter: after.nonce.toString(),
+        attempts,
+      };
+      record('out:i', res);
+      // Transfer one: refused at admission as stale (nothing proven, nothing spent), then admitted and landed.
+      const oneAttempts = attempts.filter((x) => x.transfer === 'one').map((x) => x.outcome);
+      if (
+        a.state !== 'locked' ||
+        b.state !== 'locked' ||
+        after.nonce !== before.nonce + 2n ||
+        json(oneAttempts) !== json([oneAttempts[0], 'admitted', 'job succeeded']) ||
+        !/^refused 409 bridge-out-stale$/.test(oneAttempts[0] ?? '')
+      )
+        throw new Error(`i: ${json(res.locks)}`);
+      return res;
+    }
+    case 'j': {
+      // bridge-out-entitle for a coin tx1 never paid (another landing key): entitle-not-found.
+      const r = readBridgeOuts(pg.store, pg.scope, account()).find(
+        (x) => x.state === 'locked' && x.amount === String(50n * UNIT),
+      );
+      if (!r) throw new Error('no 50 Y transfer to borrow the tx1 from');
+      const st = await pg.chain.accountState(account());
+      const counter = pg.signing.useCounter(st!, 0n);
+      const job = await pg.relay.submit('bridge-out-entitle', {
+        account: account(),
+        payload: {
+          tx1Hash: (await indexerTx(r.tx1Id!))?.hash?.replace(/^0x/, '') ?? r.tx1Id,
+          spentCoin: r.spentCoin,
+          amount: r.amount,
+          landingCoinPublicKey: '77'.repeat(32),
+          deviceKey: signerA.deviceKey,
+          useCounter: String(counter),
+        },
+      });
+      const done = await pg.relay.waitForJob(job.requestId, () => undefined);
+      res.job = { state: done.state, code: done.error?.code ?? null };
+      record('out:j', res);
+      if (done.state !== 'failed' || done.error?.code !== 'entitle-not-found') throw new Error(`j: ${json(res.job)}`);
+      return res;
+    }
+    default:
+      throw new Error(`unknown OUT_CASE ${c}`);
+  }
+}
+
 async function main() {
   out.network = NETWORK;
   if (STEP !== 'bridge-deploy') {
@@ -1097,8 +1803,13 @@ async function main() {
       if (!t) throw new Error(`no ${label} recorded`);
       return tx2(BigInt(t.authNonce), BigInt(t.amount), process.env.LABEL ?? 'tx2', {
         tamperRecipient: process.env.TAMPER === '1',
+        ...(COMPUTED ? { coin: coinOf(label) } : {}),
       });
     }
+    case 'return':
+      return returnCoin(process.env.TX1_LABEL ?? 'tx1');
+    case 'out':
+      return outCase(process.env.OUT_CASE ?? 'a');
     case 'resume-lock':
       return resumeLock();
     case 'resume-return':
@@ -1117,8 +1828,14 @@ async function main() {
       const w = await openLanding(keys);
       const bal = (await w.balances())[colourY()] ?? 0n;
       await w.stop().catch(() => undefined);
+      // P6.0: the page's computed path finds it anyway (it watches for the coin, no decryption).
+      const comp = COMPUTED ? await computedLanding(keys, coinOf(process.env.TX1_LABEL ?? 'tx1-seal')) : null;
       keys.clear();
-      return record('negSeal', { sdkSeesCoin: bal >= BigInt(t.amount), balance: bal.toString() });
+      return record(`negSeal:${process.env.TX1_LABEL ?? 'tx1-seal'}`, {
+        sdkSeesCoin: bal >= BigInt(t.amount),
+        balance: bal.toString(),
+        ...(comp ? { computedSeesCoin: comp.holds, computedMtIndex: comp.mtIndex, events: comp.events } : {}),
+      });
     }
     default:
       throw new Error(`unknown STEP ${JSON.stringify(STEP)}`);

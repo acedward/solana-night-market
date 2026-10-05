@@ -121,6 +121,8 @@ services:
       RESTORES_PER_ACCOUNT_PER_DAY: '${CAP_RESTORES_PER_DAY:-3}'
       # AA 00047 P11.I: the sponsored-withdrawal allowance (Q46; run-local.sh lowers it in the caps phase).
       WITHDRAWS_DAILY_CAP: '${CAP_WITHDRAWS_PER_DAY:-100}'
+      # AA 00060 P6: Bridge out (the journey registry; empty: no bridging).
+      BRIDGE_REGISTRY_FILE: '${BRIDGE_REGISTRY_FILE:-}'
       LOG_LEVEL: info
     volumes:
       - '${KEYS_DIR:?}:/app/vendor/passport/contract/contracts/managed:ro'

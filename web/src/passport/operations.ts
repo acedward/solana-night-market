@@ -606,12 +606,34 @@ export async function withdrawToWallet(
   env: OperationEnv,
   account: string,
   args: { color: string; amount: bigint; recipient: string },
-  opts: { recipientEnvelope?: boolean } = {},
-): Promise<{ txId: string; change: StoredCoin | null; changeMismatch: boolean }> {
+  opts: {
+    recipientEnvelope?: boolean;
+    /** AA 00060 P6: a Bridge-out's tx1 (the relay returns a landing entitlement with the result). */
+    purpose?: 'bridge-out';
+    /** AA 00060 P6: the coin to spend (Bridge out chooses it to derive the landing key's transfer). */
+    coin?: StoredCoin & { mtIndex: string };
+    /** AA 00060 P6: refuse (before the wallet is asked) unless the account's auth nonce is this one. */
+    expectAuthNonce?: string;
+    /** AA 00060 P6: told the coin and the auth nonce right before the wallet is asked (the bridge-out
+     *  record is written then, before each step). */
+    onPrepared?: (p: { coin: StoredCoin; authNonce: string; counter: bigint }) => void;
+  } = {},
+): Promise<{
+  txId: string;
+  change: StoredCoin | null;
+  changeMismatch: boolean;
+  /** AA 00060 P6: for `purpose: 'bridge-out'`, the relay's single-use landing entitlement. */
+  landingEntitlement?: string;
+  spent: StoredCoin;
+  authNonce: string;
+}> {
   const to = recipientOf(args.recipient, env.scope.network);
   const coins = readCoins(env.store, env.scope, account);
-  const coin = chooseCoin(coins, args.color, args.amount);
+  const coin = opts.coin ?? chooseCoin(coins, args.color, args.amount);
   const { state, counter, ctx } = await gatedContext(env, account);
+  if (opts.expectAuthNonce !== undefined && state.authNonce !== opts.expectAuthNonce) {
+    throw new OperationError('Your account moved on since this started. Nothing was sent; try again.');
+  }
   const payload: WithdrawPayload = {
     recipient: to.coinPublicKey,
     ...(to.encryptionPublicKey ? { recipientEncryptionKey: to.encryptionPublicKey } : {}),
@@ -619,8 +641,15 @@ export async function withdrawToWallet(
     amount: args.amount.toString(10),
     coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex },
     authNonce: state.authNonce,
+    ...(opts.purpose ? { purpose: opts.purpose } : {}),
   };
-  const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: withdrawRequest(payload) }, counter);
+  opts.onPrepared?.({ coin, authNonce: state.authNonce, counter });
+  const { purpose: _purpose, ...signedPayload } = payload;
+  const passportAuth = await env.signing.authorise(
+    ctx,
+    { kind: 'gated', request: withdrawRequest(signedPayload) },
+    counter,
+  );
   // The change follows from what the wallet signed (the coin and the amount): computed here, never
   // taken from the relay (Q28 A), and written down before the approval leaves the page (R2-5).
   const expected = predictWithdrawChange(coin, args.amount);
@@ -670,7 +699,14 @@ export async function withdrawToWallet(
   );
   env.store.put(env.scope, 'coins', next, { account });
   if (change) putCoin(env, account, change);
-  return { txId: result.txId, change, changeMismatch };
+  return {
+    txId: result.txId,
+    change,
+    changeMismatch,
+    ...(result.landingEntitlement ? { landingEntitlement: result.landingEntitlement } : {}),
+    spent: coin,
+    authNonce: state.authNonce,
+  };
 }
 
 /** Add or replace one coin of the account's list (by its commitment). */

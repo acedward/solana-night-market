@@ -58,6 +58,7 @@ export default defineConfig([
       'relay/**/*.ts',
       'scripts/**/*.{ts,js,mjs}',
       'test/**/*.ts',
+      'e2e/**/*.ts',
       '**/test/**/*.{ts,tsx}',
       '*.config.{js,ts}',
       '**/*.config.{js,ts}',

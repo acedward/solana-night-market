@@ -1,0 +1,25 @@
+{
+  "schema": "effectstream.solana-midnight-bridge.deployment/1",
+  "splMint": "9dDNUA4PE3PiLxhwi3qj2ZbssJs38EXB6jVC91yQs2Qx",
+  "splMintDecimals": 6,
+  "name": "Y",
+  "symbol": "Y",
+  "bridgeProgram": "EoYfTfExTMVsojMWjGnVBvmxFnChB47wpQijiDMeBZjM",
+  "bridgeContract": "04615c69ec5e41cbcaa78fd520305aac102c491938acf70fa4ee586d486265bd",
+  "colour": "c409463c7569fa78c2fab688d4becb89a342984553f0a743b69670f67acbf493",
+  "operatorKey": "2L8uz9gR948WPW6zHG46x63bpuUchLuv7HjETZA59Mqp",
+  "midnightNetwork": "undeployed",
+  "solanaGenesisHash": "5jB9q7cXCJaaZ2KGmzXVgSD2zCeRbZLKbNW4nzB3ZipU",
+  "api": "http://bridge-y:9999",
+  "startSlot": 892,
+  "startBlockHeight": 67,
+  "delivery": {
+    "adapters": [
+      {
+        "id": "passport-ed25519",
+        "keySet": "21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e",
+        "passportCommit": "599327b918b55afc95d6c98a89bcd15f4e8b0d53"
+      }
+    ]
+  }
+}

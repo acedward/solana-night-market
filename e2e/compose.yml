@@ -20,6 +20,14 @@
 # uses, so it must be http://127.0.0.1:<INJECTOR_PORT> exactly (the I-4 text binds it).
 
 services:
+  # AA 00057 P3b.2 (00060 session finding S-2): the contract prover (rc.8) was OOM-killed at its cap after
+  # several proofs, with restart policy `no`; the relay failed that job gracefully. Here it restarts on
+  # failure, under an explicit memory cap and no swap beyond it.
+  proof-server-rc8:
+    restart: on-failure:5
+    mem_limit: ${PS8_MEM_LIMIT:-12g}
+    memswap_limit: ${PS8_MEM_LIMIT:-12g}
+
   injector:
     image: ${INJECTOR_IMAGE:-s00059/service:unset}
     pull_policy: never
@@ -38,6 +46,9 @@ services:
     volumes:
       - injector-data:/data
       - '${JOURNEY_FILE:?}:/run/journey/journey-tokens.undeployed.json:ro'
+      # AA 00057 P3b.3 (Q10): the injector's own token file, generated from Night Market's full token list
+      # (names, decimals such as twBTC 8, icons) over the injector's bundled file.
+      - '${INJECTOR_TOKENS_FILE:?}:/run/journey/tokens.undeployed.json:ro'
     environment:
       HOST: '0.0.0.0'
       PORT: '8899'
@@ -50,6 +61,7 @@ services:
       MIDNIGHT_INDEXER_WS: 'ws://indexer:8088/api/v4/graphql/ws'
       DECRYPTOR_BIN: '/usr/local/bin/midnight-esk-decrypt'
       JOURNEY_REGISTRY: '/run/journey/journey-tokens.undeployed.json'
+      TOKEN_REGISTRY: '/run/journey/tokens.undeployed.json'
       ACCOUNTS_ENABLED: '1'
       ACCOUNTS_POLL_MS: '${ACCOUNTS_POLL_MS:-5000}'
       LOG: 'true'

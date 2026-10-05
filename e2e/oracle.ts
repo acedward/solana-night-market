@@ -20,7 +20,7 @@
 // Row II's RPC column needs A registered (step III), so the checkpoints are: start, II (A not yet
 // registered: the RPC must show exactly the real SPL, and nothing synthetic), III (row II's RPC column),
 // IV, V, and after-negatives (row V again; the X vault holds the 1 X the non-account lock left there,
-// the known limitation of spec US1-2).
+// the known limitation of spec US1-2); then, beyond the spec's table, after-partial (P3b.4, FR-021).
 
 export type Holdings = Readonly<Record<string, bigint>>;
 
@@ -36,7 +36,7 @@ export interface Checkpoint {
 export const UNIT = 1_000_000n;
 const u = (n: number) => BigInt(n) * UNIT;
 
-export const CHECKPOINTS = ['start', 'II', 'III', 'IV', 'V', 'after-negatives'] as const;
+export const CHECKPOINTS = ['start', 'II', 'III', 'IV', 'V', 'after-negatives', 'after-partial'] as const;
 export type CheckpointName = (typeof CHECKPOINTS)[number];
 
 /** The base units the non-account lock (the SC-004 `undeliverable` negative) leaves in X's vault. */
@@ -85,7 +85,19 @@ export const ORACLE: Readonly<Record<CheckpointName, Checkpoint>> = {
     accountB: { X: u(200) },
     vaults: { X: u(500) + UNDELIVERABLE_LOCK, Y: 0n },
   },
+  // P3b.4 (spec FR-021, beyond the spec's table): A bridges 100 X out of its 300 X coin; the 200 X change is
+  // saved in the inbox, so the injector shows exactly the page's 200; the release lands 100 X more on Solana.
+  'after-partial': {
+    solanaA: { X: u(200), Y: u(50) },
+    accountA: { X: u(200) },
+    rpcA: { spl: { X: u(200), Y: u(50) }, midnight: { X: u(200) } },
+    accountB: { X: u(200) },
+    vaults: { X: u(400) + UNDELIVERABLE_LOCK, Y: 0n },
+  },
 };
+
+/** P3b.4: the partial Bridge out of 'after-partial' (base units of X). */
+export const PARTIAL_OUT = u(100);
 
 export type SurfaceName = 'solanaA' | 'accountA' | 'rpcA.spl' | 'rpcA.midnight' | 'accountB' | 'vaults';
 

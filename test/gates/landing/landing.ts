@@ -47,6 +47,8 @@
 //   i           two locks built on the same bridge state at once: one lands, the other is refused before
 //               any proof (`bridge-out-stale`), rebuilt on the new state, and lands
 //   j           `bridge-out-entitle` for a coin tx1 never paid → `entitle-not-found`
+//   partial     AA 00057 P3b.4 (FR-021): OUT_AMOUNT of OUT_SYMBOL (default X) from a larger coin: tx1, the
+//               change saved in the inbox (one more approval), the lock, the release arriving on Solana
 //
 // SECRETS: A's test device seed is market-flows.ts's (state.json, mode 600); the landing master is
 // re-derived from it in every process and never written; the operator's throwaway key is in
@@ -1599,6 +1601,78 @@ async function outCase(c: string) {
         if (rec.state !== 'arrived' || ataAfter - ataBefore !== 50n * UNIT)
           throw new Error(`a: the release did not arrive as expected: ${json(res.arrival)}`);
       }
+      return res;
+    }
+    case 'partial': {
+      // AA 00057 P3b.4 (spec FR-021): a PARTIAL Bridge out of OUT_SYMBOL (default X) through the page's own
+      // operations. tx1 pays OUT_AMOUNT to the landing key and leaves change, which the page saves in the
+      // inbox right after tx1 (one more approval); then the lock, and the release followed until it ARRIVES
+      // in the wallet's token account. The injector's side (X (Midnight) = the page's, unseenCoins 0) is
+      // e2e/journey.ts STEP=fr021's.
+      const entry = gate.journey?.[process.env.OUT_SYMBOL ?? 'X'];
+      if (!entry) throw new Error(`no journey entry ${process.env.OUT_SYMBOL ?? 'X'}`);
+      const colour = norm(entry.colour);
+      const amount = BigInt(need('OUT_AMOUNT'));
+      await pageY((v) => v > amount, 60, colour);
+      const coin = chooseCoin(readCoins(pg.store, pg.scope, account()), colour, amount);
+      if (BigInt(coin.value) <= amount) throw new Error(`partial: the coin chosen (${coin.value}) leaves no change`);
+      const notes: string[] = [];
+      const pctx: BridgeOutContext = { ...ctx, onNote: (t) => notes.push(t) };
+      const ataBefore = await walletTokenBalance(entry);
+      const t0 = Date.now();
+      const m = await landingMasterFor(pctx, account());
+      const r = await startBridgeOut(pctx, m, { account: account(), entry, amount, coin });
+      pg.flush();
+      res.tx1 = {
+        authNonce: r.authNonce,
+        state: r.state,
+        tx1Id: r.tx1Id,
+        seconds: (Date.now() - t0) / 1000,
+        fees: r.tx1Id ? ((await indexerTx(r.tx1Id))?.fees ?? null) : null,
+      };
+      const t1 = Date.now();
+      const done = await finishLock(pctx, m, account(), r);
+      pg.flush();
+      res.lock = {
+        state: done.state,
+        withdrawalId: done.withdrawalId,
+        tx2Id: done.tx2Id,
+        seconds: (Date.now() - t1) / 1000,
+      };
+      const t2 = Date.now();
+      let rec = readBridgeOuts(pg.store, pg.scope, account()).find((x) => x.authNonce === r.authNonce)!;
+      const progress: string[] = [];
+      while (rec.state !== 'arrived' && Date.now() - t2 < 900_000) {
+        rec = await followBridgeOut(pctx, rec);
+        putBridgeOut(pg.store, pg.scope, account(), rec);
+        pg.flush();
+        if (rec.progress && progress[progress.length - 1] !== rec.progress) progress.push(rec.progress);
+        if (rec.state !== 'arrived') await new Promise((ok) => setTimeout(ok, 5_000));
+      }
+      const ataAfter = await walletTokenBalance(entry);
+      res.arrival = {
+        state: rec.state,
+        seconds: (Date.now() - t2) / 1000,
+        progress,
+        walletTokenAccount: { before: ataBefore, after: ataAfter },
+      };
+      // The change, by the page's own decode: unspent, of the coin's value less the amount, filed in the inbox.
+      const sync = await syncAccount(pg, account());
+      pg.flush();
+      const changeValue = BigInt(coin.value) - amount;
+      const change = (sync.coins as Any[]).find(
+        (c) => c.color === colour && !c.spent && BigInt(c.value) === changeValue && c.mtIndex !== null,
+      );
+      res.change = {
+        value: changeValue.toString(),
+        found: !!change,
+        inInbox: change?.inInbox ?? null,
+        origin: change?.origin ?? null,
+      };
+      res.notes = notes;
+      record('out:partial', res);
+      if (done.state !== 'locked' || rec.state !== 'arrived' || ataAfter - ataBefore !== amount || !change?.inInbox)
+        throw new Error(`partial: not as expected: ${json(res)}`);
       return res;
     }
     case 'b-start':

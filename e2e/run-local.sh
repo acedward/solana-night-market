@@ -288,6 +288,7 @@ up() {
   cp -Rc "$KEYS_SRC" "$RUN/keys-harness"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-harness/bridge"
   cp -Rc "$PS_PARAMS_SRC" "$RUN/ps-params"; cp -Rc "$PS8_PARAMS_SRC" "$RUN/ps8-params"
   echo '{}' >"$RUN/nm/journey-tokens.undeployed.json"
+  echo '{}' >"$RUN/nm/injector-tokens.undeployed.json"
 
   NODE_PORT=$(free_ports 1); INDEXER_PORT=$(free_ports 1); RELAY_PORT=$(free_ports 1)
   SOL_RPC=$(free_ports 2); SOL_FAUCET=$(free_ports 1); SOL_GOSSIP=$(free_ports 1); DYN_LO=$(free_ports 60)
@@ -368,21 +369,38 @@ up() {
   done
   mark deploys end
 
-  # ── I-1: the journey registry, generated from the two records (P1), the mints checked on the validator ──
+  # ── I-1: the journey registry, generated from the two records (P1), the mints checked on the validator, with
+  #    the icons of the one table (P3b.3: image, splImage, icon) and the site's icon map from the same table ──
   bun_nm -v "$RUN/nm:/run/nm" -v "$OUT:/out:ro" "$BUN_IMAGE" bun e2e/registry/build.ts --network undeployed \
     --genesis "$GENESIS" --solana-rpc "http://host.docker.internal:$SOL_RPC" --out /run/nm/journey-tokens.undeployed.json \
-    /out/standin-x.record.json /out/standin-y.record.json 2>&1 | tee "$OUT/registry-build.log"
+    --site-icons-out /run/nm/site-icons.json /out/standin-x.record.json /out/standin-y.record.json 2>&1 | tee "$OUT/registry-build.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "the journey registry"
   python3 - "$RUN/nm/tokens.json" "$RUN/nm/site-config.json" <<'PY'
 import json, sys
 json.dump({"network": "undeployed", "relayUrl": "http://relay:8080", "tokens": json.load(open(sys.argv[1]))}, open(sys.argv[2], "w"), indent=1)
 PY
   bun_nm -v "$RUN/nm:/run/nm" "$BUN_IMAGE" bun scripts/bridge-tokens.ts /run/nm/journey-tokens.undeployed.json \
-    --site-config /run/nm/site-config.json --relay-tokens /run/nm/tokens.json --pairs X/Y \
+    --site-config /run/nm/site-config.json --relay-tokens /run/nm/tokens.json --pairs X/Y --icons /run/nm/site-icons.json \
     --solana-rpc "http://host.docker.internal:$SOL_RPC" 2>&1 | tee "$OUT/bridge-tokens.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "bridge-tokens"
-  cp "$RUN/nm/journey-tokens.undeployed.json" "$RUN/nm/tokens.json" "$RUN/nm/site-config.json" "$OUT/"
+  # P3b.3 (Q10): the injector's own token file from Night Market's FULL list (the relay's TOKENS_FILE), over
+  # the injector's bundled file at its pin (the genesis tokens).
+  bun_nm -v "$RUN/nm:/run/nm" -v "$INJECTOR_REPO/tokens:/injector-tokens:ro" "$BUN_IMAGE" bun e2e/registry/build.ts \
+    injector-tokens --network undeployed --journey /run/nm/journey-tokens.undeployed.json --nm-tokens /run/nm/tokens.json \
+    --base /injector-tokens/tokens.undeployed.json --out /run/nm/injector-tokens.undeployed.json 2>&1 | tee "$OUT/injector-tokens.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || fail "the injector's token file"
+  cp "$RUN/nm/journey-tokens.undeployed.json" "$RUN/nm/tokens.json" "$RUN/nm/site-config.json" "$RUN/nm/site-icons.json" \
+    "$RUN/nm/injector-tokens.undeployed.json" "$OUT/"
   export BRIDGE_REGISTRY_FILE=/run/nm/journey-tokens.undeployed.json
+  # AA 00060 P13.3 (Q7 A): the relay's test SPL faucet gets X's and Y's mint authorities, which on the
+  # localnet deploy are the bridges' OPERATOR keys (deploy-devnet.ts: operator = payer = mint authority).
+  # The tool picks, per I-1 mint, the keypair that is its on-chain authority (mode 600; public keys printed).
+  bun_nm -v "$RUN/nm:/run/nm" -v "$RUN/secrets-x:/secrets-x:ro" -v "$RUN/secrets-y:/secrets-y:ro" "$BUN_IMAGE" \
+    bun relay/src/tools/spl-faucet-keys.ts --journey /run/nm/journey-tokens.undeployed.json \
+    --rpc "http://host.docker.internal:$SOL_RPC" --out /run/nm/spl-faucet-keys.json \
+    /secrets-x/solana-operator.json /secrets-y/solana-operator.json 2>&1 | tee "$OUT/spl-faucet-keys.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || fail "the faucet keys"
+  export SPL_FAUCET_KEYS_FILE=/run/nm/spl-faucet-keys.json SPL_FAUCET_RPC_URL="http://host.docker.internal:$SOL_RPC"
 
   # ── the injector (built here from the pinned 00059 clone, nothing pulled), the relay, the mock exchange ──
   docker build --pull=false -q -t "$INJECTOR_IMAGE" "$INJECTOR_REPO" >"$OUT/injector-build.log" 2>&1 || fail "the injector image"
@@ -466,7 +484,9 @@ export_env() {
   export PS8_MEM_LIMIT=12g PS_MEM_LIMIT=4g RELAY_MEM_LIMIT=4g
   export INJECTOR_IMAGE INJECTOR_PORT INJECTOR_WS_PORT=$((INJECTOR_PORT + 1))
   export VALIDATOR_RPC_PORT="$SOL_RPC" VALIDATOR_WS_PORT=$((SOL_RPC + 1)) JOURNEY_FILE="$RUN/nm/journey-tokens.undeployed.json"
+  export INJECTOR_TOKENS_FILE="$RUN/nm/injector-tokens.undeployed.json"
   export BRIDGE_REGISTRY_FILE=/run/nm/journey-tokens.undeployed.json
+  export SPL_FAUCET_KEYS_FILE=/run/nm/spl-faucet-keys.json SPL_FAUCET_RPC_URL="http://host.docker.internal:$SOL_RPC"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -536,6 +556,19 @@ journey() {
   journey_ts JOURNEY_STEP=neg STEP=neg-undeliverable || fail "SC-004 non-account lock"
   mark negatives end
   oracle after-negatives
+
+  say "==== P3b.4: the rows beyond the spec's table (FR-021, P13, 00059 P7, Q10)"
+  mark rows start
+  fresh_prover
+  landing JOURNEY_STEP=fr021 STEP=out OUT_CASE=partial OUT_SYMBOL=X OUT_AMOUNT=100000000 || fail "FR-021: the partial Bridge out"
+  oracle after-partial
+  journey_ts JOURNEY_STEP=fr021 STEP=fr021 || fail "FR-021: the injector after the partial Bridge out"
+  journey_ts JOURNEY_STEP=p13 STEP=spl-faucet || fail "P13: the test SPL faucet"
+  journey_ts JOURNEY_STEP=p7 STEP=spl-metadata "EXPECT_SPL_FILLIN=${EXPECT_SPL_FILLIN:-1}" || fail "00059 P7: the real SPL metadata"
+  flows demo-a JOURNEY_STEP=demo || fail "A claims the demo tokens"
+  journey_ts JOURNEY_STEP=demo STEP=demo-decimals || fail "Q10: decimals and icons through the injector"
+  journey_ts JOURNEY_STEP=icons STEP=icons || fail "Q10: the published icons"
+  mark rows end
 
   journey_ts JOURNEY_STEP=summary STEP=prompts || fail "SC-005"
   journey_ts JOURNEY_STEP=summary STEP=summary || fail "summary"

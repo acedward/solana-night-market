@@ -7,7 +7,8 @@ live); for now it documents the local harness.
 
 | Path | What |
 |---|---|
-| `registry/build.ts` | I-1: the journey token registry `journey-tokens.<net>.json`, generated from the bridges' deployment records (I-3). Tests: `registry/build.test.ts` |
+| `registry/build.ts` | I-1: the journey token registry `journey-tokens.<net>.json`, generated from the bridges' deployment records (I-3), with the icons of the one table; and (`injector-tokens`) the injector's own token file from Night Market's full token list. Tests: `registry/build.test.ts`, `registry/icons.test.ts` |
+| `registry/token-icons.json`, `registry/icons.ts` | the ONE icon table (public HTTPS for the wallet, the same files bundled by the site), and what is derived from it |
 | `oracle.ts` | the US5 oracle table as data, and its exact comparison. Tests: `oracle.test.ts` |
 | `prompt-log.ts` | the wallet-prompt ledger (SC-005) the page-code harnesses append to when `PROMPT_LOG` is set |
 | `journey.ts` | the journey's own steps: the oracle at each checkpoint, the negatives (SC-004, SC-006), the prompt count |
@@ -71,5 +72,9 @@ validator, accounts A and B by the page's own code, A's wallet through the injec
 | IV | A makes "200 X for 50 Y"; B takes it | 1 |
 | V | A's page Bridges out 50 Y through the landing key; the release arrives on Solana | 3 |
 | negatives | a forged registration, a registration for another key's account, an unregistered address (byte-identical answers), a tampered landing-key recipient, a non-deterministic signer, a lock to a contract that is not an account | — |
+| FR-021 | A bridges 100 X out of its 300 X coin: the change is saved in the inbox (one more approval), the release arrives; the injector equals the page, `unseenCoins` 0 (oracle `after-partial`) | 4 (not counted in SC-005) |
+| P13 | the relay's test SPL faucet mints 1,000 X and 1,000 Y to a fresh wallet; a second claim is refused | 0 |
+| 00059 P7 | the real SPL X's metadata through the injector's fill-in: name "X", its icon (`EXPECT_SPL_FILLIN=0` before P7: passed through) | 0 |
+| Q10 | after A's demo claim: twBTC 8 decimals (0.1), twUSDC 6, names and icons through the injector, equal to the page; the published icons equal the site's copies | 2 (the claim, and the refused second claim) |
 
 `$OUT/report.md` is the run's evidence table; `$OUT/report.json` the same as data.

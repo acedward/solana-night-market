@@ -68,7 +68,7 @@ timings["SC-003 RPC exact after the step ended, s (oracle)"] = sc003
 
 # ── the oracle ──
 oracle_rows = []
-for cp in ("start", "II", "III", "IV", "V", "after-negatives"):
+for cp in ("start", "II", "III", "IV", "V", "after-negatives", "after-partial"):
     o = journey.get(f"oracle:{cp}")
     if not o:
         oracle_rows.append({"checkpoint": cp, "ran": False})
@@ -112,11 +112,31 @@ negatives = {
     "SC-006 unregistered byte-identical": {k: all(r.get("ok") for r in v) for k, v in (un.get("results") or {}).items()} or None,
 }
 
+part = landing.get("out:partial") or {}
+fr = journey.get("fr021") or {}
+fa = journey.get("spl-faucet") or {}
+meta = journey.get("spl-metadata") or {}
+dd = journey.get("demo-decimals") or {}
+ic = journey.get("icons") or []
+rows = {
+    "FR-021 partial Bridge out (100 X)": {
+        "tx1s": (part.get("tx1") or {}).get("seconds"), "locks": (part.get("lock") or {}).get("seconds"),
+        "arrivals": (part.get("arrival") or {}).get("seconds"), "change": part.get("change"),
+        "injectorEqualsPage": fr.get("pageX") is not None and fr.get("pageX") == fr.get("rpcX"), "unseenCoins": fr.get("unseenCoins"),
+    } if part else None,
+    "P13 SPL faucet": {"balances": fa.get("balances"), "second": fa.get("second"), "claimSeconds": fa.get("claimSeconds")} if fa else None,
+    "00059 P7 real SPL metadata": {k: (v if k == "expectFillIn" else {"served": v.get("served"), "image": v.get("image")}) for k, v in meta.items()} if meta else None,
+    "Q10 decimals and icons": dd.get("checks") if dd else None,
+    "Q10 published icons": all(r.get("published") and r.get("site") for r in ic) if ic else None,
+}
+for k, v in rows.items():
+    timings.setdefault("rows", {})[k] = v
 prompts = journey.get("prompts")
 errors = {k: v for k, v in {**journey, **landing}.items() if k.endswith(":error")}
 verdict = {
     "oracleExactEverywhere": all(r.get("ran") and r.get("exact") for r in oracle_rows),
     "negativesAllRan": all(v is not None for v in negatives.values()),
+    "p3bRowsAllRan": all(v is not None for v in rows.values()),
     "sc005": None if not prompts else {"A": prompts["A"]["journeyTotal"], "perStep": prompts["A"]["perStep"],
                                         "withinLimit": prompts["A"]["withinLimit"], "matchesExpected": prompts["A"]["matchesExpected"]},
     "memoryPeakGiB": memory and memory.get("peakGiB"),
@@ -124,7 +144,7 @@ verdict = {
     "downClean": down is not None and all(down.get(k) == 0 for k in ("containers", "volumes", "validatorProcesses", "runDirLeft", "injectorImageLeft", "lockHeldBy00057")),
     "errors": errors,
 }
-verdict["pass"] = bool(verdict["oracleExactEverywhere"] and verdict["negativesAllRan"] and verdict["sc005"]
+verdict["pass"] = bool(verdict["oracleExactEverywhere"] and verdict["negativesAllRan"] and verdict["p3bRowsAllRan"] and verdict["sc005"]
                        and verdict["sc005"]["withinLimit"] and verdict["sc005"]["matchesExpected"] and not errors)
 report = {"verdict": verdict, "oracle": oracle_rows, "timings": timings, "negatives": negatives, "prompts": prompts,
           "memory": memory, "health": health, "down": down}
@@ -145,6 +165,9 @@ for k, v in timings.items():
     md.append(f"- {k}: {json.dumps(v)}")
 md += ["", "## Prompts (SC-005)", "", json.dumps(verdict["sc005"]), "", "## Negatives", ""]
 for k, v in negatives.items():
+    md.append(f"- {k}: {json.dumps(v)}")
+md += ["", "## Rows beyond the spec's table (P3b.4)", ""]
+for k, v in rows.items():
     md.append(f"- {k}: {json.dumps(v)}")
 md += ["", f"Memory peak: {verdict['memoryPeakGiB']} GiB; up in {verdict['upSeconds']} s; down clean: {verdict['downClean']}", ""]
 if errors:

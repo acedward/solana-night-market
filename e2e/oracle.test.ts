@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CHECKPOINTS,
   ORACLE,
+  PARTIAL_OUT,
   UNDELIVERABLE_LOCK,
   UNIT,
   compareCheckpoint,
@@ -65,7 +66,7 @@ describe('the oracle table is the spec’s US5 table', () => {
       const o = ORACLE[c];
       const bridgedX = (o.accountA.X ?? 0n) + (o.accountB.X ?? 0n);
       const bridgedY = (o.accountA.Y ?? 0n) + (o.accountB.Y ?? 0n);
-      const extra = c === 'after-negatives' ? UNDELIVERABLE_LOCK : 0n;
+      const extra = c === 'after-negatives' || c === 'after-partial' ? UNDELIVERABLE_LOCK : 0n;
       expect(o.vaults.X).toBe(bridgedX + extra);
       expect(o.vaults.Y).toBe(bridgedY);
     }
@@ -73,6 +74,16 @@ describe('the oracle table is the spec’s US5 table', () => {
     const { vaults: v2, ...rest2 } = ORACLE['after-negatives'];
     expect(rest2).toEqual(rest1);
     expect(v2.X! - v1.X!).toBe(UNDELIVERABLE_LOCK);
+  });
+
+  it('after-partial: exactly PARTIAL_OUT moved from account A to its wallet, and out of the X vault', () => {
+    const n = ORACLE['after-negatives'];
+    const p = ORACLE['after-partial'];
+    expect(n.accountA.X! - p.accountA.X!).toBe(PARTIAL_OUT);
+    expect(p.solanaA.X! - n.solanaA.X!).toBe(PARTIAL_OUT);
+    expect(n.vaults.X! - p.vaults.X!).toBe(PARTIAL_OUT);
+    expect(p.rpcA.midnight).toEqual(p.accountA);
+    expect(p.accountB).toEqual(n.accountB);
   });
 
   it('every unit of X and Y is somewhere: wallet A + accounts + B’s side = what was minted to the journey', () => {

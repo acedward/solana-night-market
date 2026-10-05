@@ -25,7 +25,15 @@
 //                       bridge contract (not a Passport account); the same lock sent anyway (the raw
 //                       LockToContract a hostile client could send) is reported `undeliverable` by X's
 //                       bridge, which signs nothing: no new action on X's bridge contract
-//   STEP=prompts        SC-005: user A's wallet prompts over the journey's steps (≤ 7; per step 1,1,1,1,3)
+//   STEP=fr021          P3b.4 (FR-021): after landing.ts OUT_CASE=partial, the injector's X equals the page's
+//                       and the registration's unseenCoins is 0 (the oracle's after-partial checks balances)
+//   STEP=spl-faucet     P3b.4 (00060 P13): a claim mints 1,000 X and 1,000 Y to a fresh wallet; a second is refused
+//   STEP=spl-metadata   P3b.4 (00059 P7): the real SPL X's metadata through the injector's fill-in
+//                       (EXPECT_SPL_FILLIN=0 before P7: passed through, nothing invented)
+//   STEP=demo-decimals  P3b.4 (Q10): after A's demo claim, twBTC 8 decimals, twUSDC 6, icons, equal to the page
+//   STEP=icons          P3b.4 (Q10): every published icon equals the table and the site's bundled copy
+//   STEP=prompts        SC-005: user A's wallet prompts over the journey's steps (≤ 7; per step 1,1,1,1,3);
+//                       the partial Bridge out (FR-021) takes exactly 4 (one more than a whole-coin one)
 //   STEP=summary        the run's verdict, the oracle table as observed, the timings and the prompts
 //
 // SECRETS: the test wallets' seeds and the accounts' encryption secrets are market-flows.ts's
@@ -41,7 +49,15 @@ import { join } from 'node:path';
 import { base58 } from '@scure/base';
 import nacl from 'tweetnacl';
 
-import { PROFILES, bytesToHex, hexToBytes, holdingsByColour, registryFor, type NetworkName } from '@nightmarket/core';
+import {
+  PROFILES,
+  SPL_FAUCET_REFUSALS,
+  bytesToHex,
+  hexToBytes,
+  holdingsByColour,
+  registryFor,
+  type NetworkName,
+} from '@nightmarket/core';
 import {
   parseJourneyRegistry,
   readRegistrationInfo,
@@ -55,13 +71,16 @@ import {
   TOKEN_PROGRAM_ID,
   associatedTokenAddress,
   bridgeVaultAddress,
+  findProgramAddress,
   shortvec,
   splitTransaction,
 } from '@nightmarket/core/solana';
 
 import { ChainReader } from '../web/src/chain/indexer.js';
 import { BridgeInRefused, followBridgeIn, precheckBridgeIn, sendBridgeIn } from '../web/src/bridge/in/operations.js';
+import { claimSolanaTokens, faucetOffer, solanaBalances } from '../web/src/bridge/faucet/operations.js';
 import { SolanaRpc } from '../web/src/bridge/solana-rpc.js';
+import { RelayClient, RelayError } from '../web/src/relay/client.js';
 import { syncAccount } from '../web/src/passport/operations.js';
 import { headlessPage } from '../test/stack/p6/page.js';
 import {
@@ -74,6 +93,7 @@ import {
   type Observed,
 } from './oracle.js';
 import { logPrompt, readPromptLog, summarisePrompts, SC005_LIMIT } from './prompt-log.js';
+import { parseIconTable } from './registry/icons.js';
 
 type Any = any;
 
@@ -642,6 +662,266 @@ async function negUndeliverable() {
   if (!ok) throw new Error(`SC-004 non-account lock: not as expected: ${json(res)}`);
 }
 
+// ── P3b.4: the rows beyond the spec's table ─────────────────────────────────
+/** The injector's registration of A (I-4 `GET /api/accounts/:id`). */
+async function registrationOfA(f: FlowsState): Promise<Any | null> {
+  const r = await fetch(`${INJECTOR_URL}/api/accounts/${registrationId(addressOf(f.A), norm(f.A.account))}`);
+  return r.ok ? r.json() : null;
+}
+
+/** STEP=fr021 (spec FR-021): after the partial Bridge out, the injector shows exactly the page's X and the
+ *  registration counts no unseen coin (the change was saved in the inbox). The balances themselves are the
+ *  oracle's (CHECKPOINT=after-partial). */
+async function fr021() {
+  step('FR-021: after a partial Bridge out, the injector equals the page and unseenCoins is 0');
+  const f = flows();
+  const reg = journey();
+  const X = reg.entries.find((e) => e.symbol === 'X')!;
+  const symbolOf = (c: string) => reg.byColour(c)?.symbol ?? `colour:${c.slice(0, 16)}`;
+  const t0 = Date.now();
+  let res: Any;
+  for (;;) {
+    const [page, rpcMid, registration] = await Promise.all([
+      pageHoldings('A', f, symbolOf),
+      midnightHoldings(addressOf(f.A), reg.entries),
+      registrationOfA(f),
+    ]);
+    res = {
+      pageX: (page.X ?? 0n).toString(),
+      rpcX: (rpcMid.holdings.X ?? 0n).toString(),
+      unseenCoins: registration?.unseenCoins ?? null,
+      status: registration?.status ?? null,
+      colour: X.colour,
+      seconds: (Date.now() - t0) / 1000,
+    };
+    if ((res.pageX === res.rpcX && res.unseenCoins === 0) || Date.now() - t0 > 120_000) break;
+    await sleep(3_000);
+  }
+  record('fr021', res);
+  say(json(res));
+  if (res.pageX !== res.rpcX || res.unseenCoins !== 0 || res.status !== 'synced')
+    throw new Error(`FR-021: the injector does not equal the page, or a coin is unseen: ${json(res)}`);
+}
+
+/** STEP=spl-faucet (00060 P13, spec FR-024): a claim mints 1,000 X and 1,000 Y to a FRESH wallet (no wallet
+ *  prompt: the relay pays), read back from the validator; a second claim within the period is refused. */
+async function splFaucet() {
+  step('P13: the test SPL faucet mints 1,000 X and 1,000 Y to a fresh wallet; a second claim is refused');
+  const reg = journey();
+  const relay = new RelayClient(RELAY);
+  const wallet = base58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(randomBytes(32))).publicKey);
+  const offer = await faucetOffer(relay, wallet);
+  const sol = new SolanaRpc(SOLANA_RPC_URL);
+  const before = await solanaBalances(sol, wallet, offer?.tokens ?? []);
+  const t0 = Date.now();
+  const result = await claimSolanaTokens(relay, wallet);
+  const claimSeconds = (Date.now() - t0) / 1000;
+  let after = await solanaBalances(sol, wallet, offer!.tokens);
+  for (let i = 0; i < 20 && offer!.tokens.some((t) => after.get(t.mint) !== BigInt(t.amount)); i++) {
+    await sleep(1_000);
+    after = await solanaBalances(sol, wallet, offer!.tokens);
+  }
+  let second: Any;
+  try {
+    await claimSolanaTokens(relay, wallet);
+    second = { refused: false };
+  } catch (e) {
+    second = {
+      refused: true,
+      code: e instanceof RelayError ? e.code : ((e as Any).code ?? null),
+      message: (e as Error).message,
+    };
+  }
+  const expected = Object.fromEntries(
+    reg.entries.map((e) => [e.splMint, (1000n * 10n ** BigInt(e.decimals)).toString()]),
+  );
+  const res = {
+    wallet,
+    offer: offer
+      ? { enabled: offer.enabled, reason: offer.reason ?? null, periodHours: offer.periodHours, tokens: offer.tokens }
+      : null,
+    signature: result.signature,
+    claimSeconds,
+    minted: result.minted.map((m) => ({ symbol: m.symbol, amount: m.amount, createdAccount: m.createdAccount })),
+    balances: Object.fromEntries(
+      (offer?.tokens ?? []).map((t) => [
+        t.symbol,
+        { before: String(before.get(t.mint)), after: String(after.get(t.mint)) },
+      ]),
+    ),
+    second,
+  };
+  record('spl-faucet', res);
+  say(json(res));
+  const ok =
+    !!offer?.enabled &&
+    offer.tokens.length === reg.entries.length &&
+    offer.tokens.every(
+      (t) => t.amount === expected[t.mint] && before.get(t.mint) === 0n && after.get(t.mint) === BigInt(t.amount),
+    ) &&
+    second.refused === true &&
+    second.code === SPL_FAUCET_REFUSALS.period;
+  if (!ok) throw new Error(`P13: the faucet is not as expected: ${json(res)}`);
+}
+
+const METAPLEX = 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s';
+/** Metaplex Token Metadata v1: name, symbol, uri (borsh strings, NUL padding trimmed). */
+function decodeMetaplex(data: Uint8Array): { name: string; symbol: string; uri: string } | null {
+  if (data.length < 65 + 12 || data[0] !== 4) return null;
+  let at = 65;
+  const str = () => {
+    const n = data[at]! | (data[at + 1]! << 8) | (data[at + 2]! << 16) | (data[at + 3]! << 24);
+    const s = new TextDecoder().decode(data.slice(at + 4, at + 4 + n)).replace(/\0+$/, '');
+    at += 4 + n;
+    return s;
+  };
+  return { name: str(), symbol: str(), uri: str() };
+}
+/** The injector's own URL for a public one it names (its PUBLIC_URL is 127.0.0.1:<port> on the host). */
+const inContainer = (url: string) => url.replace(/^http:\/\/127\.0\.0\.1:\d+/, INJECTOR_URL);
+
+/** STEP=spl-metadata (00059 P7, Q10): the REAL SPL X through the injector. With EXPECT_SPL_FILLIN=1 (the
+ *  default; 00059 after P7) its Metaplex metadata PDA reads as name "X", symbol "X", and the metadata JSON's
+ *  image is I-1's `splImage`; with 0 (00059 before P7) the injector passes the upstream's answer through
+ *  (no metadata account), byte for byte. Either way the mint account itself is the validator's, byte for byte. */
+async function splMetadata() {
+  step('00059 P7: the real SPL X reads as "X" with its icon, through the metadata fill-in');
+  const reg = journey();
+  const raw = JSON.parse(readFileSync(journeyFile, 'utf8')) as { tokens: Any[] };
+  const fillin = process.env.EXPECT_SPL_FILLIN !== '0';
+  const out: Record<string, Any> = { expectFillIn: fillin };
+  let ok = true;
+  for (const e of reg.entries) {
+    const i1 = raw.tokens.find((t) => t.splMint === e.splMint) ?? {};
+    const [pda] = findProgramAddress(
+      [new TextEncoder().encode('metadata'), base58.decode(METAPLEX), base58.decode(e.splMint)],
+      METAPLEX,
+    );
+    const mintIdentical = await bytesIdentical('getAccountInfo', [e.splMint, { encoding: 'base64' }]);
+    const r = await rpc(INJECTOR_URL, 'getAccountInfo', [pda, { encoding: 'base64' }]);
+    const upstream = await rpc(SOLANA_RPC_URL, 'getAccountInfo', [pda, { encoding: 'base64' }]);
+    const meta = r?.value ? decodeMetaplex(new Uint8Array(Buffer.from(r.value.data[0], 'base64'))) : null;
+    let image: string | null = null;
+    if (meta?.uri) {
+      const j = (await fetch(inContainer(meta.uri))
+        .then((x) => x.json())
+        .catch(() => null)) as Any;
+      image = j?.image ?? null;
+    }
+    const row = {
+      mint: e.splMint,
+      pda,
+      upstreamHasMetadata: !!upstream?.value,
+      served: meta,
+      image,
+      expectedImage: i1.splImage ?? null,
+      mintBytesIdentical: mintIdentical.ok,
+    };
+    out[e.symbol] = row;
+    const rowOk = fillin
+      ? !row.upstreamHasMetadata && meta?.name === e.name && meta?.symbol === e.symbol && image === i1.splImage
+      : !row.upstreamHasMetadata && r?.value === null;
+    ok &&= rowOk && mintIdentical.ok;
+  }
+  record('spl-metadata', out);
+  say(json(out));
+  if (!ok) throw new Error(`00059 P7: the real SPL metadata is not as expected: ${json(out)}`);
+}
+
+/** STEP=demo-decimals (Q10): after A claims Night Market's demo tokens, the injector shows them with Night
+ *  Market's decimals (twBTC 8: 0.1 twBTC = 10,000,000 base units), names and icons, equal to the page. */
+async function demoDecimals() {
+  step('Q10: twBTC shows 8 decimals through the injector (and twUSDC 6), equal to the page, with icons');
+  const f = flows();
+  const reg = journey();
+  const tk = tokens();
+  const icons = parseIconTable(JSON.parse(readFileSync(join(__dirname, 'registry/token-icons.json'), 'utf8')));
+  const symbolOf = (c: string) => reg.byColour(c)?.symbol ?? tk.byColour(c)?.symbol ?? `colour:${c.slice(0, 16)}`;
+  const t0 = Date.now();
+  let res: Any;
+  for (;;) {
+    const page = await pageHoldings('A', f, symbolOf);
+    const r = await rpc(INJECTOR_URL, 'getTokenAccountsByOwner', [
+      addressOf(f.A),
+      { programId: TOKEN_2022_PROGRAM_ID },
+      { encoding: 'jsonParsed' },
+    ]);
+    const rows: Any[] = [];
+    for (const a of r.value as Any[]) {
+      const info = a.account.data.parsed.info;
+      const mi = await rpc(INJECTOR_URL, 'getAccountInfo', [String(info.mint), { encoding: 'jsonParsed' }]).catch(
+        () => null,
+      );
+      const meta = (mi?.value?.data?.parsed?.info?.extensions ?? []).find(
+        (x: Any) => x.extension === 'tokenMetadata',
+      )?.state;
+      const json2 = meta?.uri
+        ? ((await fetch(inContainer(meta.uri))
+            .then((x) => x.json())
+            .catch(() => null)) as Any)
+        : null;
+      rows.push({
+        name: meta?.name ?? null,
+        symbol: meta?.symbol ?? null,
+        amount: String(info.tokenAmount.amount),
+        decimals: Number(info.tokenAmount.decimals),
+        uiAmountString: String(info.tokenAmount.uiAmountString),
+        image: json2?.image ?? null,
+      });
+    }
+    const pick = (n: string) => rows.find((x) => x.name === n);
+    const btc = pick('twBTC (Midnight)');
+    const usdc = pick('twUSDC (Midnight)');
+    res = {
+      page: Object.fromEntries(Object.entries(page).map(([k, v]) => [k, v.toString()])),
+      rpc: rows,
+      seconds: (Date.now() - t0) / 1000,
+      checks: {
+        twBTC:
+          !!btc &&
+          btc.decimals === 8 &&
+          btc.amount === String(page.twBTC ?? -1n) &&
+          btc.uiAmountString === '0.1' &&
+          btc.image === icons.base + icons.midnight.twBTC,
+        twUSDC:
+          !!usdc &&
+          usdc.decimals === 6 &&
+          usdc.amount === String(page.twUSDC ?? -1n) &&
+          usdc.image === icons.base + icons.midnight.twUSDC,
+        xMidnightImage: pick('X (Midnight)')?.image === icons.base + icons.midnight.X,
+      },
+    };
+    if (Object.values(res.checks).every(Boolean) || Date.now() - t0 > 120_000) break;
+    await sleep(3_000);
+  }
+  record('demo-decimals', res);
+  say(json(res));
+  if (!Object.values(res.checks).every(Boolean)) throw new Error(`Q10 decimals/icons: not as expected: ${json(res)}`);
+}
+
+/** STEP=icons (Q10): every published icon the wallet loads is byte-identical to the site's bundled copy. */
+async function iconsStep() {
+  step('Q10: the published icons equal the table and the site’s bundled copies');
+  const icons = parseIconTable(JSON.parse(readFileSync(join(__dirname, 'registry/token-icons.json'), 'utf8')));
+  const { createHash } = await import('node:crypto');
+  const rows: Any[] = [];
+  for (const [file, sha] of Object.entries(icons.sha256)) {
+    const r = await fetch(icons.base + file).catch(() => null);
+    const body = r?.ok ? new Uint8Array(await r.arrayBuffer()) : null;
+    const site = readFileSync(join(__dirname, '../web/public', icons.siteDir, file));
+    rows.push({
+      file,
+      status: r?.status ?? null,
+      cors: r?.headers.get('access-control-allow-origin') ?? null,
+      published: body ? createHash('sha256').update(body).digest('hex') === sha : false,
+      site: createHash('sha256').update(site).digest('hex') === sha,
+    });
+  }
+  record('icons', rows);
+  for (const r of rows) say(`${r.file} ${r.status} published=${r.published} site=${r.site} cors=${r.cors}`);
+  if (!rows.every((r) => r.published && r.site && r.cors === '*')) throw new Error(`Q10 icons: ${json(rows)}`);
+}
+
 // ── STEP=prompts (SC-005) ───────────────────────────────────────────────────
 function prompts() {
   step('SC-005: user A’s wallet prompts over the journey');
@@ -658,6 +938,9 @@ function prompts() {
   record('prompts', res);
   say(`A: ${json(A.perStep)} = ${A.journeyTotal} (limit ${SC005_LIMIT}); outside the journey ${json(A.other)}`);
   if (!A.withinLimit || !A.matchesExpected) throw new Error(`SC-005: A's prompts are not as expected: ${json(A)}`);
+  // FR-021 / 00060 P12.3: a partial Bridge out asks once more (saving its change) than a whole-coin one.
+  if (A.other.fr021 !== undefined && A.other.fr021 !== 4)
+    throw new Error(`FR-021: the partial Bridge out took ${A.other.fr021} prompts, not 4`);
 }
 
 // ── STEP=summary ────────────────────────────────────────────────────────────
@@ -695,6 +978,16 @@ async function main() {
       return;
     case 'neg-undeliverable':
       return negUndeliverable();
+    case 'fr021':
+      return fr021();
+    case 'spl-faucet':
+      return splFaucet();
+    case 'spl-metadata':
+      return splMetadata();
+    case 'demo-decimals':
+      return demoDecimals();
+    case 'icons':
+      return iconsStep();
     case 'prompts':
       return prompts();
     case 'summary':

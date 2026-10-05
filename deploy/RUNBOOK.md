@@ -10,8 +10,9 @@ SPL tokens bridged in from Solana.
 This runbook deploys and runs the market on Midnight **stagenet**, a test network: nothing here
 carries real value. Every command runs from the repository root unless it says otherwise.
 `deploy/.env.example` documents every setting; `deploy/SYSTEMD.md` covers a host without Docker.
-What the market cannot promise is in the README's "Known limitations" (the site's About page,
-`/#about`, says the same to customers).
+What the market cannot promise is in the README's "Known limitations". The site has no About page
+(AA 00060 FR-029), so point customers to that list; the page's own warnings stay in the flows they
+apply to.
 
 ## Production checklist
 
@@ -771,9 +772,10 @@ day is about 41 DUST.
   the change when only part of a coin goes out. The landing-key signature is a key: sign it only on
   this site.
 - **Demo tokens**: once per wallet. These are test networks and test tokens.
-- **The About page** (`/#about`, linked from every page's footer) lists the known limitations in
-  plain words, as the README's "Known limitations" does. It says nothing about the withdrawal
-  allowance (questions Q46).
+- **There is no About page** (AA 00060 FR-029): the site does not list the known limitations, and
+  `/#about` opens Markets. The README's "Known limitations" is the list to give customers. The
+  page's in-flow warnings are unchanged: the signing panels, the landing-key text, and the Bridge
+  out and Show in my wallet notices.
 
 ## 11. Known limits
 

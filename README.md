@@ -86,8 +86,10 @@ to sign) and `relay/src/passport/arm.ts` (`DeviceArm`, the relay's check of a si
 ## Known limitations
 
 Night Market is a proof of concept on Midnight stagenet, a test network. It trades only free
-faucet test tokens, which have no value. These limits remain; the site's About page (`/#about`)
-says the same in plain words.
+faucet test tokens, which have no value. These limits remain. The site has no About page (AA 00060
+FR-029): this list and `deploy/RUNBOOK.md` are where they are written down, and the page's own
+warnings (the signing panels, the landing-key text, the Bridge out and Show in my wallet notices)
+stay in the flows they apply to.
 
 **Accounts**
 
@@ -110,8 +112,13 @@ says the same in plain words.
   or sooner when your account approves anything else (a take, a withdrawal, a Bridge out, saving a
   change or restoring your key; the page asks first). A future Offer Files feature will provide
   cancellation for every client. (AA 00060 FR-028; this replaces 00047's "Cancel offer".)
-- All of a customer's data is in their browser; Export is the only backup.
+- All of a customer's data is in their browser; Export is the only backup. Export on Your data
+  after every change: clearing the browser without an export loses the key that finds the
+  account's coins.
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
+- **Solana wallets:** Phantom and Nightly are tested. Any other wallet that signs Solana messages
+  through the Wallet Standard may work. The page asks the wallet for one approval at a time, with a
+  short pause between approvals; if no window appears, open the wallet from the browser's toolbar.
 
 **What the page trusts**
 
@@ -338,6 +345,8 @@ For scripts that drive the page:
   `own-offer-note`.
 - A bridged token's row in the compact "Your tokens" list has `data-kind="bridged"`, and its value is
   the total.
+- The About page is gone (FR-029): `/#about` opens Markets, like any unknown route, and
+  `about-link`, `about`, `about-testnet`, `about-how`, `about-limits` and `about-limit` are gone.
 
 ## Checks and the secret scan
 

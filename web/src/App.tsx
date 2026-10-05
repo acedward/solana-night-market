@@ -5,8 +5,9 @@
 //
 // A create-and-trade market: the order books (Markets) and making and taking offers (Trade) come
 // first; the holdings (Portfolio, route #account) and the browser's records (Your data, route
-// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working. The About
-// page (route #about, AA 00047 P11.D, questions Q58) is linked from the footer, not the header.
+// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working. There is
+// no About page (AA 00060 FR-029; the known limitations are in the README and the RUNBOOK): its old
+// route #about, like any unknown route, opens Markets.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
@@ -39,7 +40,6 @@ import {
 } from './design/index.js';
 import { MarketProvider } from './market/MarketContext.js';
 import WalletProbe from './dev/WalletProbe.js';
-import { About } from './pages/About.js';
 import { Accounts } from './pages/Accounts.js';
 import { LocalData } from './pages/LocalData.js';
 import { Markets } from './pages/Markets.js';
@@ -70,16 +70,12 @@ export const SECTIONS = [
   { id: 'local', label: 'Your data', icon: 'data' },
 ] as const satisfies ReadonlyArray<TabItem>;
 type SectionId = (typeof SECTIONS)[number]['id'];
-/** Pages linked from the footer, not from the header's sections (questions Q58). */
-const FOOTER_PAGES = ['about'] as const;
-type PageId = SectionId | (typeof FOOTER_PAGES)[number];
 
-const sectionFromHash = (): PageId => {
+/** The section a hash names; any other hash (the removed #about among them, FR-029) opens Markets. */
+const sectionFromHash = (): SectionId => {
   // A section may carry parameters after '?' (#trade?pair=twBTC/twUSDC&offer=…, from the Markets page).
   const h = window.location.hash.replace(/^#/, '').split('?')[0] ?? '';
-  const footerPage = FOOTER_PAGES.find((p) => p === h);
-  if (footerPage) return footerPage;
-  return (SECTIONS.find((s) => s.id === h)?.id ?? 'markets') as SectionId;
+  return SECTIONS.find((s) => s.id === h)?.id ?? 'markets';
 };
 
 /**
@@ -320,7 +316,7 @@ function Shell({
   prompts: SignPromptStore;
   activity: ActivityStore;
 }) {
-  const [section, setSection] = useState<PageId>(sectionFromHash);
+  const [section, setSection] = useState<SectionId>(sectionFromHash);
   useEffect(() => {
     const on = () => setSection(sectionFromHash());
     window.addEventListener('hashchange', on);
@@ -366,9 +362,7 @@ function Shell({
           </Toast>
         )}
         <main className="wrap app-main">
-          {section === 'about' ? (
-            <About networkName={`Midnight ${network.name}`} bridging={bridges.state === 'ready'} />
-          ) : section === 'local' ? (
+          {section === 'local' ? (
             <LocalData network={network.name} />
           ) : section === 'account' ? (
             <>

@@ -21,6 +21,8 @@ export const API_PATHS = {
   accountZswap: (account: string) => `/v1/accounts/${account}/zswap`,
   /** The demo-token pack and limits (AA 00047 B3, ./demo-tokens.ts). */
   demoTokens: '/v1/demo-tokens',
+  /** The test SPL faucet: what a claim mints, and a wallet's last claim (AA 00060 P13, ./spl-faucet.ts). */
+  splFaucet: '/v1/spl-faucet',
 } as const;
 
 // ── Errors ──────────────────────────────────────────────────────────────────

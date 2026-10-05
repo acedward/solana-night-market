@@ -144,7 +144,14 @@ describe('configuration', () => {
       (p) => (p === '/t' ? tokens() : read(p)),
     );
     expect(secrets.sponsorSeedHex).toBe(Buffer.from(mnemonicToSeedSync(mnemonic, '')).toString('hex'));
-    expect(Object.keys(secrets).sort()).toEqual(['sponsorSeedHex', 'sponsorSeedSource']);
+    // AA 00060 P13: the test SPL faucet's keys are secrets too (none without SPL_FAUCET_KEYS_FILE).
+    expect(Object.keys(secrets).sort()).toEqual([
+      'splFaucetKeys',
+      'splFaucetKeysSource',
+      'sponsorSeedHex',
+      'sponsorSeedSource',
+    ]);
+    expect([secrets.splFaucetKeys, secrets.splFaucetKeysSource]).toEqual([null, null]);
     for (const bad of ['/bad', '/missing']) {
       try {
         loadConfig({ RELAY_NETWORK: 'undeployed', TOKENS_FILE: '/t', SPONSOR_SEED_FILE: bad }, (p) =>

@@ -157,3 +157,6 @@ The full runbook section comes with P5R.4. The gate `e2e/stagenet/run-gate.sh` r
   - At about 0.55 s per call that is ≈ 1.8 blocks/s, even on the private RPC, while devnet makes ≈ 2.5 slots/s or more.
   - Eight calls in parallel give ≈ 17 blocks/s (evidence `p5r0/gate/rpc-private-throughput.json`).
   - So the node only keeps up if the block reader fetches concurrently.
+- **Where a bridge node starts reading Solana (deployment practice).** Start a node near its program's deploy/Initialize slot (the deployment file's `solana.startSlot`, as `deploy-devnet.ts` writes it). Or start it at the current tip, but only after verifying that there were no locks since Initialize: `getSignaturesForAddress` on the program, its config PDA, its authority PDA and its vault shows nothing after the Initialize slot, and the vault holds 0. A node replaying hours of devnet from Initialize needs about an hour to catch up.
+  - Bridge X (2026-10-05) had been initialized at slot 507835598, with nothing since. It was moved to slot 507869386 (the tip − 150), and `bridge:record` was re-run, so the record's `startSlot` matches. After its restart the node was at devnet's tip within about a minute.
+  - Evidence: `p5r0/gate/run5/start-slot-verification.json` and `p5r-x*.start-slot-507869386.json`.

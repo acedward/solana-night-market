@@ -26,6 +26,8 @@ export interface SentTransaction {
   wire: Uint8Array;
   message: Uint8Array;
   accountKeys: string[];
+  /** The slot it was sent at (getSignaturesForAddress answers it). */
+  slot?: number;
 }
 
 export interface MockSolanaRpc {
@@ -137,20 +139,26 @@ export function mockSolanaRpc(opts: { genesisHash?: string } = {}): MockSolanaRp
             }
           }
           const signature = base58.encode(parts.signatures[0]!);
-          rpc.sent.push({ signature, wire, message: parts.message, accountKeys });
+          rpc.sent.push({ signature, wire, message: parts.message, accountKeys, slot });
           return ok(signature);
         }
         case 'getBlockHeight':
           return ok(slot);
         case 'getSignaturesForAddress': {
           const address = String(p[0]);
-          const limit = Number((p[1] as { limit?: number } | undefined)?.limit ?? 1000);
+          const o = (p[1] as { limit?: number; before?: string } | undefined) ?? {};
+          const limit = Number(o.limit ?? 1000);
+          const naming = rpc.sent.filter((t) => t.accountKeys.includes(address)).reverse();
+          const start = o.before ? naming.findIndex((t) => t.signature === o.before) + 1 : 0;
           return ok(
-            rpc.sent
-              .filter((t) => t.accountKeys.includes(address))
-              .reverse()
-              .slice(0, limit)
-              .map((t) => ({ signature: t.signature, slot, err: null, memo: null, blockTime: null, confirmationStatus: 'confirmed' })),
+            naming.slice(start, start + limit).map((t) => ({
+              signature: t.signature,
+              slot: t.slot ?? slot,
+              err: null,
+              memo: null,
+              blockTime: null,
+              confirmationStatus: 'confirmed',
+            })),
           );
         }
         case 'getSignatureStatuses': {

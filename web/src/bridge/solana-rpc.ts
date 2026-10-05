@@ -71,8 +71,48 @@ export class SolanaRpc {
   }
 
   async latestBlockhash(): Promise<string> {
-    const r = await this.call<{ value: { blockhash: string } }>('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-    return r.value.blockhash;
+    return (await this.latestBlockhashInfo()).blockhash;
+  }
+
+  /** A fresh blockhash and the last block height at which a transaction using it can land. */
+  async latestBlockhashInfo(): Promise<{ blockhash: string; lastValidBlockHeight: bigint; slot: bigint }> {
+    const r = await this.call<{
+      context: { slot: number };
+      value: { blockhash: string; lastValidBlockHeight: number };
+    }>('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+    return {
+      blockhash: r.value.blockhash,
+      lastValidBlockHeight: BigInt(r.value.lastValidBlockHeight),
+      slot: BigInt(r.context.slot),
+    };
+  }
+
+  /** The current block height (AA 00060 P10.3 C3: has a lock's blockhash expired?). */
+  async blockHeight(): Promise<bigint> {
+    return BigInt(await this.call<number>('getBlockHeight', [{ commitment: 'confirmed' }]));
+  }
+
+  /** Signatures of transactions naming `address`, newest first, before `before` when given (C3: a lock
+   *  whose wallet answer was lost). */
+  async signaturesForAddress(
+    address: string,
+    limit = 100,
+    before?: string,
+  ): Promise<{ signature: string; slot: bigint }[]> {
+    const r = await this.call<{ signature: string; slot: number }[]>('getSignaturesForAddress', [
+      address,
+      { limit, commitment: 'confirmed', ...(before ? { before } : {}) },
+    ]);
+    return r.map((x) => ({ signature: x.signature, slot: BigInt(x.slot) }));
+  }
+
+  /** A transaction's wire bytes (base64 encoding), or null when it is not available. */
+  async transactionWire(signature: string): Promise<Uint8Array | null> {
+    const r = await this.call<{ transaction: [string, string] } | null>('getTransaction', [
+      signature,
+      { commitment: 'confirmed', maxSupportedTransactionVersion: 0, encoding: 'base64' },
+    ]);
+    return r?.transaction ? fromBase64(r.transaction[0]) : null;
   }
 
   sendTransaction = (wire: Uint8Array) =>

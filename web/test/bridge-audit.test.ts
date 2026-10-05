@@ -162,10 +162,63 @@ describe('C3: a timed-out sign-and-send may have sent the lock (F-A4, F-B3)', ()
       },
     };
     await expect(
-      sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, { onWithdrawn: (r: BridgeInRecord) => removed.push(r) } as never),
+      sendBridgeIn(s.ctx, entry, 500_000_000n, 0n, 1000, {
+        onWithdrawn: (r: BridgeInRecord) => removed.push(r),
+      } as never),
     ).rejects.toBeInstanceOf(WalletError);
     expect(removed).toHaveLength(1);
     expect(s.chain.sent).toEqual([]);
+  });
+});
+
+describe('C3: the search for a lost lock is bounded, and a search cut short never says "nothing was locked"', () => {
+  const base: BridgeInRecord = {
+    direction: 'in',
+    key: 'ab'.repeat(32),
+    message: Buffer.from('the lock message').toString('base64'),
+    lastValidBlockHeight: '100',
+    fromSlot: '500',
+    source: '11111111111111111111111111111111',
+    colour: entry.colour,
+    mint: entry.splMint,
+    symbol: entry.symbol,
+    amount: '1',
+    bridgeApi: entry.bridgeApi,
+    balanceBefore: '0',
+    createdAt: 1,
+    state: 'unknown',
+  };
+  const rpcWith = (slotOf: (page: number, i: number) => number) => {
+    let pages = 0;
+    return {
+      pages: () => pages,
+      rpc: {
+        blockHeight: async () => 1_000n,
+        signatureStatus: async () => null,
+        transactionWire: async () => null,
+        signaturesForAddress: async () => {
+          const page = pages++;
+          return Array.from({ length: 100 }, (_, i) => ({ signature: `s${page}-${i}`, slot: BigInt(slotOf(page, i)) }));
+        },
+      } as unknown as SolanaRpc,
+    };
+  };
+
+  it('every page newer than the lock: still unknown after the page limit (not "failed")', async () => {
+    const { reconcileBridgeIn, BRIDGE_IN_SEARCH_PAGES } = await import('../src/bridge/in/operations.js');
+    const t = rpcWith(() => 900);
+    const r = await reconcileBridgeIn(base, { rpc: t.rpc });
+    expect(r.state).toBe('unknown');
+    expect(t.pages()).toBe(BRIDGE_IN_SEARCH_PAGES);
+  });
+
+  it('the search reaches the slot before the lock and the blockhash expired: failed, nothing was locked', async () => {
+    const { reconcileBridgeIn } = await import('../src/bridge/in/operations.js');
+    const t = rpcWith((page, i) => (page === 1 && i === 50 ? 400 : 900));
+    const r = await reconcileBridgeIn(base, { rpc: t.rpc });
+    expect(r.state).toBe('failed');
+    expect(r.progress).toMatch(/Nothing was locked/);
+    expect(t.pages()).toBe(2);
   });
 });
 
@@ -217,7 +270,8 @@ describe('C7: "Find my transfers" adopts a transfer whose local record is unusab
   it('a record left without an entitlement, or marked failed after an interrupted tx1, is adopted again', async () => {
     const ops: Any = await import('../src/bridge/out/operations.js');
     expect(typeof ops.transfersToAdopt).toBe('function');
-    const rec = (authNonce: string, o: Partial<BridgeOutRecord>) => ({ authNonce, state: 'tx1-sent', ...o }) as BridgeOutRecord;
+    const rec = (authNonce: string, o: Partial<BridgeOutRecord>) =>
+      ({ authNonce, state: 'tx1-sent', ...o }) as BridgeOutRecord;
     const found = ['1', '2', '3', '4'].map((authNonce) => ({ authNonce, open: true }));
     const records = [
       rec('1', { state: 'tx1-sent', entitlement: `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.1.${'c'.repeat(64)}` }),
@@ -231,7 +285,10 @@ describe('C7: "Find my transfers" adopts a transfer whose local record is unusab
 describe('C11: the site checks each bridge’s own deployment record (F-A10)', () => {
   it('a bridge whose GET /deployment names another mint: bridging refused, naming the token; a matching one or none: ready', async () => {
     const { checkBridges } = await import('../src/bridge/registry.js');
-    const journey = structuredClone(journeyFixture) as { solanaGenesisHash: string; tokens: Array<Record<string, Any>> };
+    const journey = structuredClone(journeyFixture) as {
+      solanaGenesisHash: string;
+      tokens: Array<Record<string, Any>>;
+    };
     const recordOf = (t: Record<string, Any>) => ({
       schema: 'effectstream.solana-midnight-bridge.deployment/1',
       splMint: t.splMint,
@@ -253,15 +310,29 @@ describe('C11: the site checks each bridge’s own deployment record (F-A10)', (
         return t ? deployment(t) : new Response('', { status: 404 });
       }) as typeof fetch;
     const solana = { rpcUrl: 'http://rpc.test', genesisHash: null, cluster: 'solana:localnet' };
-    const same = await checkBridges(journey, 'undeployed', solana, serve((t) => Response.json(recordOf(t))));
+    const same = await checkBridges(
+      journey,
+      'undeployed',
+      solana,
+      serve((t) => Response.json(recordOf(t))),
+    );
     expect(same.state).toBe('ready');
-    const none = await checkBridges(journey, 'undeployed', solana, serve(() => new Response('', { status: 503 })));
+    const none = await checkBridges(
+      journey,
+      'undeployed',
+      solana,
+      serve(() => new Response('', { status: 503 })),
+    );
     expect(none.state).toBe('ready');
     const swapped = await checkBridges(
       journey,
       'undeployed',
       solana,
-      serve((t) => Response.json(t.symbol === 'X' ? { ...recordOf(t), splMint: '1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE' } : recordOf(t))),
+      serve((t) =>
+        Response.json(
+          t.symbol === 'X' ? { ...recordOf(t), splMint: '1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE' } : recordOf(t),
+        ),
+      ),
     );
     expect(swapped).toMatchObject({ state: 'refused' });
     expect((swapped as Any).reason).toMatch(/X/);

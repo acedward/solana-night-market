@@ -275,16 +275,21 @@ test('the fonts are self-hosted, load, and nothing else leaves the page', async 
   page.on('request', (r) => requests.push(r.url()));
   const ex = await serveExchange(page);
   await page.goto('/#markets');
-  await page.evaluate(() => document.fonts.ready);
-  const faces = await page.evaluate(() => {
-    const out: string[] = [];
-    document.fonts.forEach((f) => {
-      if (f.status === 'loaded') out.push(`${f.family.replace(/"/g, '')} ${f.weight}`);
+  // The face loads only once text is rendered in it: wait for the page's text, then for the face (AA 00060
+  // P10.3: `document.fonts.ready` right after the load event could resolve before React rendered anything,
+  // with nothing loading yet, and CI saw no face loaded).
+  await expect(page.getByRole('heading', { name: 'Night Market' })).toBeVisible();
+  const loadedFaces = () =>
+    page.evaluate(async () => {
+      await document.fonts.ready;
+      const out: string[] = [];
+      document.fonts.forEach((f) => {
+        if (f.status === 'loaded') out.push(`${f.family.replace(/"/g, '')} ${f.weight}`);
+      });
+      return out;
     });
-    return out;
-  });
   // One variable face (weights 100–900), the Latin subset only: the page's text is English.
-  expect(faces).toEqual(expect.arrayContaining(['Inter Variable 100 900']));
+  await expect.poll(loadedFaces, { timeout: 10_000 }).toEqual(expect.arrayContaining(['Inter Variable 100 900']));
   expect(await page.evaluate(() => document.fonts.check('400 16px "Inter Variable"'))).toBe(true);
   expect(await page.evaluate(() => document.fonts.check('650 28px "Inter Variable"'))).toBe(true);
   const fontFiles = requests.filter((u) => /\.woff2?(\?|$)/.test(u));

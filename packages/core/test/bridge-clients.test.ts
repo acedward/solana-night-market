@@ -144,7 +144,7 @@ describe('T1.6 I-3 client against the mock bridge API', () => {
   });
 });
 
-describe('T1.6 I-4 client against the mock injector (PROVISIONAL: 00059 proposal of 2026-10-04)', () => {
+describe('T1.6 I-4 client against the mock injector (FROZEN 2026-10-04 @ 00059 f4d215c)', () => {
   const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(5));
   const wallet = base58.encode(kp.publicKey);
   const account = '45'.repeat(32);

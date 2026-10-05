@@ -1,19 +1,27 @@
 // I-4, the RPC injector's account registration (owner 00059; consumer: Night Market's "Show in my
 // wallet"), as the page uses it (AA 00060 P1.5). Browser-safe.
 //
-// PROVISIONAL: 00059's PROPOSAL of 2026-10-04 (plans/00059-injector-passport-accounts.md, Interfaces
-// "I-4", PROPOSED): `GET /api/accounts/registration-info`, `POST /api/accounts` with
-// `{solanaAddress, accountAddress, accountViewingKey, message, signature}`, `GET /api/accounts/:id`, the
-// 9-line v1 text below, its error codes and statuses. P8.2 takes 00059's frozen builder, route and codes
-// and its vectors; T8.5 checks that I-4's first line differs from I-5's, from `Site: ` and from every
-// market label.
+// FROZEN: 00059 froze I-4 on 2026-10-04 at acedward/solana-token-injector `f4d215c` (PR #2;
+// `docs/account-registration.md`, "Status: FROZEN"), unchanged from its proposal but for two
+// clarifications this module follows: the expiry is accepted when `now < Expires <= now + maxTtlSeconds`
+// (years 1970-9999), and a wrong method answers 405 `method-not-allowed`. Routes:
+// `GET /api/accounts/registration-info`, `POST /api/accounts` with
+// `{solanaAddress, accountAddress, accountViewingKey, message, signature}`, `GET /api/accounts/:id` (the
+// id is the first 16 hex of sha256('account:' + wallet + ':' + account)). Its vectors
+// (test/fixtures/00059-account-registration-vectors.json) hold the renderer below
+// (packages/core/test/injector.test.ts); T8.5 checks that I-4's first line differs from I-5's, from
+// `Site: ` and from every market label.
 //
-// Night Market renders the text ITSELF from this template and the injector's registration info; it
-// never signs text an injector hands it.
+// Night Market renders the text ITSELF from this template, the CONFIGURED injector's origin and the
+// site's own network (the registration info must agree with both); it never signs text an injector
+// hands it.
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';
 
-export const I4_STATUS = 'PROVISIONAL (00059 proposal of 2026-10-04)';
+import { bytesToHex } from '../hex.js';
+
+export const I4_STATUS = 'FROZEN 2026-10-04 (00059 @ f4d215c)';
 
 export const REGISTRATION_FIRST_LINE = 'solana-token-injector account registration v1';
 export const REGISTRATION_MAX_BYTES = 512;
@@ -38,6 +46,7 @@ export const REGISTRATION_ERROR_CODES = [
   'storage-error',
   'accounts-disabled',
   'not-found',
+  'method-not-allowed',
 ] as const;
 export type RegistrationErrorCode = (typeof REGISTRATION_ERROR_CODES)[number];
 
@@ -83,8 +92,11 @@ export interface RegistrationText {
 
 const two = (n: number) => String(n).padStart(2, '0');
 
-/** "YYYY-MM-DD HH:MM:SS UTC". */
+/** "YYYY-MM-DD HH:MM:SS UTC" (whole seconds, the years 1970-9999). */
 export function registrationExpiry(unixSeconds: number): string {
+  if (!Number.isSafeInteger(unixSeconds) || unixSeconds < 0 || unixSeconds > 253_402_300_799) {
+    throw new RangeError('the expiry is whole seconds in the years 1970-9999');
+  }
   const t = new Date(unixSeconds * 1000);
   return `${t.getUTCFullYear()}-${two(t.getUTCMonth() + 1)}-${two(t.getUTCDate())} ${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())} UTC`;
 }
@@ -108,6 +120,55 @@ export function registrationMessageText(p: RegistrationText): string {
     throw new RangeError('the registration text must be printable ASCII, at most 512 bytes');
   }
   return text;
+}
+
+const LINE_PREFIXES = ['RPC ', 'Midnight network ', 'Wallet ', 'Account ', 'Expires '] as const;
+
+/**
+ * The fields of an exact v1 text, or null: the injector's own rule (parse with the grammar, re-render
+ * from the parsed fields, compare the bytes). The page never signs a text it did not render; this is
+ * for the vectors and the mock injector.
+ */
+export function parseRegistrationText(text: string): RegistrationText | null {
+  const lines = text.split('\n');
+  if (lines.length !== 9) return null;
+  const field = (i: number, prefix: string) => (lines[i]!.startsWith(prefix) ? lines[i]!.slice(prefix.length) : null);
+  const [origin, networkId, solanaAddress, accountAddress, expiry] = LINE_PREFIXES.map((p, i) => field(i + 2, p));
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) UTC$/.exec(expiry ?? '');
+  if (!origin || !networkId || !solanaAddress || !accountAddress || !m) return null;
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(networkId) || !/^[0-9a-f]{64}$/.test(accountAddress)) return null;
+  if (injectorOrigin(origin) !== origin) return null;
+  const expires = Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!) / 1000;
+  const fields = { origin, networkId, solanaAddress, accountAddress, expires };
+  try {
+    return registrationMessageText(fields) === text ? fields : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The registration id the injector files a wallet and account under (the first 16 hex of
+ *  sha256('account:' + wallet + ':' + account)), so the page can read the status without storing it. */
+export function registrationId(solanaAddress: string, accountAddress: string): string {
+  const account = accountAddress.replace(/^0x/, '').toLowerCase();
+  return bytesToHex(sha256(new TextEncoder().encode(`account:${solanaAddress}:${account}`))).slice(0, 16);
+}
+
+/** How far ahead the page sets `Expires`: the injector's `maxTtlSeconds` less a margin for clock skew
+ *  (a quarter of it, at most 60 s), so `now < Expires <= now + maxTtl` holds on the injector's clock. */
+export function registrationExpiresAt(nowSeconds: number, maxTtlSeconds: number): number {
+  const margin = Math.min(60, Math.floor(maxTtlSeconds / 4));
+  return Math.floor(nowSeconds) + Math.max(1, maxTtlSeconds - margin);
+}
+
+/** The origin the text binds to, as WHATWG serialises it (I-4 `{origin}`), or null. */
+export function injectorOrigin(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 export class InjectorError extends Error {

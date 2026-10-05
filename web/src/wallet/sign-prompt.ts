@@ -12,6 +12,8 @@
 
 import { sha256 } from '@noble/hashes/sha2.js';
 
+import { REGISTRATION_FIRST_LINE } from '@nightmarket/core/bridge';
+
 import type { SignFacts } from './sign-facts.js';
 
 export interface SignPrompt {
@@ -21,8 +23,9 @@ export interface SignPrompt {
   text: string;
   /** "82d2 06a4": the first 8 hex digits of the message's digest line. */
   fingerprint: string;
-  /** What the message is: an account call (F3) or the relay's proof-of-key envelope. */
-  kind: 'account-call' | 'relay-envelope';
+  /** What the message is: an account call (F3), the relay's proof-of-key envelope, or (AA 00060 P8)
+   *  the RPC injector's registration text (I-4). */
+  kind: 'account-call' | 'relay-envelope' | 'rpc-registration';
   /** Unix ms when the wallet was asked (for the "waiting" line). */
   since: number;
   /** For an account call: what the contract enforces (base units, token ids, deadline; Q25 B′). */
@@ -42,9 +45,13 @@ export function messageFingerprint(bytes: Uint8Array): string {
   return group(m ? m[1]!.slice(0, 8) : hexOf(sha256(bytes)).slice(0, 8));
 }
 
-/** Which kind of message it is, from its second line (Track A's possession message says so). */
-export const messageKind = (text: string): SignPrompt['kind'] =>
-  text.split('\n')[1] === 'Prove you hold this key' ? 'relay-envelope' : 'account-call';
+/** Which kind of message it is: I-4's own first line (AA 00060), else from its second line (Track A's
+ *  possession message says so). */
+export const messageKind = (text: string): SignPrompt['kind'] => {
+  const lines = text.split('\n');
+  if (lines[0] === REGISTRATION_FIRST_LINE) return 'rpc-registration';
+  return lines[1] === 'Prove you hold this key' ? 'relay-envelope' : 'account-call';
+};
 
 /** The one prompt open at a time, as an external store React subscribes to. */
 export class SignPromptStore {

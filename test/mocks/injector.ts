@@ -1,7 +1,8 @@
-// A MOCK of the RPC injector's account registration (I-4, 00059's PROPOSAL; AA 00060 P1.5). It checks a
-// registration the way 00059's verification order starts (shape, the v1 text re-rendered from its own
-// fields, the wallet and account equal to the body's, its origin and network, the expiry window, the
-// strict signature), then stores it. It never reads a chain: the account checks (steps 12-16) are
+// A MOCK of the RPC injector's account registration (I-4, FROZEN by 00059 @ f4d215c; AA 00060 P1.5, P8.2).
+// It checks a registration the way 00059's verification order starts (shape, the v1 text re-rendered from
+// its own fields, the wallet and account equal to the body's, its origin and network, the expiry window
+// `now < Expires <= now + maxTtl`, the strict signature), then stores it; a wrong method on a route
+// answers 405 `method-not-allowed`. It never reads a chain: the account checks (steps 12-16) are
 // replaced by `failNext`, which makes the next POST answer a chosen error code. Every request body is
 // recorded, so a test can check exactly what the page sent and where.
 
@@ -91,6 +92,14 @@ export function mockInjector(opts: { origin?: string; networkId?: string; maxTtl
         };
       };
       const one = /^\/api\/accounts\/([0-9a-f]{16})$/.exec(url.pathname);
+      const known = url.pathname === '/api/accounts' || url.pathname === '/api/accounts/registration-info' || one;
+      const allowed = url.pathname === '/api/accounts' ? 'GET, POST' : 'GET';
+      if (known && !allowed.split(', ').includes(req.method)) {
+        return new Response(JSON.stringify({ error: 'method not allowed', code: 'method-not-allowed' }), {
+          status: 405,
+          headers: { 'content-type': 'application/json', allow: allowed, 'access-control-allow-origin': '*' },
+        });
+      }
       if (one && req.method === 'GET') {
         return stored.has(one[1]!)
           ? json(view(one[1]!))
@@ -135,7 +144,7 @@ export function mockInjector(opts: { origin?: string; networkId?: string; maxTtl
       if (field('RPC ', 2) !== origin) return fail('wrong-origin');
       if (field('Midnight network ', 3) !== networkId) return fail('wrong-network');
       const now = mock.now();
-      if (now > expires) return fail('expired');
+      if (now >= expires) return fail('expired');
       if (expires > now + maxTtl) return fail('expiry-too-far');
       if (!verifyEd25519Strict(bytesToHex(key), new TextEncoder().encode(b.message), hexToBytes(b.signature!, 64))) {
         return fail('bad-signature');

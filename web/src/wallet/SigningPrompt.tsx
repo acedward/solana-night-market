@@ -34,6 +34,8 @@ const LEDE = {
     'Phantom shows you this text. It is exactly what you approve, and what your account checks before anything happens. Approve it only if it matches what you asked for.',
   'relay-envelope':
     'Phantom asks you to prove you own this wallet, so the market can act for you. This signature moves none of your funds and costs nothing.',
+  'rpc-registration':
+    'Your wallet shows you this text. Signing it lets the RPC it names show your Night Market balances in your wallet. It authorises nothing on chain and moves no funds.',
 } as const;
 
 /** How long the progress view waits after a signature before it shows (a refused request ends at once). */
@@ -158,13 +160,15 @@ export function SigningPrompt({
         <pre className="sign-text mono" data-testid="sign-prompt-text" tabIndex={0}>
           {prompt.text}
         </pre>
-        <p className="fingerprint">
-          <span>Check the fingerprint</span>
-          <strong data-testid="sign-prompt-fingerprint">{prompt.fingerprint}</strong>
-          <span>
-            = the first digits of the <span className="mono">{digestLine}</span> line in {prompt.wallet}.
-          </span>
-        </p>
+        {prompt.kind !== 'rpc-registration' && (
+          <p className="fingerprint">
+            <span>Check the fingerprint</span>
+            <strong data-testid="sign-prompt-fingerprint">{prompt.fingerprint}</strong>
+            <span>
+              = the first digits of the <span className="mono">{digestLine}</span> line in {prompt.wallet}.
+            </span>
+          </p>
+        )}
         <p className="waiting">
           <Spinner />
           <span>

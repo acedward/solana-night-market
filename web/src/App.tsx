@@ -372,7 +372,7 @@ function Shell({
           ) : section === 'account' ? (
             <>
               <BridgeNotice />
-              <Accounts network={network} relayUrl={config.relayUrl} />
+              <Accounts network={network} relayUrl={config.relayUrl} injectorUrl={config.injector?.url ?? null} />
             </>
           ) : section === 'markets' ? (
             <Markets network={network} relayUrl={config.relayUrl} />

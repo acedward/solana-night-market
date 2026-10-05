@@ -17,7 +17,18 @@ export const SCHEMA_KEY = 'night-market/schema';
 export const SCHEMA_VERSION = 1;
 const V1 = 'night-market/v1/';
 
-export const RECORD_KINDS = ['profile', 'account', 'secret', 'coins', 'roster', 'offer', 'job', 'settings'] as const;
+// AA 00060: `bridge` keeps the account's Bridge in (and later Bridge out) records; no secret.
+export const RECORD_KINDS = [
+  'profile',
+  'account',
+  'secret',
+  'coins',
+  'roster',
+  'offer',
+  'job',
+  'settings',
+  'bridge',
+] as const;
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 /** Kinds whose value is a secret: masked until the customer reveals it. */
@@ -67,6 +78,8 @@ export function recordKey(
   const s = normaliseScope(scope);
   const account = opts.account ? opts.account.replace(/^0x/, '').toLowerCase() : '-';
   if (account !== '-' && !ACCOUNT_RE.test(account)) throw new StoreKeyError('bad account address');
+  if (kind === 'bridge' && (account === '-' || id === undefined))
+    throw new StoreKeyError('a bridge record needs an account and an id');
   return `${V1}${s.network}/${s.owner}/${account}/${tail}`;
 }
 
@@ -90,6 +103,9 @@ export function parseKey(key: string): ParsedKey | null {
   if (!network || !NETWORK_RE.test(network) || !owner || !OWNER_RE.test(owner)) return null;
   if (account !== '-' && !ACCOUNT_RE.test(account ?? '')) return null;
   if (!isKind(kind) || rest.length > 0 || (id !== undefined && !ID_RE.test(id))) return null;
+  // AA 00060: a bridge record belongs to one account and has an id (`in-<signature>`); anything else
+  // under that name is foreign.
+  if (kind === 'bridge' && (account === '-' || id === undefined)) return null;
   return {
     scope: { global: false, network, owner, account: account === '-' ? null : account! },
     kind,

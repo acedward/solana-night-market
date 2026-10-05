@@ -62,6 +62,8 @@ import {
   type TrackerStage,
 } from '../design/index.js';
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
+import { useBridges } from '../bridge/BridgeContext.js';
+import { BridgeIn } from '../bridge/in/BridgeIn.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
   awaitChange,
@@ -463,6 +465,8 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
   const wallet = useWallet();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const chain = useChain();
+  // AA 00060 P7: the site's journey registry passed its checks, so Bridge in is offered.
+  const bridging = useBridges().state === 'ready';
   const [job, setJob] = useState<JobView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -538,6 +542,12 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     };
   }, [store, scope, wallet.signing, relay, chain, activity]);
   const dismiss = useCallback(() => setMessage(null), []);
+  // AA 00060 P7 (FR-003): Bridge in's completion is the page's own decode, from a fresh walk.
+  const bridgePageCoins = useCallback(async () => {
+    const e = env();
+    if (!e || !account || !hasSecret) return [];
+    return (await syncAccount(e, account.address)).coins;
+  }, [env, account, hasSecret]);
 
   const sync = useCallback(async () => {
     const e = env();
@@ -864,6 +874,21 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
               )}
             </Panel>
           )}
+          {account && hasSecret && bridging && (
+            <BridgeIn
+              network={network.name}
+              account={account.address}
+              accountCheck={
+                accountCheck.status === 'ok'
+                  ? 'ok'
+                  : accountCheck.status === 'failed' || accountCheck.status === 'error'
+                    ? 'failed'
+                    : 'pending'
+              }
+              pageCoins={bridgePageCoins}
+              busy={!!busy}
+            />
+          )}
           {!account && (
             <Card title="Open your free account" data-testid="no-account">
               <ul className="onboarding">
@@ -991,7 +1016,10 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
               <ul className="onboarding">
                 <li>
                   <strong>Your keys stay in Phantom</strong>
-                  Phantom only signs short messages you can read. Night Market never sends a Solana transaction.
+                  Phantom only signs short messages you can read.{' '}
+                  {bridging
+                    ? 'It signs a Solana transaction only when you bridge tokens in, after the page shows you what it does.'
+                    : 'Night Market never sends a Solana transaction.'}
                 </li>
                 <li>
                   <strong>Private by default</strong>

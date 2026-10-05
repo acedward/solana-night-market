@@ -15,7 +15,7 @@ import { registryFor, shortSolanaAddress, tokensDigest, type NetworkProfile } fr
 import { ActivityProvider } from './activity/ActivityContext.js';
 import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
-import { BridgeNotice, BridgeProvider } from './bridge/BridgeContext.js';
+import { BridgeNotice, BridgeProvider, useBridges } from './bridge/BridgeContext.js';
 import { ChainProvider } from './chain/ChainContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
@@ -334,6 +334,7 @@ function Shell({
   }, []);
   const { status } = useStore();
   const wallet = useWallet();
+  const bridges = useBridges();
   const pending = SECTIONS.find((s) => s.id === section)?.label ?? '';
   const storage = status === 'ok' ? null : storageText(status);
   return (
@@ -365,7 +366,7 @@ function Shell({
         )}
         <main className="wrap app-main">
           {section === 'about' ? (
-            <About networkName={`Midnight ${network.name}`} />
+            <About networkName={`Midnight ${network.name}`} bridging={bridges.state === 'ready'} />
           ) : section === 'local' ? (
             <LocalData network={network.name} />
           ) : section === 'account' ? (
@@ -386,7 +387,7 @@ function Shell({
             </section>
           )}
         </main>
-        <SiteFooter networkName={`Midnight ${network.name}`} />
+        <SiteFooter networkName={`Midnight ${network.name}`} bridging={bridges.state === 'ready'} />
         <ProfileRecorder network={network.name} />
         <SigningPrompt prompts={prompts} activity={activity} timeoutSeconds={config.walletTimeoutSeconds} />
       </div>

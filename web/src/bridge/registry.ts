@@ -9,7 +9,7 @@ import type { SolanaRpcConfig } from '../config.js';
 
 export type BridgeCheck =
   | { state: 'none' }
-  | { state: 'ready'; registry: BridgeRegistry; genesisHash: string }
+  | { state: 'ready'; registry: BridgeRegistry; genesisHash: string; solana: SolanaRpcConfig }
   | { state: 'refused'; reason: string };
 
 /** The Solana RPC's genesis hash (`getGenesisHash`). */
@@ -51,7 +51,7 @@ export async function checkBridges(
       midnightNetwork: PROFILES[network].midnightNetworkId,
       solanaGenesisHash: genesisHash,
     });
-    return { state: 'ready', registry, genesisHash };
+    return { state: 'ready', registry, genesisHash, solana };
   } catch (e) {
     if (!(e instanceof BridgeRegistryError)) throw e;
     const why =

@@ -53,8 +53,8 @@ import { mockSolanaRpc } from '../../../test/mocks/solana-rpc.js';
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
 
-describe('T1.6 I-2 lock codec (PROVISIONAL: 00058 proposal of 2026-10-04)', () => {
-  it('is marked provisional', () => expect(I2_STATUS).toMatch(/^PROVISIONAL/));
+describe('T1.6 I-2 lock codec (FROZEN 2026-10-04, 00058 @ 6c07dab)', () => {
+  it('is marked frozen', () => expect(I2_STATUS).toMatch(/^FROZEN 2026-10-04 \(00058 @ 6c07dab\)/));
 
   it("00058's proposed vector: 500 X at 6 decimals to contract a1×32", () => {
     const data = encodeLockToContract(500_000_000n, new Uint8Array(32).fill(0xa1));

@@ -13,7 +13,7 @@
     "./solana-signature": "./src/solana-signature.ts",
     "./bridge": "./src/bridge/index.ts",
     "./bridge/landing-wallet": "./src/bridge/landing-wallet.ts",
-    "./solana": "./src/solana/tx.ts"
+    "./solana": "./src/solana/index.ts"
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.19.0",

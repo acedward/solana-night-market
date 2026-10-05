@@ -17,3 +17,5 @@ packages/core/test/fixtures/kernel/staging-*/
 test/fixtures/messages-10b29b1.json
 # AA 00060 P4.4: the generator's goldens, exactly what scripts/bridge-tokens.ts writes; never reformat
 test/fixtures/bridge-tokens/*.out.json
+# AA 00060 P7.4: 00058's frozen vectors, copied byte for byte (00058-interfaces.PROVENANCE.md); never reformat
+test/fixtures/00058-interfaces.json

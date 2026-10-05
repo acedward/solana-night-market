@@ -464,6 +464,7 @@ export default function WalletProbe({ config }: { config: SiteConfig }) {
       results,
       landing,
       txs,
+      goldens?.length,
     ],
   );
 

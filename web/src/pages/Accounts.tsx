@@ -64,6 +64,7 @@ import {
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useBridges } from '../bridge/BridgeContext.js';
 import { BridgeIn } from '../bridge/in/BridgeIn.js';
+import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
   awaitChange,
@@ -456,7 +457,16 @@ function SendForm({
   );
 }
 
-export function Accounts({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
+export function Accounts({
+  network,
+  relayUrl,
+  injectorUrl = null,
+}: {
+  network: NetworkProfile;
+  relayUrl: string;
+  /** AA 00060 P8: config.json `injector.url`, for "Show in my wallet". */
+  injectorUrl?: string | null;
+}) {
   const tokens = useTokenRegistry();
   const activity = useActivity();
   const connect = useConnectPrompt();
@@ -886,6 +896,16 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                     : 'pending'
               }
               pageCoins={bridgePageCoins}
+              busy={!!busy}
+            />
+          )}
+          {account && secret && injectorUrl && (
+            <ShowInWallet
+              injectorUrl={injectorUrl}
+              network={network.name}
+              account={account.address}
+              viewingKey={secret.encSecretKey}
+              accountChecked={accountCheck.status === 'ok'}
               busy={!!busy}
             />
           )}

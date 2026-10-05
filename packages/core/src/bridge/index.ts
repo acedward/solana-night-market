@@ -5,7 +5,7 @@
 //   - I-2, the Lock to a contract recipient (./lock-codec.ts; FROZEN 00058 @ 6c07dab) and Bridge in's
 //     transaction (./bridge-in.ts);
 //   - I-3, the bridge's transfer API (./transfers.ts; FROZEN 00058 @ 6c07dab);
-//   - I-4, the injector's account registration (./injector.ts; PROVISIONAL until 00059 P1).
+//   - I-4, the injector's account registration (./injector.ts; FROZEN 2026-10-04 @ 00059 f4d215c).
 // The landing wallet's keys (wallet-sdk-hd + ledger-v9) are the separate entry
 // `@nightmarket/core/bridge/landing-wallet`, loaded only for Bridge out.
 

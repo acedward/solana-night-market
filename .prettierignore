@@ -19,3 +19,5 @@ test/fixtures/messages-10b29b1.json
 test/fixtures/bridge-tokens/*.out.json
 # AA 00060 P7.4: 00058's frozen vectors, copied byte for byte (00058-interfaces.PROVENANCE.md); never reformat
 test/fixtures/00058-interfaces.json
+# AA 00060 P8.2: 00059's frozen I-4 vectors, copied byte for byte (00059-account-registration-vectors.PROVENANCE.md); never reformat
+test/fixtures/00059-account-registration-vectors.json

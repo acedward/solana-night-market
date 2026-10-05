@@ -158,6 +158,9 @@ test('T7.5: the facts before the prompt, one transaction, then 404 → observed 
   await expect(page.getByTestId('bridge-in-fact-amount')).toHaveText('Amount 500000000 base units (500 X)');
   await expect(page.getByTestId('bridge-in-fact-source')).toHaveText(`From your token account ${s.ata}`);
   await expect(page.getByTestId('bridge-in-fact-account')).toHaveText(`To your Night Market account ${ACCOUNT}`);
+  await expect(page.getByTestId('bridge-in-fact-balances')).toHaveText(
+    'Your wallet holds 600 X and 1 SOL (the fee is paid in SOL)',
+  );
   // Nothing was asked of the wallet yet; the footer no longer says the site never sends a transaction.
   expect(txRequests(s.wallet)).toHaveLength(0);
   await expect(page.getByTestId('footer-wallet-bridging')).toContainText('only when you bridge tokens in');

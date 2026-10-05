@@ -260,6 +260,10 @@ export function BridgeIn({
             </li>
             <li data-testid="bridge-in-fact-source">From your token account {f.source}</li>
             <li data-testid="bridge-in-fact-account">To your Night Market account {f.account}</li>
+            <li data-testid="bridge-in-fact-balances">
+              Your wallet holds {formatUnits(check.pre.splBalance, check.entry.decimals)} {check.entry.symbol} and{' '}
+              {formatUnits(check.pre.lamports, 9)} SOL (the fee is paid in SOL)
+            </li>
           </ul>
           {check.pre.note && (
             <Notice tone="info" data-testid="bridge-in-note">

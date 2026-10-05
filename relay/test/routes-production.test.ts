@@ -86,7 +86,10 @@ const KIND: Record<RelayActionName, Kind> = {
   'spl-faucet': 'unsigned',
 };
 /** The signed actions this file walks through (the entitlement and unsigned ones have their own tests). */
-const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => KIND[a] !== 'entitlement' && KIND[a] !== 'unsigned');
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter(
+  // AA 00060 spec FR-028: `cancel-offers` is refused before anything (its own tests below).
+  (a) => KIND[a] !== 'entitlement' && KIND[a] !== 'unsigned' && a !== 'cancel-offers',
+);
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
 class CountingSponsor extends FakeSponsor {
@@ -463,6 +466,39 @@ describe.each(SIGNED_ACTIONS)('POST /v1/actions/%s (production catalogue)', (act
     expect(e.error.code).toBe('sponsor-low');
     sponsor.current = { ...sponsor.current, dustSpecks: 10n ** 20n };
     expect((await post(r, action, b)).status).toBe(202); // the same authorisation still works
+  });
+});
+
+// AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): Night Market does not cancel offers. The
+// relay refuses `cancel-offers` (a rotate_enc_key to the account's own key) FIRST: no nonce, no allowance, no
+// queue slot, no proof, no DUST. "Restore my encryption key" (another key) is unchanged.
+describe('FR-028: offers cannot be cancelled', () => {
+  it('a correctly signed cancel is refused before anything, at no cost to anyone', async () => {
+    const sponsor = new CountingSponsor({
+      configured: true,
+      state: 'synced',
+      synced: true,
+      dustSpecks: 10n ** 20n,
+    } as SponsorStatus);
+    const r = productionRelay({ sponsor, env: { RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN: '1' } });
+    const b = await body(r, 'cancel-offers');
+    for (let i = 0; i < 3; i++) {
+      const res = await post(r, 'cancel-offers', b);
+      expect(res.status, `request ${i + 1}`).toBe(403);
+      const e = (await res.json()) as { error: { code: string; message: string } };
+      expect(e.error.code).toBe('offers-cannot-be-cancelled');
+      expect(e.error.message).toContain('Offer Files');
+    }
+    expect(r.queued()).toBe(0);
+    expect(sponsor.walletCalls).toBe(0);
+    // The owner's allowance was not touched: its next call is accepted.
+    expect((await post(r, 'withdraw', await body(r, 'withdraw'))).status).toBe(202);
+  });
+
+  it('"Restore my encryption key" to another key still works', async () => {
+    const r = productionRelay();
+    expect((await post(r, 'restore-enc-key', await body(r, 'restore-enc-key'))).status).toBe(202);
+    expect(r.queued()).toBe(1);
   });
 });
 

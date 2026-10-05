@@ -162,10 +162,13 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     expect(takeUntil).toBeLessThanOrEqual(nowS() + 600);
   });
 
-  test('Cancel offer: one approval, the chain’s nonce moves, and only then the offer shows Cancelled', async ({
+  // AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): offers cannot be cancelled in Night
+  // Market. No cancel control anywhere; the banner shows the expiry; the offer ends when the chain shows
+  // another call of the account (its nonce moved), and only then it shows Cancelled (ended).
+  test('FR-028: no cancel control; the banner shows the expiry; the offer ends only when the chain shows another call', async ({
     page,
   }) => {
-    const { phantom, relay, indexer } = await setup(page, { seeded: true });
+    const { phantom, relay } = await setup(page, { seeded: true });
     await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
     await connectPhantom(page);
     await expect(holding(page, 'twBTC')).toContainText('0.10');
@@ -173,42 +176,20 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     await page.getByTestId('make-quantity').fill('0.05');
     await page.getByTestId('make-price').fill('60000');
     await page.getByTestId('make-sign').click();
-    await expect(page.getByTestId('live-offer-banner')).toBeVisible();
-    const before = indexer.queries.length;
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('Cancelled: your offer can no longer be taken');
-    expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
-      ['open-swap', 'ok'],
-      ['cancel-offers', 'ok'],
-    ]);
-    // The account's own key, re-affirmed: the call changes nothing but the nonce.
-    expect(relay.submitted[1]!.body.payload).toMatchObject({ newKey: relay.encKey, authNonce: '3' });
-    expect(phantom.requests).toHaveLength(2);
-    // F3 v2 (questions Q30, Q32): the account's own key re-affirmed reads as a cancel, not a key change.
-    expect(lines(phantom.requests[1]!.text).slice(1, 3)).toEqual([
-      'Cancel all open offers',
-      'Your key does not change',
-    ]);
-    expect(relay.authNonce).toBe(4n);
-    expect(indexer.queries.slice(before)).toContain(`state:${ACCOUNT}`); // the chain confirmed it
+    const banner = page.getByTestId('live-offer-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('the expiry you approved');
+    await expect(banner).toContainText('Offers cannot be cancelled');
+    await expect(page.getByTestId('cancel-offer')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /cancel/i })).toHaveCount(0);
+    expect(relay.submitted.map((s) => s.action)).toEqual(['open-swap']);
+    expect(phantom.requests).toHaveLength(1);
+    // Another call of the account landed: once the chain shows it (and no fill), the offer has ended.
+    relay.anotherCallLanded();
+    await page.reload();
+    await connectPhantom(page);
     await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');
     await expect(page.getByTestId('live-offer-banner')).toHaveCount(0);
-  });
-
-  test('a market that cannot cancel yet says so, and the offer stays as it is', async ({ page }) => {
-    const { relay } = await setup(page, { seeded: true });
-    relay.cancelMode = 'not-implemented';
-    await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
-    await connectPhantom(page);
-    await expect(holding(page, 'twBTC')).toContainText('0.10');
-    await page.getByTestId('side-sell').click();
-    await page.getByTestId('make-quantity').fill('0.05');
-    await page.getByTestId('make-price').fill('60000');
-    await page.getByTestId('make-sign').click();
-    await expect(page.getByTestId('live-offer-banner')).toBeVisible();
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('This market cannot cancel offers yet');
-    await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'live');
   });
 });
 

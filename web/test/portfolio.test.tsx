@@ -556,3 +556,46 @@ describe('FR-025: the compact "Your tokens" list', () => {
     await act(async () => root.unmount());
   });
 });
+
+// ── AA 00060 P11 (light review L-B1): a failed read on Midnight is "unavailable", with no total ───────────
+describe('L-B1: after a failed Midnight read, no total from the stale coins', () => {
+  const ok = new Map<string, LineRead>([[X.splMint, { state: 'ok', amount: 90_000n * M }]]);
+
+  it('the Portfolio row: Midnight "unavailable" (why), the Solana line as read, and no total', () => {
+    const [x] = bridgedHoldings([X], coins(), ok, 'the indexer did not answer');
+    expect(x!.midnight).toEqual({
+      state: 'unavailable',
+      why: 'the last read on Midnight failed: the indexer did not answer',
+    });
+    expect(x!.solana).toEqual({ state: 'ok', amount: 90_000n * M });
+    expect(x!.total).toBeNull();
+    // Without a failure, the same coins give the total.
+    expect(bridgedHoldings([X], coins(), ok)[0]!.total).not.toBeNull();
+  });
+
+  it('the compact list: the Solana value alone, marked, never a total', () => {
+    const shielded = [{ colour: X.colour, amount: 10_000n * M }];
+    const [row] = compactRows(shielded, [], [X], ok, () => 0, 'the indexer did not answer') as Array<
+      Extract<ReturnType<typeof compactRows>[number], { kind: 'bridged' }>
+    >;
+    expect(row).toMatchObject({ kind: 'bridged', midnight: null, total: false, value: 90_000n * M });
+    const html = renderToStaticMarkup(<BridgedHolding row={row!} symbol="X" icon={null} />);
+    expect(html).toContain('Midnight unavailable');
+    expect(html).toContain('Midnight: unavailable');
+  });
+
+  it('syncAccount records a failed read, and a later good read clears it', async () => {
+    const { midnightReadFailure, noteMidnightRead, resetMidnightReads } =
+      await import('../src/passport/read-status.js');
+    const { syncAccount } = await import('../src/passport/operations.js');
+    const { LocalStore } = await import('../src/store/store.js');
+    resetMidnightReads();
+    localStorage.clear();
+    const account = '5e'.repeat(32);
+    const env = { store: new LocalStore(localStorage), scope: { network: 'undeployed', owner: '22'.repeat(32) } };
+    await expect(syncAccount(env as never, account)).rejects.toThrow();
+    expect(midnightReadFailure(account)).toMatch(/does not hold the account secret/);
+    noteMidnightRead(account, { ok: true });
+    expect(midnightReadFailure(account)).toBeNull();
+  });
+});

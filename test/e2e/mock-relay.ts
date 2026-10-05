@@ -425,6 +425,17 @@ export class MockRelay {
     }
   }
 
+  /** AA 00060 FR-028 (the page cancels nothing): someone settles the maker's offer this relay holds. */
+  async settleHeldOfferBySomeone(): Promise<void> {
+    await this.settleHeldOffer();
+  }
+
+  /** AA 00060 FR-028: another signed call of the account landed (a withdrawal, say): its nonce moved. */
+  anotherCallLanded(): void {
+    this.authNonce += 1n;
+    this.useCounter += 1n;
+  }
+
   /** The maker's offer this relay holds (the last make), settled by someone: what the chain shows. */
   private async settleHeldOffer() {
     const make = [...this.submitted].reverse().find((x) => x.action === 'open-swap');

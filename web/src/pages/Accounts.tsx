@@ -105,6 +105,7 @@ import {
   type OperationEnv,
 } from '../passport/operations.js';
 import { findAccount, listJobs, readCoins, readSecret } from '../passport/records.js';
+import { useMidnightReadFailure } from '../passport/read-status.js';
 import { useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient, RelayError } from '../relay/client.js';
 import { storageText } from '../store/messages.js';
@@ -122,6 +123,7 @@ const JOB_TITLE: Record<string, string> = {
   'withdraw-unshielded': 'Withdrawing public tokens',
   'append-inbox': 'Saving your change',
   'demo-tokens': 'Delivering your demo tokens',
+  // An older browser's record only: offers cannot be cancelled since AA 00060 FR-028.
   'cancel-offers': 'Cancelling your offer',
   'restore-enc-key': 'Restoring your encryption key',
 };
@@ -472,9 +474,11 @@ export function Accounts({
   // P12.1d (FR-025): ONE Solana read shared with the compact list beside the books (../bridge/
   // SolanaLinesContext.tsx), read again when the account's bridged coins change and on "Refresh balances".
   const { lines: solanaLines, refresh: refreshSolana } = useSolanaHoldings(coins);
+  // P11 (light review L-B1): after a failed refresh on Midnight, its line is "unavailable", with no total.
+  const midnightFailure = useMidnightReadFailure(account && hasSecret ? account.address : null);
   const bridged = useMemo(
-    () => bridgedHoldings(bridgeEntries, hasSecret ? shownCoins : null, solanaLines),
-    [bridgeEntries, hasSecret, shownCoins, solanaLines],
+    () => bridgedHoldings(bridgeEntries, hasSecret ? shownCoins : null, solanaLines, midnightFailure),
+    [bridgeEntries, hasSecret, shownCoins, solanaLines, midnightFailure],
   );
   // FR-023: whether this market hands out demo tokens (action 4), and the open transfers (actions 2, 3).
   const [demoOffered, setDemoOffered] = useState<boolean | null>(null);

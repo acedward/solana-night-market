@@ -176,7 +176,10 @@ export type AuthFailureCode =
   | 'bad-signature'
   | 'wrong-signer'
   | 'unknown-nonce'
-  | 'replayed';
+  | 'replayed'
+  // AA 00060 spec FR-028: a passport call that would only cancel offers (a key rotation to the account's own
+  // key); the relay answers it 403 `offers-cannot-be-cancelled`.
+  | 'offers-cannot-be-cancelled';
 
 export type AuthResult =
   { ok: true; signer: string; message: RelayActionMessage } | { ok: false; code: AuthFailureCode; reason: string };

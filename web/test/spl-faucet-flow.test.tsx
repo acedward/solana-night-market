@@ -115,3 +115,54 @@ describe('the Portfolio seam for Mint Solana tokens', () => {
     expect(byTestId(div, 'mint-solana-offer')!.textContent).toContain('minted to your wallet');
   });
 });
+
+// AA 00060 P11 (light review L-B2): the faucet reads Solana balances on the SAME checked RPC as the Portfolio
+// (`solanaLineRpc`): a site whose Solana RPC is its injector's origin gets "unavailable", and no read is made.
+describe('L-B2: the faucet never reads balances through the RPC injector', () => {
+  it('faucetSolanaRpc: none without bridging; the refusal when the RPC is the injector; else the RPC', async () => {
+    const { faucetSolanaRpc } = await import('../src/bridge/faucet/operations.js');
+    expect(faucetSolanaRpc(null)).toBeNull();
+    expect(faucetSolanaRpc({ refused: 'the site’s Solana RPC is its wallet RPC injector' })).toEqual({
+      refused: 'the site’s Solana RPC is its wallet RPC injector',
+    });
+    const ok = faucetSolanaRpc({ url: 'http://solana-rpc.test/' });
+    expect(ok && 'rpc' in ok).toBe(true);
+  });
+
+  it('mounted under a site whose Solana RPC is its injector: no Solana read, the balances say why', async () => {
+    const { SolanaLinesSource } = await import('../src/bridge/SolanaLinesContext.js');
+    const { BridgeRegistry } = await import('@nightmarket/core/bridge');
+    stubRelay({ serve: true });
+    const relayFetch = globalThis.fetch;
+    const rpcCalls: string[] = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('http://injector.test:8899')) rpcCalls.push(String(input));
+      return relayFetch(input, init);
+    });
+    const entry = {
+      colour: 'ab'.repeat(32),
+      splMint: X,
+      bridgeContract: 'cd'.repeat(32),
+      bridgeProgram: X,
+      bridgeApi: 'http://bridge.test',
+      name: 'Test X',
+      symbol: 'X',
+      decimals: 6,
+    };
+    const ready = {
+      state: 'ready' as const,
+      registry: new BridgeRegistry('undeployed', '11111111111111111111111111111111', [entry]),
+      genesisHash: '11111111111111111111111111111111',
+      solana: { rpcUrl: 'http://injector.test:8899/', cluster: 'solana:localnet', genesisHash: null },
+    };
+    const { div } = await mount(
+      <SolanaLinesSource bridges={ready} walletAddress={WALLET} injectorUrl="http://injector.test:8899">
+        <MintSolanaTokensFlow relayUrl={RELAY} walletAddress={WALLET} />
+      </SolanaLinesSource>,
+    );
+    await settle(200);
+    expect(rpcCalls).toEqual([]);
+    expect(div.textContent).toContain('unavailable (');
+    expect(div.textContent).toContain('injector');
+  });
+});

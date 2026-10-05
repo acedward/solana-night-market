@@ -18,10 +18,11 @@
 // The seam limits are enforced and explained here (Q9, FR-019): one live offer at a time, each
 // payment from one coin (an offer the account cannot pay keeps a greyed Buy or Sell that says why
 // on hover, focus and tap: "Not enough twBTC. You hold 0.10 twBTC.", AA 00044), and a warning
-// before a take cancels a live offer (L-TRD.3). Your own offer stays in the book, marked "Your
-// offer"; it cannot be taken by your own account (AA 00060 P14.0, questions Q9), so its row offers
-// "Cancel your offer" instead. The market's status (plan P4-A error states) pauses the actions it
-// cannot carry out, with the reason, before anything is signed.
+// before a take ends a live offer (L-TRD.3). Your own offer stays in the book, marked "Your offer",
+// with a short note and NO action: your own account cannot take it (AA 00060 P14.0, questions Q9), and
+// offers cannot be cancelled in Night Market (spec FR-028, owner 2026-10-05: they expire; a future Offer
+// Files feature will cancel them for every client). The market's status (plan P4-A error states) pauses
+// the actions it cannot carry out, with the reason, before anything is signed.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
@@ -90,9 +91,9 @@ import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import {
   CREATE_ROW,
-  OWN_OFFER_CANNOT_TAKE,
-  OWN_OFFER_WARNING,
+  OWN_OFFER_NOTE,
   bestPriceText,
+  bookMeta,
   bookTitle,
   createRowHint,
   createRowLabel,
@@ -103,7 +104,7 @@ import {
   type BookHalf,
 } from '../trade/book-view.js';
 import { OPEN_OFFERS_NOTE, madeOfferText, tookOfferText } from '../trade/messages.js';
-import { cancelOffers, guardFor, makeOffer, offerShown, reconcileOffers, takeOffer } from '../trade/operations.js';
+import { guardFor, makeOffer, offerShown, reconcileOffers, takeOffer } from '../trade/operations.js';
 import { liveOffer, readTrades } from '../trade/records.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
 import { useWallet, useWalletName } from '../wallet/WalletContext.js';
@@ -295,8 +296,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmTake, setConfirmTake] = useState<BookEntry | null>(null);
-  // Your own live offer's row, opened to cancel it (FR-027): its offer id.
-  const [confirmOwn, setConfirmOwn] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   const confirmRef = useRef<HTMLDivElement>(null);
   const dismiss = useCallback(() => setMessage(null), []);
@@ -391,8 +390,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
 
   // Bring the review into view when an offer is picked (it opens under the half it belongs to).
   useEffect(() => {
-    if (confirmTake || confirmOwn) confirmRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-  }, [confirmTake, confirmOwn]);
+    if (confirmTake) confirmRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [confirmTake]);
 
   const head = (
     <PageHead
@@ -486,7 +485,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   // Open (or close) a create row; one thing open at a time in the view (FR-026).
   const toggleCreate = (s: TradeSide) => {
     setConfirmTake(null);
-    setConfirmOwn(null);
     if (creating === s) {
       setCreating(null);
       return;
@@ -530,25 +528,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
     }
   };
 
-  // "Cancel offer" (audit C6, questions Q30): one approval, one transaction that moves the account's
-  // nonce, so the offer can never be taken; done when the chain shows it. Also "Cancel your offer" on
-  // your own row in the book (FR-027).
-  const doCancel = () =>
-    void run('cancel', 'cancel-offers', async (e) => {
-      setConfirmOwn(null);
-      const r = await cancelOffers(e, account.address);
-      const tx = `tx ${r.txId.slice(0, 8)}…${r.txId.slice(-6)}`;
-      setMessage({
-        kind: 'ok',
-        // Cancelled only when the chain shows the nonce moved AND the offer was not filled (R2-4).
-        text:
-          r.cancelled > 0
-            ? `Cancelled: your offer can no longer be taken by anyone (${tx}).`
-            : `Done (${tx}): nothing signed before can be used any more. Your offer was taken before the cancel landed; it shows as Filled.`,
-      });
-      refreshBook();
-    });
-
   const submitMake = (ev: FormEvent) => {
     ev.preventDefault();
     if (!legs || !makeFunding?.ok || makeGuard.kind === 'refuse' || paused || refusedAccount) return;
@@ -574,7 +553,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const startTake = (e: BookEntry) => {
     setMessage(null);
     setCreating(null);
-    setConfirmOwn(null);
     setConfirmTake(e);
   };
   const doTake = (e: BookEntry) =>
@@ -646,40 +624,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       </div>
     );
   };
-
-  // Your own live offer, opened from its row (FR-027): the owner's warning, why your own account
-  // cannot take it (P14.0, questions Q9), and the cancel that leaves you with the same tokens.
-  const ownConfirm = (entry: BookEntry) => (
-    <div ref={confirmRef} className="book-review" data-testid="own-offer-confirm" data-offer={entry.offerId}>
-      <p className="panel-intro small">
-        <strong>
-          Your offer: {entry.side === 'ask' ? 'sell' : 'buy'} {amt(entry.baseRaw, base)} {base.symbol} for{' '}
-          {amt(entry.quoteRaw, quote)} {quote.symbol}
-        </strong>
-      </p>
-      <Notice tone="warning" role="alert" className="panel-intro" data-testid="own-offer-warning">
-        {OWN_OFFER_WARNING} {OWN_OFFER_CANNOT_TAKE}
-      </Notice>
-      <ButtonRow stretch>
-        <Button
-          variant="secondary"
-          className="btn-block"
-          data-testid="own-offer-cancel-sign"
-          disabled={!!busy || !!paused || refusedAccount}
-          onClick={doCancel}
-        >
-          {busy === 'cancel' ? 'Cancelling…' : 'Cancel your offer'}
-        </Button>
-        <Button variant="secondary" className="btn-block" onClick={() => setConfirmOwn(null)}>
-          Back
-        </Button>
-      </ButtonRow>
-      <p className="xsmall muted gap-top" data-testid="own-offer-cancel-note">
-        One approval in {walletName.name} ends it on Midnight, so nobody can take it; the market pays the fee. Your
-        tokens stay in your account.
-      </p>
-    </div>
-  );
 
   // The open create row's form (FR-026): the existing make, its validations and "Use the best price".
   const createForm = (s: TradeSide) => {
@@ -779,26 +723,20 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           One approval in {walletName.name} lists your offer on the market; it puts nothing on-chain. Your tokens stay
           in your account until someone takes the whole offer (then it settles on Midnight in one transaction), until it
           expires one hour after you approve: the expiry is part of what you approve, so nobody can take it later.
-          Cancel it sooner with Cancel offer; approving anything else from this account cancels it too.
+          Offers cannot be cancelled: approving anything else from this account ends it too.
         </p>
       </form>
     );
   };
 
-  // One half of the book: its offers (take, or your own: cancel), then its create row (FR-026).
+  // One half of the book: its offers (take, or your own: the badge and a note), then its create row (FR-026).
   const bookHalf = (entries: BookEntry[], kind: BookHalf) => {
     const headId = `trade-book-${kind}-title`;
     const h = halfHeading(kind, pair);
     const makes = CREATE_ROW[kind];
     const formId = `tr-create-${makes}`;
     const open = creating === makes;
-    const review =
-      confirmTake && (confirmTake.side === 'ask') === (kind === 'asks')
-        ? takeConfirm(confirmTake)
-        : (() => {
-            const own = confirmOwn ? entries.find((e) => e.offerId === confirmOwn) : undefined;
-            return own ? ownConfirm(own) : null;
-          })();
+    const review = confirmTake && (confirmTake.side === 'ask') === (kind === 'asks') ? takeConfirm(confirmTake) : null;
     return (
       <div className="book-half" data-testid={`trade-half-${kind}`}>
         <div className="book-side-head">
@@ -829,7 +767,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               const t = takeability(e);
               const what = rowAction(e, trades, live);
               const action = kind === 'asks' ? 'Buy' : 'Sell';
-              const selected = picked === e.offerId || confirmTake?.offerId === e.offerId || confirmOwn === e.offerId;
+              const selected = picked === e.offerId || confirmTake?.offerId === e.offerId;
               return (
                 // One row group per offer.
                 <tbody
@@ -847,28 +785,15 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
                     <td className="num">{amt(e.baseRaw, base)}</td>
                     <td className="num">{amt(e.quoteRaw, quote)}</td>
                     <td className="act">
-                      {what === 'own-live' ? (
-                        // FR-027: your own offer stays in the book; your own account cannot take it
-                        // (P14.0, questions Q9), so it offers the cancel.
+                      {what === 'own' ? (
+                        // FR-027 as amended (questions Q9): your own offer stays in the book; your own
+                        // account cannot take it (P14.0), and offers cannot be cancelled (FR-028): no action.
                         <span className="own-act">
                           <YoursBadge data-testid="own-offer" />
-                          <Button
-                            size="small"
-                            variant="secondary"
-                            data-testid="own-offer-cancel"
-                            disabled={!!busy || !!paused || refusedAccount}
-                            onClick={() => {
-                              setMessage(null);
-                              setCreating(null);
-                              setConfirmTake(null);
-                              setConfirmOwn(e.offerId);
-                            }}
-                          >
-                            Cancel your offer
-                          </Button>
+                          <span className="xsmall muted" data-testid="own-offer-note">
+                            {OWN_OFFER_NOTE}
+                          </span>
                         </span>
-                      ) : what === 'own' ? (
-                        <YoursBadge data-testid="own-offer" />
                       ) : t.funding.ok ? (
                         <Button
                           size="small"
@@ -968,19 +893,10 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           {offerShown(live).listed
             ? `Your offer is listed on the market: ${live.summary}, until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)} (the expiry you approved).`
             : `Your offer is not listed on the market (yet): ${live.summary}. It can still be taken until ${live.validUntil ? deadlineText(live.validUntil) : clock(live.expiresAt)}, the expiry you approved.`}{' '}
-          It is not on-chain: your tokens stay in your account until someone takes it. Any other approval (a take or a
-          withdrawal) cancels it; we ask you first.
-          <ButtonRow className="gap-top">
-            <Button
-              variant="secondary"
-              size="small"
-              data-testid="cancel-offer"
-              disabled={!!busy || !!paused || refusedAccount}
-              onClick={doCancel}
-            >
-              {busy === 'cancel' ? 'Cancelling…' : 'Cancel offer'}
-            </Button>
-          </ButtonRow>
+          It is not on-chain: your tokens stay in your account until someone takes it. Offers cannot be cancelled in
+          Night Market: it ends at that expiry, or sooner if this account approves anything else (a take, a withdrawal,
+          a Bridge out, saving a change or restoring your key); we ask you first. A future Offer Files feature will let
+          every client cancel offers.
         </Notice>
       )}
 
@@ -997,7 +913,6 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               setPairId(e.target.value);
               setPicked(null);
               setConfirmTake(null);
-              setConfirmOwn(null);
               setCreating(null);
             }}
             data-testid="trade-pair"
@@ -1025,7 +940,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
             {quote.symbol}
           </>
         }
-        meta={`prices in ${quote.symbol}`}
+        meta={bookMeta(pair)}
         data-testid="trade-book"
         data-title={bookTitle(pair)}
       >

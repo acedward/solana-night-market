@@ -87,10 +87,16 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: 'Coins are not merged. Solana wallet accounts on a Ledger device are not supported yet.',
   },
   {
-    // AA 00060 FR-027 (plan P14.0, questions Q9).
+    // AA 00060 FR-027 as amended (plan P14.0, questions Q9).
     id: 'own-offer',
     title: 'You cannot take your own offer.',
-    text: 'Your offer stays in the order book, marked "Your offer". Your account cannot take it: the offer and the take would use the same approval, so Midnight would refuse the trade. Cancel it instead; you keep your tokens.',
+    text: 'Your offer stays in the order book, marked "Your offer". Your account cannot take it: the offer and the take would use the same approval, so Midnight would refuse the trade.',
+  },
+  {
+    // AA 00060 spec FR-028 (owner, 2026-10-05).
+    id: 'no-cancel',
+    title: 'Offers cannot be cancelled; they expire.',
+    text: 'An offer ends at the expiry you approved (one hour), or sooner when your account approves anything else (a take, a withdrawal, a Bridge out, saving a change or restoring your key; the page asks you first). A future Offer Files feature will provide cancellation for every client.',
   },
   {
     id: 'wallets',

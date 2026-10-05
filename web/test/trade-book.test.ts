@@ -26,10 +26,9 @@ import {
 
 import { BOOK, PAIRS, STATS, type PairId } from '../../packages/core/test/fixtures/kernel/book.js';
 import { askText, bidText } from '../src/market/view.js';
+import * as bookView from '../src/trade/book-view.js';
 import {
   CREATE_ROW,
-  OWN_OFFER_CANNOT_TAKE,
-  OWN_OFFER_WARNING,
   SELF_TAKE_SUPPORTED,
   bestPriceText,
   bookTitle,
@@ -210,8 +209,10 @@ describe('FR-027: your own offer in the book', () => {
     expect(SELF_TAKE_SUPPORTED).toBe(false);
   });
 
-  it('your live offer offers the cancel; an ended one only the badge; anyone else’s a take', () => {
-    expect(rowAction(entry, [make], { offerId: entry.offerId })).toBe('own-live');
+  // Owner, questions Q9 (2026-10-05): no per-row "Cancel your offer" ("you cannot really cancel an order once
+  // it's placed"). Your own offer, live or ended, is the badge and a note: no action at all.
+  it('your own offer, live or ended, is "own" (the badge and the note, no action); anyone else’s a take', () => {
+    expect(rowAction(entry, [make], { offerId: entry.offerId })).toBe('own');
     expect(rowAction(entry, [make], null)).toBe('own');
     expect(rowAction(entry, [make], { offerId: 'cc'.repeat(32) })).toBe('own');
     expect(rowAction(other, [make], { offerId: entry.offerId })).toBe('take');
@@ -219,11 +220,18 @@ describe('FR-027: your own offer in the book', () => {
     expect(rowAction(entry, [{ role: 'take', offerId: entry.offerId }], null)).toBe('take');
   });
 
-  it('says the owner’s warning, and why your own account cannot take it', () => {
-    expect(OWN_OFFER_WARNING).toBe(
-      'This is your offer. Taking it trades with yourself: you pay the fees and end up with the same tokens.',
+  it('says, in a short note, that you cannot take your own offer', () => {
+    expect((bookView as Record<string, unknown>).OWN_OFFER_NOTE).toBe("You can't take your own offer.");
+  });
+});
+
+describe('questions Q10: the book says which token the amounts and the prices are in', () => {
+  it('"amounts in <base>, prices in <quote>"', () => {
+    const meta = (bookView as Record<string, unknown>).bookMeta as
+      ((p: { base: { symbol: string }; quote: { symbol: string } }) => string) | undefined;
+    expect(typeof meta).toBe('function');
+    expect(meta!({ base: { symbol: 'twUSDC' }, quote: { symbol: 'twBTC' } })).toBe(
+      'amounts in twUSDC, prices in twBTC',
     );
-    expect(OWN_OFFER_CANNOT_TAKE).toContain('cannot take its own offer');
-    expect(OWN_OFFER_CANNOT_TAKE).toContain('Cancel it instead');
   });
 });

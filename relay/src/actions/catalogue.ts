@@ -78,7 +78,18 @@ export interface ActionDefinition {
   /** AA 00060 P10.3 (audit C2): false when the action does not take the account's one-job gate (a
    *  read-only, instant action an unsigned caller may send for any account). Default true. */
   accountGate?: boolean;
+  /** AA 00060 spec FR-028: an action this market no longer offers. The route refuses it FIRST, before
+   *  its body is read, any nonce or allowance is used, or anything is queued, proven or paid. */
+  refused?: { status: 403; code: string; reason: string };
 }
+
+/** AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): the market does not cancel offers. */
+export const OFFER_CANCEL_REFUSED = {
+  status: 403,
+  code: 'offers-cannot-be-cancelled',
+  reason:
+    'Night Market does not cancel offers: an offer ends at its signed expiry, or when the account approves another action. A future Offer Files feature will provide cancellation for every client.',
+} as const;
 
 /** The actions authorised by what their body carries (AA 00060 P6.3), not by a wallet signature. */
 export const ENTITLEMENT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
@@ -97,7 +108,6 @@ export const UNSIGNED_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActio
 
 import {
   appendInboxExecutor,
-  cancelOffersExecutor,
   registerExecutor,
   restoreEncKeyExecutor,
   withdrawExecutor,
@@ -193,10 +203,12 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
   // authorised by its own F3 signature like the other gated calls; the arm's check refuses any key
   // but the on-chain `enc_key` (relay/src/passport/ed25519-arm.ts `cancelKeepsTheKey`), and the key
   // volume keeps the rotate prover key (relay/src/prover/required.ts).
+  // AA 00060 spec FR-028: no longer offered. The route refuses it before anything else (no nonce, no
+  // allowance, no queue slot, no proof, no DUST); "Restore my encryption key" below stays.
   set('cancel-offers', {
     auth: 'passport-call',
     payload: CancelOffersPayloadSchema,
-    executor: cancelOffersExecutor(deps),
+    refused: OFFER_CANCEL_REFUSED,
   });
   // AA 00047 P10 (audit round 2 R2-3, questions Q36): "Restore my encryption key", the same circuit
   // to the BROWSER's key (@nightmarket/core `RestoreEncKeyPayloadSchema`, `restoreEncKeyRequest`), for

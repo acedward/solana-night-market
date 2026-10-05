@@ -2039,13 +2039,33 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
-/* Your own offer's row: the badge, then "Cancel your offer" (FR-027). */
+/* Your own offer's row: the badge, then "Cancel your offer" (FR-027). In a narrow half (a phone)
+   the button's words wrap, so the row never runs past the book's edge. */
 .own-act {
   display: inline-flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   gap: 6px;
+}
+@container (max-width: 400px) {
+  .own-act {
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .own-act .btn {
+    white-space: normal;
+    text-align: center;
+    line-height: 1.2;
+    max-width: 6.5em;
+  }
+}
+/* The ⇄ of "Order book <base> ⇄ <quote>", drawn (not every font has the glyph). */
+.pair-arrow svg {
+  width: 0.95em;
+  height: 0.95em;
+  vertical-align: -0.12em;
+  color: var(--muted);
 }
 /* The spread under the two halves of the book. */
 .spread-line {

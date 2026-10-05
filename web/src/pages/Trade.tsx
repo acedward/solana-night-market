@@ -697,7 +697,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         noValidate
       >
         <p className="panel-intro small muted" data-testid="make-listed-under">
-          {createRowHint(s, pair)} It is listed under {listedUnder(s) === 'asks' ? 'Sellers' : 'Buyers'}.
+          It is listed under {listedUnder(s) === 'asks' ? 'Sellers' : 'Buyers'} once the exchange has it.
         </p>
         <div className="form-grid">
           <Field
@@ -1013,7 +1013,22 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         <PairStats market={state.status === 'ready' ? market : null} quote={quote} />
       </div>
 
-      <Panel title={bookTitle(pair)} meta={`prices in ${quote.symbol}`} data-testid="trade-book">
+      <Panel
+        title={
+          // `Order book <base> ⇄ <quote>` (bookTitle), with the arrow drawn; its accessible name is the text.
+          <>
+            Order book {base.symbol}{' '}
+            <span className="pair-arrow">
+              <Icon name="trade" />
+              <span className="sr-only">⇄</span>
+            </span>{' '}
+            {quote.symbol}
+          </>
+        }
+        meta={`prices in ${quote.symbol}`}
+        data-testid="trade-book"
+        data-title={bookTitle(pair)}
+      >
         {market?.status === 'no-liquidity' && (
           <Notice className="panel-intro" data-testid="trade-no-liquidity">
             No offers yet: nobody is buying or selling {base.symbol} for {quote.symbol} right now. Create the first

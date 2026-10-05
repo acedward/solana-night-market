@@ -106,7 +106,7 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
   await expect(sellQuote).toHaveAttribute('aria-expanded', 'true');
   const form = page.getByTestId('trade-half-asks').getByTestId('make-section');
   await expect(form).toHaveAttribute('data-side', 'buy');
-  await expect(form.getByTestId('make-listed-under')).toContainText('It is listed under Buyers');
+  await expect(form.getByTestId('make-listed-under')).toHaveText('It is listed under Buyers once the exchange has it.');
   await expect(page.getByTestId('make-price')).toHaveValue(/^0\.04/); // the best bid
   await expect(page.getByTestId('make-prefill')).toContainText('Use the best price');
 
@@ -200,4 +200,35 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
   await expect(
     page.getByTestId('trade-book-asks').locator(`[data-offer="${second}"]`).getByTestId('own-offer-cancel'),
   ).toBeVisible();
+});
+
+test.describe('at a 390 px phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test('your own row, its cancel and the create rows fit inside the book', async ({ page }) => {
+    const { ex, relay } = await setup(page, { seeded: true });
+    listMakes(ex, relay);
+    await page.goto(`/${pairHash('twBTC/twUSDC')}`);
+    await connectPhantom(page);
+    await expect(holding(page, 'twUSDC')).toContainText('1,000.00');
+    await page.getByTestId('side-buy').click();
+    await page.getByTestId('make-quantity').fill('0.01');
+    await page.getByTestId('make-price').fill('59000');
+    await page.getByTestId('make-sign').click();
+    await expect(page.getByTestId('trade-message')).toContainText('Your offer is listed on the market');
+    const cancel = page.getByTestId('trade-book-bids').getByTestId('own-offer-cancel');
+    await expect(cancel).toBeVisible();
+    const panel = (await page.getByTestId('trade-book').boundingBox())!;
+    for (const el of [
+      cancel,
+      page.getByTestId('trade-book-bids').getByTestId('own-offer'),
+      page.getByTestId('side-buy'),
+      page.getByTestId('side-sell'),
+    ]) {
+      const b = (await el.boundingBox())!;
+      expect(b.x).toBeGreaterThanOrEqual(panel.x);
+      expect(b.x + b.width).toBeLessThanOrEqual(panel.x + panel.width);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+  });
 });

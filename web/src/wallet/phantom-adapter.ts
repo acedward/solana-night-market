@@ -157,7 +157,8 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
         (t: Uint8Array, c: string, facts?: TransactionFacts): Promise<Uint8Array> =>
           pace(async () => {
             const paused = opts.gate?.() ?? null;
-            if (paused) throw new WalletError('paused', paused);
+            // Refused BEFORE the wallet is called (audit F1): nothing can have been sent.
+            if (paused) throw new WalletError('paused', paused, { beforeCall: true });
             if (facts) opts.prompts.openTransaction(facts, handle.name);
             let signed = false;
             const request = fn(t, c);

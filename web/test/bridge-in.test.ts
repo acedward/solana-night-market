@@ -31,7 +31,7 @@ import {
 } from '../src/bridge/in/operations.js';
 import type { BridgeInRecord } from '../src/bridge/in/records.js';
 import { SolanaRpc } from '../src/bridge/solana-rpc.js';
-import { WalletError } from '../src/wallet/wallet-errors.js';
+import { WalletError, walletErrorFrom } from '../src/wallet/wallet-errors.js';
 import { deploymentRecordOf, mockBridgeApi, transferView } from '../../test/mocks/bridge-api.js';
 import { asFetch } from '../../test/mocks/http.js';
 import { mockSolanaRpc } from '../../test/mocks/solana-rpc.js';
@@ -89,7 +89,9 @@ function setup(opts: { features?: 'both' | 'send' | 'sign' | 'none'; spl?: bigin
     return out;
   };
   const refuse = () => {
-    if (wallet.mode === 'reject') throw new WalletError('rejected');
+    // A wallet's explicit rejection: code 4001 (P10.6, audit F1: only that, or a refusal before the call, is
+    // "never sent").
+    if (wallet.mode === 'reject') throw walletErrorFrom({ code: 4001, message: 'User rejected the request.' }, 'sign');
   };
   const signAndSend = async (tx: Uint8Array, c: string) => {
     wallet.asked.push(`signAndSend ${c}`);

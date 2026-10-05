@@ -88,3 +88,38 @@ test('C8: the confirmation and the wallet panel say the landing key is permanent
   release();
   await expect(page.getByTestId('bridge-out-error')).toBeVisible();
 });
+
+// AA 00060 P12.2 (spec FR-021, session finding S-1): a PARTIAL Bridge out leaves change in the account. The
+// page saves it in the inbox right after tx1, with one more approval, as a withdrawal does, so the injector
+// and other browsers see it; "Save it now" is only the fallback. A whole-coin Bridge out leaves no change
+// and asks for nothing more. The mock market issues no landing entitlement, so the flow stops right after
+// tx1 (and its change) with "no entitlement yet": the second transaction is the stack's to test (T6.5).
+async function bridgeOutThroughTx1(page: Parameters<typeof bridgeSite>[0], amount: string, leavesChange: boolean) {
+  await page.getByTestId('bridge-out-amount').fill(amount);
+  await page.getByTestId('bridge-out-review').click();
+  // The confirmation says when one more approval (the change) follows (P12.3).
+  await expect(page.getByTestId('bridge-out-confirm-change')).toHaveCount(leavesChange ? 1 : 0);
+  await page.getByTestId('bridge-out-send').click();
+  await expect(page.getByTestId('bridge-out-error')).toContainText('no entitlement yet', { timeout: 90_000 });
+}
+
+test('FR-021: a partial Bridge out saves its change in the inbox right after the withdrawal (one more approval)', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const s = await withX(page);
+  await bridgeOutThroughTx1(page, '5', true);
+  expect(s.relay.submitted.map((x) => x.action)).toEqual(['withdraw', 'append-inbox']);
+  // Two landing-key signatures, the withdrawal, and the change's inbox note.
+  expect(s.wallet.requests).toHaveLength(4);
+  await expect(page.getByTestId('unsecured-coin')).toHaveCount(0);
+});
+
+test('FR-021: a whole-coin Bridge out leaves no change and asks for no extra approval', async ({ page }) => {
+  test.setTimeout(120_000);
+  const s = await withX(page);
+  await bridgeOutThroughTx1(page, '7', false);
+  expect(s.relay.submitted.map((x) => x.action)).toEqual(['withdraw']);
+  expect(s.wallet.requests).toHaveLength(3);
+  await expect(page.getByTestId('unsecured-coin')).toHaveCount(0);
+});

@@ -38,8 +38,11 @@ import type { BridgeOutEntitleResult } from '@nightmarket/core/bridge/out';
 import { bridgeReleaseReceiptAddress } from '@nightmarket/core/solana';
 
 import {
+  CHANGE_PENDING,
   JobFailedError,
   OperationError,
+  awaitChange,
+  secureChange,
   syncAccount,
   withdrawToWallet,
   type OperationEnv,
@@ -71,6 +74,8 @@ export interface BridgeOutContext {
   WebSocketImpl?: typeof WebSocket;
   /** Progress words for the panel (no secrets). */
   onProgress?: (text: string) => void;
+  /** A note the customer should read after the flow (AA 00060 P12.2: the change could not be saved yet). */
+  onNote?: (text: string) => void;
 }
 
 export class BridgeOutError extends OperationError {
@@ -117,7 +122,37 @@ export function entitlementExpired(token: string | undefined, nowSeconds = Math.
   return Number.isFinite(exp) && exp <= nowSeconds;
 }
 
-/** tx1: the record first, then ONE approval of the withdrawal to the landing key. */
+/**
+ * AA 00060 P12.2 (spec FR-021, session finding S-1): a PARTIAL Bridge out's change, saved in the inbox right
+ * after tx1, with one more approval, as a withdrawal does (Accounts' send: `awaitChange`, then
+ * `secureChange`). The injector and other browsers then see it. Never fails the Bridge out: if the change
+ * cannot be saved now, the account's "Save it now" item is the fallback, and the note says so.
+ */
+async function saveBridgeOutChange(ctx: BridgeOutContext, account: string, change: StoredCoin): Promise<void> {
+  try {
+    ctx.onProgress?.('Waiting for Midnight to show the change of your withdrawal');
+    const outcome = await awaitChange(ctx.env, account, change.commitment);
+    if (outcome.state === 'pending') {
+      ctx.onNote?.(`${CHANGE_PENDING} Then use "Save it now" under your account.`);
+      return;
+    }
+    if (outcome.state === 'void') {
+      ctx.onNote?.('Midnight shows that the withdrawal to your landing key never happened: nothing left your account.');
+      return;
+    }
+    ctx.onProgress?.('Approve saving the change in your inbox in your wallet (one more approval)');
+    await secureChange(ctx.env, account, outcome.coin);
+    // As Accounts does after saving a change: read the account again, so the page sees the entry.
+    await syncAccount(ctx.env, account);
+  } catch (e) {
+    ctx.onNote?.(
+      `The change of this Bridge out is not saved in your inbox yet (${e instanceof Error ? e.message : 'failed'}). It is kept in this browser: use "Save it now" under your account.`,
+    );
+  }
+}
+
+/** tx1: the record first, then ONE approval of the withdrawal to the landing key; for a partial withdrawal,
+ *  one more approval to save its change (P12.2, FR-021). */
 export async function startBridgeOut(
   ctx: BridgeOutContext,
   master: LandingMaster,
@@ -153,6 +188,7 @@ export async function startBridgeOut(
       ctx.network,
     );
     let r = record;
+    let change: StoredCoin | null = null;
     try {
       const done = await withdrawToWallet(
         ctx.env,
@@ -165,6 +201,7 @@ export async function startBridgeOut(
           onPrepared: () => putBridgeOut(ctx.env.store, ctx.env.scope, o.account, record),
         },
       );
+      change = done.change;
       r = {
         ...record,
         state: 'tx1-sent',
@@ -188,6 +225,8 @@ export async function startBridgeOut(
       throw e;
     }
     putBridgeOut(ctx.env.store, ctx.env.scope, o.account, r);
+    // FR-021: a partial withdrawal left change in the account; save it in the inbox now.
+    if (change) await saveBridgeOutChange(ctx, o.account, change);
     return r;
   } finally {
     keys.clear();

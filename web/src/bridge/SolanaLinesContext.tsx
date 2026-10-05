@@ -25,6 +25,9 @@ interface SolanaLinesValue {
   refresh(): void;
   /** A view's account coins of the bridged colours (`bridgedCoinsKey`). */
   coinsChanged(key: string): void;
+  /** P11 (light review L-B2): the Solana RPC every balance read uses, after the config check
+   *  (`solanaLineRpc`: the site's Solana RPC, never its injector's origin), or null (no bridging). */
+  rpc: { url: string } | { refused: string } | null;
 }
 
 const NONE: SolanaLinesValue = {
@@ -32,6 +35,7 @@ const NONE: SolanaLinesValue = {
   lines: new Map(),
   refresh: () => undefined,
   coinsChanged: () => undefined,
+  rpc: null,
 };
 const Ctx = createContext<SolanaLinesValue>(NONE);
 
@@ -82,16 +86,24 @@ export function SolanaLinesSource({
   const lines = useSolanaLines(rpc, owner, entries, `${refreshes}|${coinsKey ?? ''}`, fetchImpl);
   const refresh = useCallback(() => setRefreshes((n) => n + 1), []);
   const coinsChanged = useCallback((key: string) => setCoinsKey(key), []);
-  const value = useMemo(() => ({ entries, lines, refresh, coinsChanged }), [entries, lines, refresh, coinsChanged]);
+  const value = useMemo(
+    () => ({ entries, lines, refresh, coinsChanged, rpc }),
+    [entries, lines, refresh, coinsChanged, rpc],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 /** The bridged tokens' Solana lines for a view showing `coins` (the account's coins, unfiltered). */
 export function useSolanaHoldings(coins: readonly StoredCoin[]): Omit<SolanaLinesValue, 'coinsChanged'> {
-  const { entries, lines, refresh, coinsChanged } = useContext(Ctx);
+  const { entries, lines, refresh, coinsChanged, rpc } = useContext(Ctx);
   const key = bridgedCoinsKey(coins, entries);
   useEffect(() => {
     if (entries.length > 0) coinsChanged(key);
   }, [key, entries.length, coinsChanged]);
-  return { entries, lines, refresh };
+  return { entries, lines, refresh, rpc };
+}
+
+/** P11 (light review L-B2): the checked Solana RPC (`solanaLineRpc`) for any other Solana balance read. */
+export function useSolanaRpcGuard(): SolanaLinesValue['rpc'] {
+  return useContext(Ctx).rpc;
 }

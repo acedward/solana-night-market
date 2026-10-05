@@ -11,11 +11,12 @@
 // Which create row sits in which half follows the spec's rule and plan P14.1. The owner's own example
 // may mean the other way round (questions Q10): `CREATE_ROW` is the one place that decides it.
 //
-// Your own offer (FR-027): an account cannot take its own offer (P14.0, questions Q9). The make and the
-// take are signed at the same auth nonce and device counter, so in one transaction the second call's
-// device entry is gone and its guaranteed transcript no longer matches; the relay also refuses a call
-// signed ahead of the chain's nonce. So your own live row offers "Cancel your offer" (the on-chain
-// cancel, which leaves you with the same tokens a self-take would), never a take.
+// Your own offer (FR-027 as amended by the owner, questions Q9): an account cannot take its own offer
+// (P14.0). The make and the take are signed at the same auth nonce and device counter, so in one
+// transaction the second call's device entry is gone and its guaranteed transcript no longer matches;
+// the relay also refuses a call signed ahead of the chain's nonce. So your own row shows the "Your offer"
+// badge and a short note, and NO action: no take, and no cancel (the owner: "you cannot really cancel an
+// order once it's placed"; offers cannot be cancelled at all, spec FR-028: they expire).
 
 import type { BookEntry, Market, MarketPair, TradeSide } from '@nightmarket/core';
 
@@ -74,30 +75,28 @@ export function bestPriceText(side: TradeSide, market: Pick<Market, 'asks' | 'bi
 /** Whether this site can take the account's own offer (P14.0: no; questions Q9). */
 export const SELF_TAKE_SUPPORTED = false;
 
-/** The warning the owner asked for, kept for a self-take (FR-027); shown with the reason it cannot. */
-export const OWN_OFFER_WARNING =
-  'This is your offer. Taking it trades with yourself: you pay the fees and end up with the same tokens.';
+/** What your own offer's row says (questions Q9): it has no action. */
+export const OWN_OFFER_NOTE = "You can't take your own offer.";
 
-/** Why your own account cannot take it, and what to do instead (P14.0). */
-export const OWN_OFFER_CANNOT_TAKE =
-  'Your account cannot take its own offer: taking it and the offer itself would use the same approval, so Midnight would refuse the trade. Cancel it instead: you keep your tokens, as a take would leave them.';
+/** The book's line under its title (questions Q10): which token the amounts and the prices are in, so the
+ *  title's order (`<base> ⇄ <quote>`) cannot be misread. */
+export const bookMeta = (pair: Pick<MarketPair, 'base' | 'quote'>): string =>
+  `amounts in ${pair.base.symbol}, prices in ${pair.quote.symbol}`;
 
 /**
- * What a book row offers this account (FR-026, FR-027):
- *   own-live   the account's own offer, the one live now: "Cancel your offer" (a self-take is
- *              impossible, P14.0);
- *   own        the account's own offer that has ended on its side (filled, cancelled, expired, ended)
- *              while the exchange still lists it: the badge only, nothing to do;
- *   take       anyone else's offer: take it (Buy or Sell), if one coin can pay.
+ * What a book row offers this account (FR-026, FR-027 as amended, questions Q9):
+ *   own    the account's own offer, live or ended (the exchange may still list it): the badge and the
+ *          note, NO action (no take: P14.0; no cancel: FR-028);
+ *   take   anyone else's offer: take it (Buy or Sell), if one coin can pay.
  */
-export type RowAction = 'own-live' | 'own' | 'take';
+export type RowAction = 'own' | 'take';
 
 export function rowAction(
   entry: Pick<BookEntry, 'offerId'>,
   trades: readonly Pick<TradeRecord, 'role' | 'offerId'>[],
   live: Pick<TradeRecord, 'offerId'> | null,
 ): RowAction {
-  if (live && live.offerId === entry.offerId) return 'own-live';
+  if (live && live.offerId === entry.offerId) return 'own';
   if (trades.some((t) => t.role === 'make' && t.offerId === entry.offerId)) return 'own';
   return 'take';
 }

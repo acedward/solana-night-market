@@ -258,11 +258,13 @@ export function restoreChangesTheKey(payload: RestoreEncKeyPayload, ledger: Acco
   if (/^0+$/.test(next))
     return { ok: false, code: 'malformed', reason: 'a restore needs an encryption key, not an all-zero value' };
   if (next !== onChain) return null;
+  // AA 00060 spec FR-028: the account's own key again only moves the nonce, i.e. it cancels open offers,
+  // which the market does not do.
   return {
     ok: false,
-    code: 'malformed',
+    code: 'offers-cannot-be-cancelled',
     reason:
-      "this key is already the account's encryption key: there is nothing to restore (to end open offers, use Cancel offer)",
+      "this key is already the account's encryption key: there is nothing to restore, and Night Market does not cancel offers (they expire)",
   };
 }
 

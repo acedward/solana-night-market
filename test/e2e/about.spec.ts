@@ -28,6 +28,7 @@ const LIMITS = [
   'demo-tokens',
   'one-offer',
   'own-offer',
+  'no-cancel',
   'wallets',
   'your-data',
 ];

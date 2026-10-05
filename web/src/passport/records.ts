@@ -44,6 +44,8 @@ export type JobAction =
   | 'open-swap'
   | 'take'
   | 'demo-tokens'
+  /** Kept so an older browser's job record still reads and imports (offer cancels were removed: AA 00060
+   *  spec FR-028). */
   | 'cancel-offers'
   | 'restore-enc-key';
 

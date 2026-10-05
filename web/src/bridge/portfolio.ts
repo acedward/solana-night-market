@@ -9,7 +9,9 @@
 //             injector: an injector adds Midnight tokens to what it reports, so a site whose Solana RPC
 //             is its injector's origin gets "unavailable" (the config check, `solanaLineRpc`).
 //   Total     only when both reads succeeded; otherwise the failing line says "unavailable" and there is
-//             no total. Both amounts use the I-1 entry's decimals (the bridge is 1:1).
+//             no total. Both amounts use the I-1 entry's decimals (the bridge is 1:1). A failed refresh
+//             on Midnight counts as a failed read (P11, light review L-B1): the browser's coins are then
+//             as they were, so they never feed a total (`midnightFailure`, ../passport/read-status.ts).
 //
 // Tokens without a Solana version (not in I-1) are not touched: they keep their rows as before.
 
@@ -50,11 +52,15 @@ export function bridgedHoldings(
   entries: readonly BridgeEntry[],
   coins: readonly StoredCoin[] | null,
   solana: ReadonlyMap<string, LineRead>,
+  /** Why the last read of the account on Midnight failed (L-B1), or null. */
+  midnightFailure: string | null = null,
 ): BridgedHolding[] {
   return entries.map((entry) => {
-    const midnight: MidnightRead = coins
-      ? { state: 'ok', ...midnightBalance(coins, entry.colour) }
-      : { state: 'unavailable', why: 'this browser does not hold your account’s key' };
+    const midnight: MidnightRead = !coins
+      ? { state: 'unavailable', why: 'this browser does not hold your account’s key' }
+      : midnightFailure !== null
+        ? { state: 'unavailable', why: `the last read on Midnight failed: ${midnightFailure}` }
+        : { state: 'ok', ...midnightBalance(coins, entry.colour) };
     const s = solana.get(entry.splMint) ?? { state: 'loading' };
     const total = midnight.state === 'ok' && s.state === 'ok' ? midnight.amount + s.amount : null;
     return { entry, midnight, solana: s, total };
@@ -172,9 +178,10 @@ export type CompactRow =
       kind: 'bridged';
       colour: string;
       entry: BridgeEntry;
-      midnight: bigint;
+      /** The Midnight value, or null when the last read on Midnight failed (L-B1). */
+      midnight: bigint | null;
       solana: LineRead;
-      /** The value shown: the total when the Solana read succeeded, else the Midnight value alone. */
+      /** The value shown: the total when both reads succeeded, else the one line that was read. */
       value: bigint;
       /** Whether `value` is the total (both reads succeeded). */
       total: boolean;
@@ -184,8 +191,9 @@ export type CompactRow =
  * The compact list's rows (FR-025): every token's FULL value, a bridged one as ONE row whose value is the
  * FR-020 total, and only rows whose value is above zero. When the Solana read failed or is still running,
  * a bridged row shows its Midnight value alone (marked by the view), never a total; with no Midnight value
- * either, it is not shown. `shielded` are the chain-confirmed holdings by colour, `unshielded` the public
- * balances; `order` sorts by the market's token order.
+ * either, it is not shown. A failed read on Midnight is the same (P11, L-B1): the row shows the Solana value
+ * alone, marked, never a total. `shielded` are the chain-confirmed holdings by colour, `unshielded` the
+ * public balances; `order` sorts by the market's token order.
  */
 export function compactRows(
   shielded: ReadonlyArray<{ colour: string; amount: bigint }>,
@@ -193,6 +201,7 @@ export function compactRows(
   entries: readonly BridgeEntry[],
   lines: ReadonlyMap<string, LineRead>,
   order: (colour: string) => number,
+  midnightFailure: string | null = null,
 ): CompactRow[] {
   const bridgedColours = new Set(entries.map((e) => e.colour));
   const rows: CompactRow[] = [
@@ -200,16 +209,18 @@ export function compactRows(
       .filter((h) => !bridgedColours.has(h.colour))
       .map((h) => ({ kind: 'shielded' as const, colour: h.colour, amount: h.amount })),
     ...entries.map((entry): CompactRow => {
-      const midnight = shielded.find((h) => h.colour === entry.colour)?.amount ?? 0n;
+      const midnight =
+        midnightFailure !== null ? null : (shielded.find((h) => h.colour === entry.colour)?.amount ?? 0n);
       const solana = lines.get(entry.splMint) ?? { state: 'loading' };
-      const total = solana.state === 'ok';
+      const solanaAmount = solana.state === 'ok' ? solana.amount : null;
+      const total = midnight !== null && solanaAmount !== null;
       return {
         kind: 'bridged',
         colour: entry.colour,
         entry,
         midnight,
         solana,
-        value: total ? midnight + solana.amount : midnight,
+        value: (midnight ?? 0n) + (solanaAmount ?? 0n),
         total,
       };
     }),

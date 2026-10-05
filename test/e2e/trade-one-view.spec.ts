@@ -2,9 +2,10 @@
 // exchange (nothing leaves the page's origin). The Trade page is ONE view of a pair, `Order book
 // <base> ⇄ <quote>`: each half lists the offers you can take and ends with a create row for your own
 // offer, which is listed in the OTHER half once the exchange has it. The "Buy or sell now" and
-// "Create offer" panels are gone. Your own live offer stays in the book, marked "Your offer", and
-// offers "Cancel your offer" with the owner's warning: your own account cannot take it (P14.0,
-// questions Q9). Generic pairs only here (twETH/twBTC, twUSDM/twUSDC): no token is special.
+// "Create offer" panels are gone. Your own offer stays in the book, marked "Your offer", with a short
+// note that you cannot take it and NO action (owner, questions Q9: no per-row "Cancel your offer"); the
+// market-wide "Cancel offer" (00047 Q30) is unchanged. The book says "amounts in <base>, prices in <quote>"
+// (questions Q10). Generic pairs only here (twETH/twBTC, twUSDM/twUSDC): no token is special.
 
 import { expect, test, type Page } from '@playwright/test';
 
@@ -86,7 +87,7 @@ test('FR-026: one view; takes work from both halves (twUSDM/twUSDC)', async ({ p
   expect(phantom.requests).toHaveLength(2);
 });
 
-test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half; your own offer: the warning and "Cancel your offer"', async ({
+test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half; your own offer: the badge and the note, no action', async ({
   page,
 }) => {
   const { ex, relay, phantom } = await setup(page, { seeded: true });
@@ -95,6 +96,8 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
   await connectPhantom(page);
   await expect(holding(page, 'twBTC')).toContainText('0.10');
   await expect(page.getByTestId('trade-book').getByRole('heading', { name: 'Order book twETH ⇄ twBTC' })).toBeVisible();
+  // Questions Q10: which token the amounts and the prices are in, so the title's order cannot be misread.
+  await expect(page.getByTestId('trade-book')).toContainText('amounts in twETH, prices in twBTC');
   await expect(page.getByTestId('trade-book-asks').getByTestId('trade-line')).toHaveCount(0); // nobody is selling
   await expect(page.getByTestId('trade-book-bids').getByTestId('trade-line')).toHaveCount(1);
 
@@ -136,14 +139,15 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
   });
   await expect(page.getByTestId('make-section')).toHaveCount(0); // the row closes once made
 
-  // Listed in the OTHER half: under Buyers, as your offer, with the cancel and no take.
+  // Listed in the OTHER half: under Buyers, as your offer: the badge and the note, no action, no take.
   const offerId = Object.keys(relay.offerStatus)[0]!;
   const mine = page.locator(`[data-testid=trade-line][data-offer="${offerId}"]`);
   await expect(page.getByTestId('trade-book-bids').locator(`[data-offer="${offerId}"]`)).toBeVisible();
   await expect(page.getByTestId('trade-book-asks').locator(`[data-offer="${offerId}"]`)).toHaveCount(0);
   await expect(mine).toHaveAttribute('data-own', 'yes');
   await expect(mine.getByTestId('own-offer')).toHaveText('Your offer');
-  await expect(mine.getByTestId('own-offer-cancel')).toHaveText('Cancel your offer');
+  await expect(mine.getByTestId('own-offer-note')).toHaveText("You can't take your own offer.");
+  await expect(mine.getByRole('button')).toHaveCount(0);
   await expect(mine.getByTestId('take-line')).toHaveCount(0);
 
   // One live offer per account: the other create row refuses a second one.
@@ -156,31 +160,21 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
   await page.getByTestId('make-close').click();
   await expect(page.getByTestId('make-section')).toHaveCount(0);
 
-  // FR-027: your own offer opens the warning and why your account cannot take it; one approval
-  // cancels it on Midnight.
-  await mine.getByTestId('own-offer-cancel').click();
-  const confirm = page.getByTestId('trade-half-bids').getByTestId('own-offer-confirm');
-  await expect(confirm).toBeVisible();
-  await expect(confirm.getByTestId('own-offer-warning')).toContainText(
-    'This is your offer. Taking it trades with yourself: you pay the fees and end up with the same tokens.',
-  );
-  await expect(confirm.getByTestId('own-offer-warning')).toContainText('Your account cannot take its own offer');
-  await expect(confirm.getByTestId('take-sign')).toHaveCount(0);
+  // Offers cannot be cancelled (spec FR-028): no cancel control anywhere; the offer ends at its expiry.
+  await expect(page.getByTestId('cancel-offer')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /cancel/i })).toHaveCount(0);
+  expect(relay.submitted.map((s) => s.action)).toEqual(['open-swap']);
   expect(phantom.requests).toHaveLength(1);
-  await confirm.getByTestId('own-offer-cancel-sign').click();
-  await expect(page.getByTestId('trade-message')).toContainText('Cancelled: your offer can no longer be taken');
-  expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
-    ['open-swap', 'ok'],
-    ['cancel-offers', 'ok'],
-  ]);
-  expect(phantom.requests).toHaveLength(2);
-  await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');
-  await expect(page.getByTestId('live-offer-banner')).toHaveCount(0);
-  // Still listed by the exchange until it lapses there: the badge stays, nothing to do.
-  await expect(mine.getByTestId('own-offer')).toBeVisible();
-  await expect(mine.getByTestId('own-offer-cancel')).toHaveCount(0);
+});
 
-  // The create row under Buyers: "Sell twETH" 0.5 at 0.05, listed under Sellers.
+test('FR-026: the create row under Buyers ("Sell <base>") is listed under Sellers, as your offer with its note', async ({
+  page,
+}) => {
+  const { ex, relay } = await setup(page, { seeded: true });
+  listMakes(ex, relay);
+  await page.goto(`/${pairHash('twETH/twBTC')}`);
+  await connectPhantom(page);
+  await expect(holding(page, 'twBTC')).toContainText('0.10');
   await page.getByTestId('side-sell').click();
   await page.getByTestId('make-quantity').fill('0.5');
   await page.getByTestId('make-price').fill('0.05');
@@ -195,17 +189,17 @@ test('FR-026 + FR-027: both create rows on twETH/twBTC, listed in the other half
     wantColor: COLOUR.twBTC,
     wantAmount: '2500000',
   });
-  const second = Object.keys(relay.offerStatus)[1]!;
-  await expect(page.getByTestId('trade-book-asks').locator(`[data-offer="${second}"]`)).toBeVisible();
-  await expect(
-    page.getByTestId('trade-book-asks').locator(`[data-offer="${second}"]`).getByTestId('own-offer-cancel'),
-  ).toBeVisible();
+  const offerId = Object.keys(relay.offerStatus)[0]!;
+  const mine = page.getByTestId('trade-book-asks').locator(`[data-offer="${offerId}"]`);
+  await expect(mine).toBeVisible();
+  await expect(mine.getByTestId('own-offer-note')).toHaveText("You can't take your own offer.");
+  await expect(mine.getByRole('button')).toHaveCount(0);
 });
 
 test.describe('at a 390 px phone', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test('your own row, its cancel and the create rows fit inside the book', async ({ page }) => {
+  test('your own row, its note and the create rows fit inside the book', async ({ page }) => {
     const { ex, relay } = await setup(page, { seeded: true });
     listMakes(ex, relay);
     await page.goto(`/${pairHash('twBTC/twUSDC')}`);
@@ -216,11 +210,11 @@ test.describe('at a 390 px phone', () => {
     await page.getByTestId('make-price').fill('59000');
     await page.getByTestId('make-sign').click();
     await expect(page.getByTestId('trade-message')).toContainText('Your offer is listed on the market');
-    const cancel = page.getByTestId('trade-book-bids').getByTestId('own-offer-cancel');
-    await expect(cancel).toBeVisible();
+    const note = page.getByTestId('trade-book-bids').getByTestId('own-offer-note');
+    await expect(note).toBeVisible();
     const panel = (await page.getByTestId('trade-book').boundingBox())!;
     for (const el of [
-      cancel,
+      note,
       page.getByTestId('trade-book-bids').getByTestId('own-offer'),
       page.getByTestId('side-buy'),
       page.getByTestId('side-sell'),

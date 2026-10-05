@@ -21,7 +21,7 @@ import {
 import { associatedTokenAddress } from '@nightmarket/core/solana';
 
 import { RelayError, type RelayClient } from '../../relay/client.js';
-import type { SolanaRpc } from '../solana-rpc.js';
+import { SolanaRpc } from '../solana-rpc.js';
 
 export class FaucetError extends Error {
   override name = 'FaucetError';
@@ -129,6 +129,17 @@ export async function claimSolanaTokens(
   if (!r.success || r.data.wallet !== wallet)
     throw new FaucetError('The market answered something unexpected.', 'bad-result');
   return r.data;
+}
+
+/** P11 (light review L-B2): the RPC the faucet's balances are read on: the checked one (`solanaLineRpc`,
+ *  never the injector's origin), or why there is none; null while bridging is not set up. */
+export function faucetSolanaRpc(
+  guard: { url: string } | { refused: string } | null,
+  fetchImpl?: typeof fetch,
+): { rpc: SolanaRpc } | { refused: string } | null {
+  if (!guard) return null;
+  if ('refused' in guard) return { refused: guard.refused };
+  return { rpc: new SolanaRpc(guard.url, fetchImpl) };
 }
 
 /** Each token's balance (base units) in `wallet`'s associated token account, from the site's own Solana RPC;

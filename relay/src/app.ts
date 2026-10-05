@@ -36,7 +36,7 @@ import {
 
 import { AccountGate } from './actions/account-gate.js';
 import type { AdmissionOutcome, JobEnd, PreauthOutcome } from './actions/admission.js';
-import type { ActionDefinition } from './actions/catalogue.js';
+import { OFFER_CANCEL_REFUSED, type ActionDefinition } from './actions/catalogue.js';
 import {
   BUDGET_EXEMPT_ACTIONS,
   countsAgainstBudget,
@@ -324,6 +324,8 @@ export function createApp(deps: AppDeps): Hono {
       const name = c.req.param('action') as RelayActionName;
       const def = (RELAY_ACTIONS as readonly string[]).includes(name) ? deps.catalogue.get(name) : undefined;
       if (!def) return apiError(c, 404, 'not-found', 'no such action');
+      // AA 00060 spec FR-028: an action the market no longer offers costs nothing: refused first.
+      if (def.refused) return apiError(c, def.refused.status, def.refused.code, def.refused.reason);
 
       let body: unknown;
       try {
@@ -417,6 +419,10 @@ export function createApp(deps: AppDeps): Hono {
       }
       if (!outcome.ok) {
         log.info('action refused', { action: def.action, code: outcome.code });
+        // AA 00060 spec FR-028: a rotate to the account's own key is an offer cancel, which the market
+        // does not do; say so plainly (it is not an authorisation failure).
+        if (outcome.code === 'offers-cannot-be-cancelled')
+          return apiError(c, OFFER_CANCEL_REFUSED.status, OFFER_CANCEL_REFUSED.code, outcome.reason);
         return apiError(c, 401, 'unauthorised', outcome.reason, outcome.code);
       }
 

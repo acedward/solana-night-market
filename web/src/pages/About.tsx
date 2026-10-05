@@ -87,10 +87,16 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: 'Coins are not merged. Solana wallet accounts on a Ledger device are not supported yet.',
   },
   {
-    // AA 00060 FR-027 (plan P14.0, questions Q9).
+    // AA 00060 FR-027 as amended (plan P14.0, questions Q9).
     id: 'own-offer',
     title: 'You cannot take your own offer.',
-    text: 'Your offer stays in the order book, marked "Your offer". Your account cannot take it: the offer and the take would use the same approval, so Midnight would refuse the trade. Cancel it instead; you keep your tokens.',
+    text: 'Your offer stays in the order book, marked "Your offer". Your account cannot take it: the offer and the take would use the same approval, so Midnight would refuse the trade.',
+  },
+  {
+    // AA 00060 spec FR-028 (owner, 2026-10-05).
+    id: 'no-cancel',
+    title: 'Offers cannot be cancelled; they expire.',
+    text: 'An offer ends at the expiry you approved (one hour), or sooner when your account approves anything else (a take, a withdrawal, a Bridge out, saving a change or restoring your key; the page asks you first). A future Offer Files feature will provide cancellation for every client.',
   },
   {
     id: 'wallets',
@@ -101,6 +107,46 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     id: 'your-data',
     title: 'Your data lives only in this browser.',
     text: 'Export it on Your data after every change: without it, clearing this browser loses the key that finds your coins.',
+  },
+];
+
+/** AA 00060 P11.3: what bridging cannot promise, in plain words (README "Bridging (AA 00060)"). Shown
+ *  only on a site that bridges. */
+export const BRIDGE_LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
+  {
+    id: 'bridge-landing-key',
+    title: 'The landing-key text is a key.',
+    text: 'Bridge out asks your wallet to sign it twice. The same text always gives the same key for this site, network and wallet, so anyone who gets that signature can take the tokens of your Bridge outs while they are in transit, now and later. Sign it only on this site.',
+  },
+  {
+    id: 'bridge-prover',
+    title: 'The market sees one transfer’s key while it proves.',
+    text: 'To lock your tokens in the bridge, the market proves a transaction with that transfer’s own key, so it could take that one coin in transit. Each transfer has its own key.',
+  },
+  {
+    id: 'bridge-one-coin',
+    title: 'One coin per Bridge out.',
+    text: 'The most you can send at once is your largest coin. Sending only part of a coin asks one more approval, to save the change.',
+  },
+  {
+    id: 'bridge-checking',
+    title: 'A Bridge in may say “Checking Solana”.',
+    text: 'If your wallet’s answer is lost, the page keeps checking Solana for the lock and waits before another Bridge in of that token. Once the request has expired you can stop checking; if the first lock landed after all, bridging in again is a second transfer with a second fee (both arrive in your account).',
+  },
+  {
+    id: 'bridge-rpc',
+    title: 'The site’s Solana RPC is trusted.',
+    text: 'It is trusted to report transactions, history and statuses honestly. A forged or malformed answer can make the page wrongly say nothing was locked, and you may lock a second time into your own account.',
+  },
+  {
+    id: 'bridge-recovery',
+    title: 'Finishing a Bridge out reads the whole chain.',
+    text: 'Finish, Return and Find my transfers read every private transfer on Midnight to find your coin. On a long chain this can be slow, and your tokens wait at your landing key until it ends.',
+  },
+  {
+    id: 'bridge-nightly',
+    title: 'Nightly.',
+    text: 'Nightly joins the lines of the text it shows: read the amounts and the token ids. It shows a new token’s name only after you reopen it.',
   },
 ];
 
@@ -147,7 +193,7 @@ export function About({ networkName, bridging = false }: { networkName: string; 
 
       <Panel title="Known limitations" data-testid="about-limits">
         <ul className="about-limits">
-          {LIMITS.map((l) => (
+          {[...LIMITS, ...(bridging ? BRIDGE_LIMITS : [])].map((l) => (
             <li key={l.id} data-testid="about-limit" data-limit={l.id}>
               <strong>{l.title}</strong> {l.text}
             </li>

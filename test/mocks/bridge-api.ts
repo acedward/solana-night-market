@@ -53,7 +53,9 @@ export function mockBridgeApi(opts: { deployment?: unknown } = {}): MockBridgeAp
     const t = /^\/transfers\/((?:s2m|m2s)(?::|%3A)\d+)$/.exec(url.pathname);
     if (t) {
       const view = transfers.get(decodeURIComponent(t[1]!));
-      return view ? json({ transfer: view }) : json({ error: 'transfer not found', id: decodeURIComponent(t[1]!) }, 404);
+      return view
+        ? json({ transfer: view })
+        : json({ error: 'transfer not found', id: decodeURIComponent(t[1]!) }, 404);
     }
     const r = /^\/recipients\/contract\/([0-9a-f]{64})$/.exec(url.pathname);
     if (r) {

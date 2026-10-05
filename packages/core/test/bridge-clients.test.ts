@@ -134,7 +134,10 @@ describe('T1.6 I-3 client against the mock bridge API', () => {
   });
 
   it("C13: the bridge node's REAL answer (wrapped as {transfer}, recorded live by 00057) is read", async () => {
-    const live = readFileSync(new URL('../../../test/fixtures/00058-live-transfer-s2m-1.json', import.meta.url), 'utf8');
+    const live = readFileSync(
+      new URL('../../../test/fixtures/00058-live-transfer-s2m-1.json', import.meta.url),
+      'utf8',
+    );
     const f = (async () => new Response(live, { status: 200 })) as unknown as typeof fetch;
     const r = await readTransfer('http://bridge', 's2m:1', f);
     expect(r.kind).toBe('view');

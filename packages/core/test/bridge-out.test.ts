@@ -41,7 +41,12 @@ describe('the paid-out nonce against the generated standard library', () => {
         contractState: init.currentContractState.data as never,
         privateState: {},
       } as never);
-      const pd = { input: { value: [], alignment: [] }, output: undefined, publicTranscript: [], privateTranscriptOutputs: [] };
+      const pd = {
+        input: { value: [], alignment: [] },
+        output: undefined,
+        publicTranscript: [],
+        privateTranscriptOutputs: [],
+      };
       const coin = {
         nonce: i === 5 ? new Uint8Array(32).fill(0xff) : det(`nonce ${i}`),
         color: det(`c ${i}`),

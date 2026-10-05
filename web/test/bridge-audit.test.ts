@@ -274,7 +274,11 @@ describe('C7: "Find my transfers" adopts a transfer whose local record is unusab
       ({ authNonce, state: 'tx1-sent', ...o }) as BridgeOutRecord;
     const found = ['1', '2', '3', '4'].map((authNonce) => ({ authNonce, open: true }));
     const records = [
-      rec('1', { state: 'tx1-sent', entitlement: `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.1.${'c'.repeat(64)}` }),
+      // A LIVE entitlement (P10.4 D4: an expired one is adopted again).
+      rec('1', {
+        state: 'tx1-sent',
+        entitlement: `le1.${'a'.repeat(64)}.${'b'.repeat(64)}.9999999999.${'c'.repeat(64)}`,
+      }),
       rec('2', { state: 'failed' }),
       rec('3', { state: 'tx1-signing' }),
     ];

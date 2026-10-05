@@ -128,6 +128,7 @@ for p in sys.stdin.buffer.read().split(b"\0"):
       sha256sum packages/contracts-solana/build/bridge.so
       mkdir -p packages/contracts-midnight/.journey
       cp /harness/bridge-wallets.ts packages/contracts-midnight/.journey/bridge-wallets.ts
+      cp /harness/dust-register.ts packages/contracts-midnight/.journey/dust-register.ts
       cp /harness/solana-shim.ts packages/contracts-solana/.journey-shim.ts
       sha256sum packages/contracts-midnight/.journey/bridge-wallets.ts packages/contracts-solana/.journey-shim.ts
       echo "$PIN" > /work/.aa00057-pin

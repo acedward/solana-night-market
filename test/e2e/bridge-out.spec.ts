@@ -19,7 +19,7 @@ async function withX(page: Parameters<typeof bridgeSite>[0]) {
   const s = await bridgeSite(page);
   // The account holds 7 X (6 decimals) in one coin.
   await s.relay.deposit([{ nonce: '9a'.repeat(32), color: X.colour, value: 7_000_000n }]);
-  await openPortfolio(page);
+  await openPortfolio(page, undefined, 'bridge-out');
   await expect(page.getByTestId('bridge-out-section')).toBeVisible();
   return s;
 }

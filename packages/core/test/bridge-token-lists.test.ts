@@ -19,6 +19,8 @@ import {
 } from '../src/bridge/token-lists.js';
 import { bytesToHex } from '../src/hex.js';
 import { ed25519TokenResolver, renderEd25519Message } from '../src/passport/ed25519.js';
+import { parseJourneyRegistry } from '../src/bridge/registry.js';
+import { siteIconPath } from '../src/tokens/icon.js';
 import { registryFor } from '../src/tokens/registry.js';
 import { tokensDigest } from '../src/tokens/digest.js';
 
@@ -47,7 +49,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'aa00060-bridge-tokens-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe('T4.1 the generator', () => {
-  it('writes the goldens byte for byte (command line)', async () => {
+  it('writes the goldens byte for byte (command line; --icons none: the P4 output)', async () => {
     const site = join(tmp, 'config.json');
     const relay = join(tmp, 'tokens.json');
     writeFileSync(site, readFileSync(join(FIX, 'bridge-tokens/site-config.in.json')));
@@ -62,6 +64,8 @@ describe('T4.1 the generator', () => {
       'X/Y,X/twUSDC',
       '--mode',
       'extend',
+      '--icons',
+      'none',
     ]);
     expect(code).toBe(0);
     expect(readFileSync(site, 'utf8')).toBe(readFileSync(join(FIX, 'bridge-tokens/site-config.out.json'), 'utf8'));
@@ -178,6 +182,99 @@ describe('T4.1 the generator', () => {
     expect(code).toBe(65);
     expect(readFileSync(site, 'utf8')).toBe(before);
     expect(rpc.calls).toEqual(['getGenesisHash', 'getAccountInfo', 'getAccountInfo']);
+  });
+});
+
+describe('P12.1b (FR-022) icons', () => {
+  it('the command line fills in the bundled icons by default: the site gets them, the relay and the digest do not', async () => {
+    const site = join(tmp, 'config-icons.json');
+    const relay = join(tmp, 'tokens-icons.json');
+    writeFileSync(site, readFileSync(join(FIX, 'bridge-tokens/site-config.in.json')));
+    writeFileSync(relay, readFileSync(join(FIX, 'bridge-tokens/relay-tokens.in.json')));
+    const code = await cli([
+      join(FIX, 'journey-registry.undeployed.json'),
+      '--site-config',
+      site,
+      '--relay-tokens',
+      relay,
+      '--pairs',
+      'X/Y,X/twUSDC',
+    ]);
+    expect(code).toBe(0);
+    const out = JSON.parse(readFileSync(site, 'utf8')) as {
+      tokens: { tokens: { symbol: string; icon?: string }[] };
+      bridges: { tokens: { symbol: string; icon?: string }[] };
+    };
+    expect(Object.fromEntries(out.tokens.tokens.map((t) => [t.symbol, t.icon]))).toEqual({
+      twUSDC: 'token-icons/twusdc.png',
+      twBTC: 'token-icons/twbtc.png',
+      X: 'token-icons/x-midnight.png',
+      Y: 'token-icons/y-midnight.png',
+    });
+    expect(Object.fromEntries(out.bridges.tokens.map((t) => [t.symbol, t.icon]))).toEqual({
+      X: 'token-icons/x.png',
+      Y: 'token-icons/y.png',
+    });
+    // The relay's list is the P4 golden, byte for byte; the digest is the same with or without icons.
+    expect(readFileSync(relay, 'utf8')).toBe(readFileSync(join(FIX, 'bridge-tokens/relay-tokens.out.json'), 'utf8'));
+    const golden = read('bridge-tokens/site-config.out.json') as { tokens: unknown };
+    expect(tokensDigest(registryFor('undeployed', out.tokens))).toBe(
+      tokensDigest(registryFor('undeployed', golden.tokens)),
+    );
+    // The site's registry and the bridge registry carry the icons.
+    expect(registryFor('undeployed', out.tokens).bySymbol('X')?.icon).toBe('token-icons/x-midnight.png');
+    expect(parseJourneyRegistry(out.bridges, { midnightNetwork: 'undeployed' }).entries.map((e) => e.icon)).toEqual([
+      'token-icons/x.png',
+      'token-icons/y.png',
+    ]);
+  });
+
+  it('an entry that names an icon keeps it; a symbol without one keeps the text badge', () => {
+    const j = journey();
+    j.tokens[0]!.icon = 'token-icons/own-x.png';
+    const out = bridgeTokenLists({ ...base(), journey: j, icons: { midnight: { y: 'token-icons/y-midnight.png' } } });
+    const tokens = (out.siteConfig.tokens as { tokens: { symbol: string; icon?: string }[] }).tokens;
+    expect(tokens.find((t) => t.symbol === 'Y')?.icon).toBe('token-icons/y-midnight.png');
+    expect(tokens.find((t) => t.symbol === 'twUSDC')?.icon).toBeUndefined();
+    const bridges = (out.siteConfig.bridges as { tokens: { symbol: string; icon?: string }[] }).tokens;
+    expect(bridges.map((b) => b.icon)).toEqual(['token-icons/own-x.png', undefined]);
+  });
+
+  it('only a path on the site’s own origin is an icon; anything else is ignored and never fails the list', () => {
+    for (const ok of ['token-icons/x.png', '/token-icons/x-midnight.png', 'a.svg', 'icons/b_1.webp'])
+      expect(siteIconPath(ok)).toBe(ok);
+    for (const bad of [
+      'https://midnight-solana-token-icons.ac-edward.workers.dev/x.png',
+      '//evil.test/x.png',
+      'data:image/png;base64,AAAA',
+      'javascript:alert(1)',
+      'token-icons/../secret.png',
+      '../x.png',
+      '.hidden.png',
+      'x.png?v=1',
+      'x.gif',
+      'token-icons/x.png#a',
+      '',
+      7,
+      null,
+    ])
+      expect(siteIconPath(bad)).toBeNull();
+    const r = registryFor('undeployed', {
+      mode: 'replace',
+      tokens: [
+        { symbol: 'A', decimals: 6, midnightColour: 'a1'.repeat(32), icon: 'https://cdn.test/a.png' },
+        { symbol: 'B', decimals: 6, midnightColour: 'b1'.repeat(32), icon: 'token-icons/b.png' },
+        { symbol: 'C', decimals: 6, midnightColour: 'c1'.repeat(32) },
+      ],
+    });
+    expect(r.bySymbol('A')?.icon).toBeUndefined();
+    expect(r.bySymbol('B')?.icon).toBe('token-icons/b.png');
+    expect('icon' in r.bySymbol('C')!).toBe(false);
+    const j = journey();
+    j.tokens[0]!.icon = '//cdn.test/x.png';
+    j.tokens[1]!.icon = 'token-icons/y.png';
+    const reg = parseJourneyRegistry(j, { midnightNetwork: 'undeployed' });
+    expect(reg.entries.map((e) => e.icon)).toEqual([undefined, 'token-icons/y.png']);
   });
 });
 

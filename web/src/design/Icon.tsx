@@ -16,6 +16,8 @@ const PATHS = {
   close: 'M6 6l12 12M18 6L6 18',
   check: 'M5 12.5l4.5 4.5L19 7',
   chevron: 'M6 9l6 6 6-6',
+  chevronRight: 'M9 6l6 6-6 6',
+  arrowLeft: 'M19 12H5m6-6l-6 6 6 6',
   logout: 'M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10',
   alert: 'M12 8v5m0 3.5h.01M10.3 4.3L2.9 17a2 2 0 0 0 1.7 3h14.8a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0z',
   info: 'M12 11v6m0-9.5h.01M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z',

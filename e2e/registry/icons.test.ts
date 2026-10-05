@@ -26,7 +26,7 @@ const FIX = join(__dirname, 'fixtures');
 const read = (p: string) => JSON.parse(readFileSync(p, 'utf8'));
 const table = () => parseIconTable(read(join(__dirname, 'token-icons.json')));
 const rec = (w: 'x' | 'y') => read(join(FIX, `standin-${w}.record.json`));
-const BASE = 'https://midnight-solana-token-icons.ac-edward.workers.dev/v2/';
+const BASE = 'https://midnight-solana-token-icons.ac-edward.workers.dev/v3/';
 
 /** Night Market's full token list as the relay's TOKENS_FILE has it after bridge-tokens.ts (P9 run 3's shape). */
 const nmTokens = () => ({

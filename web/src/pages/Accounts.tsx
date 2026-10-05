@@ -86,7 +86,7 @@ import { BridgeOut } from '../bridge/out/BridgeOut.js';
 import { isFinalOut, readBridgeOuts } from '../bridge/out/records.js';
 import { bridgedHoldings, solanaLineRpc, useSolanaLines } from '../bridge/portfolio.js';
 import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
-import { MintSolanaTokensAction } from '../bridge/faucet/MintSolanaTokens.js';
+import { useSplFaucetSeam } from '../bridge/faucet/MintSolanaTokens.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
   awaitChange,
@@ -390,16 +390,20 @@ export function Accounts({
   network,
   relayUrl,
   injectorUrl = null,
-  splFaucet = null,
+  splFaucet: splFaucetGiven,
 }: {
   network: NetworkProfile;
   relayUrl: string;
   /** AA 00060 P8: config.json `injector.url`, for "Show in my wallet". */
   injectorUrl?: string | null;
-  /** AA 00060 FR-024 (plan P13, its own lane): the "Mint Solana tokens" flow; without it the action is
-   *  listed as not available on this market. */
+  /** AA 00060 FR-024 (plan P13): the "Mint Solana tokens" flow. Absent: the relay's own test SPL faucet
+   *  (web/src/bridge/faucet/MintSolanaTokens.tsx `useSplFaucetSeam`), offered when the relay serves it; null:
+   *  none (the action is listed as not available on this market). */
   splFaucet?: SplFaucetSeam | null;
 }) {
+  // AA 00060 P13: the action is enabled only when this market's relay offers its test SPL faucet.
+  const relayFaucet = useSplFaucetSeam(relayUrl);
+  const splFaucet = splFaucetGiven === undefined ? relayFaucet : splFaucetGiven;
   const tokens = useTokenRegistry();
   const activity = useActivity();
   const connect = useConnectPrompt();
@@ -1011,10 +1015,6 @@ export function Accounts({
               busy={!!busy}
             />
           )}
-
-          {/* AA 00060 P13 (FR-024): "Mint Solana tokens"; FR-023's action list (lane 00060-lane-portfolio)
-              takes it over as action 5 (MintSolanaTokensDialog + useSplFaucetOffer). */}
-          {wallet.address && <MintSolanaTokensAction relayUrl={relayUrl} />}
 
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">

@@ -1,16 +1,12 @@
 // "Mint Solana tokens" (AA 00060 P13, spec FR-024): the flow of FR-023's Portfolio action 5.
 //
-//   useSplFaucetOffer(relayUrl, wallet)  whether the market offers it (and why not), for the action's
-//                                        enabled/disabled state ("Not available on this market")
-//   useSplFaucetSeam(relayUrl)           the Portfolio's `splFaucet` seam (lane 00060-lane-portfolio,
-//                                        `SplFaucetSeam` in web/src/account/PortfolioActions.tsx):
-//                                        `{ offered, Flow }`, Flow taking `{ account, walletAddress, onDone }`
-//   <MintSolanaTokensFlow …/>            the flow inline (a sub-page): what you get, the claim, then the result
-//                                        with the transaction signature and the new Solana balance
-//   <MintSolanaTokensDialog open …/>     the same flow in a dialog
-//   <MintSolanaTokensAction …/>          a self-contained entry (a button that opens the dialog, disabled with
-//                                        the reason when not offered), until the Portfolio's action list mounts
-//                                        the flow through the seam
+//   useSplFaucetOffer(relayUrl, wallet)  whether the market offers it (and why not)
+//   useSplFaucetSeam(relayUrl)           the Portfolio's `splFaucet` seam (`SplFaucetSeam` in
+//                                        web/src/account/PortfolioActions.tsx): `{ offered, Flow }`, the action
+//                                        enabled only when the relay offers the faucet, else listed as "Not
+//                                        available on this market"
+//   <MintSolanaTokensFlow …/>            the flow (the action's sub-page): what you get, the claim, then the
+//                                        result with the transaction signature and the new Solana balance
 //
 // The wallet is asked for nothing: the market's faucet key signs and pays. Balances come from the SITE's
 // Solana RPC (config.json `solana`), read before and after the claim.
@@ -19,7 +15,7 @@ import { useCallback, useEffect, useMemo, useState, type ComponentType, type Rea
 
 import { formatUnits, type JobView, type SplFaucetInfo, type SplFaucetResult } from '@nightmarket/core';
 
-import { Button, CopyField, Dialog, Icon, Notice, Panel, shortHex } from '../../design/index.js';
+import { Button, CopyField, Icon, Notice, Panel, shortHex } from '../../design/index.js';
 import { RelayClient } from '../../relay/client.js';
 import { useWallet } from '../../wallet/WalletContext.js';
 import { useBridges } from '../BridgeContext.js';
@@ -291,89 +287,6 @@ export function MintSolanaTokensFlow({
           <ClaimButton f={f} />
         </div>
       )}
-    </Panel>
-  );
-}
-
-/** The flow in a dialog. */
-export function MintSolanaTokensDialog({
-  relayUrl,
-  open,
-  onClose,
-}: {
-  relayUrl: string;
-  open: boolean;
-  onClose(): void;
-}) {
-  const f = useFaucetFlow(relayUrl, undefined, open);
-  const close = () => {
-    if (f.busy) return;
-    f.reset();
-    onClose();
-  };
-  return (
-    <Dialog
-      open={open}
-      title="Mint Solana tokens"
-      onClose={close}
-      testId="mint-solana-dialog"
-      actions={
-        <>
-          <Button variant="secondary" onClick={close} disabled={f.busy} data-testid="mint-solana-close">
-            {f.result ? 'Done' : 'Close'}
-          </Button>
-          {!f.result && <ClaimButton f={f} />}
-        </>
-      }
-    >
-      <FlowBody f={f} />
-    </Dialog>
-  );
-}
-
-/** A self-contained entry for the flow: shown disabled, with the reason, when the market does not offer it. */
-export function MintSolanaTokensAction({ relayUrl }: { relayUrl: string }) {
-  const { availability, info } = useSplFaucetOffer(relayUrl);
-  const [open, setOpen] = useState(false);
-  const tokens = info && info !== 'loading' ? info.tokens : [];
-  const offered = availability.state === 'offered';
-  return (
-    <Panel
-      title={
-        <>
-          <Icon name="spark" className="title-icon" /> Mint Solana tokens
-        </>
-      }
-      tone="quiet"
-      as="aside"
-      data-testid="mint-solana-action"
-      data-state={availability.state}
-    >
-      <p className="xsmall muted">
-        {tokens.length > 0
-          ? `${faucetAmountsText(tokens)} (test tokens) to your Solana wallet. The market pays the fee.`
-          : 'Test tokens to your Solana wallet. The market pays the fee.'}
-      </p>
-      <Button
-        variant="secondary"
-        disabled={!offered}
-        onClick={() => setOpen(true)}
-        data-testid="mint-solana-open"
-        aria-describedby={offered ? undefined : 'mint-solana-unavailable'}
-      >
-        Mint Solana tokens
-      </Button>
-      {availability.state === 'not-offered' && (
-        <p
-          className="small gap-top"
-          id="mint-solana-unavailable"
-          data-testid="mint-solana-unavailable"
-          data-code={availability.code}
-        >
-          Not available on this market.
-        </p>
-      )}
-      <MintSolanaTokensDialog relayUrl={relayUrl} open={open} onClose={() => setOpen(false)} />
     </Panel>
   );
 }

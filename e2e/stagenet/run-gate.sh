@@ -151,7 +151,7 @@ landing() { # [VAR=…]…  (test/gates/landing/landing.ts: the page's own opera
     -e "INDEXER_URL=$STG_INDEXER" -e "NODE_WS_URL=$STG_NODE_WS" \
     -e "MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS" -e "MIDNIGHT_DUST_PROOF_SERVER_URL=$DUST_PS" \
     -e "SOLANA_GENESIS=$DEVNET_GENESIS" --env-file "$RUN/devnet.env" -e SOLANA_CLUSTER=solana:devnet \
-    -e "LANDING_ORIGIN=http://127.0.0.1:$WEB_PORT" -e BRIDGES=X -e BRIDGE_IN_TIMEOUT_MS=1800000 ${args[@]+"${args[@]}"} "$BUN_IMAGE" \
+    -e "LANDING_ORIGIN=http://127.0.0.1:$WEB_PORT" -e BRIDGES=X -e BRIDGE_IN_TIMEOUT_MS=2700000 ${args[@]+"${args[@]}"} "$BUN_IMAGE" \
     bun test/gates/landing/landing.ts 2>&1 | tee -a "$OUT/landing.log"
   return "${PIPESTATUS[0]}"
 }

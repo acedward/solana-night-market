@@ -3048,3 +3048,60 @@ a.portfolio-action:hover {
   color: var(--link);
   font-weight: 600;
 }
+
+/* ── AA 00060 FR-025: a bridged token in the compact "Your tokens" list (expands to its two versions) ── */
+.holdings-list li.holding-bridged {
+  display: block;
+}
+.holding-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.holding-toggle:hover .sym {
+  color: var(--link);
+}
+.holding-chevron {
+  flex: none;
+  color: var(--slate);
+  transition: transform 0.15s ease;
+}
+.holding-chevron.is-open {
+  transform: rotate(180deg);
+}
+.holdings-list .holding-versions {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 calc(24px + var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.holdings-list .holding-versions[hidden] {
+  display: none;
+}
+.holdings-list .holding-versions > li {
+  display: block;
+  padding: 0;
+  border: 0;
+  color: var(--slate);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.holding-mint {
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .holding-chevron {
+    transition: none;
+  }
+}

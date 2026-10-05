@@ -295,8 +295,13 @@ start_relay() {
   fi
   docker volume create "$CP-relay-data" >/dev/null
   docker rm -f "$CP-relay" >/dev/null 2>&1
-  docker run -d --name "$CP-relay" --network "$NET" --network-alias relay -p "127.0.0.1:$RELAY_PORT:8080" \
-    --restart unless-stopped --memory 4g --pull=never -e HOME=/tmp -e RELAY_NETWORK=stagenet -e TOKENS_FILE=/run/nm/tokens.json \
+  # The relay just removed was the only one using this data volume, so any lock left in it is stale (run 3: the
+  # preview's relay left its demo-claims lock and the new relay refused to start). A fixed host name lets a
+  # recreated relay take over its own locks; no restart policy (a restart kept its own container-local
+  # funding lock and looped).
+  docker run --rm --pull=never -v "$CP-relay-data:/d" "$BUN_IMAGE" sh -c 'rm -f /d/*.lock' >/dev/null 2>&1
+  docker run -d --name "$CP-relay" --hostname relay --network "$NET" --network-alias relay -p "127.0.0.1:$RELAY_PORT:8080" \
+    --memory 4g --pull=never -e HOME=/tmp -e RELAY_NETWORK=stagenet -e TOKENS_FILE=/run/nm/tokens.json \
     -e BRIDGE_REGISTRY_FILE=/run/nm/journey-tokens.stagenet.json \
     -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
     -e "MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS" -e "MIDNIGHT_DUST_PROOF_SERVER_URL=$DUST_PS" \
@@ -403,7 +408,16 @@ gate() {
     trap 'rc=$?; trap - EXIT; teardown; say "gate exit $rc"; exit $rc' EXIT
     T0=$(date +%s)
     mark gate start
-    rm -rf "$PREVIEW_DIR/gate"; mkdir -p "$PREVIEW_DIR/gate"; RUN="$PREVIEW_DIR/gate"; chmod 700 "$RUN"
+    # A bridge node X already running on the preview keeps running (its Solana sync takes long to catch up
+    # from Initialize, and a restart starts it over): its run directory, secrets and API port are reused.
+    REUSE_NODE=0
+    if [[ -f "$PREVIEW_DIR/gate/x.env" && -n "$(docker ps -q --filter "label=com.docker.compose.project=$CP-x")" ]]; then
+      REUSE_NODE=1
+      say "reusing the running bridge node X (its sync continues)"
+    else
+      rm -rf "$PREVIEW_DIR/gate"
+    fi
+    mkdir -p "$PREVIEW_DIR/gate"; RUN="$PREVIEW_DIR/gate"; chmod 700 "$RUN"
   else
   # The stack lock: wait politely; never remove another holder's lock.
   local waited=0
@@ -431,7 +445,7 @@ gate() {
   cp "$CONF/stagenet/temporary-12.seed" "$RUN/secrets-x/midnight-delivery.seed"
   # midnight-js's private-state password policy (validatePassword: >= 16 characters, >= 3 of upper/lower/
   # digit/special, no long repeats, no sequences); run 2 stopped on a lowercase-hex password (2 classes).
-  python3 - >"$RUN/secrets-x/storage-password" <<'PY'
+  [[ -s "$RUN/secrets-x/storage-password" ]] || python3 - >"$RUN/secrets-x/storage-password" <<'PY'
 import re, secrets, string
 alphabet = string.ascii_letters + string.digits + "-_.!"
 def ok(p):
@@ -457,6 +471,7 @@ PY
       "$DEVNET" "$RUN/secrets-x/solana-operator.json" >"$RUN/solana-cli.yml"
     printf 'SOLANA_DEVNET_RPC_URL=%s\nSOLANA_RPC_URL=%s\n' "$DEVNET" "$DEVNET" >"$RUN/devnet.env"
     printf '%s\n' "$DEVNET" >"$RUN/secrets-x/solana-rpc-url" )
+  rm -rf "$RUN/keys-relay" "$RUN/keys-harness" "$RUN/ps-params" "$RUN/ps8-params"
   cp -Rc "$KEYS_SRC" "$RUN/keys-relay"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-relay/bridge"
   cp -Rc "$KEYS_SRC" "$RUN/keys-harness"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-harness/bridge"
   cp -Rc "$PS_PARAMS_SRC" "$RUN/ps-params"; cp -Rc "$PS8_PARAMS_SRC" "$RUN/ps8-params"
@@ -464,6 +479,10 @@ PY
   FUNDER="$(pub "$CONF/devnet/funder.json")"
   RELAY_PORT=$(free_port); X_API_PORT=$(free_port); WEB_PORT=$(free_port)
   [[ "${ATTACH:-}" == preview ]] && WEB_PORT="$(cat "$PREVIEW_DIR/web-port")"
+  if [[ "${REUSE_NODE:-0}" == 1 ]]; then
+    X_API_PORT="$(sed -n 's/^BRIDGE_API_PORT=//p' "$RUN/x.env")"
+    RELAY_PORT="$(docker port "$CP-relay" 8080 2>/dev/null | sed -n 's/.*://p' | head -1)"; [[ -n "$RELAY_PORT" ]] || RELAY_PORT=$(free_port)
+  fi
   { echo "night-market $(git -C "$ROOT" rev-parse HEAD)$( [[ -n "$(git -C "$ROOT" status --porcelain)" ]] && echo ' (dirty)')"
     echo "00058 $(git -C "$BRIDGE_WT" rev-parse HEAD)"; echo "relay-image $RELAY_IMAGE $(docker image inspect "$RELAY_IMAGE" --format '{{.Id}}')"
     echo "step-image $(docker image inspect "$STEP_IMAGE" --format '{{.Id}}')"
@@ -706,6 +725,31 @@ PY
   echo "X on A's wallet: $(spl balance --address "$ataA" 2>/dev/null)" | tee "$OUT/wallet-a-x.txt"
   snapshot funded
 
+  # ── the node's Solana sync must be near devnet's tip before the lock (it started from Initialize) ──
+  say "==== waiting for bridge node X's Solana sync to reach devnet's tip"
+  mark node-catch-up start
+  local waited_s=0 lag=""
+  while :; do
+    lag="$(DEVNET_URL="$DEVNET" python3 - "http://127.0.0.1:$X_API_PORT/block-heights" <<'PY'
+import json, os, sys, urllib.request
+try:
+    bh = json.load(urllib.request.urlopen(sys.argv[1], timeout=10))
+    node = next(int(r["synced_page"]) for r in bh if "olana" in r["protocol_name"])
+    req = urllib.request.Request(os.environ["DEVNET_URL"], data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": [{"commitment": "confirmed"}]}).encode(), headers={"content-type": "application/json"})
+    tip = json.load(urllib.request.urlopen(req, timeout=10))["result"]
+    print(tip - node)
+except Exception:
+    print("")
+PY
+)"
+    printf '{"t":%s,"lagSlots":"%s"}\n' "$(date +%s)" "$lag" >>"$OUT/node-catch-up.jsonl"
+    [[ -n "$lag" ]] && (( lag <= 150 )) && break
+    (( waited_s >= ${NODE_SYNC_WAIT_S:-5400} )) && fail "bridge node X's Solana sync is still $lag slots behind devnet after $waited_s s"
+    (( waited_s % 300 == 0 )) && say "node X is $lag slots behind devnet's tip"
+    sleep 30; waited_s=$((waited_s + 30))
+  done
+  mark node-catch-up end
+
   # ── 6. (a) 1 X in ──
   say "==== 6. (a) A's page bridges 1 X in (delivered into account A)"
   mark a start
@@ -837,10 +881,26 @@ faucet_x() {
   echo "faucet: $(head -c 400 "$OUT/spl-faucet-info.json")"
 }
 
+# relay-restart (ATTACH=preview, after a gate ran on the preview): the preview's relay again, with the gate's
+# configuration (bridge X; the SPL faucet if faucet-x ran). No transaction.
+relay_restart() {
+  RUN="$PREVIEW_DIR/gate"; CP=aa00057-preview; NET="$CP-net"
+  [[ -f "$RUN/x.env" ]] || { echo "no gate state in $RUN" >&2; exit 1; }
+  [[ "$(cut -d' ' -f1-4 "$LOCK/holder" 2>/dev/null)" == "00057 P5R preview for" ]] || { echo "the stack lock is not the preview's" >&2; exit 1; }
+  DUST_PS=http://proof-server-dust:6300; CONTRACT_PS=http://proof-server-contracts:6300
+  DEMO_PACK="${DEMO_PACK:-twUSDC:1000,twBTC:0.1}"
+  RELAY_IMAGE="$(cat "$STATE_ROOT/relay-image")"
+  RELAY_PORT="$(docker port "$CP-relay" 8080 2>/dev/null | sed -n 's/.*://p' | head -1)"; [[ -n "$RELAY_PORT" ]] || RELAY_PORT=$(free_port)
+  start_relay || { echo "relay start" >&2; exit 1; }
+  relay_synced >/dev/null || { docker logs "$CP-relay" 2>&1 | tail -5 | cut -c1-300; echo "the relay did not sync" >&2; exit 1; }
+  echo "relay up (sponsor synced), 127.0.0.1:$RELAY_PORT"
+}
+
 case "$CMD" in
   prep) prep ;;
   gate) gate ;;
   faucet-x) faucet_x ;;
+  relay-restart) relay_restart ;;
   rpc-check) rpc_check ;;
-  *) echo "usage: $0 prep|gate|faucet-x|rpc-check" >&2; exit 64 ;;
+  *) echo "usage: $0 prep|gate|faucet-x|relay-restart|rpc-check" >&2; exit 64 ;;
 esac

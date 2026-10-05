@@ -82,8 +82,9 @@ PY
     --restart on-failure:5 --pull=never -e PORT=6300 -e MIDNIGHT_PP=/params -v "$DIR/ps8-params:/params" "$PS8_IMAGE" >/dev/null \
     || die "rc.8 prover"
   docker volume create "$P-relay-data" >/dev/null
-  docker run -d --name "$P-relay" --network "$NET" --network-alias relay --memory 4g --pull=never \
-    --restart unless-stopped -e HOME=/tmp -e RELAY_NETWORK=stagenet \
+  docker run --rm --pull=never -v "$P-relay-data:/d" "$BUN_IMAGE" sh -c 'rm -f /d/*.lock' >/dev/null 2>&1
+  docker run -d --name "$P-relay" --hostname relay --network "$NET" --network-alias relay --memory 4g --pull=never \
+    -e HOME=/tmp -e RELAY_NETWORK=stagenet \
     -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
     -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-contracts:6300 \
     -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server-dust:6300 \

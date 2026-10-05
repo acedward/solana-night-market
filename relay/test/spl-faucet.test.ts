@@ -43,6 +43,7 @@ import { FaucetKeysError, modeTooOpen, parseFaucetKeys, secretForms, type Faucet
 import { FaucetSolanaRpc, type FaucetFetch } from '../src/faucet/solana-rpc.js';
 import { FaucetConfigError, SplFaucet, claimInstructions, faucetTokens } from '../src/faucet/spl-faucet.js';
 import { Redactor, createLogger } from '../src/log.js';
+import { keysFileText, planKeysFile } from '../src/tools/spl-faucet-keys.js';
 import { harness, newWallet, post, signedBody, silentLog } from './harness.js';
 
 const DAY = 86_400;
@@ -546,6 +547,11 @@ describe('the test SPL faucet: once per wallet per period', () => {
       status: 409,
       code: 'spl-faucet-pending',
     });
+    // Sent at the same moment (both still awaiting their checks): exactly one is admitted.
+    const other = randomAddress();
+    const both = await Promise.all([s.faucet.admit({ wallet: other }, 'c3'), s.faucet.admit({ wallet: other }, 'c4')]);
+    expect(both.map((o) => o.ok).sort()).toEqual([false, true]);
+    expect(both.find((o) => !o.ok)).toMatchObject({ status: 409, code: 'spl-faucet-pending' });
   });
 
   it('a refused send (preflight) mints nothing and gives the claim back', async () => {
@@ -845,5 +851,32 @@ describe('the test SPL faucet: configuration', () => {
     expect(modeTooOpen(statSync(f).mode)).toBe(false);
     chmodSync(f, 0o644);
     expect(modeTooOpen(statSync(f).mode)).toBe(true);
+  });
+});
+
+describe('the harness tool (relay/src/tools/spl-faucet-keys.ts, P13.3)', () => {
+  it('matches each registry mint to the keypair that is its on-chain authority, and the file loads', async () => {
+    const ch = mockChain();
+    const k = { x: newKey(), y: newKey(), mx: randomAddress(), my: randomAddress() };
+    ch.rpc.accounts.set(k.mx, { owner: TOKEN_PROGRAM_ID, data: mintData(k.x.publicKey, 6) });
+    ch.rpc.accounts.set(k.my, { owner: TOKEN_PROGRAM_ID, data: mintData(k.y.publicKey, 9) });
+    const journey = {
+      midnightNetwork: 'undeployed',
+      solanaGenesisHash: ch.rpc.genesisHash,
+      tokens: [entry('X', k.mx, 6), entry('Y', k.my, 9)],
+    };
+    const rpc = new FaucetSolanaRpc('http://solana-rpc.test', ch.fetch);
+    // Given in any order, with an unrelated key too.
+    const plan = await planKeysFile({ journey, keypairs: [newKey().secretKey, k.y.secretKey, k.x.secretKey], rpc });
+    expect(plan.missing).toEqual([]);
+    expect(plan.report).toEqual([`X ${k.mx}: authority ${k.x.publicKey}`, `Y ${k.my}: authority ${k.y.publicKey}`]);
+    for (const f of [...secretForms(k.x), ...secretForms(k.y)]) expect(plan.report.join('\n')).not.toContain(f);
+    const loaded = parseFaucetKeys(keysFileText(plan.keys), new Set([k.mx, k.my]));
+    expect(loaded.get(k.mx)?.publicKey).toBe(k.x.publicKey);
+    expect(loaded.get(k.my)?.publicKey).toBe(k.y.publicKey);
+    // Without Y's authority: Y is missing (the CLI refuses, exit 65, unless --allow-partial).
+    const partial = await planKeysFile({ journey, keypairs: [k.x.secretKey], rpc });
+    expect(partial.missing).toEqual([k.my]);
+    expect([...partial.keys.keys()]).toEqual([k.mx]);
   });
 });

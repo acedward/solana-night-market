@@ -108,11 +108,11 @@ export class SplFaucetClaims {
     return r ? { ...r } : undefined;
   }
 
-  /** Records whose period has not ended (any state): the faucet's claims this period. */
+  /** Records made in the current period (any state): the faucet's claims this period. */
   countInPeriod(): number {
     const cutoff = this.now() - this.o.periodSeconds;
     let n = 0;
-    for (const r of this.claims.values()) if (r.state !== 'claimed' || r.at > cutoff) n++;
+    for (const r of this.claims.values()) if (r.at > cutoff) n++;
     return n;
   }
 

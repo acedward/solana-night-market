@@ -99,8 +99,8 @@ export function faucetErrorText(e: unknown): string {
   return e instanceof Error ? e.message : 'The faucet could not mint your tokens.';
 }
 
-/** What the faucet answers for `wallet` (null: this relay does not serve it). */
-export const faucetOffer = (relay: RelayClient, wallet: string): Promise<SplFaucetInfo | null> =>
+/** What the faucet answers, for `wallet` when given (null: this relay does not serve it). */
+export const faucetOffer = (relay: RelayClient, wallet?: string): Promise<SplFaucetInfo | null> =>
   relay.splFaucetInfo(wallet);
 
 /** Claim the faucet's tokens for `wallet`: one request (no wallet prompt), then the job to its end. */

@@ -363,6 +363,22 @@ export class SplFaucet {
         code: R.badWallet,
         reason: 'the wallet is not a Solana address (base58, 32 bytes)',
       };
+    // Held from here, before the first await: a second request for the same wallet is refused while this
+    // one is admitted (or checked), so two claims can never both reserve it.
+    if (this.inFlight.has(wallet))
+      return { ok: false, status: 409, code: R.pending, reason: 'a claim for this wallet is in progress; wait for it' };
+    this.inFlight.set(wallet, client);
+    let admitted = false;
+    try {
+      const out = await this.admitHeld(wallet, client);
+      admitted = out.ok;
+      return out;
+    } finally {
+      if (!admitted) this.inFlight.delete(wallet);
+    }
+  }
+
+  private async admitHeld(wallet: string, client: string): Promise<AdmissionOutcome> {
     const s = await this.fresh();
     if (s.kind !== 'ready') {
       const reason: SplFaucetOffReason = s.kind === 'off' ? s.reason : 'unavailable';
@@ -374,8 +390,6 @@ export class SplFaucet {
         detail: reason,
       };
     }
-    if (this.inFlight.has(wallet))
-      return { ok: false, status: 409, code: R.pending, reason: 'a claim for this wallet is in progress; wait for it' };
     let r = this.o.claims.get(wallet);
     if (r && r.state !== 'claimed') {
       let settled: Awaited<ReturnType<SplFaucet['reconcile']>>;
@@ -394,6 +408,7 @@ export class SplFaucet {
         };
       r = this.o.claims.get(wallet);
     }
+    // From here to the reservation nothing awaits: the caps are checked and charged in one step.
     const now = this.now();
     if (r && r.state === 'claimed' && r.at + this.o.periodSeconds > now) {
       const wait = r.at + this.o.periodSeconds - now;
@@ -429,7 +444,6 @@ export class SplFaucet {
     }
     const at = now;
     this.byClient.set(client, [...(this.byClient.get(client) ?? []), at]);
-    this.inFlight.set(wallet, client);
     let released = false;
     return {
       ok: true,
@@ -485,10 +499,8 @@ export class SplFaucet {
       try {
         ctx.stage('checking');
         const s = await this.verifyChain();
-        if (s.kind !== 'ready') {
-          this.state = s;
-          throw new PublicError(R.off, `${OFF_TEXT[s.reason]}. Nothing was minted`);
-        }
+        if (!(this.state.kind === 'off' && this.state.final)) this.state = s;
+        if (s.kind !== 'ready') throw new PublicError(R.off, `${OFF_TEXT[s.reason]}. Nothing was minted`);
         const accounts = await Promise.all(
           this.tokens.map(async (t) => {
             const tokenAccount = associatedTokenAddress(wallet, t.entry.splMint);

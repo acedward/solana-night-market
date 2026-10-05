@@ -342,7 +342,9 @@ gate() {
   docker run --rm --pull=never --memory 256m -v "$TMPL_VOLUME:/work" -v "$P5R/deployments:/d:ro" "$STEP_IMAGE" sh -c \
     "mkdir -p $TROOT/deployments; for f in /d/$DEPLOYMENT.json /d/$DEPLOYMENT.record.json; do [ -f \"\$f\" ] && cp \"\$f\" $TROOT/deployments/; done; ls $TROOT/deployments" \
     >"$OUT/deployments-restored.txt" 2>&1 || fail "restore the deployment files"
-  if "$AGAVE/solana" program show "$X_PROGRAM" --url "$DEVNET" >"$OUT/program-show-before.txt" 2>&1; then
+  # The program account exists = deployed (`solana program show` needs a default signer on this host, so it
+  # cannot tell; run 1 found that). deploy-devnet.ts then checks its upgrade authority is x-operator.
+  if "$AGAVE/solana" account "$X_PROGRAM" --url "$DEVNET" >"$OUT/program-account-before.txt" 2>&1; then
     say "program $X_PROGRAM already deployed (kept)"
   else
     local l0; l0="$(sol_balance "$X_OPERATOR")"

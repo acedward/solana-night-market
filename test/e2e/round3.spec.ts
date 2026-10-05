@@ -38,7 +38,7 @@ test.describe('R3-1: the page checks where its new account came from', () => {
   }) => {
     const { relay, indexer, phantom } = await setup(page);
     indexer.tamper = { roundBomb: true };
-    await page.goto('/#account');
+    await page.goto('/#account?action=mint-midnight');
     await connectPhantom(page);
     await page.getByTestId('open-account').click();
     await expect(page.getByTestId('accounts-message')).toContainText("does not pass this site's checks");
@@ -140,7 +140,7 @@ test.describe('Q46: the withdrawal allowance is explained only once it is used u
     page,
   }) => {
     const { relay, phantom } = await setup(page, { seeded: true });
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     // Before any refusal the page says nothing about an allowance.
@@ -182,7 +182,7 @@ test.describe('Q46: the withdrawal allowance is explained only once it is used u
 
   test('the token’s exit already used: says when, offers nothing', async ({ page }) => {
     const { relay } = await setup(page, { seeded: true });
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await page.getByTestId('withdraw-kind-unshielded').click();
     await page.getByTestId('wu-amount').fill('5');

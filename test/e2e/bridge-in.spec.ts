@@ -156,7 +156,7 @@ test('T7.2 / T7.4: Token-2022, too little SPL, too little SOL: refused before th
 test("T7.3: an account that fails the page's check: refused, with no wallet request", async ({ page }) => {
   const s = await bridgeSite(page);
   s.indexer.tamper = { extraDevice: true };
-  await page.goto('/#account');
+  await page.goto('/#account?action=bridge-in');
   await connectPhantom(page);
   await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'failed');
   await review(page, '1');

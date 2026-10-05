@@ -9,8 +9,16 @@
 // wallet signature, the relay deploys and activates), the tokens (private shielded coins and public
 // unshielded balances), withdrawals to a Midnight wallet (one signature each), demo tokens, the
 // pending items and the job tracker (AA 00047 lane B2).
+//
+// AA 00060 P12.1c (spec FR-023): the page shows the holdings and a list of five actions (../account/
+// PortfolioActions.tsx), each opening its own flow as a sub-page (`#account?action=<id>`); no form is
+// inline on the Portfolio itself. Every flow stays mounted (hidden while another view is open), so an
+// open transfer keeps being followed and Bridge out's landing key stays in memory exactly as before.
+// The right column holds the job tracker, "Show in my wallet" and the pending items. The free demo pack
+// is offered only here (action 4, "Mint Midnight tokens").
+// P12.1 (FR-020): each bridged token's row shows its total, Midnight and Solana (../bridge/portfolio.ts).
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import {
   confirmedOnChain,
@@ -31,6 +39,16 @@ import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useActivity } from '../activity/ActivityContext.js';
 import { stageWords, type ActivityKind } from '../activity/activity.js';
+import { PassportHoldings } from '../account/PassportHoldings.js';
+import {
+  NOT_ON_THIS_MARKET,
+  PORTFOLIO_ACTIONS,
+  PortfolioActionList,
+  usePortfolioAction,
+  type ActionState,
+  type PortfolioActionId,
+  type SplFaucetSeam,
+} from '../account/PortfolioActions.js';
 import { RestoreKeyDialog } from '../account/RestoreKeyDialog.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
 import { WholeCoinExit, type WholeCoinExitOffer } from '../account/WholeCoinExit.js';
@@ -54,17 +72,19 @@ import {
   Select,
   StageTracker,
   StatusPill,
-  Sub,
   TextInput,
   Toast,
-  TokenIcon,
   UnitInput,
   type TrackerStage,
 } from '../design/index.js';
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
 import { useBridges } from '../bridge/BridgeContext.js';
 import { BridgeIn } from '../bridge/in/BridgeIn.js';
+import { isFinal as isFinalIn } from '../bridge/in/operations.js';
+import { readBridgeIns } from '../bridge/in/records.js';
 import { BridgeOut } from '../bridge/out/BridgeOut.js';
+import { isFinalOut, readBridgeOuts } from '../bridge/out/records.js';
+import { bridgedHoldings, solanaLineRpc, useSolanaLines } from '../bridge/portfolio.js';
 import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
@@ -164,101 +184,6 @@ function JobTracker({ job }: { job: JobView }) {
         </Notice>
       )}
     </Panel>
-  );
-}
-
-function PassportHoldings({
-  coins,
-  tokens,
-  unshielded,
-}: {
-  coins: StoredCoin[];
-  tokens: TokenRegistry | null;
-  unshielded: Array<{ colour: string; amount: bigint }>;
-}) {
-  // Listed in the market's token order (the registry's); unknown colours last.
-  const order = (colour: string) => {
-    const i = tokens?.tokens.findIndex((t) => t.midnightColour === colour) ?? -1;
-    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
-  };
-  const rows = holdingsByColour(coins)
-    .map((h) => ({ h, token: tokens?.byColour(h.color) }))
-    .sort((a, b) => order(a.h.color) - order(b.h.color));
-  const open = unshielded
-    .filter((u) => u.amount > 0n)
-    .map((u) => ({ u, token: tokens?.byColour(u.colour) }))
-    .sort((a, b) => order(a.u.colour) - order(b.u.colour));
-  if (rows.length === 0 && open.length === 0) {
-    return (
-      <EmptyState data-testid="passport-empty" icon="gift" title="No tokens yet">
-        Get the free demo pack, or send tokens to your account. They show here once they land.
-      </EmptyState>
-    );
-  }
-  return (
-    <ul className="token-list" aria-label="Your tokens" data-testid="passport-holdings">
-      {rows.map(({ h, token: t }) => {
-        const dec = t?.decimals ?? 0;
-        const symbol = t?.symbol ?? short(h.color);
-        return (
-          <li
-            key={h.color}
-            className="token-row"
-            data-testid="passport-row"
-            data-colour={h.color}
-            data-symbol={t?.symbol ?? ''}
-          >
-            <TokenIcon symbol={symbol} />
-            <span className="token-meta">
-              <span className="token-sym">
-                {symbol}
-                <span className="kind-chip">{t && t.privacy !== 'shielded' ? 'public' : 'private'}</span>
-              </span>
-              {t?.name ? <span className="token-name">{t.name}</span> : null}
-            </span>
-            <span className="token-amount">
-              <span className="num" data-testid="passport-amount" data-raw={h.total.toString()}>
-                {formatUnits(h.total, dec, { minFractionDigits: 2, grouping: true })}
-              </span>
-              <Sub>
-                up to{' '}
-                <span data-testid="passport-largest" data-raw={h.largest.toString()}>
-                  {formatUnits(h.largest, dec, { minFractionDigits: 2, grouping: true })}
-                </span>{' '}
-                in one go
-              </Sub>
-            </span>
-          </li>
-        );
-      })}
-      {open.map(({ u, token: t }) => {
-        const symbol = t?.symbol ?? short(u.colour);
-        return (
-          <li
-            key={`u-${u.colour}`}
-            className="token-row"
-            data-testid="passport-row"
-            data-kind="unshielded"
-            data-colour={u.colour}
-            data-symbol={t?.symbol ?? ''}
-          >
-            <TokenIcon symbol={symbol} />
-            <span className="token-meta">
-              <span className="token-sym">
-                {symbol}
-                <span className="kind-chip">public</span>
-              </span>
-              <span className="token-name">{t?.name ? `${t.name} · public balance` : 'public balance'}</span>
-            </span>
-            <span className="token-amount">
-              <span className="num" data-testid="passport-amount" data-raw={u.amount.toString()}>
-                {formatUnits(u.amount, t?.decimals ?? 0, { minFractionDigits: 2, grouping: true })}
-              </span>
-            </span>
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 
@@ -464,11 +389,15 @@ export function Accounts({
   network,
   relayUrl,
   injectorUrl = null,
+  splFaucet = null,
 }: {
   network: NetworkProfile;
   relayUrl: string;
   /** AA 00060 P8: config.json `injector.url`, for "Show in my wallet". */
   injectorUrl?: string | null;
+  /** AA 00060 FR-024 (plan P13, its own lane): the "Mint Solana tokens" flow; without it the action is
+   *  listed as not available on this market. */
+  splFaucet?: SplFaucetSeam | null;
 }) {
   const tokens = useTokenRegistry();
   const activity = useActivity();
@@ -480,7 +409,10 @@ export function Accounts({
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const chain = useChain();
   // AA 00060 P7: the site's journey registry passed its checks, so Bridge in is offered.
-  const bridging = useBridges().state === 'ready';
+  const bridgeState = useBridges();
+  const bridging = bridgeState.state === 'ready';
+  // AA 00060 P12.1c (FR-023): the open action's sub-page (`#account?action=<id>`), or null.
+  const action = usePortfolioAction();
   const [job, setJob] = useState<JobView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -525,6 +457,61 @@ export function Accounts({
         .filter((b) => b.amount > 0n && assets.showsColour(b.colour)) ?? [],
     [unshieldedRead.view, assets],
   );
+  // AA 00060 P12.1 (FR-020): one row per bridged token: its total, Midnight and the wallet's SPL on Solana.
+  const bridgeEntries = useMemo(
+    () =>
+      bridgeState.state === 'ready' ? bridgeState.registry.entries.filter((e) => assets.showsColour(e.colour)) : [],
+    [bridgeState, assets],
+  );
+  const lineRpc = useMemo(
+    () => (bridgeState.state === 'ready' ? solanaLineRpc(bridgeState.solana, injectorUrl) : null),
+    [bridgeState, injectorUrl],
+  );
+  const [solanaRefresh, setSolanaRefresh] = useState(0);
+  // The Solana line is read again when the account's coins of a bridged token change (a bridge in or out
+  // landed) and on "Refresh balances".
+  const bridgedCoins = coins
+    .filter((c) => bridgeEntries.some((e) => e.colour === c.color))
+    .map((c) => `${c.commitment}:${c.spent ? 1 : 0}:${c.mtIndex ?? ''}`)
+    .join(',');
+  const solanaLines = useSolanaLines(
+    lineRpc,
+    wallet.status === 'connected' ? wallet.address : null,
+    bridgeEntries,
+    `${solanaRefresh}|${bridgedCoins}`,
+  );
+  const bridged = useMemo(
+    () => bridgedHoldings(bridgeEntries, hasSecret ? shownCoins : null, solanaLines),
+    [bridgeEntries, hasSecret, shownCoins, solanaLines],
+  );
+  // FR-023: whether this market hands out demo tokens (action 4), and the open transfers (actions 2, 3).
+  const [demoOffered, setDemoOffered] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    relay.demoTokensInfo().then(
+      (i) => live && setDemoOffered(i !== null),
+      () => live && setDemoOffered(false),
+    );
+    return () => {
+      live = false;
+    };
+  }, [relay]);
+  const openTransfers = useMemo(
+    () =>
+      store && scope && account
+        ? {
+            in: readBridgeIns(store, scope, account.address).filter((r) => !isFinalIn(r)).length,
+            out: readBridgeOuts(store, scope, account.address).filter((r) => !isFinalOut(r)).length,
+          }
+        : { in: 0, out: 0 },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store, scope, account, revision],
+  );
+  // Opening an action moves the focus (and the view) to its flow; "All actions" goes back.
+  const backRef = useRef<HTMLAnchorElement>(null);
+  useEffect(() => {
+    if (action) backRef.current?.focus();
+  }, [action]);
   const [withdrawKind, setWithdrawKind] = useState<'shielded' | 'unshielded'>('shielded');
   // Whether a withdrawal to a wallet also needs F-B6's envelope (questions Q13: off by default).
   const [recipientEnvelope, setRecipientEnvelope] = useState(false);
@@ -567,6 +554,7 @@ export function Accounts({
     const e = env();
     if (!e || !account || !hasSecret) return;
     setSyncing(true);
+    setSolanaRefresh((n) => n + 1);
     try {
       const r = await syncAccount(e, account.address);
       setHistoryGap(r.history.complete ? null : (r.history.gap ?? 'the read did not finish'));
@@ -737,6 +725,22 @@ export function Accounts({
   }
 
   const registering = pendingJobs.find((j) => j.job.action === 'register' && j.account === null);
+  // FR-023: what each action can do now (a reason when it cannot), and its open transfers.
+  const bridgeReason =
+    bridgeState.state === 'refused'
+      ? bridgeState.reason
+      : bridgeState.state === 'checking'
+        ? 'Checking this market’s bridges…'
+        : NOT_ON_THIS_MARKET;
+  const actionStates: Record<PortfolioActionId, ActionState> = {
+    send: { disabled: null },
+    'bridge-in': { disabled: bridging ? null : bridgeReason, pending: openTransfers.in },
+    'bridge-out': { disabled: bridging ? null : bridgeReason, pending: openTransfers.out },
+    'mint-midnight': { disabled: demoOffered === false ? NOT_ON_THIS_MARKET : null },
+    'mint-solana': {
+      disabled: splFaucet?.offered ? null : splFaucet?.offered === null ? 'Checking this market…' : NOT_ON_THIS_MARKET,
+    },
+  };
   const unsecured = unsecuredCoins(coins);
   // R2-5 / R2-6: changes the chain does not show yet, and inbox notes it does not confirm (counted only).
   const waiting = pendingChanges(coins);
@@ -824,7 +828,7 @@ export function Accounts({
                 />
               )}
               <div data-testid="account" data-account={account.address}>
-                <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} />
+                <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} bridged={bridged} />
                 {!unshieldedRead.served && (
                   <p className="table-note" data-testid="unshielded-not-served">
                     This market does not report public (unshielded) balances yet.
@@ -847,81 +851,109 @@ export function Accounts({
               </div>
             </Panel>
           )}
-          {account && hasSecret && (
-            <Panel title="Withdraw to a Midnight wallet" data-testid="withdraw-section">
-              <Field label="From">
-                <Segmented<'shielded' | 'unshielded'>
-                  label="From"
-                  options={[
-                    { value: 'shielded', label: 'Private tokens', testId: 'withdraw-kind-shielded' },
-                    { value: 'unshielded', label: 'Public tokens', testId: 'withdraw-kind-unshielded' },
-                  ]}
-                  value={withdrawKind}
-                  onChange={setWithdrawKind}
-                />
-              </Field>
-              {withdrawKind === 'shielded' && exitOffer && (
-                <WholeCoinExit
-                  offer={exitOffer}
-                  coins={coins}
-                  tokens={tokens}
-                  busy={!!busy}
-                  onWithdraw={(c, a, r) => void send(c, a, r)}
-                  onDismiss={() => setExitOffer(null)}
-                />
-              )}
-              {withdrawKind === 'shielded' ? (
-                <SendForm
-                  coins={shownCoins}
-                  tokens={tokens}
-                  network={network.name}
-                  onSend={(c, a, r) => void send(c, a, r)}
-                  busy={!!busy}
-                />
-              ) : (
-                <UnshieldedWithdrawForm
-                  balances={unshielded}
-                  tokens={tokens}
-                  onSend={(c, a, r, b) => void sendUnshielded(c, a, r, b)}
-                  busy={!!busy}
-                />
-              )}
+          {account && hasSecret && action === null && (
+            <Panel title="What you can do" data-testid="actions-section">
+              <PortfolioActionList states={actionStates} />
             </Panel>
           )}
-          {account && hasSecret && bridging && (
-            <BridgeIn
-              network={network.name}
-              account={account.address}
-              accountCheck={
-                accountCheck.status === 'ok'
-                  ? 'ok'
-                  : accountCheck.status === 'failed' || accountCheck.status === 'error'
-                    ? 'failed'
-                    : 'pending'
-              }
-              pageCoins={bridgePageCoins}
-              busy={!!busy}
-            />
+          {account && hasSecret && action !== null && (
+            <div className="portfolio-flow-head" data-testid="portfolio-flow" data-action={action}>
+              <a href="#account" className="portfolio-back" data-testid="portfolio-back" ref={backRef}>
+                <Icon name="arrowLeft" /> All actions
+              </a>
+            </div>
+          )}
+          {account && hasSecret && action !== null && actionStates[action].disabled && (
+            <Notice tone="info" role="status" data-testid="portfolio-action-unavailable">
+              {PORTFOLIO_ACTIONS.find((a) => a.id === action)?.label}: {actionStates[action].disabled}
+            </Notice>
+          )}
+          {/* Every flow stays mounted; only the open action's is shown (FR-023). */}
+          {account && hasSecret && (
+            <div data-flow="send" hidden={action !== 'send'}>
+              <Panel title="Send tokens to a Midnight wallet" data-testid="withdraw-section">
+                <Field label="From">
+                  <Segmented<'shielded' | 'unshielded'>
+                    label="From"
+                    options={[
+                      { value: 'shielded', label: 'Private tokens', testId: 'withdraw-kind-shielded' },
+                      { value: 'unshielded', label: 'Public tokens', testId: 'withdraw-kind-unshielded' },
+                    ]}
+                    value={withdrawKind}
+                    onChange={setWithdrawKind}
+                  />
+                </Field>
+                {withdrawKind === 'shielded' && exitOffer && (
+                  <WholeCoinExit
+                    offer={exitOffer}
+                    coins={coins}
+                    tokens={tokens}
+                    busy={!!busy}
+                    onWithdraw={(c, a, r) => void send(c, a, r)}
+                    onDismiss={() => setExitOffer(null)}
+                  />
+                )}
+                {withdrawKind === 'shielded' ? (
+                  <SendForm
+                    coins={shownCoins}
+                    tokens={tokens}
+                    network={network.name}
+                    onSend={(c, a, r) => void send(c, a, r)}
+                    busy={!!busy}
+                  />
+                ) : (
+                  <UnshieldedWithdrawForm
+                    balances={unshielded}
+                    tokens={tokens}
+                    onSend={(c, a, r, b) => void sendUnshielded(c, a, r, b)}
+                    busy={!!busy}
+                  />
+                )}
+              </Panel>
+            </div>
           )}
           {account && hasSecret && bridging && (
-            <BridgeOut
-              network={network}
-              account={account.address}
-              accountChecked={accountCheck.status === 'ok'}
-              coins={coins}
-              env={env}
-              busy={!!busy}
-            />
+            <div data-flow="bridge-in" hidden={action !== 'bridge-in'}>
+              <BridgeIn
+                network={network.name}
+                account={account.address}
+                accountCheck={
+                  accountCheck.status === 'ok'
+                    ? 'ok'
+                    : accountCheck.status === 'failed' || accountCheck.status === 'error'
+                      ? 'failed'
+                      : 'pending'
+                }
+                pageCoins={bridgePageCoins}
+                busy={!!busy}
+              />
+            </div>
           )}
-          {account && secret && injectorUrl && (
-            <ShowInWallet
-              injectorUrl={injectorUrl}
-              network={network.name}
-              account={account.address}
-              viewingKey={secret.encSecretKey}
-              accountChecked={accountCheck.status === 'ok'}
-              busy={!!busy}
-            />
+          {account && hasSecret && bridging && (
+            <div data-flow="bridge-out" hidden={action !== 'bridge-out'}>
+              <BridgeOut
+                network={network}
+                account={account.address}
+                accountChecked={accountCheck.status === 'ok'}
+                coins={coins}
+                env={env}
+                busy={!!busy}
+              />
+            </div>
+          )}
+          {account && hasSecret && (
+            <div data-flow="mint-midnight" hidden={action !== 'mint-midnight'}>
+              <DemoTokens network={network} relayUrl={relayUrl} />
+            </div>
+          )}
+          {account && hasSecret && splFaucet?.offered && (
+            <div data-flow="mint-solana" hidden={action !== 'mint-solana'}>
+              <splFaucet.Flow
+                account={account.address}
+                walletAddress={wallet.address}
+                onDone={() => setSolanaRefresh((n) => n + 1)}
+              />
+            </div>
           )}
           {!account && (
             <Card title="Open your free account" data-testid="no-account">
@@ -968,7 +1000,16 @@ export function Accounts({
         <div className="area-side stack-gap">
           {job && <JobTracker job={job} />}
 
-          {account && <DemoTokens network={network} relayUrl={relayUrl} />}
+          {account && secret && injectorUrl && (
+            <ShowInWallet
+              injectorUrl={injectorUrl}
+              network={network.name}
+              account={account.address}
+              viewingKey={secret.encSecretKey}
+              accountChecked={accountCheck.status === 'ok'}
+              busy={!!busy}
+            />
+          )}
 
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">

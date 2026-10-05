@@ -171,7 +171,7 @@ The site reads `config.json` next to `index.html` (`web/public/config.json`):
 |---|---|
 | `network` | `stagenet` (default) or `undeployed` (a local stack). |
 | `relayUrl` | The relay's base URL as the browser sees it. |
-| `tokens` | `{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"? }] }`: tokens added to the network's built-in list (`"mode": "replace"` replaces it). |
+| `tokens` | `{ "tokens": [{ "symbol", "decimals", "midnightColour", "name"?, "icon"? }] }`: tokens added to the network's built-in list (`"mode": "replace"` replaces it). `icon` is an image on the site's own origin (`token-icons/x-midnight.png`; the site bundles the wallet's test-token set in `web/public/token-icons/`); without one, the token shows its text badge. |
 | `pairs` | The markets, `["BASE/QUOTE", …]`; default: the network's pairs. |
 | `assets` | This site's asset set (a list of symbols, or `"all"`); the page's `?assets=` link narrows within it. |
 | `walletTimeoutSeconds` | How long the page waits for the Solana wallet to answer a connection or a signature (5–600; default 120). |

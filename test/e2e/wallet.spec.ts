@@ -24,6 +24,7 @@ import { SITE_LINE_PREFIX } from '../../packages/core/src/passport/ed25519.js';
 import { shortSolanaAddress } from '../../packages/core/src/signing.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
 import { E2E_WALLET, connectPhantom, type MockPhantom } from './mock-phantom.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
@@ -66,7 +67,9 @@ test('connect Phantom, open an account with one approval, get the demo pack, see
   expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([['register', 'ok']]);
   expect(phantom.requests).toHaveLength(1);
 
-  // The demo pack: what it is, the limits, then ONE more approval.
+  // The demo pack, the Portfolio's "Mint Midnight tokens" (AA 00060 FR-023): what it is, the limits, then
+  // ONE more approval.
+  await openAction(page, 'mint-midnight');
   await expect(page.getByTestId('demo-pack')).toHaveText('1,000.00 twUSDC · 0.10 twBTC · 1.00 twETH');
   await expect(page.getByTestId('demo-limits')).toContainText('7 of 25 left today');
   await page.getByTestId('get-demo-tokens').click();
@@ -86,9 +89,12 @@ test('connect Phantom, open an account with one approval, get the demo pack, see
   await expect(page.getByTestId('demo-unavailable')).toHaveAttribute('data-code', 'claimed');
   await expect(page.getByTestId('get-demo-tokens')).toBeDisabled();
 
-  // The holdings side panel beside the books shows the same pack.
+  // The holdings side panel beside the books shows the same pack, and offers no demo tokens (FR-023: only the
+  // Portfolio does).
   await page.getByTestId('tab-markets').click();
   await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');
+  await expect(page.getByTestId('demo-tokens')).toHaveCount(0);
+  await expect(page.getByTestId('get-demo-tokens')).toHaveCount(0);
   await expect(holding(page, 'twBTC')).toContainText('0.10');
   await expect(holding(page, 'twETH')).toContainText('1.00');
   expect(ex.external).toEqual([]);
@@ -193,7 +199,7 @@ test('withdraw shielded (one approval, one more to record the change) and unshie
   page,
 }) => {
   const { phantom, relay } = await setup(page, { seeded: true });
-  await page.goto('/#account');
+  await page.goto('/#account?action=send');
   await connectPhantom(page);
   await expect(page.locator('[data-testid=passport-row][data-symbol="twUSDC"]')).toContainText('1,000.00');
   await expect(page.locator('[data-testid=passport-row][data-kind="unshielded"]')).toContainText('25.00');
@@ -379,7 +385,7 @@ test.describe('the wallet refuses or fails: a clear message, and nothing is sent
   test('a second demo claim is refused by the market, in words', async ({ page }) => {
     const { phantom, relay } = await setup(page, { seeded: true });
     relay.demo.claimed.add(phantom.deviceKey);
-    await page.goto('/#account');
+    await page.goto('/#account?action=mint-midnight');
     await connectPhantom(page);
     await expect(page.getByTestId('demo-unavailable')).toHaveAttribute('data-code', 'claimed');
     await expect(page.getByTestId('get-demo-tokens')).toBeDisabled();

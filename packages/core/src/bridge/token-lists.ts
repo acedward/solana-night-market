@@ -17,9 +17,14 @@
 //     (`not-spl-token`), or whose on-chain decimals differ from I-1's (`decimals-mismatch`);
 //   - a pair naming a symbol neither list has (`unknown-pair-token`), and site and relay lists that would
 //     still differ (`lists-differ`: the existing relay file and site config did not agree to begin with).
+//
+// P12.1b (spec FR-022): with `icons`, each SITE token entry without an icon gets its Midnight icon by
+// symbol, and each `bridges` entry without one its SPL icon. Icons are display only: the relay's list
+// is written without them, and the digest never includes them.
 
 import { PROFILES, isNetworkName, type NetworkName } from '../network.js';
 import { tokensDigest } from '../tokens/digest.js';
+import { siteIconPath } from '../tokens/icon.js';
 import { type TokenRegistry, registryFor, type TokenConfig } from '../tokens/registry.js';
 import { BridgeRegistryError, parseJourneyRegistry, type BridgeEntry } from './registry.js';
 
@@ -68,6 +73,32 @@ export interface BridgeTokenListsInput {
   mode?: 'extend' | 'replace';
   /** The Solana RPC's facts (the command line's `--solana-rpc`). */
   solana?: SolanaFacts;
+  /** Icons to fill in by symbol (FR-022); entries that already name one keep it. */
+  icons?: TokenIconMap;
+}
+
+/** Icons by token symbol (without regard to case), as paths on the site's own origin (../tokens/icon.ts). */
+export interface TokenIconMap {
+  /** The Midnight token's icon: the site's `tokens` entries. */
+  midnight?: Readonly<Record<string, string>>;
+  /** The SPL token's icon: the site's `bridges.tokens` entries. */
+  solana?: Readonly<Record<string, string>>;
+}
+
+const iconFor = (map: Readonly<Record<string, string>> | undefined, symbol: unknown): string | null => {
+  if (!map || typeof symbol !== 'string') return null;
+  const key = Object.keys(map).find((k) => k.toLowerCase() === symbol.toLowerCase());
+  return key ? siteIconPath(map[key]) : null;
+};
+
+/** `entry` with `icon` filled in from `map` when it names none (an invalid one is left as it is). */
+function withIcon<T extends { symbol?: unknown; icon?: unknown }>(
+  entry: T,
+  map: Readonly<Record<string, string>> | undefined,
+): T {
+  if (entry.icon !== undefined) return entry;
+  const icon = iconFor(map, entry.symbol);
+  return icon ? { ...entry, icon } : entry;
 }
 
 export interface BridgeTokenLists {
@@ -150,7 +181,10 @@ export function bridgeTokenLists(input: BridgeTokenListsInput): BridgeTokenLists
       ? { mode: t.mode, tokens: [...t.tokens, ...bridged] }
       : { mode: mode === 'replace' ? 'replace' : 'extend', tokens: bridged };
   };
-  const siteTokens = withBridged(input.siteConfig.tokens);
+  const siteListed = withBridged(input.siteConfig.tokens);
+  const siteTokens: TokenConfig = input.icons?.midnight
+    ? { ...siteListed, tokens: siteListed.tokens.map((t) => withIcon(t, input.icons?.midnight)) }
+    : siteListed;
   const relayTokens = withBridged(input.relayTokens ?? input.siteConfig.tokens);
   let siteAfter: TokenRegistry;
   let relayAfter: TokenRegistry;
@@ -180,7 +214,7 @@ export function bridgeTokenLists(input: BridgeTokenListsInput): BridgeTokenLists
     bridges: {
       midnightNetwork: registry.midnightNetwork,
       solanaGenesisHash: registry.solanaGenesisHash,
-      tokens: registry.entries,
+      tokens: registry.entries.map((e) => withIcon(e, input.icons?.solana)),
     },
   };
   return { siteConfig, relayTokens, tokensDigest: siteDigest, bridged: [...registry.entries] };

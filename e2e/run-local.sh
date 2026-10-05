@@ -32,8 +32,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 E2E="$ROOT/e2e"
 CMD="${1:-run}"
 
-BRIDGE_WT="${BRIDGE_WT:-/Users/edwardalvarado/todo/AA/experiments/00058-bridge-contract-delivery}"
-BRIDGE_PIN=01bb99b889b760ed7947e4384ebfbf19985aa3fd
+BRIDGE_WT="${BRIDGE_WT:-/Users/edwardalvarado/todo/AA/experiments/00058-bridge-contract-delivery--txv1}"
+BRIDGE_PIN=7122177284555432fc4086e8f632b31252867b9e
 TPL="$BRIDGE_WT/templates/solana-midnight-bridge"
 INJECTOR_REPO="${INJECTOR_REPO:-/Users/edwardalvarado/todo/AA/experiments/00059-injector-passport-accounts}"
 INJECTOR_PIN=459c904fc7f6e1180ad48bd4d3b8bc64971e1909

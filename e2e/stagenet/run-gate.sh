@@ -37,7 +37,7 @@ E2E="$ROOT/e2e"
 HERE="$E2E/stagenet"
 CMD="${1:-gate}"
 
-BRIDGE_WT="${BRIDGE_WT:-/Users/edwardalvarado/todo/AA/experiments/00058-bridge-contract-delivery}"
+BRIDGE_WT="${BRIDGE_WT:-$(sed -n 's/^BRIDGE_WT="${BRIDGE_WT:-\(.*\)}"$/\1/p' "$E2E/run-local.sh")}"
 BRIDGE_PIN="$(sed -n 's/^BRIDGE_PIN=//p' "$E2E/run-local.sh")"
 TPL="$BRIDGE_WT/templates/solana-midnight-bridge"
 TROOT=/work/repo/templates/solana-midnight-bridge
@@ -56,6 +56,10 @@ BUN_IMAGE=oven/bun:1.3.11
 PS6_IMAGE=midnightntwrk/proof-server@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
 PS8_IMAGE=midnightntwrk/proof-server:9.0.0-rc.8
 TMPL_VOLUME=aa00057-tmpl
+# The provers as the containers name them (ATTACH=preview: the preview's own, e2e/stagenet/preview.sh).
+DUST_PS=http://proof-server:6300
+CONTRACT_PS=http://proof-server-rc8:6300
+PREVIEW_DIR="${AA00057_STATE:-$HOME/.cache/aa-00057}/preview"
 APP_VOLUME=aa00057-check-app
 LOCK_WAIT_S="${LOCK_WAIT_S:-14400}"
 
@@ -117,7 +121,7 @@ tmpl() { # <name> <dir under the template> <cmd...>: the 00058 template's enviro
     -e BRIDGE_MODE=live -e "BRIDGE_DEPLOYMENT=$DEPLOYMENT" -e BRIDGE_SECRETS_DIR=/secrets-x \
     -e MIDNIGHT_NETWORK_ID=stagenet -e "MIDNIGHT_NODE_HTTP=$STG_NODE_WS" \
     -e "MIDNIGHT_INDEXER_HTTP=$STG_INDEXER" -e "MIDNIGHT_INDEXER_WS=$STG_INDEXER_WS" \
-    -e MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300 -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 \
+    -e "MIDNIGHT_PROOF_SERVER_URL=$DUST_PS" -e "MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS" \
     --env-file "$RUN/devnet.env" -e "SOLANA_EXPECTED_GENESIS_HASH=$DEVNET_GENESIS" \
     -e BRIDGE_DELIVERY_ADAPTERS=passport -e NODE_ENV=production -e OUT=/out \
     -w "$TROOT/$wd" "$STEP_IMAGE" bash -c '
@@ -145,7 +149,7 @@ landing() { # [VAR=…]…  (test/gates/landing/landing.ts: the page's own opera
     -v "$P5R/state:/state" -v "$OUT:/out" -e NETWORK=stagenet -e STATE_DIR=/state -e OUT=/out -e RUN_DIR_IN=/run/nm \
     -e JOURNEY_FILE=/run/nm/journey-tokens.stagenet.json -e PROMPT_LOG=/out/prompts.jsonl -e RELAY_URL=http://relay:8080 \
     -e "INDEXER_URL=$STG_INDEXER" -e "NODE_WS_URL=$STG_NODE_WS" \
-    -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server:6300 \
+    -e "MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS" -e "MIDNIGHT_DUST_PROOF_SERVER_URL=$DUST_PS" \
     -e "SOLANA_GENESIS=$DEVNET_GENESIS" --env-file "$RUN/devnet.env" -e SOLANA_CLUSTER=solana:devnet \
     -e "LANDING_ORIGIN=http://127.0.0.1:$WEB_PORT" -e BRIDGES=X -e BRIDGE_IN_TIMEOUT_MS=1800000 ${args[@]+"${args[@]}"} "$BUN_IMAGE" \
     bun test/gates/landing/landing.ts 2>&1 | tee -a "$OUT/landing.log"
@@ -281,10 +285,59 @@ print(json.dumps({"t": time.time(), "devnetSlot": tip, "blockHeights": bh}))' "$
   done
 }
 
+# Night Market's relay on stagenet with bridge X (sponsor Temporary 11). It REPLACES any relay of the same name
+# (ATTACH=preview: the preview's relay holds the same sponsor wallet, so the two never run side by side).
+# With $RUN/nm/spl-faucet-keys.json present, the test SPL faucet is on (its RPC from the 600 env file).
+start_relay() {
+  local faucet=()
+  if [[ -f "$RUN/nm/spl-faucet-keys.json" ]]; then
+    faucet=(-e SPL_FAUCET_KEYS_FILE=/run/nm/spl-faucet-keys.json --env-file "$RUN/faucet.env")
+  fi
+  docker volume create "$CP-relay-data" >/dev/null
+  docker rm -f "$CP-relay" >/dev/null 2>&1
+  docker run -d --name "$CP-relay" --network "$NET" --network-alias relay -p "127.0.0.1:$RELAY_PORT:8080" \
+    --restart unless-stopped --memory 4g --pull=never -e HOME=/tmp -e RELAY_NETWORK=stagenet -e TOKENS_FILE=/run/nm/tokens.json \
+    -e BRIDGE_REGISTRY_FILE=/run/nm/journey-tokens.stagenet.json \
+    -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
+    -e "MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS" -e "MIDNIGHT_DUST_PROOF_SERVER_URL=$DUST_PS" \
+    -e RELAY_REQUIRE_KEYS=true -e SPONSOR_ENABLED=true -e SPONSOR_SEED_FILE=/run/nm/sponsor.seed \
+    -e SPONSOR_FUNDING_LOCK_FILE=/tmp/relay-funding.lock -e SPONSOR_FEE_BLOCKS_MARGIN=5 \
+    -e DEMO_TOKENS_ENABLED=true -e "DEMO_TOKENS_PACK=${DEMO_PACK:-twUSDC:10}" -e DEMO_TOKENS_PATH=direct -e DEMO_TOKENS_DAILY_CAP=10 \
+    -e RELAY_DATA_DIR=/var/lib/night-market -e RATE_LIMIT_ACTIONS_PER_MIN=100 -e RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN=100 \
+    ${faucet[@]+"${faucet[@]}"} \
+    -e LOG_LEVEL=info -v "$RUN/keys-relay:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN/nm:/run/nm:ro" \
+    -v "$CP-relay-data:/var/lib/night-market" "$RELAY_IMAGE" >/dev/null
+}
+relay_synced() { # waits for the relay's sponsor (through its published port); 0 when synced
+  local h=""
+  for _ in $(seq 1 200); do
+    h="$(curl -s -m 10 "http://127.0.0.1:$RELAY_PORT/health" || true)"
+    python3 -c 'import json,sys; s=json.loads(sys.argv[1]).get("sponsor",{}); sys.exit(0 if s.get("synced") is True and s.get("state")=="synced" else 1)' "$h" 2>/dev/null && { printf '%s\n' "$h"; return 0; }
+    sleep 6
+  done
+  printf '%s\n' "$h"; return 1
+}
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 teardown() {
   set +e
   [[ -z "${CP:-}" ]] && return 0
+  if [[ "${ATTACH:-}" == preview ]]; then
+    # The preview stays up for the owner (relay with X, node X, site): logs and evidence only.
+    say "gate over: the preview keeps running (e2e/stagenet/preview.sh down ends it)"
+    [[ -n "${SAMPLER_PID:-}" ]] && kill "$SAMPLER_PID" 2>/dev/null
+    [[ -n "${MEM_PID:-}" ]] && kill "$MEM_PID" 2>/dev/null
+    docker logs "$CP-relay" >"$OUT/relay.log" 2>&1
+    docker logs "$CP-ps8" 2>&1 | tail -300 >"$OUT/proof-server-rc8.tail.log"
+    if [[ -f "${RUN:-/nonexistent}/x.env" ]]; then
+      docker compose -p "$CP-x" --env-file "$RUN/x.env" -f "$TPL/deploy/standin/compose.bridge.yml" logs --no-color >"$OUT/node-x-container.log" 2>&1
+    fi
+    save_deployments
+    docker ps --format '{{.Names}} {{.Status}}' | grep -E "^$CP" >"$OUT/still-running.txt"
+    redact_rpc "$OUT" | tee "$OUT/redaction.txt"
+    python3 "$HERE/gate-report.py" "$OUT" || say "WARNING: no gate report"
+    return 0
+  fi
   say "teardown $CP"
   [[ -n "${SAMPLER_PID:-}" ]] && kill "$SAMPLER_PID" 2>/dev/null
   [[ -n "${MEM_PID:-}" ]] && kill "$MEM_PID" 2>/dev/null
@@ -337,6 +390,21 @@ gate() {
   # The funding lock: looked at once, never taken (Temporary 11-14 are not the ladders' wallets).
   if [[ -e "$FUNDING_LOCK" ]]; then echo "present (not ours; not touched)"; else echo "absent"; fi >"$OUT/funding-lock.txt"
 
+  if [[ "${ATTACH:-}" == preview ]]; then
+    # ATTACH=preview: the gate builds on the owner's running preview (e2e/stagenet/preview.sh): its network,
+    # provers, relay name and site. The preview's lock is ours (00057); the gate's services stay up after it.
+    [[ -f "$PREVIEW_DIR/web-port" ]] || { echo "no running preview" >&2; exit 1; }
+    [[ "$(cut -d' ' -f1-4 "$LOCK/holder" 2>/dev/null)" == "00057 P5R preview for" ]] || { echo "the stack lock is not the preview's" >&2; exit 1; }
+    CP=aa00057-preview; NET="$CP-net"; LOCK_TAKEN=0
+    for c in ps6 ps8 site; do [[ -n "$(docker ps -q -f "name=^$CP-$c\$")" ]] || { echo "the preview's $c is not running" >&2; exit 1; }; done
+    DUST_PS=http://proof-server-dust:6300; CONTRACT_PS=http://proof-server-contracts:6300
+    DEMO_PACK="${DEMO_PACK:-twUSDC:1000,twBTC:0.1}"  # the preview's pack (the owner claims it too)
+    printf '00057 P5R preview for the owner + P5R.0 gate bridge X %s (containers %s-*)\n' "$(date -u +%FT%TZ)" "$CP" >"$LOCK/holder"
+    trap 'rc=$?; trap - EXIT; teardown; say "gate exit $rc"; exit $rc' EXIT
+    T0=$(date +%s)
+    mark gate start
+    rm -rf "$PREVIEW_DIR/gate"; mkdir -p "$PREVIEW_DIR/gate"; RUN="$PREVIEW_DIR/gate"; chmod 700 "$RUN"
+  else
   # The stack lock: wait politely; never remove another holder's lock.
   local waited=0
   until mkdir "$LOCK" 2>/dev/null; do
@@ -354,6 +422,7 @@ gate() {
   mark gate start
 
   RUN="$(mktemp -d "${TMPDIR:-/tmp}/aa00057-p5r0.XXXXXX")"; chmod 700 "$RUN"
+  fi
   mkdir -p "$RUN"/{secrets-x,nm}; chmod 700 "$RUN/secrets-x" "$RUN/nm"
   # Bridge X's live secrets (00058 README "live mode"): copies, never printed.
   cp "$CONF/devnet/x-operator.json" "$RUN/secrets-x/solana-operator.json"
@@ -386,13 +455,15 @@ PY
   ( umask 077
     printf 'json_rpc_url: "%s"\nwebsocket_url: ""\nkeypair_path: "%s"\naddress_labels:\n  "11111111111111111111111111111111": System Program\ncommitment: confirmed\n' \
       "$DEVNET" "$RUN/secrets-x/solana-operator.json" >"$RUN/solana-cli.yml"
-    printf 'SOLANA_DEVNET_RPC_URL=%s\nSOLANA_RPC_URL=%s\n' "$DEVNET" "$DEVNET" >"$RUN/devnet.env" )
+    printf 'SOLANA_DEVNET_RPC_URL=%s\nSOLANA_RPC_URL=%s\n' "$DEVNET" "$DEVNET" >"$RUN/devnet.env"
+    printf '%s\n' "$DEVNET" >"$RUN/secrets-x/solana-rpc-url" )
   cp -Rc "$KEYS_SRC" "$RUN/keys-relay"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-relay/bridge"
   cp -Rc "$KEYS_SRC" "$RUN/keys-harness"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-harness/bridge"
   cp -Rc "$PS_PARAMS_SRC" "$RUN/ps-params"; cp -Rc "$PS8_PARAMS_SRC" "$RUN/ps8-params"
   X_OPERATOR="$(pub "$RUN/secrets-x/solana-operator.json")"; X_PROGRAM="$(pub "$RUN/secrets-x/solana-bridge-program.json")"
   FUNDER="$(pub "$CONF/devnet/funder.json")"
   RELAY_PORT=$(free_port); X_API_PORT=$(free_port); WEB_PORT=$(free_port)
+  [[ "${ATTACH:-}" == preview ]] && WEB_PORT="$(cat "$PREVIEW_DIR/web-port")"
   { echo "night-market $(git -C "$ROOT" rev-parse HEAD)$( [[ -n "$(git -C "$ROOT" status --porcelain)" ]] && echo ' (dirty)')"
     echo "00058 $(git -C "$BRIDGE_WT" rev-parse HEAD)"; echo "relay-image $RELAY_IMAGE $(docker image inspect "$RELAY_IMAGE" --format '{{.Id}}')"
     echo "step-image $(docker image inspect "$STEP_IMAGE" --format '{{.Id}}')"
@@ -405,18 +476,20 @@ PY
   [[ "$genesis" == "$DEVNET_GENESIS" ]] || fail "the Solana RPC is not devnet (genesis $genesis)"
   snapshot start
 
-  # ── the provers, on the run's own network ──
+  # ── the provers, on the run's own network (ATTACH=preview: the preview's) ──
+  if [[ "${ATTACH:-}" != preview ]]; then
   docker network create "$NET" >/dev/null || fail "network"
   docker run -d --name "$CP-ps6" --network "$NET" --network-alias proof-server --memory 4g --pull=never \
     -e PORT=6300 -e MIDNIGHT_PP=/params -v "$RUN/ps-params:/params" "$PS6_IMAGE" >/dev/null || fail "the rc.6 prover"
   docker run -d --name "$CP-ps8" --network "$NET" --network-alias proof-server-rc8 --memory 12g --memory-swap 12g \
     --restart on-failure:5 --pull=never -e PORT=6300 -e MIDNIGHT_PP=/params -v "$RUN/ps8-params:/params" "$PS8_IMAGE" >/dev/null \
     || fail "the rc.8 prover"
-  for p in proof-server proof-server-rc8; do
+  fi
+  for p in "$DUST_PS" "$CONTRACT_PS"; do
     local ok=""
     for _ in $(seq 1 60); do
       docker run --rm --network "$NET" --memory 256m --pull=never "$BUN_IMAGE" bun -e \
-        "const r = await fetch('http://$p:6300/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" >/dev/null 2>&1 && { ok=1; break; }
+        "const r = await fetch('$p/ready').catch(() => null); process.exit(r?.ok ? 0 : 1)" >/dev/null 2>&1 && { ok=1; break; }
       sleep 3
     done
     [[ -n "$ok" ]] || fail "$p is not ready"
@@ -514,18 +587,7 @@ PY
   # ── 3. the relay, bridge node X, the site ──
   say "==== 3. the relay (sponsor Temporary 11), bridge node X (Temporary 12), the site"
   mark services start
-  docker volume create "$CP-relay-data" >/dev/null
-  docker run -d --name "$CP-relay" --network "$NET" --network-alias relay -p "127.0.0.1:$RELAY_PORT:8080" \
-    --memory 4g --pull=never -e HOME=/tmp -e RELAY_NETWORK=stagenet -e TOKENS_FILE=/run/nm/tokens.json \
-    -e BRIDGE_REGISTRY_FILE=/run/nm/journey-tokens.stagenet.json \
-    -e MIDNIGHT_MANAGED_PATH=/app/vendor/passport/contract/contracts/managed \
-    -e MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300 -e MIDNIGHT_DUST_PROOF_SERVER_URL=http://proof-server:6300 \
-    -e RELAY_REQUIRE_KEYS=true -e SPONSOR_ENABLED=true -e SPONSOR_SEED_FILE=/run/nm/sponsor.seed \
-    -e SPONSOR_FUNDING_LOCK_FILE=/tmp/relay-funding.lock -e SPONSOR_FEE_BLOCKS_MARGIN=5 \
-    -e DEMO_TOKENS_ENABLED=true -e DEMO_TOKENS_PACK=twUSDC:10 -e DEMO_TOKENS_PATH=direct -e DEMO_TOKENS_DAILY_CAP=10 \
-    -e RELAY_DATA_DIR=/var/lib/night-market -e RATE_LIMIT_ACTIONS_PER_MIN=100 -e RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN=100 \
-    -e LOG_LEVEL=info -v "$RUN/keys-relay:/app/vendor/passport/contract/contracts/managed:ro" -v "$RUN/nm:/run/nm:ro" \
-    -v "$CP-relay-data:/var/lib/night-market" "$RELAY_IMAGE" >/dev/null || fail "relay start"
+  start_relay || fail "relay start"
   cat >"$RUN/x.env" <<EOF
 BRIDGE_HOST=bridge-x
 BRIDGE_DEPLOYMENT=$DEPLOYMENT
@@ -536,13 +598,13 @@ BRIDGE_API_PORT=$X_API_PORT
 BRIDGE_RECORD_NAME=X
 BRIDGE_RECORD_SYMBOL=X
 BRIDGE_MEM_LIMIT=4g
-SOLANA_DEVNET_RPC_URL=$DEVNET
+SOLANA_DEVNET_RPC_URL_FILE=/secrets/solana-rpc-url
 MIDNIGHT_NETWORK_ID=stagenet
 MIDNIGHT_NODE_HTTP=$STG_NODE_WS
 MIDNIGHT_INDEXER_HTTP=$STG_INDEXER
 MIDNIGHT_INDEXER_WS=$STG_INDEXER_WS
-MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300
-MIDNIGHT_CONTRACT_PROOF_SERVER_URL=http://proof-server-rc8:6300
+MIDNIGHT_PROOF_SERVER_URL=$DUST_PS
+MIDNIGHT_CONTRACT_PROOF_SERVER_URL=$CONTRACT_PS
 EOF
   chmod 600 "$RUN/x.env"
   docker compose -p "$CP-x" --env-file "$RUN/x.env" -f "$TPL/deploy/standin/compose.bridge.yml" up -d >/dev/null 2>&1 || fail "bridge node X up"
@@ -565,10 +627,11 @@ EOF
   mark node ready
   sync_sampler & SAMPLER_PID=$!
   # The site: Night Market's build with a stagenet config.json (the relay behind it on /relay/).
-  rm -rf "$RUN/site"; cp -Rc "$STATE_ROOT/site-dist" "$RUN/site"
+  SITE_DIR="$RUN/site"
+  if [[ "${ATTACH:-}" == preview ]]; then SITE_DIR="$PREVIEW_DIR/site"; else rm -rf "$RUN/site"; cp -Rc "$STATE_ROOT/site-dist" "$RUN/site"; fi
   # The site's `solana.rpcUrl` is the private RPC too, for this LOCAL rehearsal only (served on 127.0.0.1; the
   # evidence copy is redacted). A deployment must never ship an API-keyed URL in a public config.json.
-  DEVNET_URL="$DEVNET" python3 - "$RUN/nm/site-config.json" "$RUN/nm/journey-tokens.stagenet.json" "$RUN/site/config.json" "$WEB_PORT" "$X_API_PORT" "$DEVNET_GENESIS" <<'PY'
+  DEVNET_URL="$DEVNET" python3 - "$RUN/nm/site-config.json" "$RUN/nm/journey-tokens.stagenet.json" "$SITE_DIR/config.json.new" "$WEB_PORT" "$X_API_PORT" "$DEVNET_GENESIS" <<'PY'
 import json, os, sys
 site, journey = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
 web = f"http://127.0.0.1:{sys.argv[4]}"
@@ -579,11 +642,14 @@ config = {"network": "stagenet", "relayUrl": f"{web}/relay", "tokens": site.get(
           "walletTimeoutSeconds": 300}
 json.dump({k: v for k, v in config.items() if v is not None}, open(sys.argv[3], "w"), indent=1)
 PY
-  cp "$RUN/site/config.json" "$OUT/site-config.served.json"
+  chmod 600 "$SITE_DIR/config.json.new"; mv "$SITE_DIR/config.json.new" "$SITE_DIR/config.json"
+  cp "$SITE_DIR/config.json" "$OUT/site-config.served.json"
+  if [[ "${ATTACH:-}" != preview ]]; then
   docker run -d --name "$CP-site" --network "$NET" --memory 256m --pull=never -p "127.0.0.1:$WEB_PORT:8080" \
     -v "$RUN/site:/site:ro" -v "$HERE/site-server.ts:/srv/site-server.ts:ro" -e RELAY_UPSTREAM=http://relay:8080/ \
     -e KERNEL_UPSTREAM=https://stagenet.api-zswap.zkdojo.com/ -e BATCHER_UPSTREAM=https://stagenet.batcher-zswap.zkdojo.com/ \
     "$BUN_IMAGE" bun /srv/site-server.ts >/dev/null || fail "site server"
+  fi
   for _ in $(seq 1 30); do curl -sf -o /dev/null "http://127.0.0.1:$WEB_PORT/config.json" && break; sleep 1; done
   { echo "index $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/")"
     echo "config $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/config.json")"
@@ -630,7 +696,10 @@ PY
     haveX=0
   fi
   if python3 -c "import sys; sys.exit(0 if float(sys.argv[1] or 0) < 2 else 1)" "$haveX"; then
-    spl mint "$MINT_X" 2 "$ataA" --mint-authority "$RUN/secrets-x/solana-operator.json" \
+    local auth authkey="$RUN/secrets-x/solana-operator.json"
+    auth="$(spl display "$MINT_X" 2>/dev/null | awk '/Mint authority/{print $NF}')"
+    [[ "$auth" == "$(pub "$CONF/devnet/faucet.json")" ]] && authkey="$CONF/devnet/faucet.json"
+    spl mint "$MINT_X" 2 "$ataA" --mint-authority "$authkey" \
       --fee-payer "$RUN/secrets-x/solana-operator.json" >"$OUT/mint-x-to-a.log" 2>&1 \
       || { cat "$OUT/mint-x-to-a.log"; fail "mint 2 X to A"; }
   fi
@@ -725,9 +794,53 @@ PY
   grep -c 'REDACTED devnet RPC' "$RUN/out/probe.txt" | sed 's/^/redaction marks: /'
 }
 
+# faucet-x (after a PASSING gate, ATTACH=preview): X's mint authority goes to the dedicated devnet faucet key
+# (00060 Q7 A: `spl-token authorize <mint> mint <faucet>`, signed by x-operator), and the preview's relay
+# restarts with its test SPL faucet ("Mint Solana tokens") holding that key. OUT=<evidence dir>.
+faucet_x() {
+  : "${OUT:?OUT (the evidence directory) is required}"
+  mkdir -p "$OUT"
+  RUN="$PREVIEW_DIR/gate"; CP=aa00057-preview; NET="$CP-net"
+  [[ -f "$RUN/x.env" && -f "$RUN/solana-cli.yml" ]] || { echo "no gate state in $RUN (run ATTACH=preview gate first)" >&2; exit 1; }
+  [[ "$(cut -d' ' -f1-4 "$LOCK/holder" 2>/dev/null)" == "00057 P5R preview for" ]] || { echo "the stack lock is not the preview's" >&2; exit 1; }
+  [[ -f "$CONF/devnet/faucet.json" && "$(stat -f %Lp "$CONF/devnet/faucet.json")" == 600 ]] || { echo "no faucet key" >&2; exit 1; }
+  DEVNET="$(tr -d ' \r\n' <"$DEVNET_RPC_FILE")"
+  DUST_PS=http://proof-server-dust:6300; CONTRACT_PS=http://proof-server-contracts:6300
+  DEMO_PACK="${DEMO_PACK:-twUSDC:1000,twBTC:0.1}"
+  RELAY_IMAGE="$(cat "$STATE_ROOT/relay-image")"
+  local mint faucet xop auth
+  mint="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['splMint'])" "$P5R/deployments/$DEPLOYMENT.record.json")"
+  faucet="$(pub "$CONF/devnet/faucet.json")"; xop="$(pub "$RUN/secrets-x/solana-operator.json")"
+  auth="$(spl display "$mint" 2>/dev/null | awk '/Mint authority/{print $NF}')"
+  echo "mint $mint authority before $auth" | tee "$OUT/faucet-x.txt"
+  if [[ "$auth" == "$xop" ]]; then
+    spl authorize "$mint" mint "$faucet" --authority "$RUN/secrets-x/solana-operator.json" \
+      --fee-payer "$RUN/secrets-x/solana-operator.json" >"$OUT/authorize-x.log" 2>&1 || { cat "$OUT/authorize-x.log"; exit 1; }
+  elif [[ "$auth" != "$faucet" ]]; then
+    echo "mint authority $auth is neither x-operator nor the faucet key" >&2; exit 1
+  fi
+  auth="$(spl display "$mint" 2>/dev/null | awk '/Mint authority/{print $NF}')"
+  echo "mint $mint authority after $auth (faucet $faucet)" | tee -a "$OUT/faucet-x.txt"
+  [[ "$auth" == "$faucet" ]] || { echo "the handover did not take" >&2; exit 1; }
+  ( umask 077; printf 'SPL_FAUCET_RPC_URL=%s\n' "$DEVNET" >"$RUN/faucet.env" )
+  bun_nm -v "$RUN/nm:/run/nm" -v "$CONF/devnet/faucet.json:/keys/faucet.json:ro" --env-file "$RUN/devnet.env" "$BUN_IMAGE" sh -c \
+    'exec bun relay/src/tools/spl-faucet-keys.ts --journey /run/nm/journey-tokens.stagenet.json --rpc "$SOLANA_RPC_URL" --out /run/nm/spl-faucet-keys.json /keys/faucet.json' \
+    2>&1 | tee "$OUT/spl-faucet-keys.log"
+  [[ "${PIPESTATUS[0]}" == 0 ]] || { echo "spl-faucet-keys" >&2; exit 1; }
+  chmod 600 "$RUN/nm/spl-faucet-keys.json"
+  RELAY_PORT="$(docker port "$CP-relay" 8080 2>/dev/null | sed -n 's/.*://p' | head -1)"; [[ -n "$RELAY_PORT" ]] || RELAY_PORT=$(free_port)
+  start_relay || { echo "relay restart" >&2; exit 1; }
+  relay_synced >"$OUT/relay-health-faucet.json" || { docker logs "$CP-relay" 2>&1 | tail -30; echo "the relay did not come back" >&2; exit 1; }
+  curl -s "http://127.0.0.1:$RELAY_PORT/v1/config" >"$OUT/relay-config-faucet.json"
+  curl -s "http://127.0.0.1:$RELAY_PORT/v1/spl-faucet" >"$OUT/spl-faucet-info.json"
+  redact_rpc "$OUT" >"$OUT/redaction-faucet.txt"
+  echo "faucet: $(head -c 400 "$OUT/spl-faucet-info.json")"
+}
+
 case "$CMD" in
   prep) prep ;;
   gate) gate ;;
+  faucet-x) faucet_x ;;
   rpc-check) rpc_check ;;
-  *) echo "usage: $0 prep|gate|rpc-check" >&2; exit 64 ;;
+  *) echo "usage: $0 prep|gate|faucet-x|rpc-check" >&2; exit 64 ;;
 esac

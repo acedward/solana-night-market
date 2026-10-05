@@ -122,17 +122,21 @@ status() {
 import json, sys
 h = json.load(sys.stdin); s = h.get("sponsor", {})
 print("relay sponsor synced", s.get("synced"), "state", s.get("state"), "DUST", round(int(s.get("dustSpecks") or 0) / 1e15, 3))' 2>/dev/null
-  docker ps --filter "name=^$P-" --format '{{.Names}} {{.Status}}'
+  docker ps --filter "name=^$P" --format '{{.Names}} {{.Status}}'
   echo "lock: $(cat "$LOCK/holder" 2>/dev/null || echo free)"
 }
 
 down() {
+  # Bridge node X, when a gate ran on this preview (ATTACH=preview run-gate.sh): its compose project.
+  docker ps -a --filter "label=com.docker.compose.project=$P-x" -q | xargs -r docker rm -f >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.docker.compose.project=$P-x" | xargs -r docker volume rm >/dev/null 2>&1
+  docker network rm "$P-x_default" >/dev/null 2>&1
   docker rm -f "$P-site" "$P-relay" "$P-ps8" "$P-ps6" >/dev/null 2>&1
   docker volume rm "$P-relay-data" >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   rm -rf "$DIR"
   if [[ "$(cut -d' ' -f1-4 "$LOCK/holder" 2>/dev/null)" == "00057 P5R preview for" ]]; then rm -rf "$LOCK"; fi
-  echo "preview down: containers $(docker ps -a --format '{{.Names}}' | grep -c "^$P-"), lock $(cat "$LOCK/holder" 2>/dev/null || echo free)"
+  echo "preview down: containers $(docker ps -a --format '{{.Names}}' | grep -c "^$P"), volumes $(docker volume ls -q | grep -c "^$P"), lock $(cat "$LOCK/holder" 2>/dev/null || echo free)"
 }
 
 case "$CMD" in

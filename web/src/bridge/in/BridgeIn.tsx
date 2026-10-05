@@ -8,6 +8,10 @@
 // P10.3 (audit C3): the record is written before the wallet is asked; a wallet that does not answer in
 // time leaves it `unknown` ("checking"), never "nothing was sent"; its late answer is kept; and a new
 // Bridge in of that token waits until the page has found the lock on Solana or its blockhash expired.
+//
+// P10.4 (audit D1, D5): only definite evidence says "nothing was locked"; while Solana cannot be read the
+// record stays "checking" (with backoff). Once the request has expired, "Stop checking" shows the evidence
+// to check in the wallet and, on confirmation, ends the check and unblocks the token.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
@@ -23,6 +27,8 @@ import {
   BridgeInRefused,
   BridgeInUncertain,
   blocksNewBridgeIn,
+  bridgeInEvidence,
+  dismissBridgeIn,
   followBridgeIn,
   isFinal,
   pageBalance,
@@ -45,12 +51,13 @@ const STATE_TEXT: Record<BridgeInRecord['state'], string> = {
   completed: 'In your account',
   undeliverable: 'Not delivered',
   failed: 'Failed on Solana',
+  dismissed: 'Not checked any more',
 };
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong.');
 /** Why a new Bridge in of a token must wait (audit C3). */
 export const BRIDGE_IN_WAIT_TEXT =
-  'An earlier Bridge in of this token may have been sent: wait until this page has checked Solana for it (it does so every few seconds) before you bridge this token in again.';
+  'An earlier Bridge in of this token may have been sent: wait until this page has checked Solana for it before you bridge this token in again. If Solana cannot be read for long, you can stop that check below once its request has expired.';
 /** The same record but for when it was last checked. */
 const sameRecord = (a: BridgeInRecord, b: BridgeInRecord) =>
   JSON.stringify({ ...a, checkedAt: 0 }) === JSON.stringify({ ...b, checkedAt: 0 });
@@ -83,6 +90,8 @@ export function BridgeIn({
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [working, setWorking] = useState<'check' | 'send' | null>(null);
+  /** The record whose "Stop checking" evidence is open (audit D5). */
+  const [dismissing, setDismissing] = useState<string | null>(null);
   const records = useMemo(
     () => (store && scope ? readBridgeIns(store, scope, account) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -131,7 +140,11 @@ export function BridgeIn({
             ...r,
             progress: errorText(e).slice(0, 300),
           }));
-          if (live && sameRecord(next, r) === false) putBridgeIn(store, scope, account, next);
+          if (!live || sameRecord(next, r)) continue;
+          // Write only over the record this step read: a "Stop checking" (or a late wallet answer) written
+          // meanwhile wins.
+          const cur = readBridgeIns(store, scope, account).find((x) => bridgeInId(x) === bridgeInId(r));
+          if (cur && JSON.stringify(cur) === JSON.stringify(r)) putBridgeIn(store, scope, account, next);
         }
       } finally {
         running = false;
@@ -194,10 +207,20 @@ export function BridgeIn({
           putBridgeIn(store, scope, account, r);
         },
         onWithdrawn: (r) => removeBridgeIn(store, scope, account, r),
-        // The wallet's late answer: kept unless the page already found the lock (or settled it) itself.
+        // The wallet's late answer: kept unless the page already found the lock (or followed it further).
+        // An earlier "failed" or "dismissed" is reopened (audit D1, R-B1): the signature is checked again.
         onLate: (r) => {
           const now = stillOpen(r);
           if (!now || now.state === 'signing' || now.state === 'unknown') putBridgeIn(store, scope, account, r);
+          else if (now.state === 'failed' || now.state === 'dismissed') {
+            putBridgeIn(store, scope, account, {
+              ...now,
+              signature: r.signature,
+              state: 'unknown',
+              progress: 'Your wallet answered late: checking Solana for the lock',
+              checkedAt: Date.now(),
+            });
+          }
         },
       });
       putBridgeIn(store, scope, account, rec);
@@ -325,13 +348,62 @@ export function BridgeIn({
       )}
       {records.length > 0 && (
         <ul className="small" data-testid="bridge-in-records">
-          {records.map((r) => (
-            <li key={bridgeInId(r)} data-testid="bridge-in-record" data-state={r.state}>
-              {formatUnits(BigInt(r.amount), entries.find((e) => e.colour === r.colour)?.decimals ?? 0)} {r.symbol}:{' '}
-              <strong>{STATE_TEXT[r.state]}</strong>
-              {r.progress && r.state !== 'completed' ? ` · ${r.progress}` : ''}
-            </li>
-          ))}
+          {records.map((r) => {
+            const decimals = entries.find((e) => e.colour === r.colour)?.decimals ?? 0;
+            const id = bridgeInId(r);
+            return (
+              <li key={id} data-testid="bridge-in-record" data-state={r.state}>
+                {formatUnits(BigInt(r.amount), decimals)} {r.symbol}: <strong>{STATE_TEXT[r.state]}</strong>
+                {r.progress && r.state !== 'completed' ? ` · ${r.progress}` : ''}
+                {r.state === 'unknown' && r.blockhashExpired && dismissing !== id && (
+                  <>
+                    {' '}
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      onClick={() => setDismissing(id)}
+                      data-testid="bridge-in-dismiss"
+                    >
+                      Stop checking…
+                    </Button>
+                  </>
+                )}
+                {r.state === 'unknown' && r.blockhashExpired && dismissing === id && (
+                  <div data-testid="bridge-in-dismiss-evidence">
+                    <p>
+                      This page could not finish checking whether this lock reached Solana. Its request has expired, so
+                      your wallet can no longer send it. Look in your wallet&apos;s activity for a transfer matching
+                      these facts. If you find one, the bridge still delivers its tokens to your account. Stop checking
+                      only when you have looked: the page then lets you bridge this token in again.
+                    </p>
+                    <ul className="mono">
+                      {bridgeInEvidence(r, decimals).map((f) => (
+                        <li key={f.label}>
+                          {f.label}: {f.value}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="row">
+                      <Button variant="secondary" size="small" onClick={() => setDismissing(null)}>
+                        Keep checking
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="small"
+                        onClick={() => {
+                          if (store && scope) putBridgeIn(store, scope, account, dismissBridgeIn(r));
+                          setDismissing(null);
+                        }}
+                        data-testid="bridge-in-dismiss-confirm"
+                      >
+                        Yes, stop checking
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </Panel>

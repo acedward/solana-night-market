@@ -51,6 +51,7 @@ import {
 import type { TransactionFacts } from '../../wallet/sign-prompt.js';
 import type { SolanaTransactions } from '../../wallet/transactions.js';
 import { WalletError } from '../../wallet/wallet-errors.js';
+import { verifyDeployment } from '../registry.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
 
@@ -130,6 +131,19 @@ export async function precheckBridgeIn(ctx: BridgeInContext, entry: BridgeEntry,
     refuse(`${entry.symbol}'s mint is not a classic SPL token, so it can't be bridged.`);
   if (mint!.data.length < 45 || mint!.data[44] !== entry.decimals) {
     refuse(`${entry.symbol}'s mint does not have the decimals this site lists (${entry.decimals}).`);
+  }
+  // P10.4 (audit D7, R-B5): the bridge's own deployment record must name this mint, program, contract,
+  // colour and decimals; a bridge that cannot be verified gets no lock (fail closed).
+  const deployment = await verifyDeployment(entry, ctx.fetchImpl);
+  if (deployment.kind === 'unavailable') {
+    refuse(
+      `The ${entry.symbol} bridge cannot be verified right now (${deployment.why} with its deployment record), so this page will not lock tokens for it. Try again later.`,
+    );
+  }
+  if (deployment.kind === 'mismatch') {
+    refuse(
+      `The ${entry.symbol} bridge names another ${deployment.fields.join(', ')} than this site's token list, so this page will not lock tokens for it.`,
+    );
   }
   const facts = lockToAccountFacts({ entry, depositor: ctx.depositor, amount, account: ctx.account });
   const spl = await ctx.rpc.tokenBalance(facts.source);
@@ -292,12 +306,31 @@ export const blocksNewBridgeIn = (records: readonly BridgeInRecord[], colour: st
 /** How far back one look searches the source token account's transactions (pages of 100). */
 export const BRIDGE_IN_SEARCH_PAGES = 10;
 
+/** What a record says while Solana cannot be read (audit D1): never that nothing was locked. */
+export const BRIDGE_IN_UNREADABLE_TEXT =
+  'Solana could not be read right now, so this page cannot tell yet whether the lock was sent. It checks again shortly; until then, Bridge in of this token waits.';
+
+/** After `n` failed lookups in a row, how long the page waits before asking Solana again (audit D1). */
+export const bridgeInBackoffMs = (n: number): number => (n <= 0 ? 0 : Math.min(5_000 * 2 ** (n - 1), 300_000));
+
+/** Whether a record still being checked is due for its next look (audit D1: back off after errors). */
+export const bridgeInCheckDue = (r: BridgeInRecord, now = Date.now()): boolean =>
+  !r.lookupErrors || now >= (r.checkedAt ?? 0) + bridgeInBackoffMs(r.lookupErrors);
+
 /**
  * One look on Solana for a lock whose wallet answer was lost (audit C3): by its signature when known, else
  * among the source token account's transactions back to the slot its blockhash was read at, by its exact
- * message. Found: `sent` (then followed as usual). Not found, the search complete, and its blockhash
- * already expired (read FIRST, so a lock that lands later cannot be missed): `failed`, nothing was locked.
- * Otherwise still `unknown` (a search cut short never says "nothing was locked").
+ * message. Found: `sent` (then followed as usual).
+ *
+ * "Nothing was locked" (`failed`) needs DEFINITE evidence (audit D1: R-A2, R-B1): the blockhash has expired
+ * (its height read FIRST, so a lock that lands later cannot be missed), and the search reached the lock's
+ * slot with every listed transaction read. Any lookup that fails (an RPC error, a listed transaction Solana
+ * does not return, a body that does not decode) leaves the record `unknown`, counts the error (the page then
+ * backs off, `bridgeInCheckDue`), and keeps blocking a new Bridge in of the token.
+ *
+ * Once the blockhash has expired, a look that stops at the page limit records where it stopped
+ * (`searchBefore`) and the next one resumes there (audit D5: R-A5): any lock landed before the expiry, so
+ * newer transactions need no second look.
  */
 export async function reconcileBridgeIn(
   r: BridgeInRecord,
@@ -305,51 +338,128 @@ export async function reconcileBridgeIn(
   now = Date.now(),
 ): Promise<BridgeInRecord> {
   if (r.state !== 'signing' && r.state !== 'unknown') return r;
-  const height = r.lastValidBlockHeight ? await ctx.rpc.blockHeight() : null;
-  if (r.signature && (await ctx.rpc.signatureStatus(r.signature))) {
-    return { ...r, state: 'sent', progress: 'Found on Solana', checkedAt: now };
-  }
+  const { lookupErrors: _errors, searchBefore: _cursor, ...rest } = r;
+  let expired = r.blockhashExpired === true;
+  const found = (signature: string): BridgeInRecord => {
+    const { blockhashExpired: _x, ...clean } = rest;
+    return { ...clean, signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
+  };
+  const unreadable = (): BridgeInRecord => ({
+    ...r,
+    state: 'unknown',
+    ...(expired ? { blockhashExpired: true } : {}),
+    lookupErrors: (r.lookupErrors ?? 0) + 1,
+    progress: BRIDGE_IN_UNREADABLE_TEXT,
+    checkedAt: now,
+  });
   let complete = !r.message || !r.source;
-  if (r.message && r.source) {
-    const from = r.fromSlot ? BigInt(r.fromSlot) : null;
-    let before: string | undefined;
-    search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
-      const sigs = await ctx.rpc.signaturesForAddress(r.source, 100, before);
-      for (const { signature, slot } of sigs) {
-        if (from !== null && slot < from) {
-          complete = true;
-          break search;
-        }
-        const wire = await ctx.rpc.transactionWire(signature).catch(() => null);
-        if (!wire) continue;
-        let sent: Uint8Array;
-        try {
-          sent = splitTransaction(wire).message;
-        } catch {
-          continue;
-        }
-        if (toBase64(sent) === r.message)
-          return { ...r, signature, state: 'sent', progress: 'Found on Solana', checkedAt: now };
-      }
-      if (sigs.length < 100) {
-        complete = true;
-        break;
-      }
-      before = sigs[sigs.length - 1]!.signature;
+  let cursor: string | undefined;
+  try {
+    if (r.lastValidBlockHeight) {
+      const height = await ctx.rpc.blockHeight();
+      if (height > BigInt(r.lastValidBlockHeight)) expired = true;
     }
+    if (r.signature && (await ctx.rpc.signatureStatus(r.signature))) return found(r.signature);
+    if (r.message && r.source) {
+      const from = r.fromSlot ? BigInt(r.fromSlot) : null;
+      // Resume only a search that began after the expiry (its cursor is kept only then).
+      let before = expired && r.blockhashExpired ? r.searchBefore : undefined;
+      search: for (let page = 0; page < BRIDGE_IN_SEARCH_PAGES; page++) {
+        const sigs = await ctx.rpc.signaturesForAddress(r.source, 100, before);
+        for (const { signature, slot } of sigs) {
+          if (from !== null && slot < from) {
+            complete = true;
+            break search;
+          }
+          // A listed transaction Solana does not return, or one that does not decode, is not "not found".
+          const wire = await ctx.rpc.transactionWire(signature);
+          if (!wire) return unreadable();
+          let sent: Uint8Array;
+          try {
+            sent = splitTransaction(wire).message;
+          } catch {
+            return unreadable();
+          }
+          if (toBase64(sent) === r.message) return found(signature);
+        }
+        if (sigs.length < 100) {
+          complete = true;
+          break;
+        }
+        before = sigs[sigs.length - 1]!.signature;
+      }
+      if (!complete && expired) cursor = before;
+    }
+  } catch {
+    return unreadable();
   }
-  if (complete && height !== null && height > BigInt(r.lastValidBlockHeight!)) {
+  if (complete && expired) {
     return {
-      ...r,
+      ...rest,
       state: 'failed',
+      blockhashExpired: true,
       progress: "Not sent: your wallet's request expired before it reached Solana. Nothing was locked.",
       checkedAt: now,
     };
   }
-  return { ...r, state: 'unknown', progress: 'Checking Solana for the lock', checkedAt: now };
+  return {
+    ...rest,
+    state: 'unknown',
+    ...(expired ? { blockhashExpired: true } : {}),
+    ...(cursor ? { searchBefore: cursor } : {}),
+    progress: 'Checking Solana for the lock',
+    checkedAt: now,
+  };
 }
 
-const FINAL: ReadonlySet<BridgeInRecord['state']> = new Set(['completed', 'undeliverable', 'failed']);
+/**
+ * "Stop checking" (audit D5: R-A5): the customer, having checked their wallet's activity against the
+ * evidence the page shows (`bridgeInEvidence`), ends a check the page cannot finish. Only once the request
+ * has expired (the wallet can no longer send it). The record is kept, final, and no longer blocks the token;
+ * if the lock was in fact sent, the bridge still delivers its tokens to the account.
+ */
+export function dismissBridgeIn(r: BridgeInRecord, now = Date.now()): BridgeInRecord {
+  if (r.state !== 'unknown' && r.state !== 'signing') {
+    throw new BridgeInError('Only a lock this page is still checking can be dismissed.');
+  }
+  if (!r.blockhashExpired) {
+    throw new BridgeInError(
+      'This request has not expired yet, so your wallet may still send it. Wait until it has expired.',
+    );
+  }
+  const { lookupErrors: _e, searchBefore: _c, ...rest } = r;
+  return {
+    ...rest,
+    state: 'dismissed',
+    progress:
+      'You stopped this check. If the lock was sent after all, the bridge still delivers its tokens to your account.',
+    checkedAt: now,
+  };
+}
+
+/** What the customer checks in their wallet before "Stop checking" (audit D5). */
+export function bridgeInEvidence(r: BridgeInRecord, decimals: number): { label: string; value: string }[] {
+  const out = [{ label: 'Amount', value: `${formatUnits(BigInt(r.amount), decimals)} ${r.symbol}` }];
+  if (r.source) out.push({ label: 'From your token account', value: r.source });
+  out.push({ label: 'Mint', value: r.mint });
+  if (r.signature) out.push({ label: 'Transaction signature', value: r.signature });
+  if (r.key) out.push({ label: 'Request id (SHA-256 of the lock message)', value: r.key });
+  if (r.lastValidBlockHeight) {
+    out.push({ label: 'Valid until Solana block height', value: `${r.lastValidBlockHeight} (expired)` });
+  }
+  out.push({ label: 'Asked at', value: new Date(r.createdAt).toISOString() });
+  out.push({
+    label: 'What this page could check',
+    value: r.lookupErrors
+      ? `Solana could not be read (${r.lookupErrors} time${r.lookupErrors === 1 ? '' : 's'} in a row)`
+      : r.searchBefore
+        ? "Part of your token account's history; the search had not finished"
+        : 'Not finished yet',
+  });
+  return out;
+}
+
+const FINAL: ReadonlySet<BridgeInRecord['state']> = new Set(['completed', 'undeliverable', 'failed', 'dismissed']);
 export const isFinal = (r: BridgeInRecord): boolean => FINAL.has(r.state);
 
 /** The page's balance of a colour by its own decode (confirmed coins only). */
@@ -364,7 +474,10 @@ export async function followBridgeIn(
   now = Date.now(),
 ): Promise<BridgeInRecord> {
   if (isFinal(r)) return r;
-  if (r.state === 'signing' || r.state === 'unknown') return reconcileBridgeIn(r, ctx, now);
+  if (r.state === 'signing' || r.state === 'unknown') {
+    // Back off after failed lookups (audit D1); the record is unchanged until its next look is due.
+    return bridgeInCheckDue(r, now) ? reconcileBridgeIn(r, ctx, now) : r;
+  }
   if (r.state === 'sent' && r.signature) {
     const status = await ctx.rpc.signatureStatus(r.signature);
     if (status === 'failed')

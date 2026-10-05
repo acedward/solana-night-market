@@ -195,7 +195,9 @@ describe('C3: the search for a lost lock is bounded, and a search cut short neve
       rpc: {
         blockHeight: async () => 1_000n,
         signatureStatus: async () => null,
-        transactionWire: async () => null,
+        // Every listed transaction is READ, and none is the lock (P10.4, audit D1 / R-B1: a body Solana does
+        // not return is no evidence of absence, so this test once accepted incomplete evidence).
+        transactionWire: async () => Uint8Array.from([1, ...new Array<number>(64).fill(0), 9, 9, 9]),
         signaturesForAddress: async () => {
           const page = pages++;
           return Array.from({ length: 100 }, (_, i) => ({ signature: `s${page}-${i}`, slot: BigInt(slotOf(page, i)) }));

@@ -571,35 +571,57 @@ async function negUndeliverable() {
   };
   const t0 = Date.now();
   let rec = await sendBridgeIn(ctx, X, amount, 0n);
+  // The bridge's own verdict, read from X's node directly. The node answers `GET /transfers/:id` with
+  // `{ "transfer": <TransferView> }` (00050's envelope, which 00058's CLI reads); a 404 until it has seen
+  // the lock. The page's own reading of the same transfer (followBridgeIn) is recorded beside it.
+  const nodeView = async (): Promise<Any | null> => {
+    if (!rec.lockNonce) return null;
+    const r = await fetch(`${X.bridgeApi}/transfers/s2m:${rec.lockNonce}`).catch(() => null);
+    if (!r || !r.ok) return null;
+    const body = (await r.json().catch(() => null)) as Any;
+    return body?.transfer ?? null;
+  };
   const timeline: string[] = [];
-  while (
-    rec.state !== 'undeliverable' &&
-    rec.state !== 'failed' &&
-    rec.state !== 'completed' &&
-    Date.now() - t0 < 600_000
-  ) {
-    rec = await followBridgeIn(rec, ctx, async () => []);
-    if (rec.progress && timeline[timeline.length - 1] !== rec.progress) timeline.push(rec.progress);
-    if (rec.state !== 'undeliverable') await sleep(3_000);
+  let view: Any | null = null;
+  let decidedSeconds: number | null = null;
+  while (Date.now() - t0 < 300_000) {
+    if (rec.state !== 'undeliverable' && rec.state !== 'failed' && rec.state !== 'completed') {
+      rec = await followBridgeIn(rec, ctx, async () => []);
+      if (rec.progress && timeline[timeline.length - 1] !== rec.progress) timeline.push(rec.progress);
+    }
+    view = await nodeView();
+    if (view?.status === 'undeliverable' || view?.status === 'completed') {
+      decidedSeconds ??= (Date.now() - t0) / 1000;
+      // Give the page a few more reads to see it too (it polls the same API).
+      if (rec.state === 'undeliverable' || Date.now() - t0 > decidedSeconds * 1000 + 30_000) break;
+    }
+    await sleep(3_000);
   }
-  const decidedSeconds = (Date.now() - t0) / 1000;
   await sleep(20_000); // a margin: nothing may follow the decision
-  const view = rec.lockNonce
-    ? await fetch(`${X.bridgeApi}/transfers/s2m:${rec.lockNonce}`).then((r) => r.json() as Promise<Any>)
-    : null;
+  view = (await nodeView()) ?? view;
   const ata = associatedTokenAddress(third, X.splMint);
   const after = {
     vault: (await sol.tokenBalance(vault)) ?? 0n,
     third: (await sol.tokenBalance(ata)) ?? 0n,
     xBridgeActions: await contractActionCount(X.bridgeContract),
   };
+  // Whether the PAGE (Night Market's own I-3 client) must see `undeliverable` too: the strict default.
+  // See plans/00057-solana-midnight-journey-questions.md Q9 (the page cannot read the node's envelope).
+  const pageMustSee = process.env.NEG_PAGE_MUST_SEE !== '0';
   const res = {
     target: { contract: target, what: "Y's bridge contract (a contract, not a Passport account)" },
     precheck,
-    lock: { signature: rec.signature, nonce: rec.lockNonce ?? null, state: rec.state, reason: rec.reason ?? null },
+    lock: {
+      signature: rec.signature,
+      nonce: rec.lockNonce ?? null,
+      pageState: rec.state,
+      pageReason: rec.reason ?? null,
+    },
     view: view
       ? { status: view.status, reason: view.reason, delivery: view.delivery, recipientKind: view.recipientKind }
       : null,
+    pageSawUndeliverable: rec.state === 'undeliverable',
+    pageMustSee,
     decidedSeconds,
     timeline,
     before,
@@ -610,13 +632,13 @@ async function negUndeliverable() {
   const ok =
     precheck.refused === true &&
     /cannot deliver/.test(String(precheck.message)) &&
-    rec.state === 'undeliverable' &&
     view?.status === 'undeliverable' &&
     view?.reason?.code === 'not-a-passport-account' &&
     view?.delivery === null &&
     after.xBridgeActions === before.xBridgeActions &&
     after.vault - before.vault === amount &&
-    before.third - after.third === amount;
+    before.third - after.third === amount &&
+    (!pageMustSee || rec.state === 'undeliverable');
   if (!ok) throw new Error(`SC-004 non-account lock: not as expected: ${json(res)}`);
 }
 

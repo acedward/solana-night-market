@@ -101,6 +101,8 @@ negatives = {
         "bridgeActionsBefore": (nu.get("before") or {}).get("xBridgeActions"),
         "bridgeActionsAfter": (nu.get("after") or {}).get("xBridgeActions"),
         "decidedSeconds": nu.get("decidedSeconds"),
+        "pageSawUndeliverable": nu.get("pageSawUndeliverable"),
+        "pageTimeline": nu.get("timeline"),
     } if nu else None,
     "SC-004 tampered landing-key recipient": {
         "status": neg_relay.get("status"), "code": neg_relay.get("code"),

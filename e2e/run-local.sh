@@ -578,7 +578,6 @@ down() {
   docker run --rm --pull=never --memory 256m -v "$TMPL_VOLUME:/work" "$STEP_IMAGE" sh -c \
     "rm -rf $TROOT/deployments/standin-x.json $TROOT/deployments/standin-y.json $TROOT/deployments/standin-x.record.json $TROOT/deployments/standin-y.record.json $TROOT/packages/contracts-midnight/midnight-level-db-deploy" >/dev/null 2>&1
   peak_memory
-  report
   sleep 2
   local containers volumes validator rundir image
   containers=$(docker ps -a --format '{{.Names}}' | grep -cE "^$CP")
@@ -591,6 +590,7 @@ down() {
   local lock; lock=$([[ -d "$LOCK" && "$(cut -d' ' -f1 "$LOCK/holder" 2>/dev/null)" == 00057 ]] && echo 1 || echo 0)
   printf '{"project":"%s","containers":%s,"volumes":%s,"validatorProcesses":%s,"runDirLeft":%s,"injectorImageLeft":%s,"lockHeldBy00057":%s,"at":"%s"}\n' \
     "$CP" "$containers" "$volumes" "$validator" "$rundir" "$image" "$lock" "$(date -u +%FT%TZ)" | tee "$OUT/down-check.json"
+  report
   (( containers + volumes + validator + rundir + image + lock == 0 )) || { say "DOWN LEFT SOMETHING BEHIND"; return 1; }
   say "down: nothing left; lock released"
 }

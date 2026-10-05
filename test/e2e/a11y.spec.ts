@@ -242,14 +242,16 @@ for (const vp of VIEWPORTS) {
       await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
       for (const [hash, ready] of [
         ['#markets', 'market-feed-status'],
-        [`#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`, 'make-section'],
+        [`#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`, 'trade-book'],
         ['#account', 'passport-section'],
         ['#local', 'local-data'],
       ] as const) {
         await page.goto(`/${hash}`);
         await expect(page.getByTestId(ready)).toBeVisible();
         if (hash.startsWith('#trade')) {
-          // The Create offer card filled in, so its preview and the submit button are stops too.
+          // A create row open and filled in (AA 00060 FR-026), so its preview and the submit button
+          // are stops too.
+          await page.getByTestId('side-sell').click();
           await page.getByTestId('make-quantity').fill('0.05');
           await page.getByTestId('make-price').fill('61500');
           await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -330,7 +332,8 @@ for (const vp of VIEWPORTS) {
 
       // The progress view of a take: Escape hides it ("Continue in background"); the take goes on.
       await page.getByTestId('trade-pair').selectOption('twUSDM/twUSDC');
-      await page.getByTestId('buy-best-ask').click();
+      // AA 00060 FR-026: the best ask is the first row under Sellers.
+      await page.getByTestId('trade-book-asks').getByTestId('take-line').first().click();
       const holdTake = relay.holdNextJob();
       await page.getByTestId('take-sign').click();
       await expect(page.getByTestId('activity-progress')).toBeVisible();

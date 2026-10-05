@@ -87,6 +87,12 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
     text: 'Coins are not merged. Solana wallet accounts on a Ledger device are not supported yet.',
   },
   {
+    // AA 00060 FR-027 (plan P14.0, questions Q9).
+    id: 'own-offer',
+    title: 'You cannot take your own offer.',
+    text: 'Your offer stays in the order book, marked "Your offer". Your account cannot take it: the offer and the take would use the same approval, so Midnight would refuse the trade. Cancel it instead; you keep your tokens.',
+  },
+  {
     id: 'wallets',
     title: 'Solana wallets.',
     text: 'Phantom and Nightly are tested. Any other wallet that signs Solana messages through the Wallet Standard may work. The page asks your wallet for one approval at a time, with a short pause between approvals; if no window appears, open the wallet from your browser’s toolbar or try again.',

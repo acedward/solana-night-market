@@ -189,6 +189,9 @@ export class MockRelay {
   offerStatus: Record<string, string> = {};
   /** What the exchange says about the next make when the relay stops waiting (`live` = listed). */
   makeListing = 'live';
+  /** Told of every make as the relay posts it to the exchange (AA 00060 FR-026: a test lists it in the
+   *  exchange's book, as the kernel does, before the page reads the book again). */
+  onMake: ((offerId: string, payload: Record<string, string>) => void) | null = null;
   /** Render with another token list than the browser (a symbol the relay does not share): every
    *  account call's rebuilt message then differs, and the check must refuse it (questions Q12). */
   mismatchedTokens = false;
@@ -586,6 +589,7 @@ export class MockRelay {
         const offerId = randomBytes(32).toString('hex');
         const status = this.makeListing;
         this.offerStatus[offerId] = status;
+        this.onMake?.(offerId, p as Record<string, string>);
         s.stages = ['proving', 'proven', 'posted', status === 'live' ? 'listed' : `status-${status}`];
         s.result = {
           offerId,

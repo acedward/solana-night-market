@@ -142,7 +142,8 @@ test('make an offer and take one: each ONE approval of the readable swap text th
 
   // Take: on twETH/twBTC (no twUSDC in it), sell the 1 twETH coin at the best bid, 0.04 twBTC.
   await page.getByTestId('trade-pair').selectOption('twETH/twBTC');
-  await page.getByTestId('sell-best-bid').click();
+  // AA 00060 FR-026: the best bid is the first row under Buyers (the "Buy or sell now" panel is gone).
+  await page.getByTestId('trade-book-bids').getByTestId('take-line').first().click();
   await expect(page.getByTestId('take-confirm')).toBeVisible();
   await expect(page.getByTestId('take-cancels-offer')).toBeVisible(); // the live offer dies with it
   await page.getByTestId('take-sign').click();

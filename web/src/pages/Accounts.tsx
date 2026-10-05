@@ -88,7 +88,7 @@ import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
 import { confirmCancelsOffer as confirmOffer, reconcileFromChain } from '../trade/operations.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
-import { useWallet } from '../wallet/WalletContext.js';
+import { useWallet, useWalletName } from '../wallet/WalletContext.js';
 
 const short = (s: string, head = 8, tail = 6) =>
   s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
@@ -273,6 +273,7 @@ function UnshieldedWithdrawForm({
   onSend: (color: string, amount: bigint, recipient: string, balance: bigint) => void;
   busy: boolean;
 }) {
+  const wallet = useWalletName();
   const [color, setColor] = useState('');
   const [amount, setAmount] = useState('');
   const [recipient, setRecipient] = useState('');
@@ -340,7 +341,7 @@ function UnshieldedWithdrawForm({
         />
       </Field>
       <p className="small muted panel-intro">
-        You approve once: Phantom shows the amount, the token and the recipient before you approve.
+        You approve once: {wallet.name} shows the amount, the token and the recipient before you approve.
       </p>
       {error && (
         <Notice tone="danger" role="alert" data-testid="wu-error" className="panel-intro">
@@ -367,6 +368,7 @@ function SendForm({
   onSend: (color: string, amount: bigint, recipient: string) => void;
   busy: boolean;
 }) {
+  const wallet = useWalletName();
   const held = holdingsByColour(coins);
   const [color, setColor] = useState('');
   const [amount, setAmount] = useState('');
@@ -440,9 +442,9 @@ function SendForm({
           />
         </Field>
         <p className="small muted panel-intro">
-          You approve once for the payment: Phantom shows the amount, the token and the recipient. Any change stays in
-          your account, and Phantom asks for one more approval to save it in your account&apos;s inbox, so a backup can
-          always restore it.
+          You approve once for the payment: {wallet.name} shows the amount, the token and the recipient. Any change
+          stays in your account, and {wallet.name} asks for one more approval to save it in your account&apos;s inbox,
+          so a backup can always restore it.
         </p>
         {error && (
           <Notice tone="danger" role="alert" data-testid="send-error" className="panel-intro">
@@ -473,6 +475,7 @@ export function Accounts({
   const { store, revision, status: storageStatus } = useStore();
   const { spendingPaused } = useRelayStatus();
   const wallet = useWallet();
+  const walletName = useWalletName();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const chain = useChain();
   // AA 00060 P7: the site's journey registry passed its checks, so Bridge in is offered.
@@ -705,7 +708,7 @@ export function Accounts({
     });
 
   const lede =
-    'Your tokens on Midnight, controlled by your Phantom wallet. Balances come from the coins this browser keeps, checked against your account’s inbox on Midnight.';
+    'Your tokens on Midnight, controlled by your Solana wallet. Balances come from the coins this browser keeps, checked against your account’s inbox on Midnight.';
 
   if (wallet.status !== 'connected' || !scope) {
     return (
@@ -717,7 +720,7 @@ export function Accounts({
           action={
             connect ? (
               <Button data-testid="account-connect-cta" onClick={connect}>
-                <Icon name="wallet" /> Connect Phantom
+                <Icon name="wallet" /> Connect wallet
               </Button>
             ) : undefined
           }
@@ -725,7 +728,7 @@ export function Accounts({
           <span data-testid="account-connect">
             {wallet.supported
               ? 'Connect your Solana wallet to see your account. It only signs messages: it needs no SOL, and the market pays every Midnight fee.'
-              : 'Accounts controlled by a Solana wallet (Phantom) are coming to this site. Until then, browse the order books on Markets.'}
+              : 'Accounts controlled by a Solana wallet are coming to this site. Until then, browse the order books on Markets.'}
           </span>
         </EmptyState>
       </section>
@@ -913,7 +916,7 @@ export function Accounts({
             <Card title="Open your free account" data-testid="no-account">
               <ul className="onboarding">
                 <li>
-                  <strong>One approval in Phantom</strong>
+                  <strong>One approval in {walletName.name}</strong>
                   It proves you own this wallet. It moves no funds and costs nothing.
                 </li>
                 <li>
@@ -1035,8 +1038,8 @@ export function Accounts({
             <Panel tone="quiet" as="aside" title="How it works">
               <ul className="onboarding">
                 <li>
-                  <strong>Your keys stay in Phantom</strong>
-                  Phantom only signs short messages you can read.{' '}
+                  <strong>Your keys stay in {walletName.name}</strong>
+                  {walletName.Name} signs short messages you can read for every market action.{' '}
                   {bridging
                     ? 'It signs a Solana transaction only when you bridge tokens in, after the page shows you what it does.'
                     : 'Night Market never sends a Solana transaction.'}

@@ -17,7 +17,7 @@ import { bytesToHex, type DeviceSigner } from '@nightmarket/core';
 import { assertDeviceKeyDecodes, type Ed25519Display } from '@nightmarket/core/passport';
 
 import { ed25519ActionSigning } from './signing.js';
-import type { SignPromptStore } from './sign-prompt.js';
+import type { SignPromptStore, TransactionFacts } from './sign-prompt.js';
 import { classifyWalletSignature } from './solana-signature.js';
 import { discoverSolanaWallets, type ConnectedSolanaWallet, type SolanaWalletHandle } from './solana-wallets.js';
 import type { WalletAdapter, WalletSessionEvent } from './WalletContext.js';
@@ -36,42 +36,76 @@ export interface SolanaAdapterOptions {
   win?: Window;
 }
 
+/** AA 00060 P5 (G-NIGHTLY run 1): the pause between the end of one wallet request and the start of the
+ *  next. Nightly showed no prompt for a `signMessage` asked the moment the previous one answered (the
+ *  request hung); the page now never asks back to back, and asks one request at a time. */
+export const WALLET_REQUEST_GAP_MS = 750;
+
+/** Runs wallet requests one at a time, each at least `gapMs` after the previous one ended. */
+export function walletPacer(
+  gapMs = WALLET_REQUEST_GAP_MS,
+  now: () => number = () => Date.now(),
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): <T>(fn: () => Promise<T>) => Promise<T> {
+  let queue: Promise<unknown> = Promise.resolve();
+  let lastEnded = Number.NEGATIVE_INFINITY;
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = async (): Promise<T> => {
+      const wait = lastEnded + gapMs - now();
+      if (wait > 0) await sleep(wait);
+      try {
+        return await fn();
+      } finally {
+        lastEnded = now();
+      }
+    };
+    const p = queue.then(run, run);
+    queue = p.catch(() => undefined);
+    return p;
+  };
+}
+
+type Pace = <T>(fn: () => Promise<T>) => Promise<T>;
+const unpaced: Pace = (fn) => fn();
+
 /** The DeviceSigner of a connected wallet, with the page's checks around the wallet's signMessage. */
 export function walletSigner(
   wallet: ConnectedSolanaWallet,
   name: string,
-  opts: Pick<SolanaAdapterOptions, 'prompts' | 'timeoutMs' | 'gate'>,
+  opts: Pick<SolanaAdapterOptions, 'prompts' | 'timeoutMs' | 'gate'> & { pace?: Pace },
   onHardware: () => void = () => undefined,
 ): DeviceSigner {
   const deviceKey = bytesToHex(wallet.publicKey);
+  const pace = opts.pace ?? unpaced;
   return {
     deviceKey,
     address: wallet.address,
-    async signMessage(message: Uint8Array): Promise<Uint8Array> {
-      const paused = opts.gate?.() ?? null;
-      if (paused) throw new WalletError('paused', paused);
-      opts.prompts.open(message, name);
-      let signed = false;
-      try {
-        let out: { signature: Uint8Array; signedMessage?: Uint8Array };
-        try {
-          out = await withWalletTimeout(wallet.signMessage(message), opts.timeoutMs);
-        } catch (e) {
-          throw walletErrorFrom(e, 'sign');
-        }
-        const verdict = classifyWalletSignature(message, out.signature, wallet.publicKey, out.signedMessage);
-        if (verdict === 'hardware') {
-          onHardware();
-          throw new WalletError('hardware');
-        }
-        if (verdict !== 'ok') throw new WalletError('bad-signature');
-        signed = true;
-        return out.signature;
-      } finally {
-        opts.prompts.close(signed ? 'signed' : 'ended');
-      }
-    },
+    signMessage: (message: Uint8Array) => pace(() => signOnce(message)),
   };
+  async function signOnce(message: Uint8Array): Promise<Uint8Array> {
+    const paused = opts.gate?.() ?? null;
+    if (paused) throw new WalletError('paused', paused);
+    opts.prompts.open(message, name);
+    let signed = false;
+    try {
+      let out: { signature: Uint8Array; signedMessage?: Uint8Array };
+      try {
+        out = await withWalletTimeout(wallet.signMessage(message), opts.timeoutMs);
+      } catch (e) {
+        throw walletErrorFrom(e, 'sign');
+      }
+      const verdict = classifyWalletSignature(message, out.signature, wallet.publicKey, out.signedMessage);
+      if (verdict === 'hardware') {
+        onHardware();
+        throw new WalletError('hardware');
+      }
+      if (verdict !== 'ok') throw new WalletError('bad-signature');
+      signed = true;
+      return out.signature;
+    } finally {
+      opts.prompts.close(signed ? 'signed' : 'ended');
+    }
+  }
 }
 
 export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
@@ -108,28 +142,36 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
       }
       const listeners = new Set<(e: WalletSessionEvent) => void>();
       const emit = (e: WalletSessionEvent) => listeners.forEach((l) => l(e));
-      const signer = walletSigner(wallet, handle.name, opts, () => emit('hardware'));
+      // One request at a time, never back to back (WALLET_REQUEST_GAP_MS): messages and transactions alike.
+      const pace = walletPacer();
+      const signer = walletSigner(wallet, handle.name, { ...opts, pace }, () => emit('hardware'));
       const stopWatching = wallet.onChange(() => emit('account-changed'));
       // AA 00060 (Bridge in): the wallet's transaction features, behind the same gate and timeout as its
       // messages (the page builds and checks every transaction before it asks; ../bridge/in/operations.ts).
+      // The signing panel shows the transaction's decoded facts while the wallet is open (P5.3).
       const guarded =
-        <A extends unknown[]>(fn: (...a: A) => Promise<Uint8Array>) =>
-        async (...a: A): Promise<Uint8Array> => {
-          const paused = opts.gate?.() ?? null;
-          if (paused) throw new WalletError('paused', paused);
-          try {
-            return await withWalletTimeout(fn(...a), opts.timeoutMs);
-          } catch (e) {
-            throw walletErrorFrom(e, 'sign');
-          }
-        };
+        (fn: (t: Uint8Array, c: string) => Promise<Uint8Array>) =>
+        (t: Uint8Array, c: string, facts?: TransactionFacts): Promise<Uint8Array> =>
+          pace(async () => {
+            const paused = opts.gate?.() ?? null;
+            if (paused) throw new WalletError('paused', paused);
+            if (facts) opts.prompts.openTransaction(facts, handle.name);
+            let signed = false;
+            try {
+              const out = await withWalletTimeout(fn(t, c), opts.timeoutMs);
+              signed = true;
+              return out;
+            } catch (e) {
+              throw walletErrorFrom(e, 'sign');
+            } finally {
+              if (facts) opts.prompts.close(signed ? 'signed' : 'ended');
+            }
+          });
       const transactions = {
         ...(wallet.signAndSendTransaction
-          ? { signAndSend: guarded((t: Uint8Array, c: string) => wallet.signAndSendTransaction!(t, c)) }
+          ? { signAndSend: guarded((t, c) => wallet.signAndSendTransaction!(t, c)) }
           : {}),
-        ...(wallet.signTransaction
-          ? { sign: guarded((t: Uint8Array, c: string) => wallet.signTransaction!(t, c)) }
-          : {}),
+        ...(wallet.signTransaction ? { sign: guarded((t, c) => wallet.signTransaction!(t, c)) } : {}),
       };
       return {
         address: wallet.address,

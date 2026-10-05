@@ -330,7 +330,7 @@ export function Markets({ network, relayUrl }: { network: NetworkProfile; relayU
     <PageHead
       eyebrow="Create and trade on Midnight"
       title="Markets"
-      lede="Pick a pair to buy or sell, straight from your Phantom wallet. Prices come only from live offers: nothing is estimated."
+      lede="Pick a pair to buy or sell, straight from your Solana wallet. Prices come only from live offers: nothing is estimated."
       actions={
         <>
           <FeedStatus state={state} />

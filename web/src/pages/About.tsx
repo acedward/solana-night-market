@@ -84,7 +84,12 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
   {
     id: 'one-offer',
     title: 'One live offer at a time, one coin per payment.',
-    text: 'Coins are not merged. Phantom accounts on a Ledger device are not supported yet.',
+    text: 'Coins are not merged. Solana wallet accounts on a Ledger device are not supported yet.',
+  },
+  {
+    id: 'wallets',
+    title: 'Solana wallets.',
+    text: 'Phantom and Nightly are tested. Any other wallet that signs Solana messages through the Wallet Standard may work. The page asks your wallet for one approval at a time, with a short pause between approvals; if no window appears, open the wallet from your browser’s toolbar or try again.',
   },
   {
     id: 'your-data',
@@ -116,7 +121,7 @@ export function About({ networkName, bridging = false }: { networkName: string; 
         <ul className="onboarding">
           <li>
             <strong>Your Solana wallet controls a Midnight account</strong>
-            Phantom signs one readable message per action. The account checks that signature itself, on Midnight.{' '}
+            Your wallet signs one readable message per action. The account checks that signature itself, on Midnight.{' '}
             {bridging
               ? 'Your wallet signs a Solana transaction only to bridge tokens in, a lock the page builds and shows you first.'
               : 'Night Market never sends a Solana transaction.'}

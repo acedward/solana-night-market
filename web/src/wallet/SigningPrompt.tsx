@@ -26,17 +26,37 @@ import {
 } from '../activity/activity.js';
 import { Button, Dialog, Icon, ProgressBar, Spinner, Stepper } from '../design/index.js';
 import type { SignFacts } from './sign-facts.js';
-import type { SignPromptStore } from './sign-prompt.js';
+import type { SignPromptKind, SignPromptStore, TransactionFacts } from './sign-prompt.js';
 import { useWallet } from './WalletContext.js';
 
-const LEDE = {
-  'account-call':
-    'Phantom shows you this text. It is exactly what you approve, and what your account checks before anything happens. Approve it only if it matches what you asked for.',
-  'relay-envelope':
-    'Phantom asks you to prove you own this wallet, so the market can act for you. This signature moves none of your funds and costs nothing.',
-  'rpc-registration':
-    'Your wallet shows you this text. Signing it lets the RPC it names show your Night Market balances in your wallet. It authorises nothing on chain and moves no funds.',
-} as const;
+/** What the panel says first, per kind of request, with the connected wallet's name (AA 00060 P5.2). */
+const lede = (kind: SignPromptKind, wallet: string): string =>
+  ({
+    'account-call': `${wallet} shows you this text. It is exactly what you approve, and what your account checks before anything happens. Approve it only if it matches what you asked for.`,
+    'relay-envelope': `${wallet} asks you to prove you own this wallet, so the market can act for you. This signature moves none of your funds and costs nothing.`,
+    'rpc-registration': `${wallet} shows you this text. Signing it lets the RPC it names show your Night Market balances in your wallet. It authorises nothing on chain and moves no funds.`,
+    'landing-key': `${wallet} shows you this text, and asks you twice: sign the same text both times. It creates the private key your Bridge out lands on. Sign it only on this site; anyone who gets this signature can take tokens while they are in transit.`,
+    'solana-transaction': `${wallet} asks you to approve one Solana transaction that this page built. It is the transaction below: check it matches what ${wallet} shows. It costs a small SOL fee.`,
+  })[kind];
+
+/** A Solana transaction's facts, as the page built it (AA 00060 P5.3). */
+function TransactionFactsList({ facts }: { facts: TransactionFacts }) {
+  return (
+    <div className="sign-facts" data-testid="sign-tx-facts">
+      <p className="sign-label">
+        What this transaction does: <span data-testid="sign-tx-title">{facts.title}</span>
+      </p>
+      <dl className="sign-facts-list">
+        {facts.facts.map((f, i) => (
+          <div key={`${f.label}-${i}`} data-testid="sign-tx-fact" data-label={f.label}>
+            <dt>{f.label}</dt>
+            <dd className={f.mono ? 'mono break' : undefined}>{f.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
 
 /** How long the progress view waits after a signature before it shows (a refused request ends at once). */
 const SETTLE_MS = 300;
@@ -116,6 +136,18 @@ export function SigningPrompt({
     return () => clearInterval(t);
   }, [running]);
 
+  // AA 00060 P5 (G-NIGHTLY run 1): a wallet can drop a request without showing a window. After a while
+  // the panel says so, and what to do; the request still ends at the page's timeout.
+  const hintMs = Math.min(10, Math.max(2, timeoutSeconds / 2)) * 1000;
+  const [stale, setStale] = useState<number | null>(null);
+  useEffect(() => {
+    if (!prompt) return;
+    const since = prompt.since;
+    const t = setTimeout(() => setStale(since), Math.max(0, since + hintMs - Date.now()));
+    return () => clearTimeout(t);
+  }, [prompt, hintMs]);
+  const noWindow = prompt !== null && stale === prompt.since;
+
   const flow = act ? ACTIVITY_FLOW[act.kind] : null;
   const steps = flow ? [`Approve in ${walletName}`, ...flow.steps] : [];
 
@@ -146,7 +178,7 @@ export function SigningPrompt({
       >
         {act ? <Stepper steps={steps} current={0} label={act.title} /> : null}
         <p className="small" data-testid="sign-prompt-kind" data-kind={prompt.kind}>
-          {LEDE[prompt.kind]}
+          {lede(prompt.kind, prompt.wallet)}
         </p>
         {flow?.end === 'listed' && (
           <p className="small off-chain-note" data-testid="sign-prompt-off-chain">
@@ -154,13 +186,19 @@ export function SigningPrompt({
           </p>
         )}
         {prompt.facts && <SignFactsList facts={prompt.facts} />}
-        <p className="sign-label">What {prompt.wallet} shows</p>
-        {/* Focusable: the F3 v2 text (base units, full token ids) is long enough to scroll on a phone,
-            and a keyboard user must be able to scroll it too (axe scrollable-region-focusable). */}
-        <pre className="sign-text mono" data-testid="sign-prompt-text" tabIndex={0}>
-          {prompt.text}
-        </pre>
-        {prompt.kind !== 'rpc-registration' && (
+        {prompt.transaction ? (
+          <TransactionFactsList facts={prompt.transaction} />
+        ) : (
+          <>
+            <p className="sign-label">What {prompt.wallet} shows</p>
+            {/* Focusable: the F3 v2 text (base units, full token ids) is long enough to scroll on a phone,
+                and a keyboard user must be able to scroll it too (axe scrollable-region-focusable). */}
+            <pre className="sign-text mono" data-testid="sign-prompt-text" tabIndex={0}>
+              {prompt.text}
+            </pre>
+          </>
+        )}
+        {(prompt.kind === 'account-call' || prompt.kind === 'relay-envelope') && (
           <p className="fingerprint">
             <span>Check the fingerprint</span>
             <strong data-testid="sign-prompt-fingerprint">{prompt.fingerprint}</strong>
@@ -176,6 +214,13 @@ export function SigningPrompt({
             this stops waiting after {timeoutSeconds} seconds.
           </span>
         </p>
+        {noWindow && (
+          <p className="small" role="status" data-testid="sign-prompt-no-window">
+            No window from {prompt.wallet}? Open {prompt.wallet} from your browser&apos;s toolbar: the request may be
+            waiting there. If it is not, this request ends after {timeoutSeconds} seconds; then try again. Nothing is
+            sent until you approve.
+          </p>
+        )}
       </Dialog>
     );
   }

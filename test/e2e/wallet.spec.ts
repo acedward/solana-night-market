@@ -23,7 +23,7 @@ import { formatUnshieldedAddress } from '../../packages/core/src/unshielded.js';
 import { SITE_LINE_PREFIX } from '../../packages/core/src/passport/ed25519.js';
 import { shortSolanaAddress } from '../../packages/core/src/signing.js';
 import { COLOUR } from '../../packages/core/test/fixtures/kernel/book.js';
-import { connectPhantom, type MockPhantom } from './mock-phantom.js';
+import { E2E_WALLET, connectPhantom, type MockPhantom } from './mock-phantom.js';
 import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
@@ -387,6 +387,7 @@ test.describe('the wallet refuses or fails: a clear message, and nothing is sent
 });
 
 test("Phantom's injected provider (no Wallet Standard): display 'utf8', and an account opens", async ({ page }) => {
+  test.skip(E2E_WALLET !== 'phantom', "Phantom's injected provider exists only for Phantom (AA 00060 P5)");
   const { phantom, relay } = await setup(page, { injected: true, standard: false });
   await page.goto('/#account');
   await connectPhantom(page);

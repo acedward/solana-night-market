@@ -40,6 +40,7 @@ import {
   splitTransaction,
 } from '@nightmarket/core/solana';
 
+import type { TransactionFacts } from '../../wallet/sign-prompt.js';
 import type { SolanaTransactions } from '../../wallet/WalletContext.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
@@ -122,6 +123,22 @@ export async function precheckBridgeIn(ctx: BridgeInContext, entry: BridgeEntry,
   return { facts, splBalance: spl!, lamports, note };
 }
 
+/** The lock's facts for the signing panel while the wallet is open (P5.3). */
+export const lockTransactionFacts = (entry: BridgeEntry, f: LockFacts): TransactionFacts => ({
+  title: `Lock ${formatUnits(f.amount, entry.decimals)} ${entry.symbol} on Solana for your Night Market account`,
+  facts: [
+    { label: 'Program', value: f.program, mono: true },
+    { label: 'Mint', value: f.mint, mono: true },
+    {
+      label: 'Amount',
+      value: `${f.amount.toString()} base units (${formatUnits(f.amount, entry.decimals)} ${entry.symbol})`,
+    },
+    { label: 'From your token account', value: f.source, mono: true },
+    { label: 'To your Night Market account', value: f.account, mono: true },
+    { label: 'Fee payer', value: f.depositor, mono: true },
+  ],
+});
+
 /** Sends the lock; resolves with the record to keep (state `sent`). Throws before recording anything
  *  when the wallet refuses, fails, or returns another transaction. */
 export async function sendBridgeIn(
@@ -142,9 +159,11 @@ export async function sendBridgeIn(
   checkLockToAccount(built.transaction, built.facts);
   let signature: string;
   if (ctx.transactions?.signAndSend) {
-    signature = encodeKey(await ctx.transactions.signAndSend(built.transaction, ctx.chain));
+    signature = encodeKey(
+      await ctx.transactions.signAndSend(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts)),
+    );
   } else if (ctx.transactions?.sign) {
-    const signed = await ctx.transactions.sign(built.transaction, ctx.chain);
+    const signed = await ctx.transactions.sign(built.transaction, ctx.chain, lockTransactionFacts(entry, built.facts));
     // The wallet must sign exactly the page's transaction: nothing added, nothing changed.
     try {
       checkLockToAccount(signed, built.facts);

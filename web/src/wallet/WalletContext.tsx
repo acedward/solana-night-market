@@ -17,6 +17,7 @@ import { deviceKeyFromSolanaAddress } from '@nightmarket/core';
 
 import { HARDWARE_NOT_SUPPORTED } from './wallet-errors.js';
 import type { ActionSigning } from './signing.js';
+import type { TransactionFacts } from './sign-prompt.js';
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected';
 
@@ -31,12 +32,13 @@ export interface WalletOption {
  *  disconnected), or a signature showed it is a hardware (Ledger) account, which v1 refuses. */
 export type WalletSessionEvent = 'account-changed' | 'hardware';
 
-/** AA 00060 (Bridge in): the connected wallet's Solana transaction features, where it has them. */
+/** AA 00060 (Bridge in): the connected wallet's Solana transaction features, where it has them. `facts`
+ *  is what the page built, decoded, for its signing panel (P5.3). */
 export interface SolanaTransactions {
   /** `solana:signAndSendTransaction` (the wallet sends): resolves with the first signature. */
-  signAndSend?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
+  signAndSend?(transaction: Uint8Array, chain: string, facts?: TransactionFacts): Promise<Uint8Array>;
   /** `solana:signTransaction` (the page sends): resolves with the signed wire transaction. */
-  sign?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
+  sign?(transaction: Uint8Array, chain: string, facts?: TransactionFacts): Promise<Uint8Array>;
 }
 
 /** A connected wallet session, as an adapter returns it. */
@@ -155,4 +157,12 @@ export function useWallet(): WalletState {
   const v = useContext(WalletCtx);
   if (!v) throw new Error('useWallet outside WalletProvider');
   return v;
+}
+
+/** AA 00060 P5.2: the wallet's name for the page's copy: the connected wallet's own ("Nightly"), or
+ *  "your Solana wallet" before connecting (`Name` starts a sentence). Never a wallet the customer does
+ *  not use. */
+export function useWalletName(): { name: string; Name: string } {
+  const n = useWallet().walletName;
+  return n ? { name: n, Name: n } : { name: 'your Solana wallet', Name: 'Your Solana wallet' };
 }

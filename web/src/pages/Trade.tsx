@@ -86,7 +86,7 @@ import { OPEN_OFFERS_NOTE, madeOfferText, tookOfferText } from '../trade/message
 import { cancelOffers, guardFor, makeOffer, offerShown, reconcileOffers, takeOffer } from '../trade/operations.js';
 import { liveOffer, readTrades } from '../trade/records.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
-import { useWallet } from '../wallet/WalletContext.js';
+import { useWallet, useWalletName } from '../wallet/WalletContext.js';
 
 const amt = (raw: bigint, t: TokenEntry) => formatUnits(raw, t.decimals, { minFractionDigits: 2, grouping: true });
 const clock = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
@@ -259,6 +259,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   const { state, registry, pairs: allPairs } = useMarkets();
   const { store, revision } = useStore();
   const wallet = useWallet();
+  const walletName = useWalletName();
   const connect = useConnectPrompt();
   const activity = useActivity();
   const relayStatus = useRelayStatus();
@@ -381,7 +382,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       title="Trade"
       lede={
         pair
-          ? `Buy or sell ${pair.base.symbol} for ${pair.quote.symbol}: take an offer from the book now, or create your own at your price. One approval in Phantom per trade; the market pays the network fees.`
+          ? `Buy or sell ${pair.base.symbol} for ${pair.quote.symbol}: take an offer from the book now, or create your own at your price. One approval in ${walletName.name} per trade; the market pays the network fees.`
           : 'Every trade is one token against another. Take an offer from the book now, or create your own at your price.'
       }
       actions={<PortfolioToggle open={drawer} onClick={() => setDrawer(true)} />}
@@ -427,7 +428,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         action={
           connect ? (
             <Button data-testid="trade-connect-cta" onClick={connect}>
-              <Icon name="wallet" /> Connect Phantom
+              <Icon name="wallet" /> Connect wallet
             </Button>
           ) : undefined
         }
@@ -453,7 +454,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
       >
         <span data-testid="trade-no-account">
           Open an account on <a href="#account">Portfolio</a> (or import your backup on <a href="#local">Your data</a>)
-          to trade. It takes one approval in Phantom, and the market pays every fee.
+          to trade. It takes one approval in {walletName.name}, and the market pays every fee.
         </span>
       </EmptyState>,
     );
@@ -691,7 +692,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
           </Button>
         </ButtonRow>
         <p className="xsmall muted gap-top" data-testid="take-validity">
-          You approve once in Phantom; the market pays the network fees. Your approval is valid for{' '}
+          You approve once in {walletName.name}; the market pays the network fees. Your approval is valid for{' '}
           {Math.round(TAKE_LIFETIME_SECONDS / 60)} minutes: if the market has not settled it by then, nobody can.
         </p>
       </div>
@@ -952,10 +953,10 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
               {busy === 'make' ? 'Preparing your offer…' : `Create ${side === 'buy' ? 'buy' : 'sell'} offer`}
             </Button>
             <p className="xsmall muted gap-top" data-testid="make-off-chain">
-              One approval in Phantom lists your offer on the market; it puts nothing on-chain. Your tokens stay in your
-              account until someone takes the whole offer (then it settles on Midnight in one transaction), until it
-              expires one hour after you approve: the expiry is part of what you approve, so nobody can take it later.
-              Cancel it sooner with Cancel offer; approving anything else from this account cancels it too.
+              One approval in {walletName.name} lists your offer on the market; it puts nothing on-chain. Your tokens
+              stay in your account until someone takes the whole offer (then it settles on Midnight in one transaction),
+              until it expires one hour after you approve: the expiry is part of what you approve, so nobody can take it
+              later. Cancel it sooner with Cancel offer; approving anything else from this account cancels it too.
             </p>
           </Panel>
         </div>

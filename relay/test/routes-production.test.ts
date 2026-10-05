@@ -67,7 +67,7 @@ const ACCOUNT = '5e'.repeat(32);
 const AUTH_NONCE = 3n;
 const COLOUR_A = 'a1'.repeat(32);
 
-type Kind = 'relay-action' | 'passport-call' | 'entitlement';
+type Kind = 'relay-action' | 'passport-call' | 'entitlement' | 'unsigned';
 const KIND: Record<RelayActionName, Kind> = {
   register: 'relay-action',
   withdraw: 'passport-call',
@@ -82,9 +82,11 @@ const KIND: Record<RelayActionName, Kind> = {
   // AA 00060 P6.3: authorised by a landing entitlement (relay/test/bridge-out.test.ts tests them).
   'bridge-out': 'entitlement',
   'bridge-out-entitle': 'entitlement',
+  // AA 00060 P13: the test SPL faucet, unsigned (relay/test/spl-faucet.test.ts tests it).
+  'spl-faucet': 'unsigned',
 };
-/** The signed actions this file walks through (the entitlement ones have their own test). */
-const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => KIND[a] !== 'entitlement');
+/** The signed actions this file walks through (the entitlement and unsigned ones have their own tests). */
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => KIND[a] !== 'entitlement' && KIND[a] !== 'unsigned');
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
 class CountingSponsor extends FakeSponsor {

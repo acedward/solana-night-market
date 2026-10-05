@@ -24,6 +24,7 @@ import {
   RELAY_ACTIONS,
   RegisterPayloadSchema,
   RestoreEncKeyPayloadSchema,
+  SplFaucetPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
@@ -85,6 +86,15 @@ export const ENTITLEMENT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayAc
   'bridge-out-entitle',
 ]);
 
+/** The actions with no authorisation at all, charged to the requesting client only (AA 00060 P13). */
+export const OPEN_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>(['spl-faucet']);
+
+/** Every action that carries no wallet signature. */
+export const UNSIGNED_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
+  ...ENTITLEMENT_ACTIONS,
+  ...OPEN_ACTIONS,
+]);
+
 import {
   appendInboxExecutor,
   cancelOffersExecutor,
@@ -140,6 +150,14 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     // ../bridge/out-actions.ts, wired by `withBridgeOut`).
     { ...def('bridge-out', 'prover', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
     { ...def('bridge-out-entitle', 'relay', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
+    // AA 00060 P13 (spec FR-024): "Mint Solana tokens", the test SPL faucet (executor: ../faucet/spl-faucet.ts,
+    // wired by `withSplFaucet` only when SPL_FAUCET_KEYS_FILE is set). No DUST, no prover, no account.
+    {
+      ...def('spl-faucet', 'relay', 'AA 00060 P13', { auth: 'unsigned', requiresAccount: false }),
+      requiresSponsor: false,
+      accountGate: false,
+      available: false,
+    },
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -257,6 +275,25 @@ export function withBridgeOut(
     preauth: entitlePreauth(deps),
     accountGate: false,
     executor: bridgeOutEntitleExecutor(),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with the test SPL faucet (AA 00060 P13, spec FR-024; ../faucet/spl-faucet.ts): unsigned,
+ * on the relay lane, admitted only for a wallet that has not claimed this period, under the per-client and
+ * per-period caps, while the faucet's chain checks hold.
+ */
+export function withSplFaucet(
+  map: Map<RelayActionName, ActionDefinition>,
+  faucet: { admit: AdmissionCheck; executor: JobExecutor },
+): Map<RelayActionName, ActionDefinition> {
+  map.set('spl-faucet', {
+    ...map.get('spl-faucet')!,
+    available: true,
+    payload: SplFaucetPayloadSchema,
+    admit: faucet.admit,
+    executor: faucet.executor,
   });
   return map;
 }

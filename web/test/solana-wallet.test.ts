@@ -469,6 +469,58 @@ describe('AA 00060 P5: Nightly, paced requests, and the new prompt kinds', () =>
     expect(seen.at(-1)).toBeNull();
   });
 
+  it('P10.6 (audit F1): a refusal BEFORE the wallet is called says so; an error from the wallet keeps its code', async () => {
+    const kp = keyPair(15);
+    const account = {
+      address: solanaAddressOf(bytesToHex(kp.publicKey)),
+      publicKey: kp.publicKey,
+      chains: ['solana:mainnet'],
+      features: ['solana:signMessage', 'solana:signAndSendTransaction'],
+    };
+    let called = 0;
+    const wallet: StandardWallet = {
+      version: '1.0.0',
+      name: 'Disconnecting',
+      icon: 'data:image/svg+xml;base64,PHN2Zy8+',
+      chains: ['solana:mainnet'],
+      accounts: [account],
+      features: {
+        'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [account] }) },
+        'solana:signMessage': { version: '1.1.0', signMessage: async () => [] },
+        'solana:signAndSendTransaction': {
+          version: '1.0.0',
+          signAndSendTransaction: async () => {
+            called++;
+            throw { code: 4900, message: 'Disconnected' };
+          },
+        },
+      },
+    };
+    registerWallet(wallet);
+    let paused: string | null = 'The token lists differ.';
+    const a = solanaWalletAdapter({
+      display,
+      prompts: new SignPromptStore(),
+      timeoutMs: 3_000,
+      gate: () => paused,
+      win: window,
+    });
+    const session = await connectFirst(a);
+    const refused = (await session.transactions!.signAndSend!(new Uint8Array([1]), 'solana:localnet').catch(
+      (e: unknown) => e,
+    )) as WalletError & { beforeCall?: boolean; code?: number };
+    expect(called).toBe(0);
+    expect(refused.kind).toBe('paused');
+    expect(refused.beforeCall).toBe(true);
+    paused = null;
+    const after = (await session.transactions!.signAndSend!(new Uint8Array([1]), 'solana:localnet').catch(
+      (e: unknown) => e,
+    )) as WalletError & { beforeCall?: boolean; code?: number };
+    expect(called).toBe(1);
+    expect(after.code).toBe(4900);
+    expect(after.beforeCall).not.toBe(true);
+  });
+
   it('messageKind: the landing key (I-5) and the registration (I-4) have their own kinds; the others are as before', () => {
     const landing = landingMessageText({
       origin: 'https://market.example',

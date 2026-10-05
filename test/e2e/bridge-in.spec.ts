@@ -159,8 +159,14 @@ test("T7.3: an account that fails the page's check: refused, with no wallet requ
   await page.goto('/#account?action=bridge-in');
   await connectPhantom(page);
   await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'failed');
-  await review(page, '1');
-  await expect(page.getByTestId('bridge-in-error')).toContainText('check of your account on Midnight failed');
+  // The page may re-check the account meanwhile ("waits until this page has checked" while it runs, which is
+  // also a refusal); review again until the failed check is what refuses (CI flake at bd35a43, AA 00060 P10.6).
+  await expect(async () => {
+    await review(page, '1');
+    await expect(page.getByTestId('bridge-in-error')).toContainText('check of your account on Midnight failed', {
+      timeout: 2_000,
+    });
+  }).toPass({ timeout: 30_000 });
   expect(txRequests(s.wallet)).toHaveLength(0);
 });
 

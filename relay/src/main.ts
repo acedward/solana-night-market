@@ -2,9 +2,10 @@
 // redactor, check the key volume (and refuse to start when it lacks any circuit the relay proves,
 // plan P4-A), open the sponsor wallet (under the funding lock when one is configured), wire the
 // Ed25519 arm and the Solana envelope scheme when the key volume is loaded (lane B3:
-// ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, and serve.
+// ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, the test SPL faucet when its keys
+// are configured (AA 00060 P13), and serve.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { KernelClient } from '@nightmarket/core';
@@ -21,6 +22,7 @@ import {
   withDemoTokens,
   withRegistrationCaps,
   withBridgeOut,
+  withSplFaucet,
   withTrade,
 } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
@@ -42,6 +44,10 @@ import { demoTokens, demoTokensInfo } from './demo/action.js';
 import { ClaimsStoreError, DemoTokenClaims } from './demo/claims.js';
 import { DemoFaucets } from './demo/faucet.js';
 import { resolvePack, type ResolvedPackItem } from './demo/pack.js';
+import { FaucetClaimsError, SplFaucetClaims } from './faucet/claims.js';
+import { secretForms } from './faucet/keys.js';
+import { FaucetSolanaRpc } from './faucet/solana-rpc.js';
+import { FaucetConfigError, SplFaucet } from './faucet/spl-faucet.js';
 import { healthCollector, httpProbes } from './health.js';
 import { Redactor, createLogger } from './log.js';
 import { ProofServerClient } from './prover/client.js';
@@ -65,7 +71,7 @@ async function main(): Promise<void> {
   const redactor = new Redactor();
   let loaded: ReturnType<typeof loadConfig>;
   try {
-    loaded = loadConfig(process.env, (p) => readFileSync(p, 'utf8'));
+    loaded = loadConfig(process.env, (p) => readFileSync(p, 'utf8'), { fileMode: (p) => statSync(p).mode });
   } catch (e) {
     const msg = e instanceof ConfigError ? e.message : 'the configuration could not be loaded';
     process.stderr.write(`${JSON.stringify({ t: new Date().toISOString(), level: 'error', msg: `config: ${msg}` })}\n`);
@@ -74,6 +80,10 @@ async function main(): Promise<void> {
   const { config, secrets } = loaded;
   redactor.addSecret(secrets.sponsorSeedHex);
   redactor.addSecret(secrets.sponsorSeedSource);
+  // AA 00060 P13: the faucet's mint authority keys, in every text form, and its RPC URL (it may carry a key).
+  redactor.addSecret(secrets.splFaucetKeysSource);
+  for (const k of secrets.splFaucetKeys?.values() ?? []) for (const f of secretForms(k)) redactor.addSecret(f);
+  redactor.addSecret(config.splFaucet?.rpcUrl);
   const log = createLogger({ level: config.logLevel, redactor }, { service: 'relay', network: config.network.name });
 
   // The key volume (plan P4-A): every circuit the relay proves must have its prover key, verifier
@@ -278,6 +288,39 @@ async function main(): Promise<void> {
     });
   }
 
+  // AA 00060 P13 (spec FR-024): the test SPL faucet, when SPL_FAUCET_KEYS_FILE is set (config.ts checked the
+  // file, the registry, the data dir and the RPC). Its chain checks run now; a refusal that is not final
+  // (the RPC cannot be read) is checked again on demand, and mainnet-beta is refused for good.
+  let splFaucet: SplFaucet | null = null;
+  if (config.splFaucet && config.bridges && secrets.splFaucetKeys) {
+    const f = config.splFaucet;
+    try {
+      splFaucet = new SplFaucet({
+        registry: config.bridges,
+        keys: secrets.splFaucetKeys,
+        rpc: new FaucetSolanaRpc(f.rpcUrl),
+        claims: new SplFaucetClaims({ file: f.claimsFile, periodSeconds: f.periodHours * 3600 }),
+        amountWhole: f.amountWhole,
+        periodSeconds: f.periodHours * 3600,
+        claimsPerPeriod: f.claimsPerPeriod,
+        perClientPerPeriod: f.perClientPerPeriod,
+        log: log.child({ component: 'spl-faucet' }),
+      });
+    } catch (e) {
+      if (e instanceof FaucetConfigError || e instanceof FaucetClaimsError) {
+        log.error('the SPL faucet cannot start; refusing to start', { reason: e.message });
+        process.exit(78);
+      }
+      throw e;
+    }
+    const s = await splFaucet.check();
+    log.info('SPL faucet configured', {
+      state: s.kind === 'off' ? `off: ${s.reason}` : s.kind,
+      tokens: splFaucet.tokens.map((t) => `${t.entry.symbol}:${f.amountWhole}`).join(','),
+      periodHours: f.periodHours,
+    });
+  }
+
   // Security review F-B3: `append-inbox` is sponsored only against a single-use entitlement the
   // relay issued for a change coin (./actions/entitlements.ts); the MAC key comes from the seed.
   const entitlements = new AppendEntitlements({
@@ -407,6 +450,13 @@ async function main(): Promise<void> {
       }),
     );
   }
+  if (splFaucet) {
+    const faucet = splFaucet;
+    catalogue = withSplFaucet(catalogue, {
+      admit: ({ payload, client }) => faucet.admit(payload, client ?? 'unknown'),
+      executor: faucet.executor(),
+    });
+  }
   catalogue = withRegistrationCaps(catalogue, registrationCaps);
   catalogue = withAccountCaps(catalogue, accountCaps);
   // AA 00060 P6.3: Bridge out's second transaction and the entitlement re-issue.
@@ -483,6 +533,7 @@ async function main(): Promise<void> {
     });
     log.info('bridge out enabled', { bridges: landing.bridges.entries.map((b) => b.symbol) });
   }
+  const faucetForApp = splFaucet;
   const app = createApp({
     config,
     version: RELAY_VERSION,
@@ -496,6 +547,7 @@ async function main(): Promise<void> {
     health,
     chain,
     ...(wired ? { scheme: wired.scheme, passportCall: passportCallAuthoriser(() => runtime, wired.arm, replay) } : {}),
+    ...(faucetForApp ? { splFaucet: (w?: string) => faucetForApp.info(w) } : {}),
     demoTokens: demoTokensInfo({
       claims: claims ?? new DemoTokenClaims({ file: null, dailyCap: config.demoTokens.dailyCap }),
       pack: demoPack,

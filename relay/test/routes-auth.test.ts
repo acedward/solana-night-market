@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { RELAY_ACTIONS } from '@nightmarket/core';
 
-import { ENTITLEMENT_ACTIONS } from '../src/actions/catalogue.js';
+import { ENTITLEMENT_ACTIONS, UNSIGNED_ACTIONS } from '../src/actions/catalogue.js';
 import { STATE_CHANGING_ROUTES } from '../src/app.js';
 import { ACCOUNT, FakeSponsor, harness, newWallet, post, samplePayload, signedBody, testConfig } from './harness.js';
 
@@ -19,8 +19,9 @@ describe('the relay routes', () => {
   });
 });
 
-/** The signed actions (AA 00060's entitlement actions carry no signature: relay/test/bridge-out.test.ts). */
-const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => !ENTITLEMENT_ACTIONS.has(a));
+/** The signed actions (AA 00060's entitlement actions carry no signature: relay/test/bridge-out.test.ts; nor
+ *  does its test SPL faucet: relay/test/spl-faucet.test.ts). */
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter((a) => !UNSIGNED_ACTIONS.has(a));
 
 describe.each(SIGNED_ACTIONS)('POST /v1/actions/%s', (action) => {
   const expect401 = async (res: Response, detail: string) => {
@@ -168,6 +169,20 @@ describe('AA 00060: Bridge out on a relay that does not offer it', () => {
     const err = ((await res.json()) as { error: { code: string; detail?: string } }).error;
     expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
     expect(h.queue.stats().jobs).toBe(0);
+  });
+});
+
+describe('AA 00060 P13: the test SPL faucet on a relay that does not offer it', () => {
+  it('refuses spl-faucet as not supported, queues nothing, and the offer says not configured', async () => {
+    const h = harness();
+    const res = await post(h, 'spl-faucet', { payload: { wallet: '11111111111111111111111111111111' } });
+    expect(res.status).toBe(401);
+    const err = ((await res.json()) as { error: { code: string; detail?: string; message: string } }).error;
+    expect(err).toMatchObject({ code: 'unauthorised', detail: 'not-supported' });
+    expect(err.message).toMatch(/does not offer Mint Solana tokens/);
+    expect(h.queue.stats().jobs).toBe(0);
+    const info = await (await h.app.request('/v1/spl-faucet')).json();
+    expect(info).toEqual({ enabled: false, reason: 'not-configured', tokens: [], periodHours: 24 });
   });
 });
 

@@ -1802,8 +1802,9 @@ async function outCase(c: string) {
     }
     case 'j': {
       // bridge-out-entitle for a coin tx1 never paid (another landing key): entitle-not-found.
+      // (a)'s transfer: locked, or arrived when the run follows the real bridge's release (P9).
       const r = readBridgeOuts(pg.store, pg.scope, account()).find(
-        (x) => x.state === 'locked' && x.amount === String(50n * UNIT),
+        (x) => (x.state === 'locked' || x.state === 'arrived') && x.amount === String(50n * UNIT),
       );
       if (!r) throw new Error('no 50 Y transfer to borrow the tx1 from');
       const st = await pg.chain.accountState(account());

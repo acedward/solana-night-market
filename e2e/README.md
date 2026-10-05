@@ -37,7 +37,7 @@ Pinned inputs, checked before anything starts (the script refuses when they diff
 | Input | Pin | Where |
 |---|---|---|
 | AA 00058 bridge (deploy tooling, nodes, CLI) | effectstream `00058-bridge-contract-delivery` @ `1c9f4959db1a9f004820c01fb321225bb255916c` (PR #937) | a clean local clone, `BRIDGE_WT` |
-| AA 00059 injector | acedward/solana-token-injector `00059-injector-passport-accounts` @ `b358a19f4b5fbcf7dd2b7d664a939a29c2472451` (PR #2) | a clean local clone, `INJECTOR_REPO` |
+| AA 00059 injector | acedward/solana-token-injector `00059-injector-passport-accounts` @ `459c904fc7f6e1180ad48bd4d3b8bc64971e1909` (PR #2, with P7: the metadata fill-in, I-1 `image`/`splImage`, `TOKEN_REGISTRY`) | a clean local clone, `INJECTOR_REPO` |
 | Passport key volume | fingerprint `21493588…`, `VERIFIED` | `~/.cache/aa-00047/p10i-keys` (copied per run) |
 | Images | node 2.0.0-rc.4 by digest, indexer 4.4.0-rc.1, proof servers rc.6 and rc.8, `oven/bun:1.3.11`, `e00050/unit:s4` | local (nothing is pulled) |
 | Solana | native Agave 3.0.14 `solana-test-validator` and CLI, `spl-token` | `~/.cache/aa-00058/agave/bin` |

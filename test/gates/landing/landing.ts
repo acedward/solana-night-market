@@ -70,7 +70,14 @@ import {
   registryFor,
   type NetworkName,
 } from '@nightmarket/core';
-import { bridgeColourOf, deriveLandingMaster, type LandingMaster } from '@nightmarket/core/bridge';
+import { bridgeColourOf, deriveLandingMaster, type BridgeEntry, type LandingMaster } from '@nightmarket/core/bridge';
+import {
+  TOKEN_2022_PROGRAM_ID,
+  associatedTokenAddress,
+  bridgeVaultAddress,
+  shortvec,
+  splitTransaction,
+} from '@nightmarket/core/solana';
 import {
   balanceWithLandingCoin,
   findLandingCoin,
@@ -103,11 +110,15 @@ import {
   adoptTransfer,
   findTransfers,
   finishLock,
+  followBridgeOut,
   landingMasterFor,
   returnToAccount,
   startBridgeOut,
   type BridgeOutContext,
 } from '../../../web/src/bridge/out/operations.js';
+import { followBridgeIn, precheckBridgeIn, sendBridgeIn } from '../../../web/src/bridge/in/operations.js';
+import { checkInjector, readRegistrationStatus, registerAccount } from '../../../web/src/bridge/rpc/operations.js';
+import { SolanaRpc } from '../../../web/src/bridge/solana-rpc.js';
 import { putBridgeOut, readBridgeOuts, type BridgeOutRecord } from '../../../web/src/bridge/out/records.js';
 import { recordKey } from '../../../web/src/store/schema.js';
 import { ed25519ActionSigning } from '../../../web/src/wallet/signing.js';
@@ -144,6 +155,8 @@ const ORIGIN = process.env.LANDING_ORIGIN ?? 'http://127.0.0.1:5173';
 const GENESIS = process.env.SOLANA_GENESIS ?? base58.encode(new Uint8Array(32).fill(7));
 /** P6.0 (Q5 A): balance with the page's computed-coin path instead of the SDK's sync. */
 const COMPUTED = process.env.COMPUTED === '1';
+/** P9 (the real 00058 bridges): the Solana validator's RPC (JOURNEY_FILE: the journey registry). */
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL ?? '';
 
 const say = (s: string) => process.stdout.write(`   ${s}\n`);
 const step = (s: string) => process.stdout.write(`\n== ${new Date().toISOString()} ${s}\n`);
@@ -177,6 +190,10 @@ interface GateState {
   bridge?: { contract: string; colour: string; sourceMint: string; networkTag: string };
   nextLockNonce?: number;
   tx1?: Record<string, Any>;
+  /** P9: the real 00058 bridges' journey entries (I-1) by symbol; Y's is also `bridge`. */
+  journey?: Record<string, BridgeEntry>;
+  /** P9: A's coin commitments per symbol at the last page-mark. */
+  marks?: Record<string, string[]>;
 }
 const gatePath = join(STATE_DIR, 'landing-state.json');
 const gate: GateState = existsSync(gatePath) ? (JSON.parse(readFileSync(gatePath, 'utf8')) as GateState) : {};
@@ -286,16 +303,16 @@ function pageA(): HeadlessPage {
 }
 
 /** The page's balance of Y on A (its own decode), waiting until `until` holds. */
-async function pageY(until: (v: bigint) => boolean = () => true, tries = 60) {
+async function pageY(until: (v: bigint) => boolean = () => true, tries = 60, colour = colourY()) {
   const pg = pageA();
   let last: { total: bigint; coins: Any[]; authNonce: string } = { total: -1n, coins: [], authNonce: '' };
   for (let i = 0; i < tries; i++) {
     const sync = await syncAccount(pg, account());
     pg.flush();
-    const y = holdingsByColour(sync.coins).find((h) => h.color === colourY());
+    const y = holdingsByColour(sync.coins).find((h) => h.color === colour);
     last = {
       total: y?.total ?? 0n,
-      coins: sync.coins.filter((c: Any) => c.color === colourY()),
+      coins: sync.coins.filter((c: Any) => c.color === colour),
       authNonce: sync.state.authNonce,
     };
     if (until(last.total)) return last;
@@ -1307,6 +1324,7 @@ async function negCircuit() {
 
 /** Y's journey-registry entry (I-1), as the site and the relay both read it. */
 function entryY(): Any {
+  if (gate.journey?.Y) return gate.journey.Y;
   const b = gate.bridge!;
   return {
     colour: b.colour,
@@ -1332,6 +1350,7 @@ function outCtx(page: HeadlessPage, signing?: Any): BridgeOutContext {
     solanaGenesisHash: GENESIS,
     wallet: signerA.address,
     deviceKey: signerA.deviceKey,
+    ...(SOLANA_RPC_URL ? { rpc: new SolanaRpc(SOLANA_RPC_URL) } : {}),
     onProgress: (t) => say(`page: ${t}`),
   };
 }
@@ -1416,6 +1435,8 @@ async function outCase(c: string) {
       entitlement: !!r.entitlement,
       tx1Id: r.tx1Id,
       seconds: (Date.now() - t0) / 1000,
+      // P9.6: what the sponsor paid for tx1 (the indexer's record).
+      fees: r.tx1Id ? ((await indexerTx(r.tx1Id))?.fees ?? null) : null,
     };
     return { r, m };
   };
@@ -1439,6 +1460,8 @@ async function outCase(c: string) {
       nonceBefore: before.nonce.toString(),
       nonceAfter: after.nonce.toString(),
       landingStillHolds: holds,
+      // P9.6: the DUST the sponsor paid for the lock (the indexer's record of tx2).
+      fees: done.tx2Id ? ((await indexerTx(done.tx2Id))?.fees ?? null) : null,
     };
     const ok =
       done.state === 'locked' &&
@@ -1451,6 +1474,8 @@ async function outCase(c: string) {
   };
   switch (c) {
     case 'a': {
+      // P9: with the real bridge, the release arrives in the wallet's token account on Solana.
+      const ataBefore = SOLANA_RPC_URL ? await walletTokenBalance(entryY()) : null;
       const cap = captureRequests();
       let r: BridgeOutRecord;
       let m: LandingMaster;
@@ -1494,6 +1519,29 @@ async function outCase(c: string) {
       record('out:a', res);
       if (leaks.length > 0) throw new Error(`T6.4: a landing secret left the tab: ${leaks.join('; ')}`);
       void m!;
+      if (ataBefore !== null) {
+        // The page follows the transfer: the bridge's I-3 progress, then the release receipt on Solana.
+        const t0 = Date.now();
+        let rec = readBridgeOuts(pg.store, pg.scope, account()).find((x) => x.authNonce === r!.authNonce)!;
+        const progress: string[] = [];
+        while (rec.state !== 'arrived' && Date.now() - t0 < 900_000) {
+          rec = await followBridgeOut(ctx, rec);
+          putBridgeOut(pg.store, pg.scope, account(), rec);
+          pg.flush();
+          if (rec.progress && progress[progress.length - 1] !== rec.progress) progress.push(rec.progress);
+          if (rec.state !== 'arrived') await new Promise((ok) => setTimeout(ok, 5_000));
+        }
+        const ataAfter = await walletTokenBalance(entryY());
+        res.arrival = {
+          state: rec.state,
+          seconds: (Date.now() - t0) / 1000,
+          progress,
+          walletTokenAccount: { before: ataBefore, after: ataAfter },
+        };
+        record('out:a', res);
+        if (rec.state !== 'arrived' || ataAfter - ataBefore !== 50n * UNIT)
+          throw new Error(`a: the release did not arrive as expected: ${json(res.arrival)}`);
+      }
       return res;
     }
     case 'b-start':
@@ -1754,8 +1802,9 @@ async function outCase(c: string) {
     }
     case 'j': {
       // bridge-out-entitle for a coin tx1 never paid (another landing key): entitle-not-found.
+      // (a)'s transfer: locked, or arrived when the run follows the real bridge's release (P9).
       const r = readBridgeOuts(pg.store, pg.scope, account()).find(
-        (x) => x.state === 'locked' && x.amount === String(50n * UNIT),
+        (x) => (x.state === 'locked' || x.state === 'arrived') && x.amount === String(50n * UNIT),
       );
       if (!r) throw new Error('no 50 Y transfer to borrow the tx1 from');
       const st = await pg.chain.accountState(account());
@@ -1782,9 +1831,293 @@ async function outCase(c: string) {
   }
 }
 
+// ── P9: the real 00058 bridges (journey registry I-1 from their deployment records) ────────────────
+
+/** The wallet's (A's) associated token account balance of `entry`'s SPL mint, base units (0 if none). */
+async function walletTokenBalance(entry: BridgeEntry, owner = signerA.address): Promise<bigint> {
+  const rpc = new SolanaRpc(need('SOLANA_RPC_URL'));
+  return (await rpc.tokenBalance(associatedTokenAddress(owner, entry.splMint))) ?? 0n;
+}
+
+/** STEP=adopt-bridges: the journey's X and Y become this gate's bridges (the page's entries). */
+function adoptBridges() {
+  const j = JSON.parse(readFileSync(need('JOURNEY_FILE'), 'utf8')) as { tokens: BridgeEntry[] };
+  gate.journey = Object.fromEntries(j.tokens.map((t) => [t.symbol, t]));
+  const y = gate.journey.Y;
+  if (!y || !gate.journey.X) throw new Error('the journey registry has no X or no Y');
+  gate.bridge = {
+    contract: norm(y.bridgeContract),
+    colour: norm(y.colour),
+    sourceMint: bytesToHex(base58.decode(y.splMint)),
+    networkTag: '',
+  };
+  saveGate();
+  record('adopt-bridges', gate.journey);
+  say(`bridges: ${json(Object.values(gate.journey).map((t) => ({ symbol: t.symbol, contract: t.bridgeContract })))}`);
+}
+
+/** STEP=wallets: A's and B's wallet addresses (the Solana side of the market's test devices). */
+function wallets() {
+  const st = flowsState() as Any;
+  const addr = (seed: string) => base58.encode(nacl.sign.keyPair.fromSeed(hexToBytes(seed, 32)).publicKey);
+  process.stdout.write(`WALLET_A ${addr(st.A.seed)}\nWALLET_B ${addr(st.B.seed)}\n`);
+  process.stdout.write(`ACCOUNT_A ${norm(st.A.account)}\nACCOUNT_B ${norm(st.B.account)}\n`);
+}
+
+/** A's unspent coins of `colour` by the page's own decode (commitment → value). */
+async function pageCoinsOf(colour: string): Promise<Map<string, bigint>> {
+  const pg = pageA();
+  const sync = await syncAccount(pg, account());
+  pg.flush();
+  return new Map(
+    (sync.coins as Any[])
+      .filter((c) => c.color === colour && !c.spent && !c.pending && c.mtIndex !== null)
+      .map((c) => [String(c.commitment), BigInt(c.value)]),
+  );
+}
+
+/** STEP=page-mark: remember A's current coins of SYMBOL (before a third party bridges more in). */
+async function pageMark() {
+  const entry = gate.journey?.[need('SYMBOL')];
+  if (!entry) throw new Error(`no journey entry ${process.env.SYMBOL}`);
+  gate.marks = { ...(gate.marks ?? {}), [entry.symbol]: [...(await pageCoinsOf(norm(entry.colour))).keys()] };
+  saveGate();
+}
+
+/** STEP=page-wait: A's page (its own decode) holds a NEW coin of exactly AMOUNT of SYMBOL (since page-mark). */
+async function pageWait() {
+  const entry = gate.journey?.[need('SYMBOL')];
+  if (!entry) throw new Error(`no journey entry ${process.env.SYMBOL}`);
+  const amount = BigInt(need('AMOUNT'));
+  const known = new Set(gate.marks?.[entry.symbol] ?? []);
+  const t0 = Date.now();
+  let found: string | null = null;
+  for (let i = 0; i < 200 && !found; i++) {
+    for (const [commitment, value] of await pageCoinsOf(norm(entry.colour)))
+      if (!known.has(commitment) && value === amount) found = commitment;
+    if (!found) await new Promise((r) => setTimeout(r, 3_000));
+  }
+  record(`page-wait:${process.env.LABEL ?? entry.symbol}`, {
+    symbol: entry.symbol,
+    amount: amount.toString(),
+    coin: found,
+    seconds: (Date.now() - t0) / 1000,
+  });
+  if (!found) throw new Error(`A's page shows no new ${amount} coin of ${entry.symbol}`);
+}
+
+/**
+ * STEP=bridge-in (T7.9): A's page Bridge in of AMOUNT of SYMBOL from A's wallet (the page's own
+ * precheck, one LockToContract signed by the wallet, the page's send), followed to completion by the
+ * page's own decode. Then: A gains exactly AMOUNT, the wallet's token account is down by AMOUNT, and the
+ * bridge's vault is up by AMOUNT.
+ */
+async function bridgeIn() {
+  const entry = gate.journey?.[need('SYMBOL')];
+  if (!entry) throw new Error(`no journey entry ${process.env.SYMBOL}`);
+  const amount = BigInt(need('AMOUNT'));
+  const rpc = new SolanaRpc(need('SOLANA_RPC_URL'));
+  const pg = pageA();
+  step(`T7.9: A's page bridges ${amount} base units of ${entry.symbol} in from its wallet`);
+  const vault = bridgeVaultAddress(entry.bridgeProgram, entry.splMint);
+  const balanceOf = async () => (await pageY(() => true, 1, norm(entry.colour))).total;
+  const before = {
+    page: await balanceOf(),
+    wallet: await walletTokenBalance(entry),
+    vault: (await rpc.tokenBalance(vault)) ?? 0n,
+  };
+  let prompts = 0;
+  const ctx = {
+    rpc,
+    chain: 'solana:localnet',
+    depositor: signerA.address,
+    account: account(),
+    accountCheck: 'ok' as const,
+    transactions: {
+      // `solana:signTransaction`: the wallet signs the page's transaction; the page sends it.
+      async sign(tx: Uint8Array) {
+        prompts += 1;
+        const { message } = splitTransaction(tx);
+        const sig = nacl.sign.detached(message, kpA.secretKey);
+        const out = new Uint8Array(shortvec(1).length + 64 + message.length);
+        out.set(shortvec(1), 0);
+        out.set(sig, shortvec(1).length);
+        out.set(message, shortvec(1).length + 64);
+        return out;
+      },
+    },
+  };
+  const t0 = Date.now();
+  const pre = await precheckBridgeIn(ctx, entry, amount);
+  let rec = await sendBridgeIn(ctx, entry, amount, before.page);
+  const sentSeconds = (Date.now() - t0) / 1000;
+  const progress: string[] = [];
+  while (rec.state !== 'completed' && rec.state !== 'failed' && rec.state !== 'undeliverable') {
+    if (Date.now() - t0 > 900_000) break;
+    rec = await followBridgeIn(rec, ctx, async () => {
+      const sync = await syncAccount(pg, account());
+      pg.flush();
+      return sync.coins;
+    });
+    if (rec.progress && progress[progress.length - 1] !== rec.progress) progress.push(rec.progress);
+    if (rec.state !== 'completed') await new Promise((ok) => setTimeout(ok, 3_000));
+  }
+  const after = {
+    page: await balanceOf(),
+    wallet: await walletTokenBalance(entry),
+    vault: (await rpc.tokenBalance(vault)) ?? 0n,
+  };
+  const res = {
+    symbol: entry.symbol,
+    amount: amount.toString(),
+    prompts,
+    note: pre.note,
+    state: rec.state,
+    lockNonce: rec.lockNonce ?? null,
+    signature: rec.signature,
+    sentSeconds,
+    completedSeconds: (Date.now() - t0) / 1000,
+    progress,
+    before,
+    after,
+  };
+  record(`bridge-in:${process.env.LABEL ?? entry.symbol}`, res);
+  say(`bridge in: ${json({ state: rec.state, before, after, seconds: res.completedSeconds })}`);
+  if (
+    rec.state !== 'completed' ||
+    prompts !== 1 ||
+    after.page - before.page !== amount ||
+    before.wallet - after.wallet !== amount ||
+    after.vault - before.vault !== amount
+  )
+    throw new Error(`T7.9: Bridge in is not as expected: ${json(res)}`);
+}
+
+// ── P9.3: Show in my wallet against 00059's injector (I-4, FROZEN @ f4d215c) ──────────────────────
+
+/**
+ * A registers through the page's own I-4 operations (checkInjector, one signature, one POST with the
+ * viewing key); then the injector's RPC must show A's wallet exactly A's holdings by the page's own
+ * decode (as 00059's gate A2: less the change the page holds without an inbox note), in Token-2022
+ * accounts. INJECTOR_PUBLIC_URL is the origin the injector names (127.0.0.1 on the host); this container
+ * reaches it as INJECTOR_INTERNAL_URL.
+ */
+async function inject() {
+  const pub = need('INJECTOR_PUBLIC_URL').replace(/\/$/, '');
+  const internal = (process.env.INJECTOR_INTERNAL_URL ?? 'http://injector:8899').replace(/\/$/, '');
+  const fetchImpl = ((input: Any, init?: Any) => {
+    const url = String(input instanceof Request ? input.url : input);
+    return fetch(url.startsWith(pub) ? internal + url.slice(pub.length) : url, init);
+  }) as typeof fetch;
+  const rpc = async (method: string, params: unknown[]) => {
+    const r = await fetch(internal, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    const j = (await r.json()) as { result?: Any; error?: Any };
+    if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
+    return j.result;
+  };
+  step("P9.3 Show in my wallet: A registers with 00059's injector (the page's I-4 operations, one signature)");
+  const pg = pageA();
+  const ctx = {
+    injectorUrl: pub,
+    midnightNetworkId: PROFILE.midnightNetworkId,
+    wallet: signerA.address,
+    account: account(),
+    fetchImpl,
+  };
+  const info = await checkInjector(ctx);
+  let prompts = 0;
+  const signing = ed25519ActionSigning(
+    {
+      deviceKey: signerA.deviceKey,
+      address: signerA.address,
+      signMessage: async (m: Uint8Array) => {
+        prompts += 1;
+        return signerA.signMessage(m);
+      },
+    },
+    { network: NETWORK, tokens },
+  );
+  const t0 = Date.now();
+  const view = await registerAccount(ctx, info, signing, flows.A.encSecret);
+  say(`registered: ${view.id} ${view.status} (${prompts} signature)`);
+  let st: Any = view;
+  for (let i = 0; i < 90 && st.status !== 'synced'; i++) {
+    await new Promise((r) => setTimeout(r, 2_000));
+    st = (await readRegistrationStatus(ctx)) ?? st;
+  }
+  const syncedSeconds = (Date.now() - t0) / 1000;
+  // What the RPC must show: the page's holdings, less change it holds without an inbox note.
+  const want = async () => {
+    const sync = await syncAccount(pg, account());
+    pg.flush();
+    const m: Record<string, bigint> = {};
+    for (const h of holdingsByColour(sync.coins)) m[h.color] = h.total;
+    for (const c of sync.coins as Any[]) {
+      if (!c.spent && !c.inInbox && c.origin === 'change' && c.mtIndex !== null && !c.pending)
+        m[c.color] = (m[c.color] ?? 0n) - BigInt(c.value);
+    }
+    return Object.fromEntries(Object.entries(m).filter(([, v]) => v > 0n));
+  };
+  const got = async () => {
+    const r = await rpc('getTokenAccountsByOwner', [
+      signerA.address,
+      { programId: TOKEN_2022_PROGRAM_ID },
+      { encoding: 'jsonParsed' },
+    ]);
+    const accounts: { mint: string; amount: string; name?: string; symbol?: string }[] = [];
+    for (const a of r.value as Any[]) {
+      const parsed = a.account.data.parsed.info;
+      const mint = String(parsed.mint);
+      const mi = await rpc('getAccountInfo', [mint, { encoding: 'jsonParsed' }]).catch(() => null);
+      const meta = (mi?.value?.data?.parsed?.info?.extensions ?? []).find(
+        (x: Any) => x.extension === 'tokenMetadata',
+      )?.state;
+      accounts.push({
+        mint,
+        amount: String(parsed.tokenAmount.amount),
+        ...(meta ? { name: String(meta.name), symbol: String(meta.symbol) } : {}),
+      });
+    }
+    return accounts;
+  };
+  const sorted = (xs: string[]) => [...xs].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0));
+  let page: Record<string, bigint> = {};
+  let accounts: Awaited<ReturnType<typeof got>> = [];
+  let same = false;
+  const t1 = Date.now();
+  for (let i = 0; i < 60 && !same; i++) {
+    page = await want();
+    accounts = await got();
+    same =
+      json(sorted(Object.values(page).map(String))) ===
+      json(sorted(accounts.map((a) => a.amount).filter((a) => BigInt(a) > 0n)));
+    if (!same) await new Promise((r) => setTimeout(r, 3_000));
+  }
+  const bySymbol = Object.fromEntries(
+    Object.entries(page).map(([colour, v]) => [tokens.byColour(colour)?.symbol ?? colour, v.toString()]),
+  );
+  const res = {
+    registration: { id: view.id, firstStatus: view.status, status: st.status, error: st.error ?? null },
+    prompts,
+    syncedSeconds,
+    matchSeconds: (Date.now() - t1) / 1000,
+    page: bySymbol,
+    rpc: accounts,
+    same,
+  };
+  record('inject', res);
+  say(`page ${json(bySymbol)}; RPC ${json(accounts)}`);
+  if (prompts !== 1 || st.status !== 'synced' || !same)
+    throw new Error(`Show in my wallet: not as expected: ${json(res)}`);
+}
+
 async function main() {
   out.network = NETWORK;
-  if (STEP !== 'bridge-deploy') {
+  if (STEP !== 'bridge-deploy' && STEP !== 'adopt-bridges') {
     out.account = flows.A.account ?? null;
     out.wallet = signerA.address;
   }
@@ -1810,6 +2143,18 @@ async function main() {
       return returnCoin(process.env.TX1_LABEL ?? 'tx1');
     case 'out':
       return outCase(process.env.OUT_CASE ?? 'a');
+    case 'adopt-bridges':
+      return adoptBridges();
+    case 'wallets':
+      return wallets();
+    case 'page-mark':
+      return pageMark();
+    case 'page-wait':
+      return pageWait();
+    case 'bridge-in':
+      return bridgeIn();
+    case 'inject':
+      return inject();
     case 'resume-lock':
       return resumeLock();
     case 'resume-return':

@@ -41,7 +41,7 @@ import {
 } from '@nightmarket/core/solana';
 
 import type { TransactionFacts } from '../../wallet/sign-prompt.js';
-import type { SolanaTransactions } from '../../wallet/WalletContext.js';
+import type { SolanaTransactions } from '../../wallet/transactions.js';
 import type { SolanaRpc } from '../solana-rpc.js';
 import type { BridgeInRecord } from './records.js';
 

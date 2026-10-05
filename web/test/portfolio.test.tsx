@@ -4,7 +4,7 @@
 //           site's Solana RPC and never the injector (the config check); copying the mint copies it whole;
 //           tokens without a Solana version keep their rows exactly.
 //   FR-022  a configured icon is rendered, an unknown token keeps its text badge, and the bundled icons
-//           are byte-identical to the published set (SHA256SUMS; since P11 the official-symbol set `/v2/`, SHA256SUMS-v2).
+//           are byte-identical to the published set (SHA256SUMS; since P11 the official-symbol set `/v3/`, SHA256SUMS-v3).
 //   FR-023  the five actions, in order and wording, with their reasons and open transfers.
 
 import { createHash } from 'node:crypto';

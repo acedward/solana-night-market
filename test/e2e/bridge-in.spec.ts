@@ -292,3 +292,33 @@ test('D1/D5: a lost lock Solana cannot return stays "checking" and blocks the to
   await review(page, '500');
   await expect(page.getByTestId('bridge-in-facts')).toBeVisible();
 });
+
+// AA 00060 P10.5 E2 (R3-B4): the wallet sent the lock, but the browser could not save its record (storage
+// full). The lock WAS sent: the page says so, with the signature, and never "Nothing was locked".
+test('E2: the lock was sent but its record could not be saved: the page says so, with the signature', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const s = await bridgeSite(page);
+  s.rpc.logsFor = () => ['Program x invoke [1]', lockc(s, 4), 'Program x success'];
+  await page.addInitScript(() => {
+    let once = false;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (!once && key.includes('bridge') && value.includes('signature')) {
+        once = true;
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+      return original.call(this, key, value);
+    };
+  });
+  await openPortfolio(page);
+  await review(page, '500');
+  await page.getByTestId('bridge-in-send').click();
+  const error = page.getByTestId('bridge-in-error');
+  await expect(error).toBeVisible({ timeout: 15_000 });
+  expect(s.rpc.sent).toHaveLength(1);
+  await expect(error).not.toContainText('Nothing was');
+  await expect(error).toContainText('could not be saved');
+  await expect(error).toContainText(s.rpc.sent[0]!.signature);
+});

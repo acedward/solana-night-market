@@ -134,27 +134,76 @@ export class SolanaRpc {
     return BigInt(await this.call<number>('getBlockHeight', [{ commitment: 'confirmed' }]));
   }
 
+  /** AA 00060 P10.5 (audit E1/E5): the node's slot and block height in ONE answer (`getEpochInfo`), so an
+   *  expiry check knows the slot it was made at. Throws on an answer that is not well-formed. */
+  async epochPosition(): Promise<{ slot: bigint; blockHeight: bigint }> {
+    const r = await this.call<{ absoluteSlot?: unknown; blockHeight?: unknown }>('getEpochInfo', [
+      { commitment: 'confirmed' },
+    ]);
+    if (!Number.isSafeInteger(r?.absoluteSlot) || !Number.isSafeInteger(r?.blockHeight))
+      throw new SolanaRpcError('The Solana RPC answered getEpochInfo in an unknown shape.');
+    return { slot: BigInt(r.absoluteSlot as number), blockHeight: BigInt(r.blockHeight as number) };
+  }
+
   /** Signatures of transactions naming `address`, newest first, before `before` when given (C3: a lock
-   *  whose wallet answer was lost). */
+   *  whose wallet answer was lost). P10.5 (audit E1/E5): with `minContextSlot`, a node that has not reached
+   *  that slot refuses (an error, never a shorter list); an answer that is not well-formed throws. */
   async signaturesForAddress(
     address: string,
     limit = 100,
     before?: string,
+    minContextSlot?: bigint,
   ): Promise<{ signature: string; slot: bigint }[]> {
-    const r = await this.call<{ signature: string; slot: number }[]>('getSignaturesForAddress', [
+    const r = await this.call<unknown>('getSignaturesForAddress', [
       address,
-      { limit, commitment: 'confirmed', ...(before ? { before } : {}) },
+      {
+        limit,
+        commitment: 'confirmed',
+        ...(before ? { before } : {}),
+        ...(minContextSlot !== undefined ? { minContextSlot: Number(minContextSlot) } : {}),
+      },
     ]);
-    return r.map((x) => ({ signature: x.signature, slot: BigInt(x.slot) }));
+    if (!Array.isArray(r) || r.length > limit)
+      throw new SolanaRpcError('The Solana RPC answered getSignaturesForAddress in an unknown shape.');
+    return r.map((x: { signature?: unknown; slot?: unknown }) => {
+      if (typeof x?.signature !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(x.signature))
+        throw new SolanaRpcError('The Solana RPC listed a malformed signature.');
+      if (!Number.isSafeInteger(x.slot)) throw new SolanaRpcError('The Solana RPC listed a malformed slot.');
+      return { signature: x.signature, slot: BigInt(x.slot as number) };
+    });
   }
 
   /** A transaction's wire bytes (base64 encoding), or null when it is not available. */
   async transactionWire(signature: string): Promise<Uint8Array | null> {
-    const r = await this.call<{ transaction: [string, string] } | null>('getTransaction', [
+    const r = await this.call<{ transaction?: unknown } | null>('getTransaction', [
       signature,
       { commitment: 'confirmed', maxSupportedTransactionVersion: 0, encoding: 'base64' },
     ]);
-    return r?.transaction ? fromBase64(r.transaction[0]) : null;
+    if (r === null) return null;
+    const t = r?.transaction;
+    if (!Array.isArray(t) || typeof t[0] !== 'string' || t[1] !== 'base64')
+      throw new SolanaRpcError('The Solana RPC answered getTransaction in an unknown shape.');
+    return fromBase64(t[0]);
+  }
+
+  /** P10.5 (audit E1/E5): a signature's status with the slot the answering node was at. `status` null:
+   *  that node knows no transaction with this signature. Throws on an answer that is not well-formed. */
+  async signatureStatusAt(
+    signature: string,
+  ): Promise<{ slot: bigint; status: 'processed' | 'confirmed' | 'finalized' | 'failed' | null }> {
+    const r = await this.call<{ context?: { slot?: unknown }; value?: unknown }>('getSignatureStatuses', [
+      [signature],
+      { searchTransactionHistory: true },
+    ]);
+    if (!Number.isSafeInteger(r?.context?.slot) || !Array.isArray(r.value) || r.value.length !== 1)
+      throw new SolanaRpcError('The Solana RPC answered getSignatureStatuses in an unknown shape.');
+    const slot = BigInt(r.context!.slot as number);
+    const v = r.value[0] as { confirmationStatus?: unknown; err?: unknown } | null;
+    if (v === null) return { slot, status: null };
+    if (typeof v !== 'object') throw new SolanaRpcError('The Solana RPC answered a malformed status.');
+    if (v.err) return { slot, status: 'failed' };
+    const c = v.confirmationStatus;
+    return { slot, status: c === 'finalized' ? 'finalized' : c === 'confirmed' ? 'confirmed' : 'processed' };
   }
 
   sendTransaction = (wire: Uint8Array) =>

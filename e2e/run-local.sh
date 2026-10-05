@@ -147,7 +147,12 @@ for p in sys.stdin.buffer.read().split(b"\0"):
   DOCKER_CHECK_NAME=aa00057-check "$ROOT/scripts/docker-check.sh" run 'bun install --frozen-lockfile >/dev/null && bun run contracts >/dev/null' \
     || fail "install + contracts"
   local tag; tag="nm-relay:aa00057-$(git -C "$ROOT" rev-parse --short HEAD)"
-  docker build --pull=false -q -f "$ROOT/deploy/relay.Dockerfile" -t "$tag" "$ROOT" >"$STATE_ROOT/relay-build.log" 2>&1 \
+  # Built from a copy of deploy/relay.Dockerfile without its `# syntax=docker/dockerfile:1` line: that line
+  # makes BuildKit fetch the frontend image, and registry fetches hang on this host (2026-10-05:
+  # DeadlineExceeded). The file uses nothing beyond the built-in frontend (plain RUN/COPY), so the image is
+  # the same; nothing is pulled.
+  grep -v '^# syntax=' "$ROOT/deploy/relay.Dockerfile" >"$STATE_ROOT/relay.Dockerfile"
+  docker build --pull=false -q -f "$STATE_ROOT/relay.Dockerfile" -t "$tag" "$ROOT" >"$STATE_ROOT/relay-build.log" 2>&1 \
     || { tail -20 "$STATE_ROOT/relay-build.log"; fail "the relay image"; }
   echo "$tag" >"$STATE_ROOT/relay-image"
   say "prep done in $((SECONDS - t0)) s: template volume $TMPL_VOLUME (00058 $BRIDGE_PIN), app volume $APP_VOLUME, relay $tag"

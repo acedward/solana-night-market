@@ -66,6 +66,7 @@ import { useBridges } from '../bridge/BridgeContext.js';
 import { BridgeIn } from '../bridge/in/BridgeIn.js';
 import { BridgeOut } from '../bridge/out/BridgeOut.js';
 import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
+import { MintSolanaTokensAction } from '../bridge/faucet/MintSolanaTokens.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
   awaitChange,
@@ -969,6 +970,10 @@ export function Accounts({
           {job && <JobTracker job={job} />}
 
           {account && <DemoTokens network={network} relayUrl={relayUrl} />}
+
+          {/* AA 00060 P13 (FR-024): "Mint Solana tokens"; FR-023's action list (lane 00060-lane-portfolio)
+              takes it over as action 5 (MintSolanaTokensDialog + useSplFaucetOffer). */}
+          {wallet.address && <MintSolanaTokensAction relayUrl={relayUrl} />}
 
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">

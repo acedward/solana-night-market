@@ -17,7 +17,7 @@ import { deviceKeyFromSolanaAddress } from '@nightmarket/core';
 
 import { HARDWARE_NOT_SUPPORTED } from './wallet-errors.js';
 import type { ActionSigning } from './signing.js';
-import type { TransactionFacts } from './sign-prompt.js';
+import type { SolanaTransactions } from './transactions.js';
 
 export type WalletStatus = 'disconnected' | 'connecting' | 'connected';
 
@@ -32,14 +32,8 @@ export interface WalletOption {
  *  disconnected), or a signature showed it is a hardware (Ledger) account, which v1 refuses. */
 export type WalletSessionEvent = 'account-changed' | 'hardware';
 
-/** AA 00060 (Bridge in): the connected wallet's Solana transaction features, where it has them. `facts`
- *  is what the page built, decoded, for its signing panel (P5.3). */
-export interface SolanaTransactions {
-  /** `solana:signAndSendTransaction` (the wallet sends): resolves with the first signature. */
-  signAndSend?(transaction: Uint8Array, chain: string, facts?: TransactionFacts): Promise<Uint8Array>;
-  /** `solana:signTransaction` (the page sends): resolves with the signed wire transaction. */
-  sign?(transaction: Uint8Array, chain: string, facts?: TransactionFacts): Promise<Uint8Array>;
-}
+/** AA 00060 (Bridge in): the connected wallet's Solana transaction features (./transactions.ts). */
+export type { SolanaTransactions };
 
 /** A connected wallet session, as an adapter returns it. */
 export interface WalletSession {

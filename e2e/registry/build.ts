@@ -32,13 +32,32 @@
 //
 // A positional `http(s)://` origin is read as `<origin>/deployment`. Exit codes: 0 written; 65 refused
 // (`journey-registry: refused: <reason>: …`); 64 usage.
+//
+// AA 00057 P3b.3 (questions Q10): with the icon table (`--icons`, default ./token-icons.json; `none`: none),
+// each entry also gets `image` and `splImage` (HTTPS URLs: the wallet, through the injector) and `icon`
+// (Night Market FR-022: the same file on the site's own origin); `--site-icons-out` writes the site's icon
+// map from the same table. A second mode writes the injector's own token file from Night Market's full
+// token list (./icons.ts `injectorTokenFile`):
+//
+//   bun e2e/registry/build.ts injector-tokens --network <net> --journey <I-1> --nm-tokens <relay TOKENS_FILE>
+//       [--base <the injector's bundled tokens.<net>.json>] [--icons <table>] --out <file>
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { BridgeRegistryError, bridgeColourOf, parseJourneyRegistry } from '@nightmarket/core/bridge';
 
 import { solanaFacts } from '../../scripts/bridge-tokens.js';
+import {
+  IconTableError,
+  InjectorTokensError,
+  injectorTokenFile,
+  parseIconTable,
+  siteIconMap,
+  withIcons,
+  type IconTable,
+} from './icons.js';
 
 export const DEPLOYMENT_RECORD_SCHEMA = 'effectstream.solana-midnight-bridge.deployment/1';
 export const CLASSIC_SPL_TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
@@ -96,6 +115,12 @@ export interface JourneyToken {
   name: string;
   symbol: string;
   decimals: number;
+  /** P3b.3 (Q10): the Midnight-side token's icon (an HTTPS URL; the wallet, through the injector). */
+  image?: string;
+  /** P3b.3 (Q10): the real SPL token's icon (an HTTPS URL; the injector's metadata fill-in, 00059 P7). */
+  splImage?: string;
+  /** P3b.3 (FR-022): the SPL token's icon on Night Market's own origin (the same file, bundled by the site). */
+  icon?: string;
 }
 
 export interface JourneyRegistry {
@@ -117,6 +142,8 @@ export interface BuildExpect {
   solanaGenesisHash?: string;
   /** The Solana RPC's facts, to re-check the genesis hash and every mint. */
   solana?: SolanaMintFacts;
+  /** P3b.3: the icon table (./token-icons.json): each entry gains `image`, `splImage` and `icon`. */
+  icons?: IconTable;
 }
 
 const refuse = (reason: JourneyBuildRefusal, message: string): never => {
@@ -239,7 +266,11 @@ export function buildJourneyRegistry(records: readonly unknown[], expect: BuildE
       `the records name the Solana genesis ${genesis}, the RPC's is ${expect.solana.genesisHash}`,
     );
   }
-  const out: JourneyRegistry = { midnightNetwork: expect.midnightNetwork, solanaGenesisHash: genesis, tokens };
+  const out: JourneyRegistry = {
+    midnightNetwork: expect.midnightNetwork,
+    solanaGenesisHash: genesis,
+    tokens: expect.icons ? withIcons(expect.icons, tokens) : tokens,
+  };
   try {
     parseJourneyRegistry(out, { midnightNetwork: expect.midnightNetwork, solanaGenesisHash: genesis });
   } catch (e) {
@@ -261,7 +292,15 @@ export interface CliArgs {
   solanaRpc: string | null;
   out: string;
   sources: string[];
+  /** P3b.3: the icon table (default ./token-icons.json; `none`: no icons). */
+  icons: string | null;
+  /** P3b.3: also write Night Market's site icon map (scripts/token-icons.json's format) here. */
+  siteIconsOut: string | null;
 }
+
+/** The default icon table: ./token-icons.json. */
+export const DEFAULT_ICON_TABLE = fileURLToPath(new URL('./token-icons.json', import.meta.url));
+export const readIconTable = (path: string): IconTable => parseIconTable(JSON.parse(readFileSync(path, 'utf8')));
 
 class UsageError extends Error {}
 
@@ -274,7 +313,7 @@ export function parseArgs(argv: string[]): CliArgs {
       const v = argv[i + 1];
       if (v === undefined) throw new UsageError(`${a} needs a value`);
       const k = a.slice(2);
-      if (!['network', 'genesis', 'solana-rpc', 'out', 'out-dir'].includes(k))
+      if (!['network', 'genesis', 'solana-rpc', 'out', 'out-dir', 'icons', 'site-icons-out'].includes(k))
         throw new UsageError(`unknown flag ${a}`);
       flags[k] = v;
       i++;
@@ -291,6 +330,8 @@ export function parseArgs(argv: string[]): CliArgs {
     solanaRpc: flags['solana-rpc'] ?? null,
     out: flags.out ?? join(flags['out-dir'] ?? '.', journeyFileName(flags.network)),
     sources,
+    icons: flags.icons === 'none' ? null : (flags.icons ?? DEFAULT_ICON_TABLE),
+    siteIconsOut: flags['site-icons-out'] ?? null,
   };
 }
 
@@ -306,6 +347,7 @@ export async function loadRecord(source: string, fetchImpl: typeof fetch = fetch
 }
 
 export async function main(argv: string[], fetchImpl: typeof fetch = fetch): Promise<number> {
+  if (argv[0] === 'injector-tokens') return injectorTokensMain(argv.slice(1));
   let args: CliArgs;
   try {
     args = parseArgs(argv);
@@ -313,7 +355,7 @@ export async function main(argv: string[], fetchImpl: typeof fetch = fetch): Pro
     if (!(e instanceof UsageError)) throw e;
     console.error(`journey-registry: ${e.message}`);
     console.error(
-      'usage: bun e2e/registry/build.ts --network <net> [--genesis <base58>] [--solana-rpc <url>] [--out <file> | --out-dir <dir>] <record.json | http(s)://origin> ...',
+      'usage: bun e2e/registry/build.ts --network <net> [--genesis <base58>] [--solana-rpc <url>] [--out <file> | --out-dir <dir>] [--icons <table.json>|none] [--site-icons-out <file>] <record.json | http(s)://origin> ...',
     );
     return 64;
   }
@@ -323,6 +365,7 @@ export async function main(argv: string[], fetchImpl: typeof fetch = fetch): Pro
     const expect: BuildExpect = {
       midnightNetwork: args.network,
       ...(args.genesis ? { solanaGenesisHash: args.genesis } : {}),
+      ...(args.icons ? { icons: readIconTable(args.icons) } : {}),
     };
     // The records' own checks first, so the RPC is asked only about mints of well-formed records.
     let reg = buildJourneyRegistry(records, expect);
@@ -338,9 +381,71 @@ export async function main(argv: string[], fetchImpl: typeof fetch = fetch): Pro
     console.log(
       `journey-registry: wrote ${args.out}: ${reg.tokens.map((t) => `${t.symbol} ${t.colour.slice(0, 8)}…`).join(', ')}`,
     );
+    if (args.siteIconsOut) {
+      if (!expect.icons) throw new JourneyBuildError('record-shape', '--site-icons-out needs an icon table');
+      writeFileSync(args.siteIconsOut, `${JSON.stringify(siteIconMap(expect.icons), null, 2)}\n`);
+      console.log(`journey-registry: wrote the site's icon map ${args.siteIconsOut}`);
+    }
     return 0;
   } catch (e) {
-    if (e instanceof JourneyBuildError) {
+    if (e instanceof JourneyBuildError || e instanceof IconTableError) {
+      console.error(`journey-registry: refused: ${e.message}`);
+      return 65;
+    }
+    throw e;
+  }
+}
+
+/**
+ * `build.ts injector-tokens --network <net> --journey <I-1> --nm-tokens <relay TOKENS_FILE> [--base <file>]
+ * [--icons <table>] --out <file>`: the injector's token file (its TOKEN_REGISTRY) from Night Market's full
+ * token list, I-1 and the icon table (./icons.ts `injectorTokenFile`).
+ */
+export async function injectorTokensMain(argv: string[]): Promise<number> {
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const k = argv[i]!;
+    const v = argv[i + 1];
+    if (
+      !k.startsWith('--') ||
+      v === undefined ||
+      !['network', 'journey', 'nm-tokens', 'base', 'icons', 'out'].includes(k.slice(2))
+    ) {
+      console.error(`journey-registry injector-tokens: bad argument ${k}`);
+      console.error(
+        'usage: bun e2e/registry/build.ts injector-tokens --network <net> --journey <I-1> --nm-tokens <tokens.json> [--base <file>] [--icons <table>] --out <file>',
+      );
+      return 64;
+    }
+    flags[k.slice(2)] = v;
+  }
+  if (!flags.network || !flags.journey || !flags['nm-tokens'] || !flags.out) {
+    console.error('journey-registry injector-tokens: --network, --journey, --nm-tokens and --out are required');
+    return 64;
+  }
+  const read = (p: string): unknown => JSON.parse(readFileSync(p, 'utf8'));
+  try {
+    const journey = read(flags.journey) as { midnightNetwork?: string; tokens: never[] };
+    if (journey.midnightNetwork !== flags.network)
+      throw new InjectorTokensError(
+        `injector tokens: I-1 is for ${String(journey.midnightNetwork)}, not ${flags.network}`,
+      );
+    const file = injectorTokenFile({
+      network: flags.network,
+      nightMarketTokens: read(flags['nm-tokens']),
+      journey,
+      icons: readIconTable(flags.icons ?? DEFAULT_ICON_TABLE),
+      ...(flags.base ? { base: read(flags.base) } : {}),
+    });
+    writeFileSync(flags.out, `${JSON.stringify(file, null, 2)}\n`);
+    console.log(
+      `journey-registry: wrote the injector's token file ${flags.out}: ${Object.values(file.tokens)
+        .map((t) => `${t.symbol} ${t.decimals}`)
+        .join(', ')}`,
+    );
+    return 0;
+  } catch (e) {
+    if (e instanceof InjectorTokensError || e instanceof IconTableError) {
       console.error(`journey-registry: refused: ${e.message}`);
       return 65;
     }

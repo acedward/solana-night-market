@@ -23,7 +23,7 @@ function Onboarding({ done }: { done: 0 | 1 }) {
   return (
     <ol className="onboarding">
       <li>
-        <strong>{done > 0 ? 'Phantom connected' : 'Connect Phantom'}</strong>
+        <strong>{done > 0 ? 'Wallet connected' : 'Connect your Solana wallet'}</strong>
         It only signs messages: no SOL needed.
       </li>
       <li>
@@ -77,12 +77,12 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
             <Onboarding done={0} />
             {connect && (
               <Button className="btn-block" data-testid="connect-cta" onClick={connect}>
-                <Icon name="wallet" /> Connect Phantom
+                <Icon name="wallet" /> Connect wallet
               </Button>
             )}
           </>
         ) : (
-          <p className="small">Accounts controlled by a Solana wallet (Phantom) are coming to this site.</p>
+          <p className="small">Accounts controlled by a Solana wallet are coming to this site.</p>
         )}
       </Panel>
     );

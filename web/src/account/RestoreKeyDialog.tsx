@@ -7,6 +7,7 @@
 // that key. Only "Continue to Phantom" asks the wallet.
 
 import { Button, Dialog } from '../design/index.js';
+import { useWalletName } from '../wallet/WalletContext.js';
 
 /** The first 16 hex digits of a key: what the wallet shows after "New key". */
 export const keyFingerprint = (key: string) => key.replace(/^0x/, '').toLowerCase().slice(0, 16);
@@ -24,6 +25,7 @@ export function RestoreKeyDialog({
   onCancel(): void;
 }) {
   const fp = keyFingerprint(browserKey);
+  const wallet = useWalletName();
   return (
     <Dialog
       open={open}
@@ -36,7 +38,7 @@ export function RestoreKeyDialog({
             Cancel
           </Button>
           <Button data-testid="restore-continue" onClick={onContinue}>
-            Continue to Phantom
+            Continue to {wallet.name}
           </Button>
         </>
       }
@@ -50,7 +52,7 @@ export function RestoreKeyDialog({
         <strong>It never moves funds.</strong> Your tokens stay in your account, and nothing is sent anywhere.
       </p>
       <p data-testid="restore-explain-check">
-        Phantom will show <strong>Rotate encryption key</strong> and{' '}
+        {wallet.Name} will show <strong>Rotate encryption key</strong> and{' '}
         <strong>
           New key <span className="mono">{fp}</span>
         </strong>

@@ -27,6 +27,7 @@ const LIMITS = [
   'restarts',
   'demo-tokens',
   'one-offer',
+  'wallets',
   'your-data',
 ];
 
@@ -73,6 +74,8 @@ for (const vp of VIEWPORTS) {
       // AA 00047 P11.I K.7 (audit round 4c F-A4c-1 / F-B4c-1, F-A4c-2 / F-B4c-2): the two limits round 4c left.
       await expect(page.locator('[data-limit=stuck-offer]')).toContainText('can never be filled');
       await expect(page.locator('[data-limit=take-label]')).toContainText('Only the label is wrong');
+      // AA 00060 P5: the wallets tested, and what to do when no window appears.
+      await expect(page.locator('[data-limit=wallets]')).toContainText('Phantom and Nightly are tested');
       // Q46: no allowance is named before a customer reaches it.
       await expect(page.getByTestId('about')).not.toContainText(/allowance|withdrawals a day|\b100\b/i);
 

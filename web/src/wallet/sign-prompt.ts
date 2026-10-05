@@ -12,7 +12,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { REGISTRATION_FIRST_LINE } from '@nightmarket/core/bridge';
+import { LANDING_KEY_FIRST_LINE, REGISTRATION_FIRST_LINE } from '@nightmarket/core/bridge';
 
 import type { SignFacts } from './sign-facts.js';
 
@@ -23,13 +23,27 @@ export interface SignPrompt {
   text: string;
   /** "82d2 06a4": the first 8 hex digits of the message's digest line. */
   fingerprint: string;
-  /** What the message is: an account call (F3), the relay's proof-of-key envelope, or (AA 00060 P8)
-   *  the RPC injector's registration text (I-4). */
-  kind: 'account-call' | 'relay-envelope' | 'rpc-registration';
+  /** What the request is: an account call (F3), the relay's proof-of-key envelope, or (AA 00060 P5.3)
+   *  the RPC injector's registration text (I-4), the Bridge-out landing key's text (I-5, asked twice),
+   *  or a Solana transaction the page built (its decoded facts in `transaction`). */
+  kind: SignPromptKind;
   /** Unix ms when the wallet was asked (for the "waiting" line). */
   since: number;
   /** For an account call: what the contract enforces (base units, token ids, deadline; Q25 B′). */
   facts: SignFacts | null;
+  /** For a Solana transaction: what the page built, decoded (the program, the mint, the amount in base
+   *  units and with the site's decimals, the accounts). */
+  transaction?: TransactionFacts | null;
+}
+
+export type SignPromptKind =
+  'account-call' | 'relay-envelope' | 'rpc-registration' | 'landing-key' | 'solana-transaction';
+
+/** A Solana transaction's facts as the page shows them beside the wallet's own window. */
+export interface TransactionFacts {
+  /** One line: what it does ("Lock 500 X for your Night Market account"). */
+  title: string;
+  facts: { label: string; value: string; mono?: boolean }[];
 }
 
 const hexOf = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -45,11 +59,12 @@ export function messageFingerprint(bytes: Uint8Array): string {
   return group(m ? m[1]!.slice(0, 8) : hexOf(sha256(bytes)).slice(0, 8));
 }
 
-/** Which kind of message it is: I-4's own first line (AA 00060), else from its second line (Track A's
- *  possession message says so). */
-export const messageKind = (text: string): SignPrompt['kind'] => {
+/** Which kind of message it is: I-4's or I-5's own first line (AA 00060), else from its second line
+ *  (Track A's possession message says so). */
+export const messageKind = (text: string): Exclude<SignPromptKind, 'solana-transaction'> => {
   const lines = text.split('\n');
   if (lines[0] === REGISTRATION_FIRST_LINE) return 'rpc-registration';
+  if (lines[0] === LANDING_KEY_FIRST_LINE) return 'landing-key';
   return lines[1] === 'Prove you hold this key' ? 'relay-envelope' : 'account-call';
 };
 
@@ -85,6 +100,23 @@ export class SignPromptStore {
       kind,
       since: now,
       facts: kind === 'account-call' ? this.pendingFacts : null,
+    };
+    this.hidden = false;
+    this.emit();
+    return this.current;
+  }
+
+  /** AA 00060 P5.3: the wallet is asked to sign a Solana transaction the page built; the panel shows its
+   *  decoded facts (the wallet shows its own reading of the same transaction). */
+  openTransaction(transaction: TransactionFacts, wallet: string, now = Date.now()): SignPrompt {
+    this.current = {
+      wallet,
+      text: [transaction.title, ...transaction.facts.map((f) => `${f.label}: ${f.value}`)].join('\n'),
+      fingerprint: '',
+      kind: 'solana-transaction',
+      since: now,
+      facts: null,
+      transaction,
     };
     this.hidden = false;
     this.emit();

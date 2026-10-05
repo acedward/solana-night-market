@@ -18,7 +18,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { formatShieldedAddress } from '../../packages/core/src/shielded-address.js';
 import { healthBody } from './errors-fixtures.js';
-import { connectPhantom, installMockPhantom } from './mock-phantom.js';
+import { E2E_WALLET_NAME, connectPhantom, installMockPhantom } from './mock-phantom.js';
 import { INDEXER, INDEXER_OVERRIDE, MockIndexer } from './mock-indexer.js';
 import { MockRelay, RELAY } from './mock-relay.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
@@ -118,7 +118,7 @@ for (const vp of VIEWPORTS) {
       await installMockPhantom(page);
       await page.goto('/#markets');
       await page.getByTestId('connect').click();
-      await expect(page.getByTestId('wallet-option')).toHaveText(/Phantom/);
+      await expect(page.getByTestId('wallet-option')).toHaveText(new RegExp(E2E_WALLET_NAME));
       await assertLayout(page, vp.touch);
       await shot(page, `${vp.name}-connect-menu`, false);
     });

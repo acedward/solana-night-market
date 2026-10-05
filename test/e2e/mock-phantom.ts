@@ -21,6 +21,15 @@ import { offchainWrappings } from '../../web/src/wallet/solana-signature.js';
 
 export type PhantomMode = 'software' | 'ledger' | 'reject' | 'locked' | 'hang' | 'other-key';
 
+/**
+ * AA 00060 P5 (T5.1): which wallet the mock plays through the Wallet Standard. `E2E_WALLET=nightly` runs
+ * every spec against Nightly's recorded profile (G-NIGHTLY part A, 2026-10-05): its name, its chains,
+ * `solana:signIn` listed, and its Sui, Aptos, IOTA and Cedra wallets also registered as "Nightly"
+ * (no Solana feature). The default is Phantom. Phantom's injected provider exists only for Phantom.
+ */
+export const E2E_WALLET: 'phantom' | 'nightly' = process.env.E2E_WALLET === 'nightly' ? 'nightly' : 'phantom';
+export const E2E_WALLET_NAME = E2E_WALLET === 'nightly' ? 'Nightly' : 'Phantom';
+
 export interface PhantomRequest {
   via: 'wallet-standard' | 'injected';
   display: string | null;
@@ -102,7 +111,7 @@ export async function installMockPhantom(
   );
 
   await page.addInitScript(
-    ({ address, publicKeyHex, standard, injected }) => {
+    ({ address, publicKeyHex, standard, injected, walletKind }) => {
       const hex = (h: string) => Uint8Array.from((h.match(/../g) ?? []).map((b) => parseInt(b, 16)));
       const toHex = (u: Uint8Array) => Array.from(u, (b) => b.toString(16).padStart(2, '0')).join('');
       const w = window as unknown as {
@@ -119,10 +128,13 @@ export async function installMockPhantom(
         if (r.error) throw fail(r.error as { code: number; message: string });
         return { signature: hex(r.signature as string), signedMessage: hex(r.signedMessage as string) };
       }
+      const nightly = walletKind === 'nightly';
       const account = {
         address,
         publicKey: pk,
-        chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'],
+        chains: nightly
+          ? ['solana:devnet', 'solana:testnet', 'solana:mainnet']
+          : ['solana:mainnet', 'solana:devnet', 'solana:testnet'],
         features: ['solana:signMessage', 'solana:signTransaction', 'solana:signAndSendTransaction'],
         label: 'Mock account',
       };
@@ -131,9 +143,11 @@ export async function installMockPhantom(
         let connected = false;
         const wallet = {
           version: '1.0.0',
-          name: 'Phantom',
+          name: nightly ? 'Nightly' : 'Phantom',
           icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxIDEiLz4=',
-          chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'],
+          chains: nightly
+            ? ['solana:mainnet', 'solana:mainnet-beta', 'solana:testnet', 'solana:devnet']
+            : ['solana:mainnet', 'solana:devnet', 'solana:testnet'],
           get accounts() {
             return connected ? [account] : [];
           },
@@ -165,13 +179,42 @@ export async function installMockPhantom(
               signMessage: (...inputs: Array<{ message: Uint8Array }>) =>
                 Promise.all(inputs.map((i) => sign(i.message, 'wallet-standard', null))),
             },
+            ...(nightly
+              ? {
+                  'solana:signIn': {
+                    version: '1.0.0',
+                    signIn: async () => {
+                      throw fail({ code: -32601, message: 'the mock wallet does not sign in' });
+                    },
+                  },
+                }
+              : {}),
           },
         };
-        const register = (api: { register(w: unknown): void }) => api.register(wallet);
-        window.addEventListener('wallet-standard:app-ready', (e) =>
-          register((e as CustomEvent<{ register(w: unknown): void }>).detail),
-        );
-        window.dispatchEvent(new CustomEvent('wallet-standard:register-wallet', { detail: register }));
+        const announce = (w2: unknown) => {
+          const register = (api: { register(w: unknown): void }) => api.register(w2);
+          window.addEventListener('wallet-standard:app-ready', (e) =>
+            register((e as CustomEvent<{ register(w: unknown): void }>).detail),
+          );
+          window.dispatchEvent(new CustomEvent('wallet-standard:register-wallet', { detail: register }));
+        };
+        announce(wallet);
+        // Nightly also registers wallets for other chains under the same name; none is a Solana signer.
+        if (nightly) {
+          for (const chain of ['sui:mainnet', 'aptos:mainnet', 'iota:mainnet', 'cedra:mainnet']) {
+            announce({
+              version: '1.0.0',
+              name: 'Nightly',
+              icon: wallet.icon,
+              chains: [chain],
+              accounts: [],
+              features: {
+                'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [] }) },
+                'standard:events': { version: '1.0.0', on: () => () => undefined },
+              },
+            });
+          }
+        }
         w.__mockPhantomSwitch = () => listeners.forEach((l) => l({ accounts: [] }));
       }
       if (injected) {
@@ -203,13 +246,14 @@ export async function installMockPhantom(
       publicKeyHex: deviceKey,
       standard: opts.standard ?? true,
       injected: opts.injected ?? false,
+      walletKind: E2E_WALLET,
     },
   );
   return phantom;
 }
 
-/** Connect the mock Phantom through the page's own menu. */
+/** Connect the mock wallet (Phantom, or Nightly under E2E_WALLET=nightly) through the page's own menu. */
 export async function connectPhantom(page: Page): Promise<void> {
   await page.getByTestId('connect').click();
-  await page.getByTestId('wallet-option').filter({ hasText: 'Phantom' }).click();
+  await page.getByTestId('wallet-option').filter({ hasText: E2E_WALLET_NAME }).click();
 }

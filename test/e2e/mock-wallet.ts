@@ -1,13 +1,17 @@
 // A MOCK Wallet Standard wallet with a chosen PROFILE (AA 00060; it generalises ./mock-phantom.ts): its
 // name, version, chains and features, and each account's features, so the page can be run against
-// "Phantom" and against "Nightly" (P2: the profile comes from the owner's G-NIGHTLY report; until then
-// NIGHTLY_PROFILE is a placeholder, UNVERIFIED). The key lives in the TEST process; message signing has a
+// "Phantom" and against "Nightly" (NIGHTLY_PROFILE is the profile the owner's G-NIGHTLY part A recorded
+// on 2026-10-05: evidence/00060-night-market-bridge-wallet/p2/report-2-pass-20261005T003042Z.md). The key lives in the TEST process; message signing has a
 // software wallet's semantics (tweetnacl RFC 8032 over exactly the bytes), and the transaction features
 // sign the wire transaction's message in the fee-payer slot. `solana:signAndSendTransaction` hands the
 // signed transaction to `send` (the test's mock RPC).
 //
 // Modes: 'software'; 'hedged' (valid signatures with a random nonce: differ every time, as MPC or
-// hedged signers do); 'ledger' (the off-chain message wrapping); 'reject' (4001); 'other-key'.
+// hedged signers do); 'ledger' (the off-chain message wrapping); 'reject' (4001); 'other-key'; 'drop'
+// (the request never answers and no prompt shows). `dropWithinMs` models G-NIGHTLY run 1: a request
+// that arrives within that many ms after the previous one answered is dropped the same way.
+// `extraWallets` registers more wallets under other chains (Nightly also registers Sui, Aptos, IOTA and
+// Cedra wallets named "Nightly"); they have no Solana feature.
 // Every request is recorded, and every signature it returned, so a test can check none leaks.
 
 import { randomBytes } from 'node:crypto';
@@ -48,15 +52,38 @@ export const PHANTOM_PROFILE: WalletProfile = {
   accountChains: ['solana:mainnet', 'solana:devnet', 'solana:testnet'],
 };
 
-/** PLACEHOLDER (UNVERIFIED): replaced by the feature set the owner's G-NIGHTLY report records (P2). */
+/** Nightly's Solana wallet as G-NIGHTLY part A recorded it (owner run 2, 2026-10-05): no
+ *  `solana:localnet` in either chain list, yet it accepted `solana:localnet` as a transaction's chain. */
 export const NIGHTLY_PROFILE: WalletProfile = {
-  ...PHANTOM_PROFILE,
   name: 'Nightly',
-  chains: ['solana:mainnet', 'solana:devnet', 'solana:testnet', 'solana:localnet'],
-  accountChains: ['solana:mainnet', 'solana:devnet', 'solana:testnet', 'solana:localnet'],
+  version: '1.0.0',
+  chains: ['solana:mainnet', 'solana:mainnet-beta', 'solana:testnet', 'solana:devnet'],
+  features: {
+    'standard:connect': '1.0.0',
+    'standard:disconnect': '1.0.0',
+    'standard:events': '1.0.0',
+    'solana:signAndSendTransaction': '1.0.0',
+    'solana:signTransaction': '1.0.0',
+    'solana:signMessage': '1.1.0',
+    'solana:signIn': '1.0.0',
+  },
+  accountFeatures: ['solana:signAndSendTransaction', 'solana:signMessage', 'solana:signTransaction'],
+  accountChains: ['solana:devnet', 'solana:testnet', 'solana:mainnet'],
 };
 
-export type MockWalletMode = 'software' | 'hedged' | 'ledger' | 'reject' | 'other-key';
+/** The other wallets Nightly registers under the same name (their chains only; no Solana feature). */
+export const NIGHTLY_OTHER_WALLETS: WalletProfile[] = (
+  ['sui:mainnet', 'aptos:mainnet', 'iota:mainnet', 'cedra:mainnet'] as const
+).map((chain) => ({
+  name: 'Nightly',
+  version: '1.0.0',
+  chains: [chain],
+  features: { 'standard:connect': '1.0.0', 'standard:disconnect': '1.0.0', 'standard:events': '1.0.0' },
+  accountFeatures: [],
+  accountChains: [chain],
+}));
+
+export type MockWalletMode = 'software' | 'hedged' | 'ledger' | 'reject' | 'other-key' | 'drop';
 
 export interface MockWalletRequest {
   kind: 'signMessage' | 'signTransaction' | 'signAndSendTransaction';
@@ -72,6 +99,12 @@ export interface MockWallet {
   requests: MockWalletRequest[];
   /** Every signature it returned (hex), messages and transactions alike. */
   signatures: string[];
+  /** Drop a request that arrives within this many ms after the previous one answered (0: never). */
+  dropWithinMs: number;
+  /** For each request: when it arrived and when it answered (ms; null when dropped). */
+  timings: { at: number; answeredAt: number | null; dropped: boolean }[];
+  /** Keep the NEXT request waiting (its window "open"); call the returned function to let it answer. */
+  holdNext(): () => void;
 }
 
 function hedgedSign(message: Uint8Array, seed: Uint8Array, publicKey: Uint8Array): Uint8Array {
@@ -87,7 +120,12 @@ function hedgedSign(message: Uint8Array, seed: Uint8Array, publicKey: Uint8Array
 
 export async function installMockWallet(
   page: Page,
-  opts: { profile?: WalletProfile; seed?: Uint8Array; send?: (wireBase64: string) => Promise<string> } = {},
+  opts: {
+    profile?: WalletProfile;
+    seed?: Uint8Array;
+    send?: (wireBase64: string) => Promise<string>;
+    extraWallets?: WalletProfile[];
+  } = {},
 ): Promise<MockWallet> {
   const profile = opts.profile ?? PHANTOM_PROFILE;
   const seed = opts.seed ?? randomBytes(32);
@@ -100,6 +138,35 @@ export async function installMockWallet(
     mode: 'software',
     requests: [],
     signatures: [],
+    dropWithinMs: 0,
+    timings: [],
+    holdNext() {
+      let release!: () => void;
+      hold = new Promise<void>((r) => (release = r));
+      return () => release();
+    },
+  };
+  let hold: Promise<void> | null = null;
+  const waitIfHeld = async () => {
+    if (!hold) return;
+    const h = hold;
+    hold = null;
+    await h;
+  };
+  let lastAnswered = Number.NEGATIVE_INFINITY;
+  /** Records the request's timing; true when it must be dropped (it then never answers). */
+  const arrive = (): { drop: boolean; done: () => void } => {
+    const at = Date.now();
+    const drop = wallet.mode === 'drop' || (wallet.dropWithinMs > 0 && at - lastAnswered < wallet.dropWithinMs);
+    const t = { at, answeredAt: null as number | null, dropped: drop };
+    wallet.timings.push(t);
+    return {
+      drop,
+      done: () => {
+        t.answeredAt = Date.now();
+        lastAnswered = t.answeredAt;
+      },
+    };
   };
   const sign = (bytes: Uint8Array): { signature: Uint8Array; signedMessage: Uint8Array } => {
     switch (wallet.mode) {
@@ -128,6 +195,10 @@ export async function installMockWallet(
   await page.exposeFunction('__mockWalletSign', async (messageHex: string) => {
     const bytes = hexToBytes(messageHex);
     wallet.requests.push({ kind: 'signMessage', bytes });
+    const req = arrive();
+    if (req.drop) return { hang: true };
+    await waitIfHeld();
+    req.done();
     if (wallet.mode === 'reject') return { error: { code: 4001, message: 'User rejected the request.' } };
     const r = sign(bytes);
     wallet.signatures.push(bytesToHex(r.signature));
@@ -139,6 +210,10 @@ export async function installMockWallet(
       bytes: hexToBytes(wireHex),
       chain,
     });
+    const req = arrive();
+    if (req.drop) return { hang: true };
+    await waitIfHeld();
+    req.done();
     if (wallet.mode === 'reject') return { error: { code: 4001, message: 'User rejected the request.' } };
     const signed = signWire(wireHex);
     if (!send) return { signedTransaction: bytesToHex(signed) };
@@ -148,7 +223,7 @@ export async function installMockWallet(
   });
 
   await page.addInitScript(
-    ({ profile: p, address, publicKeyHex }) => {
+    ({ profile: p, address, publicKeyHex, extras }) => {
       const hex = (h: string) => Uint8Array.from((h.match(/../g) ?? []).map((b) => parseInt(b, 16)));
       const toHex = (u: Uint8Array) => Array.from(u, (b) => b.toString(16).padStart(2, '0')).join('');
       const w = window as unknown as {
@@ -178,6 +253,7 @@ export async function installMockWallet(
             Promise.all(
               inputs.map(async (i) => {
                 const r = await w.__mockWalletSign(toHex(i.message));
+                if (r.hang) await new Promise<never>(() => undefined);
                 if (r.error) throw fail(r.error as { code: number; message: string });
                 return { signature: hex(r.signature as string), signedMessage: hex(r.signedMessage as string) };
               }),
@@ -188,6 +264,7 @@ export async function installMockWallet(
             Promise.all(
               inputs.map(async (i) => {
                 const r = await w.__mockWalletSignTx(toHex(i.transaction), i.chain ?? '', false);
+                if (r.hang) await new Promise<never>(() => undefined);
                 if (r.error) throw fail(r.error as { code: number; message: string });
                 return { signedTransaction: hex(r.signedTransaction as string) };
               }),
@@ -198,10 +275,17 @@ export async function installMockWallet(
             Promise.all(
               inputs.map(async (i) => {
                 const r = await w.__mockWalletSignTx(toHex(i.transaction), i.chain, true);
+                if (r.hang) await new Promise<never>(() => undefined);
                 if (r.error) throw fail(r.error as { code: number; message: string });
                 return { signature: hex(r.signature as string) };
               }),
             ),
+        },
+        // Night Market never uses Sign In With Solana; the feature is listed as Nightly lists it.
+        'solana:signIn': {
+          signIn: async () => {
+            throw fail({ code: -32601, message: 'the mock wallet does not sign in' });
+          },
         },
       };
       const features = Object.fromEntries(
@@ -224,8 +308,32 @@ export async function installMockWallet(
         register((e as CustomEvent<{ register(w: unknown): void }>).detail),
       );
       window.dispatchEvent(new CustomEvent('wallet-standard:register-wallet', { detail: register }));
+      // Wallets for other chains, under any name (no Solana feature, no account).
+      for (const x of extras) {
+        const other = {
+          version: x.version,
+          name: x.name,
+          icon: wallet.icon,
+          chains: x.chains,
+          accounts: [],
+          features: {
+            'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [] }) },
+            'standard:events': { version: '1.0.0', on: () => () => undefined },
+          },
+        };
+        const reg = (api: { register(w: unknown): void }) => api.register(other);
+        window.addEventListener('wallet-standard:app-ready', (e) =>
+          reg((e as CustomEvent<{ register(w: unknown): void }>).detail),
+        );
+        window.dispatchEvent(new CustomEvent('wallet-standard:register-wallet', { detail: reg }));
+      }
     },
-    { profile, address: wallet.address, publicKeyHex: bytesToHex(kp.publicKey) },
+    {
+      profile,
+      address: wallet.address,
+      publicKeyHex: bytesToHex(kp.publicKey),
+      extras: (opts.extraWallets ?? []).map((x) => ({ name: x.name, version: x.version, chains: x.chains })),
+    },
   );
   return wallet;
 }

@@ -250,7 +250,7 @@ function WalletArea({
           'Connecting…'
         ) : (
           <>
-            <span className="connect-long">Connect Phantom</span>
+            <span className="connect-long">Connect wallet</span>
             <span className="connect-short">Connect</span>
           </>
         )}
@@ -259,11 +259,11 @@ function WalletArea({
         <div className="menu" role="menu" aria-label="Choose a wallet" data-testid="wallet-menu">
           {!w.supported ? (
             <p className="small" data-testid="wallet-unsupported">
-              Solana wallets (Phantom) are coming to this site. You can already browse the order books.
+              Solana wallets are coming to this site. You can already browse the order books.
             </p>
           ) : w.options.length === 0 ? (
             <p className="small" data-testid="wallet-none">
-              No Solana wallet found in this browser. Install Phantom, then reload.
+              No Solana wallet found in this browser. Install one (for example Phantom or Nightly), then reload.
             </p>
           ) : (
             <>

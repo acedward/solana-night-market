@@ -49,7 +49,7 @@ export class WalletError extends Error {
 export const timeoutError = (seconds: number) =>
   new WalletError(
     'timeout',
-    `Your wallet did not answer within ${seconds} seconds. Open it, approve or decline the pending request, and try again. Nothing was sent.`,
+    `Your wallet did not answer within ${seconds} seconds. Open it, approve or decline the pending request, and try again; if it showed no request, just try again. Nothing was sent.`,
   );
 
 /** The wallet's own error (Phantom's `{ code, message }`, a Wallet Standard Error, a string) as a

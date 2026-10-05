@@ -18,6 +18,8 @@ export default defineConfig([
     'packages/core/src/passport/vendor/offer-codec.ts',
     // AA 00060 P6.2: the vendored bridge contract (compiled output, byte for byte).
     'web/src/bridge/vendor/**',
+    // AA 00057: code that runs in the 00058 bridge template's environment (its own packages and types).
+    'e2e/template/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,
@@ -58,6 +60,7 @@ export default defineConfig([
       'relay/**/*.ts',
       'scripts/**/*.{ts,js,mjs}',
       'test/**/*.ts',
+      'e2e/**/*.ts',
       '**/test/**/*.{ts,tsx}',
       '*.config.{js,ts}',
       '**/*.config.{js,ts}',

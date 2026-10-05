@@ -25,3 +25,6 @@ test-results/
 
 # Pinned tool downloads (scripts/fetch-compactc.sh)
 .tools/
+
+# Python bytecode (e2e/report.py)
+__pycache__/

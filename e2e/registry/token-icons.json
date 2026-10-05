@@ -1,0 +1,25 @@
+{
+  "comment": "AA 00057 Q10/Q11: the ONE icon table of the journey. The wallet (through the injector: I-1 image/splImage and the injector's token file) uses `base` + file; Night Market's site (FR-022) uses `siteDir` + file, the byte-identical copies it bundles in web/public/token-icons/. `sha256` pins every file (the official-Midnight-symbol set with the badge inside the disc, SHA256SUMS-v3; v2 is superseded); e2e/registry/icons.test.ts holds the site's copies to it and the journey's STEP=icons the published files. Published versions are never overwritten (Q11): a new set is a new `/vN/` base. Generic test-token discs; the badge and midnight.png are the official Midnight symbol (source: evidence/00057-solana-midnight-journey/token-icons/SOURCE.md).",
+  "base": "https://midnight-solana-token-icons.ac-edward.workers.dev/v3/",
+  "siteDir": "token-icons/",
+  "default": "midnight.png",
+  "midnight": {
+    "X": "x-midnight.png",
+    "Y": "y-midnight.png",
+    "twUSDC": "twusdc.png",
+    "twBTC": "twbtc.png"
+  },
+  "solana": {
+    "X": "x.png",
+    "Y": "y.png"
+  },
+  "sha256": {
+    "midnight.png": "91c8b75e9230aa2b83d26aade20844f700d8a3b3c0f769a56ee636d6036dc8a5",
+    "twbtc.png": "2a55e7a869bdd75b809f3c86b72673d27a2f5850317e21d3235d0a37019185e2",
+    "twusdc.png": "252b62f7bbfc91bb037b85efbb1d9d11715a3f7f2246470b8cd6f8928dc7f902",
+    "x-midnight.png": "893c9ef21622453b9767a4cc416d3f896a5d17f486663601515672a5e28198df",
+    "x.png": "e29e823358553a27b24b610937e560ce44b407ac94c5536ff6f1adccc206ad7b",
+    "y-midnight.png": "a70236753d3226386e7f6d0b2c0b299214506038c7cabe95d70cd777decd2dbd",
+    "y.png": "f3b6409cd5a8512a7c041ab90e8fd82e314b26116ddaff31cb33fd93b178f9e9"
+  }
+}

@@ -99,6 +99,16 @@ const stored = (coin: { nonce: string; colour: string; value: string }): StoredC
   spent: false,
 });
 
+/** A listed transaction of the token account that is not the lock: well-formed, and carrying the very
+ *  signature it is listed under (P10.5, audit E1: anything else is no evidence of absence). */
+const OTHER_MESSAGE = compileLegacyMessage(entry.bridgeProgram, '11111111111111111111111111111111', [
+  memoInstruction(entry.bridgeProgram, 'another transfer'),
+]).bytes;
+function otherListed(): { signature: string; wire: Uint8Array } {
+  const sig = nacl.randomBytes(64);
+  return { signature: encodeKey(sig), wire: Uint8Array.from([1, ...sig, ...OTHER_MESSAGE]) };
+}
+
 describe('C3: a timed-out sign-and-send may have sent the lock (F-A4, F-B3)', () => {
   it('a record before the wallet; "unknown", never "nothing was sent"; the lock found on Solana; a retry blocked until then', async () => {
     const ops: Any = await import('../src/bridge/in/operations.js');
@@ -198,17 +208,24 @@ describe('C3: the search for a lost lock is bounded, and a search cut short neve
   };
   const rpcWith = (slotOf: (page: number, i: number) => number) => {
     let pages = 0;
+    const wires = new Map<string, Uint8Array>();
     return {
       pages: () => pages,
       rpc: {
-        blockHeight: async () => 1_000n,
-        signatureStatus: async () => null,
-        // Every listed transaction is READ, and none is the lock (P10.4, audit D1 / R-B1: a body Solana does
-        // not return is no evidence of absence, so this test once accepted incomplete evidence).
-        transactionWire: async () => Uint8Array.from([1, ...new Array<number>(64).fill(0), 9, 9, 9]),
+        // The expiry, with its slot (P10.5, audit E1).
+        epochPosition: async () => ({ slot: 1_000n, blockHeight: 1_000n }),
+        signatureStatusAt: async () => ({ slot: 1_000n, status: null }),
+        // Every listed transaction is READ, well-formed and consistent, and none is the lock (P10.4 D1 / R-B1,
+        // P10.5 E1 / R3-B1: a body Solana does not return, or a malformed one, is no evidence of absence, so
+        // this test once accepted incomplete evidence).
+        transactionWire: async (signature: string) => wires.get(signature) ?? null,
         signaturesForAddress: async () => {
           const page = pages++;
-          return Array.from({ length: 100 }, (_, i) => ({ signature: `s${page}-${i}`, slot: BigInt(slotOf(page, i)) }));
+          return Array.from({ length: 100 }, (_, i) => {
+            const o = otherListed();
+            wires.set(o.signature, o.wire);
+            return { signature: o.signature, slot: BigInt(slotOf(page, i)) };
+          });
         },
       } as unknown as SolanaRpc,
     };
@@ -355,17 +372,10 @@ describe('C11: the site checks each bridge’s own deployment record (F-A10)', (
 
 // ── Round 2 (AA 00060 P10.4): the audit's round-2 consolidation, D1 and D4–D7 (page side) ─────────────────
 
-/** A readable transaction body that is not the lock (another transfer of the token account). */
-const otherWire = () => {
-  const w = new Uint8Array(1 + 64 + 40);
-  w[0] = 1;
-  w.fill(7, 65);
-  return w;
-};
 /** An RPC whose `method` fails (throws, or answers nothing for a transaction it listed). */
 function failing(
   rpc: SolanaRpc,
-  method: 'transactionWire' | 'signaturesForAddress' | 'blockHeight' | 'signatureStatus',
+  method: 'transactionWire' | 'signaturesForAddress' | 'epochPosition' | 'signatureStatusAt',
   how: 'throw' | 'null',
 ): SolanaRpc {
   const f = Object.create(rpc) as Record<string, unknown>;
@@ -401,7 +411,7 @@ describe('D1: a Solana lookup that fails is never "not found" (R-A2, R-B1)', () 
       ['transactionWire', 'throw'],
       ['transactionWire', 'null'],
       ['signaturesForAddress', 'throw'],
-      ['blockHeight', 'throw'],
+      ['epochPosition', 'throw'],
     ] as const;
     for (const [method, how] of cases) {
       const r: BridgeInRecord = await ops
@@ -452,14 +462,16 @@ describe('D5: a lock nobody can find no longer blocks the token for good (R-A5)'
   it('once the request has expired, the search resumes where it stopped, and completes', async () => {
     const ops: Any = await import('../src/bridge/in/operations.js');
     // 1,500 transactions of the token account: the 1,200 newest after the lock's slot, then older ones.
-    const sigs = Array.from({ length: 1500 }, (_, i) => ({
-      signature: `s${i + 1}`,
-      slot: BigInt(i < 1200 ? 900 : 400),
-    }));
+    const wires = new Map<string, Uint8Array>();
+    const sigs = Array.from({ length: 1500 }, (_, i) => {
+      const o = otherListed();
+      wires.set(o.signature, o.wire);
+      return { signature: o.signature, slot: BigInt(i < 1200 ? 900 : 400) };
+    });
     const rpc = {
-      blockHeight: async () => 1_000n,
-      signatureStatus: async () => null,
-      transactionWire: async () => otherWire(),
+      epochPosition: async () => ({ slot: 1_000n, blockHeight: 1_000n }),
+      signatureStatusAt: async () => ({ slot: 1_000n, status: null }),
+      transactionWire: async (signature: string) => wires.get(signature) ?? null,
       signaturesForAddress: async (_a: string, limit = 100, before?: string) => {
         const start = before ? sigs.findIndex((x) => x.signature === before) + 1 : 0;
         return sigs.slice(start, start + limit);
@@ -468,7 +480,7 @@ describe('D5: a lock nobody can find no longer blocks the token for good (R-A5)'
     const r1: Any = await ops.reconcileBridgeIn(lostBase, { rpc }, 10);
     expect(r1.state).toBe('unknown');
     expect(r1.blockhashExpired).toBe(true);
-    expect(r1.searchBefore).toBe('s1000');
+    expect(r1.searchBefore).toBe(sigs[999]!.signature);
     const r2: Any = await ops.reconcileBridgeIn(r1, { rpc }, 20);
     expect(r2.state).toBe('failed');
     expect(r2.progress).toMatch(/Nothing was locked/);

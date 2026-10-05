@@ -170,21 +170,131 @@ export function unsignedTransaction(message: CompiledMessage): Uint8Array {
   ]);
 }
 
-/** The signatures and message of a wire transaction. */
-export function splitTransaction(wire: Uint8Array): { signatures: Uint8Array[]; message: Uint8Array } {
-  let n = 0;
-  let shift = 0;
+/** A parsed transaction message (legacy or v0), every byte accounted for. */
+export interface ParsedMessage {
+  version: 'legacy' | 0;
+  header: { numRequiredSignatures: number; numReadonlySigned: number; numReadonlyUnsigned: number };
+  accountKeys: string[];
+  recentBlockhash: string;
+  instructions: { programIdIndex: number; accounts: number[]; data: Uint8Array }[];
+  lookups: { account: string; writable: number[]; readonly: number[] }[];
+}
+
+/** A strict compact-u16 at `at`: at most 3 bytes, no alias encodings. Returns [value, next offset]. */
+function readShortvec(b: Uint8Array, at: number): [number, number] {
+  let value = 0;
+  for (let i = 0; i < 3; i++) {
+    if (at + i >= b.length) throw new SolanaTxError('a truncated message');
+    const byte = b[at + i]!;
+    value |= (byte & 0x7f) << (7 * i);
+    if ((byte & 0x80) === 0) {
+      if (i > 0 && byte === 0) throw new SolanaTxError('a non-canonical length');
+      if (value > 0xffff) throw new SolanaTxError('a length above u16');
+      return [value, at + i + 1];
+    }
+  }
+  throw new SolanaTxError('a length longer than three bytes');
+}
+
+/**
+ * Parse a transaction message, legacy or v0 (AA 00060 P10.5, audit E1 / R3-B1): the header, the static
+ * account keys, the blockhash, every instruction (its program and account indices within the accounts,
+ * its data), and for v0 the address-table lookups. Throws SolanaTxError unless EVERY byte belongs to it.
+ */
+export function parseMessage(m: Uint8Array): ParsedMessage {
   let at = 0;
-  for (;;) {
-    if (at >= wire.length || at > 2) throw new SolanaTxError('a malformed transaction');
-    const b = wire[at++]!;
-    n |= (b & 0x7f) << shift;
-    if ((b & 0x80) === 0) break;
-    shift += 7;
+  const need = (n: number) => {
+    if (at + n > m.length) throw new SolanaTxError('a truncated message');
+  };
+  const vec = () => {
+    const [n, next] = readShortvec(m, at);
+    at = next;
+    return n;
+  };
+  need(1);
+  let version: ParsedMessage['version'] = 'legacy';
+  if (m[0]! & 0x80) {
+    if ((m[0]! & 0x7f) !== 0) throw new SolanaTxError(`an unsupported message version ${m[0]! & 0x7f}`);
+    version = 0;
+    at = 1;
+  }
+  need(3);
+  const header = { numRequiredSignatures: m[at]!, numReadonlySigned: m[at + 1]!, numReadonlyUnsigned: m[at + 2]! };
+  at += 3;
+  const nKeys = vec();
+  need(32 * nKeys);
+  const accountKeys = Array.from({ length: nKeys }, (_, i) => encodeKey(m.slice(at + 32 * i, at + 32 * (i + 1))));
+  at += 32 * nKeys;
+  need(32);
+  const recentBlockhash = encodeKey(m.slice(at, at + 32));
+  at += 32;
+  const nIx = vec();
+  const instructions: ParsedMessage['instructions'] = [];
+  for (let k = 0; k < nIx; k++) {
+    need(1);
+    const programIdIndex = m[at++]!;
+    const nAcc = vec();
+    need(nAcc);
+    const accounts = Array.from(m.slice(at, at + nAcc));
+    at += nAcc;
+    const len = vec();
+    need(len);
+    instructions.push({ programIdIndex, accounts, data: m.slice(at, at + len) });
+    at += len;
+  }
+  const lookups: ParsedMessage['lookups'] = [];
+  if (version === 0) {
+    const nLookups = vec();
+    for (let k = 0; k < nLookups; k++) {
+      need(32);
+      const account = encodeKey(m.slice(at, at + 32));
+      at += 32;
+      const nW = vec();
+      need(nW);
+      const writable = Array.from(m.slice(at, at + nW));
+      at += nW;
+      const nR = vec();
+      need(nR);
+      const readonly = Array.from(m.slice(at, at + nR));
+      at += nR;
+      lookups.push({ account, writable, readonly });
+    }
+  }
+  if (at !== m.length) throw new SolanaTxError('trailing bytes after the message');
+  // The header and the indices must describe these accounts.
+  const { numRequiredSignatures: s, numReadonlySigned: rs, numReadonlyUnsigned: ru } = header;
+  if (s < 1 || s > nKeys) throw new SolanaTxError('a header that asks for signatures the accounts do not have');
+  if (rs >= s) throw new SolanaTxError('a header whose fee payer is read-only');
+  if (ru > nKeys - s) throw new SolanaTxError('a header with more read-only accounts than unsigned ones');
+  const total = nKeys + lookups.reduce((n, l) => n + l.writable.length + l.readonly.length, 0);
+  for (const ix of instructions) {
+    if (ix.programIdIndex === 0 || ix.programIdIndex >= nKeys)
+      throw new SolanaTxError("an instruction whose program is not one of the message's accounts");
+    if (ix.accounts.some((a) => a >= total)) throw new SolanaTxError('an instruction account outside the message');
+  }
+  return { version, header, accountKeys, recentBlockhash, instructions, lookups };
+}
+
+/** The signatures and message of a wire transaction. P10.5 (audit E1): only when the WHOLE message parses
+ *  (`parseMessage`) and its header asks for exactly the signatures given; anything else throws. */
+export function splitTransaction(wire: Uint8Array): { signatures: Uint8Array[]; message: Uint8Array } {
+  let n: number;
+  let at: number;
+  try {
+    [n, at] = readShortvec(wire, 0);
+  } catch {
+    throw new SolanaTxError('a malformed transaction');
   }
   if (at + 64 * n > wire.length) throw new SolanaTxError('a truncated transaction');
   const signatures = Array.from({ length: n }, (_, i) => wire.slice(at + 64 * i, at + 64 * (i + 1)));
-  return { signatures, message: wire.slice(at + 64 * n) };
+  const message = wire.slice(at + 64 * n);
+  const parsed = parseMessage(message);
+  if (parsed.header.numRequiredSignatures !== n) {
+    throw new SolanaTxError(
+      `a transaction with ${n} signatures for a message that asks for ${parsed.header.numRequiredSignatures}`,
+    );
+  }
+  return { signatures, message };
 }
 
 /** A Memo (v2) instruction signed by `signer`. */

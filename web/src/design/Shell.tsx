@@ -77,17 +77,26 @@ export function TabNav({
   );
 }
 
-export function SiteFooter({ networkName = 'Midnight stagenet' }) {
+/** `bridging`: the site offers Bridge in (AA 00060 P7), so its wallet signs one kind of Solana transaction. */
+export function SiteFooter({ networkName = 'Midnight stagenet', bridging = false }) {
   return (
     <footer className="site-foot">
       <div className="wrap">
         <p className="testnet" data-testid="testnet-notice">
           Testnet only — {networkName}. Tokens have no real value. A proof of concept.
         </p>
-        <p>
-          The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night Market
-          never sends a Solana transaction, and never asks for your seed phrase or private key.
-        </p>
+        {bridging ? (
+          <p data-testid="footer-wallet-bridging">
+            The tokens are Midnight test tokens from public faucets. Your Solana wallet signs messages for every market
+            action; it signs a Solana transaction only when you bridge tokens in, after the page shows you what it does.
+            Night Market never asks for your seed phrase or private key.
+          </p>
+        ) : (
+          <p>
+            The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night
+            Market never sends a Solana transaction, and never asks for your seed phrase or private key.
+          </p>
+        )}
         <p>
           <a href="#about" data-testid="about-link">
             About Night Market and its known limitations

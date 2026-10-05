@@ -15,7 +15,10 @@
 //   `signMessage(message, 'utf8')` → `{ signature, publicKey }`, events `accountChanged` and
 //   `disconnect`. Offered only when no Wallet Standard wallet of the same name registered.
 //
-// Nothing here ever asks for a Solana transaction: the wallet only signs messages, so it needs no SOL.
+// Every market action is a signed MESSAGE (no SOL needed). AA 00060 adds ONE kind of Solana transaction:
+// Bridge in's lock, which the page builds itself from the journey registry and checks before the wallet
+// is asked (`solana:signAndSendTransaction`, or `solana:signTransaction` and the page sends it). A wallet
+// with neither keeps every message flow; Bridge in then says why it is unavailable.
 
 import { bytesToHex, deviceKeyFromSolanaAddress, hexToBytes, solanaAddressOf } from '@nightmarket/core';
 
@@ -46,6 +49,12 @@ export interface ConnectedSolanaWallet {
   disconnect(): Promise<void>;
   /** Called when the wallet switches away from this account, or disconnects. */
   onChange(listener: () => void): () => void;
+  /** AA 00060 (Bridge in): sign and SEND a wire transaction on `chain` (`solana:<cluster>`); resolves with
+   *  its first signature. Absent when the wallet has no `solana:signAndSendTransaction`. */
+  signAndSendTransaction?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
+  /** AA 00060 (Bridge in): sign a wire transaction (the page sends it); resolves with the signed wire
+   *  transaction. Absent when the wallet has no `solana:signTransaction`. */
+  signTransaction?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
 }
 
 // ── Wallet Standard (the subset used) ────────────────────────────────────────
@@ -75,6 +84,16 @@ interface DisconnectFeature {
 }
 interface EventsFeature {
   on(event: 'change', listener: (props: { accounts?: readonly StandardWalletAccount[] }) => void): () => void;
+}
+interface SignAndSendTransactionFeature {
+  signAndSendTransaction(
+    ...inputs: Array<{ account: StandardWalletAccount; transaction: Uint8Array; chain: string }>
+  ): Promise<ReadonlyArray<{ signature: Uint8Array }>>;
+}
+interface SignTransactionFeature {
+  signTransaction(
+    ...inputs: Array<{ account: StandardWalletAccount; transaction: Uint8Array; chain?: string }>
+  ): Promise<ReadonlyArray<{ signedTransaction: Uint8Array }>>;
 }
 interface SignMessageFeature {
   signMessage(
@@ -120,7 +139,35 @@ function standardHandle(w: StandardWallet, index: number): SolanaWalletHandle {
       if (!account) throw new WalletError('unavailable', 'The wallet did not share an account.');
       const key = keyOf(account);
       const sign = feature<SignMessageFeature>(w, 'solana:signMessage')!;
+      // AA 00060: the transaction features, when the wallet AND the account offer them.
+      const accountHas = (f: string) => account.features.length === 0 || account.features.includes(f);
+      const signAndSend = accountHas('solana:signAndSendTransaction')
+        ? feature<SignAndSendTransactionFeature>(w, 'solana:signAndSendTransaction')
+        : null;
+      const signTx = accountHas('solana:signTransaction')
+        ? feature<SignTransactionFeature>(w, 'solana:signTransaction')
+        : null;
       return {
+        ...(signAndSend
+          ? {
+              async signAndSendTransaction(transaction: Uint8Array, chain: string) {
+                const [out] = await signAndSend.signAndSendTransaction({ account, transaction, chain });
+                const signature = bytesOf(out?.signature);
+                if (!signature || signature.length !== 64) throw new WalletError('bad-signature');
+                return signature;
+              },
+            }
+          : {}),
+        ...(signTx
+          ? {
+              async signTransaction(transaction: Uint8Array, chain: string) {
+                const [out] = await signTx.signTransaction({ account, transaction, chain });
+                const signed = bytesOf(out?.signedTransaction);
+                if (!signed) throw new WalletError('bad-signature');
+                return signed;
+              },
+            }
+          : {}),
         ...key,
         canSignMessages: account.features.length === 0 || account.features.includes('solana:signMessage'),
         async signMessage(message) {

@@ -2,7 +2,8 @@
 // Standard wallet that signs Solana messages, through `solana:signMessage`, or Phantom's injected
 // `window.phantom.solana`; Ledger-backed accounts are refused).
 //
-// A wallet here only SIGNS MESSAGES: it never sends a Solana transaction, so it needs no SOL. What the
+// A wallet here SIGNS MESSAGES for every market action (no SOL needed); its only Solana transaction is
+// Bridge in's lock (AA 00060, `transactions`), which the page builds and checks itself. What the
 // rest of the site reads is its Solana address, its device key (the same 32 bytes as hex) and its
 // `ActionSigning` (./signing.ts). MN Bank's EIP-1193 wallet, network switch and Sepolia reads are
 // gone (AA 00047).
@@ -30,11 +31,21 @@ export interface WalletOption {
  *  disconnected), or a signature showed it is a hardware (Ledger) account, which v1 refuses. */
 export type WalletSessionEvent = 'account-changed' | 'hardware';
 
+/** AA 00060 (Bridge in): the connected wallet's Solana transaction features, where it has them. */
+export interface SolanaTransactions {
+  /** `solana:signAndSendTransaction` (the wallet sends): resolves with the first signature. */
+  signAndSend?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
+  /** `solana:signTransaction` (the page sends): resolves with the signed wire transaction. */
+  sign?(transaction: Uint8Array, chain: string): Promise<Uint8Array>;
+}
+
 /** A connected wallet session, as an adapter returns it. */
 export interface WalletSession {
   /** The Solana address (base58). */
   address: string;
   signing: ActionSigning;
+  /** AA 00060: the wallet's transaction features (Bridge in); absent or empty: none. */
+  transactions?: SolanaTransactions;
   disconnect(): void;
   subscribe?(listener: (event: WalletSessionEvent) => void): () => void;
 }
@@ -56,6 +67,8 @@ export interface WalletState {
   walletName: string | null;
   /** How the site asks the wallet for signatures, while connected. */
   signing: ActionSigning | null;
+  /** AA 00060: the connected wallet's transaction features (Bridge in), or null. */
+  transactions: SolanaTransactions | null;
   /** False when the site has no wallet adapter (no token list for the network). */
   supported: boolean;
   error: string | null;
@@ -128,6 +141,7 @@ export function WalletProvider({ adapter = null, children }: { adapter?: WalletA
     deviceKey: connected ? deviceKeyFromSolanaAddress(session.address) : null,
     walletName: connected ? session.name : null,
     signing: connected ? session.signing : null,
+    transactions: connected ? (session.transactions ?? null) : null,
     supported: adapter !== null,
     error,
     connect,

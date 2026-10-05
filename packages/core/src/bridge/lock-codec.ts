@@ -1,8 +1,9 @@
 // I-2, a Solana bridge `Lock` whose Midnight recipient is a contract (owner 00058; consumer: Night
 // Market's Bridge in). THE ONLY MODULE THAT KNOWS THESE BYTES (AA 00060 P1.5).
 //
-// PROVISIONAL. It implements 00058's PROPOSAL of 2026-10-04 (plans/00058-bridge-contract-delivery.md,
-// Interfaces "I-2", Status PROPOSED) exactly, and assumes that proposal is what 00058's P1 freezes:
+// FROZEN: 00058 froze I-2 on 2026-10-04 at effectstream `6c07dab` (branch `00058-bridge-contract-delivery`,
+// PR #937; AA plans/00058-bridge-contract-delivery.md, Interfaces "I-2") with its proposal unchanged, which
+// this module implemented from P1 on:
 //   - instruction tag 3 `LockToContract`: data = 0x03 ‖ amount u64 LE (> 0) ‖ contract [32] (not all
 //     zero), 41 bytes; accounts identical to `Lock`, in the same order: depositor (signer), the
 //     depositor's token account (writable), the `config` PDA (writable), the vault PDA (writable), the
@@ -12,10 +13,10 @@
 //   - a client reads its lock nonce from `getTransaction(signature, {commitment: "confirmed",
 //     maxSupportedTransactionVersion: 0}).meta.logMessages`, one LOCKC line per LockToContract
 //     instruction, in order; the transfer id is `s2m:<nonce>`.
-// P7.4 replaces any difference with 00058's frozen text and imports its golden vectors
-// (`packages/tests/fixtures/00058-interfaces.json` in the bridge template) byte for byte.
+// 00058's golden vectors are imported byte for byte (test/fixtures/00058-interfaces.json) and
+// packages/core/test/bridge-in.test.ts holds this module to them (T7.1, P7.4).
 
-export const I2_STATUS = 'PROVISIONAL (00058 proposal of 2026-10-04)';
+export const I2_STATUS = 'FROZEN 2026-10-04 (00058 @ 6c07dab)';
 
 /** The new instruction's tag. */
 export const LOCK_TO_CONTRACT_TAG = 3;

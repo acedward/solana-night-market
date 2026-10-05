@@ -1,11 +1,16 @@
 // I-3, the bridge node's transfer API (owner 00058; consumer: Night Market's Bridge in and Bridge out
 // progress), as the page reads it (AA 00060 P1.5). Browser-safe.
 //
-// PROVISIONAL: 00058's PROPOSAL of 2026-10-04 (plans/00058-bridge-contract-delivery.md, Interfaces
-// "I-3", Status PROPOSED): `TransferView` v2 (adds `recipientKind`, `reason {code, message, at}`,
+// FROZEN: 00058 froze I-3 on 2026-10-04 at effectstream `6c07dab` (PR #937; plans/00058-bridge-contract-delivery.md,
+// Interfaces "I-3") with its proposal unchanged: `TransferView` v2 (adds `recipientKind`, `reason {code, message, at}`,
 // `delivery {adapter, account, coin, tx}`; status `undeliverable`), `GET /transfers/:id` answering 404
 // until the node's Solana sync passes the lock's slot plus 32, and `GET /recipients/contract/:address`
-// with `deliverable | undeliverable | retry`. P7.4 checks every name here against 00058's frozen text.
+// with `deliverable | undeliverable | retry` (adapter set iff deliverable, code set iff undeliverable). Its
+// vectors (test/fixtures/00058-interfaces.json, `i3`) parse here (packages/core/test/bridge-in.test.ts).
+//
+// WIDENED 2026-10-05 (00058 Q6, resolved A by the 00057 orchestrator): `recipientKind` may be `null`, only
+// while an s2m row's Solana lock has not been seen yet (the node's Midnight sync ran ahead during a
+// re-sync). `readTransfer` reads such a view as `not-seen`: the page keeps polling.
 //
 // The page reads progress from here, but judges COMPLETION only by its own decode of the account
 // (Bridge in, spec FR-003) or by the release on Solana (Bridge out, FR-009): the bridge API is not
@@ -14,7 +19,7 @@
 
 import { z } from 'zod';
 
-export const I3_STATUS = 'PROVISIONAL (00058 proposal of 2026-10-04)';
+export const I3_STATUS = 'FROZEN 2026-10-04 (00058 @ 6c07dab); widened 2026-10-05 (00058 Q6 A: recipientKind null)';
 
 export const TRANSFER_STATUSES = ['observed', 'submitted', 'completed', 'undeliverable'] as const;
 export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
@@ -49,7 +54,7 @@ export const TransferViewSchema = z.object({
   direction: z.enum(['s2m', 'm2s']),
   sourceId: z.string(),
   amount: decimal,
-  recipientKind: z.enum(['wallet', 'contract', 'solana']),
+  recipientKind: z.enum(['wallet', 'contract', 'solana']).nullable(),
   recipient: z.string().nullable(),
   sender: z.string().nullable(),
   status: z.enum(TRANSFER_STATUSES),
@@ -103,7 +108,8 @@ export type TransferRead = { kind: 'not-seen' } | { kind: 'view'; view: Transfer
 
 const base = (api: string) => api.replace(/\/+$/, '');
 
-/** `GET <api>/transfers/<id>`. A 404 is "not seen yet" (the node's sync has not passed the lock). */
+/** `GET <api>/transfers/<id>`. A 404 is "not seen yet" (the node's sync has not passed the lock), and so
+ *  is a view whose `recipientKind` is null (00058 Q6: the lock itself is not seen yet). */
 export async function readTransfer(api: string, id: string, fetchImpl: typeof fetch = fetch): Promise<TransferRead> {
   if (!/^(s2m|m2s):(0|[1-9][0-9]*)$/.test(id)) throw new BridgeApiError(`not a transfer id: ${id}`);
   const res = await fetchImpl(`${base(api)}/transfers/${encodeURIComponent(id)}`, { cache: 'no-store' });
@@ -112,6 +118,7 @@ export async function readTransfer(api: string, id: string, fetchImpl: typeof fe
   const parsed = TransferViewSchema.safeParse(await res.json());
   if (!parsed.success) throw new BridgeApiError('the bridge answered a transfer in an unknown shape');
   if (parsed.data.id !== id) throw new BridgeApiError('the bridge answered another transfer');
+  if (parsed.data.recipientKind === null) return { kind: 'not-seen' };
   return { kind: 'view', view: parsed.data };
 }
 

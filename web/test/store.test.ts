@@ -118,6 +118,17 @@ describe('keys', () => {
       expect(parseKey(k)).toBeNull();
     }
   });
+
+  it('AA 00060: a bridge record needs an account and an id', () => {
+    const account = '7e'.repeat(32);
+    const key = recordKey(ME, 'bridge', {
+      account,
+      id: 'in-5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW',
+    });
+    expect(parseKey(key)).toMatchObject({ kind: 'bridge', scope: { account } });
+    expect(() => recordKey(ME, 'bridge', { account })).toThrow(StoreKeyError);
+    expect(() => recordKey(ME, 'bridge', { id: 'in-x' })).toThrow(StoreKeyError);
+  });
 });
 
 describe('the store', () => {

@@ -2,7 +2,8 @@
 // Solana messages) behind B1.5's `WalletAdapter` / `ActionSigning` seams.
 //
 // Connecting shares the account's Solana address; nothing else. The wallet only ever SIGNS
-// MESSAGES (never a Solana transaction), so it needs no SOL. Each signature:
+// MESSAGES for every market action (no SOL needed; Bridge in's lock is its only transaction, AA 00060).
+// Each signature:
 //   1. opens the page's signing panel with the exact text and its fingerprint (./sign-prompt.ts);
 //   2. asks the wallet to sign exactly those bytes (Phantom shows them as text), within a timeout;
 //   3. checks the signature with tweetnacl over those bytes and the connected key
@@ -109,8 +110,30 @@ export function solanaWalletAdapter(opts: SolanaAdapterOptions): WalletAdapter {
       const emit = (e: WalletSessionEvent) => listeners.forEach((l) => l(e));
       const signer = walletSigner(wallet, handle.name, opts, () => emit('hardware'));
       const stopWatching = wallet.onChange(() => emit('account-changed'));
+      // AA 00060 (Bridge in): the wallet's transaction features, behind the same gate and timeout as its
+      // messages (the page builds and checks every transaction before it asks; ../bridge/in/operations.ts).
+      const guarded =
+        <A extends unknown[]>(fn: (...a: A) => Promise<Uint8Array>) =>
+        async (...a: A): Promise<Uint8Array> => {
+          const paused = opts.gate?.() ?? null;
+          if (paused) throw new WalletError('paused', paused);
+          try {
+            return await withWalletTimeout(fn(...a), opts.timeoutMs);
+          } catch (e) {
+            throw walletErrorFrom(e, 'sign');
+          }
+        };
+      const transactions = {
+        ...(wallet.signAndSendTransaction
+          ? { signAndSend: guarded((t: Uint8Array, c: string) => wallet.signAndSendTransaction!(t, c)) }
+          : {}),
+        ...(wallet.signTransaction
+          ? { sign: guarded((t: Uint8Array, c: string) => wallet.signTransaction!(t, c)) }
+          : {}),
+      };
       return {
         address: wallet.address,
+        transactions,
         signing: ed25519ActionSigning(signer, opts.display, undefined, (facts) => opts.prompts.setFacts(facts)),
         disconnect() {
           stopWatching();

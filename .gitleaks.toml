@@ -82,6 +82,16 @@ paths = ['''(^|/)packages/core/test/fixtures/kernel/staging-[0-9-]+/known-tokens
 regexTarget = "match"
 regexes = ['''^token_color"''']
 
+# AA 00060 P7: 00058's frozen interface vectors, copied byte for byte (test/fixtures/
+# 00058-interfaces.PROVENANCE.md): the values the rule flags there are PUBLIC (the bridge operator's
+# public key and the passport adapter's verifier-key-set digest). Scoped to that rule, that file AND
+# those fields.
+[[rules.allowlists]]
+condition = "AND"
+paths = ['''(^|/)test/fixtures/00058-interfaces\.json$''']
+regexTarget = "match"
+regexes = ['''^(?:operatorKey|keySet)"''']
+
 # The web bundle carries the onchain-runtime's wasm-bindgen glue (the browser-safe Passport
 # client, plan P0.4): its generated import names (`__wbg_<name>_<16 hex>`) and one exported
 # function name are code identifiers, not secrets. So is `verifyEd25519Strict`, the Solana

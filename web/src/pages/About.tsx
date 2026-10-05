@@ -93,7 +93,7 @@ const LIMITS: ReadonlyArray<{ id: string; title: string; text: string }> = [
   },
 ];
 
-export function About({ networkName }: { networkName: string }) {
+export function About({ networkName, bridging = false }: { networkName: string; bridging?: boolean }) {
   // Reached from the footer, at the bottom of a page: start at the top.
   useEffect(() => {
     window.scrollTo({ top: 0 });
@@ -116,8 +116,10 @@ export function About({ networkName }: { networkName: string }) {
         <ul className="onboarding">
           <li>
             <strong>Your Solana wallet controls a Midnight account</strong>
-            Phantom signs one readable message per action. The account checks that signature itself, on Midnight. Night
-            Market never sends a Solana transaction.
+            Phantom signs one readable message per action. The account checks that signature itself, on Midnight.{' '}
+            {bridging
+              ? 'Your wallet signs a Solana transaction only to bridge tokens in, a lock the page builds and shows you first.'
+              : 'Night Market never sends a Solana transaction.'}
           </li>
           <li>
             <strong>The market proves and pays</strong>

@@ -127,7 +127,32 @@ const job = z
   })
   .strict();
 
+/** AA 00060 P7.3: a Bridge-in record (../bridge/in/records.ts); no secret. */
+const base58 = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,90}$/);
+const bridge = z
+  .object({
+    direction: z.literal('in'),
+    signature: base58,
+    colour: hex32,
+    mint: base58,
+    symbol: text(16),
+    amount: decimal,
+    bridgeApi: z.string().regex(/^https?:\/\/[^\s/]{1,200}$/),
+    balanceBefore: decimal,
+    createdAt: ms,
+    state: z.enum(['sent', 'locked', 'bridging', 'completed', 'undeliverable', 'failed']),
+    lockNonce: decimal.optional(),
+    progress: text(300).optional(),
+    reason: z
+      .object({ code: text(40), message: text(500) })
+      .strict()
+      .optional(),
+    checkedAt: ms.optional(),
+  })
+  .strict();
+
 export const RECORD_DATA_SCHEMAS: Record<RecordKind, z.ZodType> = {
+  bridge,
   profile,
   settings,
   account,
@@ -148,7 +173,7 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
   const r = (isAssetFilter ? AssetFilterDataSchema : RECORD_DATA_SCHEMAS[key.kind]).safeParse(data);
   if (!r.success) return `a ${key.kind} record is not in the shape this page writes`;
   const scopeAccount = key.scope.global ? null : key.scope.account;
-  const needsAccount = ['account', 'coins', 'roster', 'offer'].includes(key.kind);
+  const needsAccount = ['account', 'coins', 'roster', 'offer', 'bridge'].includes(key.kind);
   if (needsAccount && !scopeAccount) return `a ${key.kind} record is not filed under an account`;
   if (['profile'].includes(key.kind) && scopeAccount) return 'a profile record is filed under an account';
   const d = r.data as Record<string, unknown>;
@@ -164,6 +189,9 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
       break;
     case 'job':
       if (key.id !== d.requestId) return 'a job record does not match its key';
+      break;
+    case 'bridge':
+      if (key.id !== `in-${String(d.signature)}`) return 'a bridge record does not match its key';
       break;
     case 'secret':
       // A secret and its public key must be one pair (security review F-B5).

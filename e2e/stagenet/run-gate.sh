@@ -198,6 +198,16 @@ except Exception as e:
     print(json.dumps({"error": str(e)}))
 PY
 }
+# The template volume's deployment files of this gate (addresses only) are kept in $P5R/deployments, so a
+# stopped gate resumes from them (run 2 lost the Solana section when the teardown cleaned the volume).
+save_deployments() {
+  local f
+  for f in "$DEPLOYMENT.json" "$DEPLOYMENT.record.json"; do
+    docker run --rm --pull=never -v "$TMPL_VOLUME:/work:ro" "$STEP_IMAGE" sh -c "cat $TROOT/deployments/$f 2>/dev/null" \
+      >"$P5R/deployments/$f.tmp" && [[ -s "$P5R/deployments/$f.tmp" ]] && mv "$P5R/deployments/$f.tmp" "$P5R/deployments/$f"
+    rm -f "$P5R/deployments/$f.tmp"
+  done
+}
 # Any 12- or 24-word line a Solana CLI prints (a recovery phrase) is replaced in the given files.
 redact_phrases() {
   python3 - "$@" <<'PY'
@@ -247,6 +257,7 @@ teardown() {
   docker volume ls --format '{{.Name}}' | grep -E "^$CP" | xargs -r docker volume rm >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   # The template volume keeps no run file of this gate: the deployment files live in $P5R/deployments.
+  save_deployments
   docker run --rm --pull=never --memory 256m -v "$TMPL_VOLUME:/work" "$STEP_IMAGE" sh -c \
     "rm -rf $TROOT/deployments/$DEPLOYMENT.json $TROOT/deployments/$DEPLOYMENT.record.json $TROOT/packages/contracts-midnight/midnight-level-db-deploy" >/dev/null 2>&1
   [[ -n "${RUN:-}" ]] && rm -rf "$RUN"
@@ -305,7 +316,22 @@ gate() {
   cp "$CONF/devnet/x-program.json" "$RUN/secrets-x/solana-bridge-program.json"
   cp "$CONF/stagenet/temporary-12.seed" "$RUN/secrets-x/midnight-operator.seed"
   cp "$CONF/stagenet/temporary-12.seed" "$RUN/secrets-x/midnight-delivery.seed"
-  od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$RUN/secrets-x/storage-password"
+  # midnight-js's private-state password policy (validatePassword: >= 16 characters, >= 3 of upper/lower/
+  # digit/special, no long repeats, no sequences); run 2 stopped on a lowercase-hex password (2 classes).
+  python3 - >"$RUN/secrets-x/storage-password" <<'PY'
+import re, secrets, string
+alphabet = string.ascii_letters + string.digits + "-_.!"
+def ok(p):
+    classes = sum(bool(re.search(r, p)) for r in (r"[A-Z]", r"[a-z]", r"[0-9]", r"[^A-Za-z0-9]"))
+    seq = any(abs(ord(p[i + 1]) - ord(p[i])) == 1 and ord(p[i + 2]) - ord(p[i + 1]) == ord(p[i + 1]) - ord(p[i])
+              for i in range(len(p) - 2))
+    return len(p) >= 32 and classes == 4 and not re.search(r"(.)\1\1", p) and not seq
+while True:
+    p = "".join(secrets.choice(alphabet) for _ in range(40))
+    if ok(p):
+        print(p, end="")
+        break
+PY
   cp "$CONF/stagenet/temporary-11.seed" "$RUN/nm/sponsor.seed"
   chmod 600 "$RUN"/secrets-x/* "$RUN/nm/sponsor.seed"
   cp -Rc "$KEYS_SRC" "$RUN/keys-relay"; cp -Rc "$STATE_ROOT/bridge-managed" "$RUN/keys-relay/bridge"
@@ -393,9 +419,11 @@ gate() {
   mark program end
   tmpl deploy-sol packages/contracts-solana bun run scripts/deploy-devnet.ts --out "$DEPLOYMENT" --user-tokens 0 2>&1 | tee "$OUT/deploy-x-solana.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "deploy-devnet.ts (mint X + Initialize)"
+  save_deployments
   mark solana-deploy end
   TMPL_MEM=6g tmpl deploy-mn packages/contracts-midnight bun run deploy.ts --mode stagenet --out "$DEPLOYMENT" 2>&1 | quiet | tee "$OUT/deploy-x-midnight.log"
   [[ "${PIPESTATUS[0]}" == 0 ]] || fail "deploy.ts (the stagenet contract, Temporary 12)"
+  save_deployments
   mark midnight-deploy end
   local ok="" a
   for a in 1 2 3 4 5 6; do

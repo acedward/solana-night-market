@@ -31,6 +31,7 @@ import {
   dismissBridgeIn,
   followBridgeIn,
   isFinal,
+  nothingLockedText,
   pageBalance,
   precheckBridgeIn,
   sendBridgeIn,
@@ -58,6 +59,10 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something w
 /** Why a new Bridge in of a token must wait (audit C3). */
 export const BRIDGE_IN_WAIT_TEXT =
   'An earlier Bridge in of this token may have been sent: wait until this page has checked Solana for it before you bridge this token in again. If Solana cannot be read for long, you can stop that check below once its request has expired.';
+/** P10.5 (audit E2, R3-B4): the lock left the page (the wallet sent it, or the page did) but its record
+ *  could not be saved. It WAS sent: say so, with what the customer needs to follow it. */
+export const bridgeInUnsavedText = (r: BridgeInRecord, decimals: number, err: unknown): string =>
+  `Your lock of ${formatUnits(BigInt(r.amount), decimals)} ${r.symbol} was sent to Solana (signature ${r.signature ?? 'unknown'}), but its record could not be saved in this browser: ${errorText(err)} The bridge still delivers the tokens to your account; keep this signature to follow the lock in your wallet's activity or a Solana explorer.`;
 /** The same record but for when it was last checked. */
 const sameRecord = (a: BridgeInRecord, b: BridgeInRecord) =>
   JSON.stringify({ ...a, checkedAt: 0 }) === JSON.stringify({ ...b, checkedAt: 0 });
@@ -197,6 +202,8 @@ export function BridgeIn({
       return;
     }
     setWorking('send');
+    // Audit E2: whether the lock has left the page. After that, no failure may say "Nothing was locked".
+    let sent: BridgeInRecord | null = null;
     const stillOpen = (r: BridgeInRecord) =>
       readBridgeIns(store, scope, account).find((x) => bridgeInId(x) === bridgeInId(r));
     try {
@@ -223,6 +230,7 @@ export function BridgeIn({
           }
         },
       });
+      sent = rec;
       putBridgeIn(store, scope, account, rec);
       setOk(
         `Sent: ${formatUnits(check.raw, check.entry.decimals)} ${check.entry.symbol} are on their way to your account.`,
@@ -230,12 +238,25 @@ export function BridgeIn({
       setCheck(null);
       setAmount('');
     } catch (err) {
-      if (err instanceof BridgeInUncertain) {
-        putBridgeIn(store, scope, account, err.record);
-        setError(err.message);
+      if (sent) {
+        // Sent, but its record could not be saved (audit E2): the lock is real.
+        setError(bridgeInUnsavedText(sent, check.entry.decimals, err));
+        setCheck(null);
+      } else if (err instanceof BridgeInUncertain) {
+        try {
+          putBridgeIn(store, scope, account, err.record);
+          setError(err.message);
+        } catch (saveErr) {
+          setError(`${err.message} This page could not save the lock's record either: ${errorText(saveErr)}`);
+        }
         setCheck(null);
       } else {
-        setError(err instanceof BridgeInRefused ? err.message : `${errorText(err)} Nothing was locked.`);
+        // Before the lock left the page (a refusal, or the wallet declined): definitely not sent.
+        setError(
+          err instanceof BridgeInRefused
+            ? err.message
+            : `${errorText(err)} ${nothingLockedText({ kind: 'never-sent' }) ?? ''}`.trim(),
+        );
       }
     } finally {
       inFlight.current = null;
@@ -373,8 +394,10 @@ export function BridgeIn({
                     <p>
                       This page could not finish checking whether this lock reached Solana. Its request has expired, so
                       your wallet can no longer send it. Look in your wallet&apos;s activity for a transfer matching
-                      these facts. If you find one, the bridge still delivers its tokens to your account. Stop checking
-                      only when you have looked: the page then lets you bridge this token in again.
+                      these facts. If you find one, the bridge still delivers its tokens to your account. The first lock
+                      may still have landed even if you find nothing: if you then bridge this token in again, that is a
+                      second transfer, with a second Solana fee, and both arrive in your account. Stop checking only
+                      when you have looked: the page then lets you bridge this token in again.
                     </p>
                     <ul className="mono">
                       {bridgeInEvidence(r, decimals).map((f) => (

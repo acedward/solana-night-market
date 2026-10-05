@@ -1986,57 +1986,70 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.trade-grid {
+/* The Trade page's one view (AA 00060 FR-026): the order book is the page. Its two halves (Sellers,
+   Buyers) each end with a create row; side by side when the main column has the room. */
+.book-halves {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4);
+  gap: var(--space-5);
   align-items: start;
 }
 @container (min-width: 760px) {
-  .trade-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  .book-halves {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }
-.trade-grid > .panel + .panel,
-.trade-side > .panel + .panel {
-  margin-top: 0;
-}
-.trade-side {
-  display: grid;
-  gap: var(--space-4);
+.book-half {
   min-width: 0;
-  order: -1; /* one column (a phone): buy, sell or create first, the book after */
+  container-type: inline-size;
 }
-@container (min-width: 760px) {
-  .trade-side {
-    order: 0;
+/* The create row: the last row of a half, "+ Sell <token>", which opens the offer form under it. */
+.book tbody.create-row tr:hover td {
+  background: transparent;
+}
+.book tbody.create-row td {
+  text-align: left;
+  white-space: normal;
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border);
+}
+.create-row-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 650;
+}
+.create-row-open svg {
+  width: 16px;
+  height: 16px;
+}
+.create-row-hint {
+  display: inline-block;
+}
+.create-form,
+.book-review {
+  margin-top: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+@container (max-width: 360px) {
+  .create-form .form-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
-.quick-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-2);
+/* Your own offer's row: the badge, then "Cancel your offer" (FR-027). */
+.own-act {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
 }
-.quick-actions .btn {
-  flex-direction: column;
-  gap: 2px;
-  min-height: 60px;
-  width: 100%;
-  white-space: normal;
-  text-align: center;
-  line-height: 1.2;
-}
-.quick-actions .btn .price {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.9;
-}
-/* The book in its card: asks above the spread line, bids below. */
-.book-stack > * + * {
-  margin-top: var(--space-4);
-}
+/* The spread under the two halves of the book. */
 .spread-line {
+  margin-top: var(--space-4);
   display: flex;
   justify-content: center;
   gap: var(--space-3);
@@ -2080,9 +2093,6 @@
   .form-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-.trade-side .form-grid {
-  grid-template-columns: minmax(0, 1fr);
 }
 .field {
   margin-bottom: var(--space-4);

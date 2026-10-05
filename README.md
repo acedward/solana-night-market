@@ -16,8 +16,11 @@ A customer with only a Solana wallet (Phantom) can:
 3. **See the order books.** Each configured market is two tokens, any two: twBTC/twUSDC,
    twETH/twUSDC, twUSDM/twUSDC and twETH/twBTC by default. Prices come only from the live ZSwap
    offer book; a market with no live offers shows "no liquidity". No token is special.
-4. **Make and take offers.** Trade one token for another by making an offer at a chosen price, or
-   by taking an offer already in the book.
+4. **Make and take offers.** Each market is one view, `Order book <base> ⇄ <quote>`. Take a whole
+   offer already in the book, or add your own at a chosen price from the create row that ends each
+   half: "Sell <quote>" under Sellers (you buy the base; your offer is listed under Buyers) and
+   "Sell <base>" under Buyers (listed under Sellers). Your own offer stays in the book, marked
+   "Your offer"; your account cannot take it, so its row offers "Cancel your offer".
 5. **Keep data in the browser.** Everything the market stores about a customer stays in the
    browser. A Local data tab shows it and offers Export, Import and Clear all.
 
@@ -77,6 +80,10 @@ says the same in plain words.
   itself. If it does, it can read the sealed notes filed after the change (privacy); it cannot move
   funds, and the site offers to restore the browser's key. (R3-9; questions Q50.)
 - One live offer per account, and one coin per payment (coins are not merged).
+- **An account cannot take its own offer.** The offer and the take would be signed at the same
+  auth nonce and device counter, so whichever runs second in the one settling transaction fails.
+  Your own offer's row offers "Cancel your offer" instead, which leaves you with the same tokens.
+  (AA 00060 FR-027; questions Q9 there.)
 - All of a customer's data is in their browser; Export is the only backup.
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).
 

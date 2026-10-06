@@ -50,6 +50,18 @@ sudo install -d -o nightmarket -g nightmarket /var/lib/nightmarket/proof-params-
 Neither binary has a bind option: **firewall 6300 and 6301**. `docker pull` of the rc.8 tag has been
 seen to hang; `crane export` by the digest above does not use Docker.
 
+**The port is a command-line flag.** Each unit passes it with `--port` (section 8). The binary also
+reads `MIDNIGHT_PROOF_SERVER_PORT`, but it ignores `PORT`. `PORT` is read only by the images' own
+start command (`midnight-proof-server --port $PORT`), which compose uses. A unit with
+`Environment=PORT=6301` and no `--port` listens on the default, 6300, where the contract prover
+already is. (Checked on both pinned versions, AA 00060 P16: `--help` prints
+`-p, --port <PORT> [env: MIDNIGHT_PROOF_SERVER_PORT=] [default: 6300]`.)
+
+**The first start downloads the public parameters.** Each server fetches them into its `MIDNIGHT_PP`
+directory at its first start, so it needs outbound HTTPS then, and the first start is slower. Later
+starts reuse the directory. (`--no-fetch-params` turns the download off.) The stack runs of this
+repository keep 117 MB there for rc.6 and 138 MB for rc.8.
+
 **The contract prover's memory grows across proofs** (AA 00047 plan risk R7: 11.94 GiB of a 12 GiB
 cap within four proofs of a restart on a localnet; killed at 14 GB after about 25). Its unit has
 `MemoryMax=14G` and `Restart=always` (section 8), and a timer restarts it every 6 hours when the relay
@@ -95,7 +107,12 @@ timer and its service are in section 8.
   ```
 
   The single-server `MIDNIGHT_PROOF_SERVER_URL` of MN Bank is refused by the relay (exit 78), and
-  every `SEPOLIA_*`, `BRIDGE_*`, `STALE_CLOSE_*` and `VAULT_GAS_*` line is gone.
+  every `SEPOLIA_*`, `STALE_CLOSE_*` and `VAULT_GAS_*` line, and MN Bank's `BRIDGE_*` lines, are gone.
+  (Night Market's `BRIDGE_REGISTRY_FILE` is a different setting: bridging, section 4.)
+
+  The relay does not read `MIDNIGHT_PP` or `PASSPORT_COMMIT`. They are here for the key unit
+  (section 4), which reads the same two files: `MIDNIGHT_PP` is its compile's parameter cache, and
+  `PASSPORT_COMMIT` is the commit it records in its report (`.night-market-keys.json`).
 - `/etc/nightmarket/relay.env` is a copy of `deploy/.env.example` with the operator's values, as
   in MN Bank's guide. The round-2 fix pass (AA 00047 P10) added settings to it; copy them over on an
   upgrade (their meaning and numbers: `deploy/RUNBOOK.md` section 9):
@@ -156,6 +173,28 @@ with `verdict VERIFIED (fingerprint 21493588…5c5e)`, and the set is 2.5 GB. To
 elsewhere, put `KEYS_IMPORT_DIR=<dir holding account/>` in `native.env` for the first run (the job
 copies only the kept prover keys).
 
+**With bridging** (`BRIDGE_REGISTRY_FILE`, `deploy/RUNBOOK.md` section 17.3), install the bridge
+bundle into the key set's directory once, after the key unit's first run. Copy it from a checkout of
+the 00050 template at the pinned commit (with compose, the same files go into the key volume's
+`bridge/`):
+
+```bash
+T=<the template checkout>/packages/contracts-midnight/contract-bridge/src/managed
+B=/app/vendor/passport/contract/contracts/managed/bridge
+sudo install -d -o nightmarket -g nightmarket "$B"
+sudo cp -r "$T/." "$B/" && sudo chown -R nightmarket:nightmarket "$B"
+sha256sum "$B/keys/lockForSolana.verifier"   # b54ed1f6aff46df16f9e3e132c3e4d5e3e7c3d51fd731049f5421f4848e3967f
+sha256sum "$B/keys/mintFromSolana.verifier"  # 5f4fa8ace0ea0e47685532f67fcfbd460d826877b877b6dbfbf33bd7dd7e80f9
+```
+
+If either hash differs, stop: that compile is not the one the bridges were deployed with. The key
+unit leaves `bridge/` in place when it re-verifies or rebuilds. The bundle is not part of the key set,
+so the fingerprint does not change: the key unit still ends with `verdict VERIFIED (fingerprint
+21493588…5c5e)`, and the relay starts with `RELAY_KEYS_FINGERPRINT` as shipped. Keep the bundle at
+this path. Its `contract/index.js` loads the contract runtime from `/app/node_modules`, which does
+not work from a directory outside `/app`. Then put `BRIDGE_REGISTRY_FILE=<a path the relay can
+read>` in `relay.env`. `RELAY_DATA_DIR` is set already.
+
 ## 5. The relay
 
 MN Bank's unit (section 8 has the whole file), with:
@@ -201,8 +240,26 @@ indexer with both origins).
 A wallet DEDICATED to this server (`deploy/RUNBOOK.md` section 4.1): create a new one for production
 (section 4.2), never the shared `.stagenet` wallet or one a test run used; its seed lives only in
 `/srv/nightmarket/secrets/sponsor.seed` (mode 600, owned by the relay's user, backed up offline).
-Register it for DUST as in MN Bank's guide (`nightmarket-tool register-dust` with the relay stopped);
-the DUST it needs, and the sponsor's worst case per day with Q46's allowance, are in
+Register it for DUST with the relay's own tool, `relay/src/tools/sponsor-wallet.ts` (there is no
+`nightmarket-tool`). Stop the relay first: the tool opens the same wallet, and refuses while the
+relay holds it. It reads the relay's settings, so load both env files the way the unit does (each
+`KEY=value` line taken as it is, never run as shell code: `. relay.env` would fail on a value such as
+`<release commit>`):
+
+```bash
+sudo systemctl stop nightmarket-relay
+sudo -u nightmarket -H bash -c 'for f in /etc/nightmarket/relay.env /etc/nightmarket/native.env; do
+    while IFS= read -r l; do [[ $l =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && export "$l"; done < "$f"; done
+  cd /app && exec /usr/local/bin/bun relay/src/tools/sponsor-wallet.ts register-dust'
+sudo systemctl start nightmarket-relay
+```
+
+`status` (NIGHT, DUST and the registration) runs the same way. Run `register-dust` again after every
+NIGHT top-up. `new` and `address` work offline and need no settings: run them without the env files,
+or pass `--network stagenet`. (The env files set `MIDNIGHT_NETWORK_ID` to an empty value, and these
+two take that as the network's name and fail.)
+
+The DUST it needs, and the sponsor's worst case per day with Q46's allowance, are in
 `deploy/RUNBOOK.md` sections 4.3 and 9. Opening a Night Market account costs about 41 DUST at the
 default margin (not MN Bank's 60).
 

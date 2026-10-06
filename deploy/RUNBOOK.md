@@ -73,7 +73,8 @@ Go through it before the market goes on a production server; each item names its
   (`docker stats`) for the first days, and restart it more often if it climbs past 12 GiB.
 - [ ] **Bridging, only if you bridge** (17): the journey registry generated once for the site and the
   relay (`scripts/bridge-tokens.ts`), `BRIDGE_REGISTRY_FILE` and `RELAY_DATA_DIR` on the relay, the
-  bridge bundle in the key volume, the site's `solana` (and `injector`) settings, and every bridge's
+  bridge bundle in the key volume (keep `RELAY_KEYS_FINGERPRINT` as shipped: the bundle does not
+  change it), the site's `solana` (and `injector`) settings, and every bridge's
   `GET /deployment` reachable from the browser. On any shared network, the test faucet holds a
   dedicated faucet key, never a bridge operator's (17.6).
 
@@ -360,8 +361,10 @@ job builds that set once and proves it is the right one before anything else sta
      `withdraw_shielded_with_ed25519`, `withdraw_unshielded_with_ed25519`,
      `append_inbox_with_ed25519`, `rotate_enc_key_with_ed25519` (the "Cancel all open offers"
      call), `open_swap_shielded_with_ed25519`, `deposit_shielded`, and `faucet/mint`;
-   - the fingerprint over all verifier keys equals `RELAY_KEYS_FINGERPRINT`
-     (**`21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e`**).
+   - the fingerprint over the key set's verifier keys (the account's 40 and the faucet's 5) equals
+     `RELAY_KEYS_FINGERPRINT` (**`21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e`**).
+     A bridge bundle installed beside them (`<key volume>/bridge/`, section 17.3) is not part of the
+     key set and does not change the fingerprint.
 6. Installs the set into the volume and writes the report `.night-market-keys.json`.
 
 Any failure exits non-zero, and Compose then does not start the relay or the web site. On later
@@ -372,6 +375,10 @@ list of problems in its first log line) when a circuit it proves lacks its prove
 or ZKIR, when the fingerprint is not `RELAY_KEYS_FINGERPRINT`, or when no volume is mounted
 (compose sets `RELAY_REQUIRE_KEYS=true`). The account's keys are also checked against the loaded
 code, and every account the relay acts on is checked against the set on chain (section 6).
+
+The key job, the relay's start-up check and `/health` (`proofServer.keys`) compute the fingerprint
+the same way, over the key set only. The bridge bundle has its own checks at start (section 17.3),
+so with bridging the pin stays the shipped one.
 
 ### 5.2 Run it
 
@@ -603,7 +610,7 @@ unhealthy only when `/health` answers 503.
 | `sponsor.dustInFlightSpecks` | The part of `dustSpecks` held by the sponsor's transactions in flight: `"0"` when idle. | Nothing: it returns to `"0"` when the transactions land. If it stays above 0 for more than an hour, a transaction never landed; the lock ends after the ledger's 3-hour grace period. |
 | `proofServer.reachable`, `version` | The CONTRACT prover: must be `9.0.0-rc.8` (`CONTRACT_PROOF_SERVER_EXPECTED_VERSION`). | Unreachable: `docker compose logs proof-server-contracts` (an out-of-memory kill shows as a restart). |
 | `dustProofServer.reachable`, `version` | The DUST prover: must be `9.0.0-rc.6`. | As above for `proof-server-dust`. |
-| `proofServer.keys.fingerprint`, `matchesPin`, `complete`, `problems` | The key set's identity and completeness. | Always pinned and complete on a running relay (it refuses to start otherwise). |
+| `proofServer.keys.fingerprint`, `pinned`, `matchesPin`, `complete`, `problems` | The key set's identity (the account and faucet keys only; not the bridge bundle) and completeness. | Always pinned and complete on a running relay (it refuses to start otherwise). |
 | `queue.lanes.prover` | Proofs running (at most 1) and waiting. | A `waiting` above 5 for long: customers wait minutes (section 9). |
 | `kernel.reachable`, `synced` | The ZSwap kernel. | `false`: offers cannot be made or taken; tell the kernel operator. |
 | `batcher.reachable`, `lastRefusal` | The batcher, and its last refusal of a take (429 = its daily cap). | Section 13.2. |
@@ -623,6 +630,9 @@ unhealthy only when `/health` answers 503.
 
 To measure what a run spent, compare two readings with `dustInFlightSpecks` at `"0"`, or add up the
 indexer's `paidFees` (section 4.3).
+
+The key set's fields are under `proofServer.keys`, not at the top level. The token list's digest is
+not in `/health`: it is `tokensDigest` in `GET /v1/config` (section 17.1).
 
 `GET /v1/demo-tokens` shows the pack, `remainingToday`, and (with `?owner=<key>`) whether a key
 has claimed, and whether it may finish a pack that failed part-way (`resumable`).
@@ -985,7 +995,7 @@ the batcher's Retry-After, up to a day). Nothing in the relay can prevent it: te
 | Data-volume init | `busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e` |
 | Compact compilers | compactc 0.35.0 (`0.35.0 (debb05f94 2026-09-29)`, the account, `--feature-zkir-v3`) and 0.34.0 (the account's callees and the faucet); archive SHA-256s in `scripts/fetch-compactc.sh` |
 | Passport sources | `vendor/passport` = acedward/passport @ `599327b918b55afc95d6c98a89bcd15f4e8b0d53` (branch `00047-solana-ed25519-arm`); `account.compact` SHA-256 `03bbd3d8ad978d6c49a573ad84d27325be95115b81a1b2d4ab829f2ecb50e6fe` |
-| Key set fingerprint | `21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e` (account 40 + faucet 5 verifier keys; the web build pins the same set) |
+| Key set fingerprint | `21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e` (account 40 + faucet 5 verifier keys; the web build pins the same set; the bridge bundle is not part of it) |
 | Faucet | mint-test-tokens v2 `shielded-token.compact` @ `a51cf3a` (SHA-256 `1dca131a…89bd`); `mint` verifier key SHA-256 `4bbbb047b2f10bc57e4fafd9537b2dcac9290d9a2f7560a9e670f96a8452794a` |
 | SDK set | `@midnightntwrk/ledger-v9` 1.0.0-rc.3, midnight-js 5.0.0-beta.7, compact-js 2.5.5-rc.8, wallet-sdk-facade 5.0.0-beta.2, compact-runtime 0.19.0 (the SDK) and 0.20.0 (the account module only) |
 | Tokens (stagenet, mint-test-tokens registry @ `a51cf3a`) | shielded twUSDC (6) faucet `11e406f1…`, twUSDM (6) `6f6dacef…`, twBTC (8) `a112d24a…`, twETH (18) `a9ea4f52…`; unshielded utwUSDC (6) `473e8354…`, utwBTC (8) `2e962ef4…` (`packages/core/src/tokens/mint-test-tokens/`) |
@@ -1148,12 +1158,28 @@ The Content-Security-Policy's `connect-src` must also name:
   `TOKENS_FILE` with the same colour, symbol and decimals, or the relay refuses to start.
 - **The key volume holds the bridge bundle** as `<key volume>/bridge/`: the 00050 template's
   compiled bridge (`packages/contracts-midnight/contract-bridge/src/managed`, unchanged, `bridge.compact`
-  sha256 `b6150529…`). At start the relay checks:
+  sha256 `b6150529…`). Copy that directory's contents into `<key volume>/bridge/` and check two
+  hashes: `bridge/keys/lockForSolana.verifier` sha256 `b54ed1f6aff46df16f9e3e132c3e4d5e3e7c3d51fd731049f5421f4848e3967f`
+  and `bridge/keys/mintFromSolana.verifier` `5f4fa8ace0ea0e47685532f67fcfbd460d826877b877b6dbfbf33bd7dd7e80f9`.
+  The key job never builds it, and its install step leaves it in place. At start the relay checks:
   - each bridge's deployed `lockForSolana` verifier key against `bridge/keys/lockForSolana.verifier`;
   - each bridge's sealed SPL mint against the registry, through `bridge/contract/index.js`.
 
   It refuses to start (exit 78) on a mismatch, or when the module or its ledger decoder does not
   load.
+- **The bridge bundle is not part of the key set's fingerprint.** `RELAY_KEYS_FINGERPRINT` covers the
+  account and faucet keys only (section 5), so it stays `21493588…` with the bundle installed: in the
+  key job's `verdict VERIFIED` line, in the relay's start-up check, and in `/health`
+  (`proofServer.keys`). The checks above are the bundle's own. (Before AA 00060 P16 the bundle changed
+  the fingerprint, to `e66737eb…` with the stagenet bridges' bundle, so a pinned relay with bridging
+  exited 78 and the key job reported `MISMATCH`.)
+- **Why the bundle has no path setting of its own:** it must stay inside the key volume, at
+  `MIDNIGHT_MANAGED_PATH/bridge`.
+  - Its `contract/index.js` imports `@midnight-ntwrk/compact-runtime-0.20`, which resolves only from a
+    directory under `/app`, the checkout with its `node_modules`. That is also why the key volume is
+    mounted under `/app`. A copy outside `/app` fails to load ("Cannot find module").
+  - The relay's prover finds the bundle it proves `lockForSolana` with only under
+    `MIDNIGHT_MANAGED_PATH`.
 - `RELAY_DATA_DIR` is required with bridges: `landing-entitlements.json` there remembers every
   landing coin locked or returned (so a coin cannot be sponsored twice) and the failed attempts.
   Back it up with the rest of `relay-data`.

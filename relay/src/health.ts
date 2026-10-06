@@ -5,7 +5,7 @@
 // request shares it; while it runs, a recent cached report is served; the key-volume check is
 // cached separately (./prover/keys.ts `cachedKeyCheck`), and app.ts rate-limits the route.
 
-import type { HealthResponse } from '@nightmarket/core';
+import type { ClientProvingHealth, HealthResponse } from '@nightmarket/core';
 
 import type { Logger } from './log.js';
 import type { ProofServerClient } from './prover/client.js';
@@ -71,6 +71,8 @@ export interface HealthDeps {
   maxStaleSeconds?: number;
   /** The batcher's last refusal of a take (plan P4-A), or null. */
   batcherRefusal?: () => { httpStatus: number; at: number } | null;
+  /** AA 00062: the client-proving mode, reported only when it is `required` (main.ts passes it then). */
+  clientProving?: ClientProvingHealth;
   now?: () => number;
 }
 
@@ -169,6 +171,7 @@ export function healthCollector(deps: HealthDeps): () => Promise<HealthResponse>
       queue: { jobs: stats.jobs, lanes: stats.lanes },
       kernel,
       batcher: { ...batcher, lastRefusal: deps.batcherRefusal?.() ?? null },
+      ...(deps.clientProving ? { clientProving: { ...deps.clientProving } } : {}),
     };
   };
 }

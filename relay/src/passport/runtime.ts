@@ -14,6 +14,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import type { Logger } from '../log.js';
+import type { ClientProofHandOff } from '../prover/proving-provider.js';
 import { MemoryPrivateStateProvider } from './private-state.js';
 import { walletProviderFor, type RelayWalletProvider, type SponsorWalletHandle } from './wallet-provider.js';
 
@@ -35,6 +36,10 @@ export interface PassportRuntimeOptions {
   /** A balanced transaction's time to live, ms (the node's fee window is short). */
   txTtlMs?: number;
   log: Logger;
+  /** AA 00062 (`CLIENT_PROVING=required`): the four k≥18 circuits are proven by the client
+   *  (../client-proving/desk.ts), and a submission the network refuses for the client's proof is told to
+   *  it (`submissionRefused`: the error to throw instead). Absent: the relay proves everything. */
+  clientProofs?: ClientProofHandOff & { submissionRefused(error: unknown): unknown };
 }
 
 const VENDOR = '../../../vendor/passport/contract';
@@ -125,6 +130,7 @@ export class PassportRuntime {
       proofProvider: await relayProofProvider(options.contractProofServerUrl, managedPath, {
         timeout: options.proofTimeoutMs ?? 900_000,
         log: options.log,
+        ...(options.clientProofs ? { clientProofs: options.clientProofs } : {}),
       }),
     };
     options.log.info('passport runtime loaded', { circuits: binding.circuits, network: options.networkId });
@@ -163,9 +169,11 @@ export class PassportRuntime {
     wallet: SponsorWalletHandle,
     privateState = new MemoryPrivateStateProvider(),
   ): Promise<PassportProviders & { walletProvider: RelayWalletProvider }> {
+    const clientProofs = this.options.clientProofs;
     const walletProvider = walletProviderFor(wallet, {
       txTtlMs: this.options.txTtlMs ?? 60_000,
       log: this.options.log,
+      ...(clientProofs ? { onSubmitError: (e: unknown) => clientProofs.submissionRefused(e) } : {}),
     });
     await walletProvider.ready;
     return {

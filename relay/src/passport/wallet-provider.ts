@@ -17,6 +17,8 @@ export interface SponsorWalletHandle {
     finalizeRecipe(recipe: unknown): Promise<unknown>;
     submitTransaction(tx: unknown): Promise<unknown>;
     estimateTransactionFee?(tx: unknown, dustSecretKey: unknown, opts: { ttl: Date }): Promise<unknown>;
+    /** Release what a transaction that will never land holds (its DUST, its coins, its pending entry). */
+    revertTransaction?(tx: unknown): Promise<unknown>;
   };
   shieldedSecretKeys: unknown;
   dustSecretKey: unknown;
@@ -55,7 +57,14 @@ export async function syncedKeys(
 
 export function walletProviderFor(
   handle: SponsorWalletHandle,
-  opts: { txTtlMs: number; log: Logger; keys?: { coinPublicKey: string; encryptionPublicKey: string } },
+  opts: {
+    txTtlMs: number;
+    log: Logger;
+    keys?: { coinPublicKey: string; encryptionPublicKey: string };
+    /** AA 00062: a failed submission is shown to the client-proof hand-off, which returns the error to
+     *  throw: another one (`client-proof-invalid`) when the network refused the client's proof. */
+    onSubmitError?: (error: unknown) => unknown;
+  },
 ): RelayWalletProvider & { ready: Promise<void> } {
   let keys = opts.keys ?? null;
   const ready = keys
@@ -109,7 +118,28 @@ export function walletProviderFor(
       return handle.wallet.finalizeRecipe(signed);
     },
     async submitTx(tx: unknown) {
-      const id = String(await handle.wallet.submitTransaction(tx));
+      let id: string;
+      try {
+        id = String(await handle.wallet.submitTransaction(tx));
+      } catch (e) {
+        const replaced = opts.onSubmitError ? opts.onSubmitError(e) : e;
+        if (replaced !== e) {
+          // AA 00062 (research R3): the network refused the client's proof. The job ends here, its error
+          // (`client-proof-invalid`) cannot match Passport's DUST-race retry, so no more proofs are asked
+          // for, and the sponsor's pending spend is released. wallet-sdk-facade 5.0.0-beta.2's
+          // `submitTransaction` already reverts on a failed submission; reverting again is harmless (each
+          // wallet releases only what is still pending) and keeps the DUST free whatever the SDK does.
+          try {
+            await handle.wallet.revertTransaction?.(tx);
+          } catch (r) {
+            opts.log.warn('reverting a refused transaction failed (the wallet may have reverted it already)', {
+              error: r,
+            });
+          }
+          throw replaced;
+        }
+        throw e;
+      }
       submitted.push({ txId: id, at: Date.now() });
       return id;
     },

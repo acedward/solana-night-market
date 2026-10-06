@@ -225,11 +225,12 @@ the **Content-Security-Policy**, which the Docker web image writes from `WEB_CON
 and a native nginx must carry itself (`deploy/RUNBOOK.md` section 16). Its `connect-src` names the
 public indexer with BOTH its `https://` and its `wss://` origin (since AA 00047 P11 the page reads an
 account's history past 500 actions over the indexer's WebSocket), and `script-src` allows
-`'wasm-unsafe-eval'` (the contract runtime and ledger-v9 run as WebAssembly in the page). The tested
-value for stagenet with the same-origin `/relay`:
+`'wasm-unsafe-eval'` (the contract runtime and ledger-v9 run as WebAssembly in the page). Since AA 00062
+it also allows the customer's own proof server (`http://localhost:* http://127.0.0.1:* https:`). The
+tested value for stagenet with the same-origin `/relay`:
 
 ```nginx
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
 ```
 
 A relay on another origin and an indexer moved by `config.json` must be added to `connect-src` (the

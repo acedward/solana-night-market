@@ -12,6 +12,7 @@ import { useAccountCheck, useChain } from '../chain/ChainContext.js';
 import type { AccountChain } from '../chain/indexer.js';
 import type { OperationEnv } from '../passport/operations.js';
 import { findAccount, readCoins, readSecret } from '../passport/records.js';
+import { useClientProver } from '../prover/ProverContext.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import { useWallet } from '../wallet/WalletContext.js';
@@ -46,12 +47,22 @@ export function useAccountView(network: NetworkProfile, relayUrl: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scope, account, revision],
   );
+  // AA 00062: the customer's own prover (used only by the k>=18 actions, when the market requires it).
+  const prover = useClientProver();
   const env = useCallback(
     (onJob?: OperationEnv['onJob']): OperationEnv | null => {
       if (!store || !scope || !wallet.signing) return null;
-      return { relay, chain, store, scope, signing: wallet.signing, ...(onJob ? { onJob } : {}) };
+      return {
+        relay,
+        chain,
+        store,
+        scope,
+        signing: wallet.signing,
+        ...(onJob ? { onJob } : {}),
+        ...(prover ? { prover } : {}),
+      };
     },
-    [store, scope, wallet.signing, relay, chain],
+    [store, scope, wallet.signing, relay, chain, prover],
   );
   return { wallet, store, scope, account, hasSecret, coins, relay, chain, check, env };
 }

@@ -4,7 +4,7 @@
 //   - axe-core (WCAG 2.0/2.1/2.2 A and AA rules) finds no violation on the key screens, at a 1440 px
 //     desktop and a 390 px phone: Markets (a new visitor, and a book open), Trade connected, the
 //     Create offer card filled in, the signing modal, the make-offer progress (preparing, listing),
-//     Portfolio, the portfolio drawer, the wallet menu, the demo tokens, an error toast, Your data
+//     Portfolio, the portfolio drawer, the wallet menu, the demo tokens, an error toast, Local Data
 //     and its CLEAR ALL dialog.
 //   - The portfolio drawer is a modal on narrow screens: it takes the focus, keeps Tab and Shift+Tab
 //     inside, closes on Escape and gives the focus back to the button that opened it.
@@ -144,12 +144,12 @@ for (const vp of VIEWPORTS) {
       }
     });
 
-    test('Your data and the CLEAR ALL dialog', async ({ page }) => {
+    test('Local Data and the CLEAR ALL dialog', async ({ page }) => {
       await serveExchange(page);
       await seedRecords(page, customerRecords().entries);
       await page.goto('/#local');
       await expect(page.locator('[data-testid=record-row]').first()).toBeVisible();
-      await axe(page, 'your data');
+      await axe(page, 'local data');
       await page.getByTestId('clear-all').click();
       await expect(page.getByTestId('clear-dialog')).toBeVisible();
       await axe(page, 'the CLEAR ALL dialog');
@@ -234,7 +234,7 @@ for (const vp of VIEWPORTS) {
       isMobile: vp.touch,
     });
 
-    test('every keyboard stop shows a visible focus ring (Markets, Trade, Portfolio, Your data)', async ({ page }) => {
+    test('every keyboard stop shows a visible focus ring (Markets, Trade, Portfolio, Local Data)', async ({ page }) => {
       test.setTimeout(120_000);
       await setup(page, { seeded: true });
       await page.goto('/#markets');
@@ -342,7 +342,7 @@ for (const vp of VIEWPORTS) {
       holdTake();
       await expect(page.getByTestId('trade-message')).toContainText('settled in one transaction on Midnight');
 
-      // A dialog (Your data's CLEAR ALL): Escape closes it and the focus goes back to its button.
+      // A dialog (Local Data's CLEAR ALL): Escape closes it and the focus goes back to its button.
       await page.goto('/#local');
       await page.getByTestId('clear-all').focus();
       await page.keyboard.press('Enter');

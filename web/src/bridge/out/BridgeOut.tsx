@@ -21,6 +21,7 @@ import type { BridgeEntry, LandingMaster } from '@nightmarket/core/bridge';
 import { indexerWsUrlOf } from '../../chain/indexer.js';
 import { Button, Field, Notice, Panel, Select, UnitInput } from '../../design/index.js';
 import type { OperationEnv } from '../../passport/operations.js';
+import { ACTION_CIRCUIT } from '../../prover/constants.js';
 import { useStore } from '../../store/StoreContext.js';
 import { useWallet } from '../../wallet/WalletContext.js';
 import { useBridges } from '../BridgeContext.js';
@@ -210,6 +211,9 @@ export function BridgeOut({
     // same warning as a withdrawal's).
     if (store && scope && !confirmCancelsOffer({ store, scope }, account, 'withdraw')) return;
     void run('bridge-out', async (c) => {
+      // AA 00062 (FR-009): its first transaction is a shielded withdrawal (k>=18). When the market
+      // requires the customer's prover, one must pass BEFORE the landing-key texts are signed.
+      await c.env.prover?.ensure(ACTION_CIRCUIT.withdraw);
       const m = await master(c);
       const coin = chooseCoin(coins, a.entry.colour, a.raw);
       setProgress('Approve the withdrawal to your landing key in your wallet');

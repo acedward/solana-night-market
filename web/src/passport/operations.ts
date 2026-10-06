@@ -82,6 +82,8 @@ import {
 } from '@nightmarket/core/passport';
 
 import type { AccountChain, AccountOnChain } from '../chain/indexer.js';
+import type { ClientProverHooks } from '../prover/client-prover.js';
+import { ACTION_CIRCUIT } from '../prover/constants.js';
 import type { RelayClient } from '../relay/client.js';
 import { jobErrorText } from '../relay/messages.js';
 import { recordKey, type WalletScope } from '../store/schema.js';
@@ -135,6 +137,24 @@ export interface OperationEnv {
   signing: ActionSigning;
   /** Where the job's progress goes (stages, queue position). */
   onJob?: (job: JobView) => void;
+  /** AA 00062 (spec FR-009): the customer's own prover, for the k>=18 actions when the market requires
+   *  client proving. `ensure` runs BEFORE anything is signed; `handOff` answers the market's hand-off
+   *  while its job waits. Absent: the market proves everything (as before). */
+  prover?: ClientProverHooks;
+}
+
+/** AA 00062: wait for a job, answering any client-proof hand-off it opens (I-62a). */
+export function waitWithProver(
+  env: Pick<OperationEnv, 'relay' | 'prover'>,
+  requestId: string,
+  onUpdate: (j: JobView) => void,
+) {
+  const prover = env.prover;
+  return env.relay.waitForJob(
+    requestId,
+    onUpdate,
+    prover ? { clientProof: (job) => prover.handOff(env.relay, job) } : {},
+  );
 }
 
 /** Sign a RelayAction envelope with the wallet: its signature, 128 lowercase hex. */
@@ -575,7 +595,7 @@ async function submitGated(
   });
   putJob(env, account, job, action, context);
   env.onJob?.(job);
-  const done = await env.relay.waitForJob(job.requestId, (j) => updateJob(env, account, j));
+  const done = await waitWithProver(env, job.requestId, (j) => updateJob(env, account, j));
   dropJob(env, account, job.requestId);
   if (done.state !== 'succeeded')
     throw new JobFailedError(
@@ -639,6 +659,8 @@ export async function withdrawToWallet(
   const to = recipientOf(args.recipient, env.scope.network);
   const coins = readCoins(env.store, env.scope, account);
   const coin = opts.coin ?? chooseCoin(coins, args.color, args.amount);
+  // AA 00062 (FR-009): a prover that passes, before anything is signed (Bridge out's tx1 too).
+  await env.prover?.ensure(ACTION_CIRCUIT.withdraw);
   const { state, counter, ctx } = await gatedContext(env, account);
   if (opts.expectAuthNonce !== undefined && state.authNonce !== opts.expectAuthNonce) {
     throw new OperationError('Your account moved on since this started. Nothing was sent; try again.');
@@ -776,6 +798,7 @@ export async function withdrawUnshieldedToWallet(
   if (args.amount <= 0n) throw new OperationError('Enter an amount above zero.');
   if (args.balance !== undefined && args.amount > args.balance)
     throw new OperationError('The account does not hold that much of this token (unshielded).');
+  await env.prover?.ensure(ACTION_CIRCUIT['withdraw-unshielded']); // AA 00062, before anything is signed
   const { state, counter, ctx } = await gatedContext(env, account);
   const payload: WithdrawUnshieldedPayload = {
     recipient,
@@ -834,6 +857,7 @@ export async function secureChange(env: OperationEnv, account: string, given: St
   }
   // R2-5: an entry is filed only for a change the CHAIN shows (its leaf), never for a pending record.
   if (coin.pending || !confirmedOnChain(coin)) throw new OperationError(CHANGE_PENDING);
+  await env.prover?.ensure(ACTION_CIRCUIT['append-inbox']); // AA 00062, before anything is signed
   const { state, counter, ctx } = await gatedContext(env, account);
   const entry = await sealEntryPortable(hexToBytes(state.encKey, 32), {
     nonce: hexToBytes(coin.nonce, 32),

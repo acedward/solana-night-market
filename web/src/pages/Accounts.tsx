@@ -107,6 +107,7 @@ import {
 import { findAccount, listJobs, readCoins, readSecret } from '../passport/records.js';
 import { useMidnightReadFailure } from '../passport/read-status.js';
 import { useRelayStatus } from '../relay/RelayStatus.js';
+import { useClientProver } from '../prover/ProverContext.js';
 import { RelayClient, RelayError } from '../relay/client.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
@@ -524,6 +525,8 @@ export function Accounts({
     [store, scope, revision],
   );
 
+  // AA 00062: the customer's own prover, for the k>=18 actions when the market requires it.
+  const prover = useClientProver();
   const env = useCallback((): OperationEnv | null => {
     if (!store || !scope || !wallet.signing) return null;
     return {
@@ -536,8 +539,9 @@ export function Accounts({
         setJob(j);
         activity.job(j);
       },
+      ...(prover ? { prover } : {}),
     };
-  }, [store, scope, wallet.signing, relay, chain, activity]);
+  }, [store, scope, wallet.signing, relay, chain, activity, prover]);
   const dismiss = useCallback(() => setMessage(null), []);
   // AA 00060 P7 (FR-003): Bridge in's completion is the page's own decode, from a fresh walk.
   const bridgePageCoins = useCallback(async () => {
@@ -793,7 +797,7 @@ export function Accounts({
               {!hasSecret && (
                 <Notice tone="danger" role="alert" className="panel-intro" data-testid="account-not-found">
                   This browser does not hold this account&apos;s key. Import your backup file on{' '}
-                  <a href="#local">Your data</a>.
+                  <a href="#local">Local Data</a>.
                 </Notice>
               )}
               {hasSecret && (
@@ -1096,7 +1100,7 @@ export function Accounts({
                 </li>
                 <li>
                   <strong>Your data stays here</strong>
-                  Your account&apos;s records live in this browser. Back them up on Your data.
+                  Your account&apos;s records live in this browser. Back them up on Local Data.
                 </li>
               </ul>
             </Panel>

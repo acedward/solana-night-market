@@ -1,5 +1,7 @@
-// The Your data tab (route #local; spec US4, FR-004, Q11): every record the market keeps in this
-// browser, with secrets masked until revealed, and Export (back up), Import (restore) and CLEAR ALL.
+// The Local Data tab (route #local; spec US4, FR-004, Q11; "Your data" until AA 00062, spec FR-008):
+// every record the market keeps in this browser, with secrets masked until revealed, and Export (back
+// up), Import (restore) and CLEAR ALL. AA 00062 P4.1 adds "Proof server (optional)" (../prover/
+// ProverSection.tsx): the customer's own prover, kept in this browser only, never in the backup.
 // A record table that stacks on a phone, and the CLEAR ALL dialog with "Export first" and a typed
 // confirmation (AA 00047 P8.1: the dark consumer design, plain words).
 
@@ -23,6 +25,7 @@ import {
   TypedConfirmDialog,
 } from '../design/index.js';
 import { useChain } from '../chain/ChainContext.js';
+import { ProverSection } from '../prover/ProverSection.js';
 import type { AccountChain } from '../chain/indexer.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
@@ -165,9 +168,9 @@ export function LocalData({ network }: { network: string }) {
     <section aria-labelledby="local-data-title" data-testid="local-data">
       <PageHead
         eyebrow="Your records"
-        title="Your data"
+        title="Local Data"
         titleId="local-data-title"
-        lede="Everything Night Market knows about you stays in this browser: your account, its viewing key, your coins and your offers. The market's servers keep none of it. You need this data to use your tokens, so back it up and keep the file private."
+        lede="Everything Night Market knows about you stays in this browser: your account, its viewing key, your coins and your offers. The market's servers keep none of it. You need this data to use your tokens, so back it up and keep the file private. An optional proof server is set here too."
       />
 
       {status !== 'ok' && (
@@ -328,6 +331,8 @@ export function LocalData({ network }: { network: string }) {
           </Button>
         </div>
       </Panel>
+
+      <ProverSection />
 
       {assets.listed.length > 0 && (
         <Panel title="Asset filter" className="section-gap" data-testid="asset-filter-panel">

@@ -87,6 +87,7 @@ import { askText, bidText, lastTradeText, spreadText } from '../market/view.js';
 import { syncAccount, type OperationEnv } from '../passport/operations.js';
 import { findAccount, readCoins, readSecret } from '../passport/records.js';
 import { RelayNotices, useRelayStatus } from '../relay/RelayStatus.js';
+import { useClientProver } from '../prover/ProverContext.js';
 import { RelayClient } from '../relay/client.js';
 import { useStore } from '../store/StoreContext.js';
 import {
@@ -347,6 +348,8 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
   // The history lists only the markets the filter shows; a live offer (the banner) always shows.
   const shownTrades = trades.filter((t) => assets.showsColour(t.base) && assets.showsColour(t.quote));
 
+  // AA 00062: the customer's own prover, for the k>=18 actions when the market requires it.
+  const prover = useClientProver();
   const env = useCallback((): OperationEnv | null => {
     if (!store || !scope || !wallet.signing) return null;
     return {
@@ -359,8 +362,9 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         setJob(j);
         activity.job(j);
       },
+      ...(prover ? { prover } : {}),
     };
-  }, [store, scope, wallet.signing, relay, chain, activity]);
+  }, [store, scope, wallet.signing, relay, chain, activity, prover]);
 
   // Reconcile My offers and the coins when the page opens, and every 30 s while an offer is live.
   const accountAddress = account?.address;
@@ -470,7 +474,7 @@ export function Trade({ network, relayUrl }: { network: NetworkProfile; relayUrl
         }
       >
         <span data-testid="trade-no-account">
-          Open an account on <a href="#account">Portfolio</a> (or import your backup on <a href="#local">Your data</a>)
+          Open an account on <a href="#account">Portfolio</a> (or import your backup on <a href="#local">Local Data</a>)
           to trade. It takes one approval in {walletName.name}, and the market pays every fee.
         </span>
       </EmptyState>,

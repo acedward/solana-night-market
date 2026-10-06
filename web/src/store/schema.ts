@@ -8,7 +8,7 @@
 //   night-market/v1/<network>/<device key>/<account>/<kind>[/<id>]
 //
 // Each value is JSON: {"v": 1, "kind", "updatedAt" (ms), "data"}. Records of a SENSITIVE kind
-// (the account's encryption secret) are masked in the Local data tab until revealed.
+// (the account's encryption secret) are masked in the Local Data tab until revealed.
 
 import { z } from 'zod';
 

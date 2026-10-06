@@ -53,9 +53,36 @@ assets are listed; no asset is special. Symbols match in any case; well-formed s
 does not know yet stay in the list and are named in the note under the tabs, and a list with
 nothing on this site shows the site's whole set. Anything waiting for the customer (a change coin
 to record, a live offer) always shows. `?assets=all` or `?assets=`, **Show all assets** (under the
-tabs, or in Your data) and CLEAR ALL clear it; Export and Import carry it. It only changes what
+tabs, or in Local Data) and CLEAR ALL clear it; Export and Import carry it. It only changes what
 the page shows: it is not a security setting, and the relay never sees it. The code is
 `src/assets/`.
+
+## The customer's own proof server (AA 00062)
+
+When the relay runs with `CLIENT_PROVING=required` (its `GET /v1/config` `clientProving`), the four
+k≥18 account circuits (making and taking offers, shielded and unshielded withdrawals including Bridge
+out's first transaction, re-filing a change) are proven by the customer's own prover, the Night
+Market prover package (`docker run … ghcr.io/midnight-experiments/solana-proof-server:…`). The code is
+`src/prover/`:
+
+- **Before anything is signed** for one of those actions, the page tests the saved prover (a pass of
+  the last minute is reused); without a passing one it opens the popup: the owner's words, the
+  command, the URL (`http://localhost:6300` by default), Test, and Continue once a Test passed.
+  Closing it stops the action. Every other action never shows it.
+- **While the relay waits** (its job's `clientProof`), the page fetches the key-less proof request,
+  posts it to the prover's `/prove-circuit`, and sends the proof back; the progress window says
+  "Proving on your prover…" with the elapsed time.
+- **Local Data → Proof server (optional)**: the URL, Test and its last result, the command, Forget.
+  The setting is the browser-wide record `night-market/v1/_global/settings/prover`: kept in this
+  browser only, never in an Export (Import refuses it), removed by CLEAR ALL.
+- **URLs**: `http://localhost:*`, `http://127.0.0.1:*` or `https://…`; an https prover sees the
+  transaction's private details, so the page asks for a confirmation first. The browser's
+  local-network permission is asked before a localhost call (Chrome ≥ 142, Firefox ≥ 153); Brave
+  and Safari block localhost from an https site, and the page says so.
+- **The Content-Security-Policy** needs `http://localhost:* http://127.0.0.1:* https:` in
+  `connect-src` (`deploy/RUNBOOK.md` section 16).
+
+The package's image reference is the one constant `PROVER_IMAGE` in `src/prover/constants.ts`.
 
 ## The Solana wallet (AA 00047 lane B2)
 
@@ -125,9 +152,9 @@ end users: no bank, custody or statement vocabulary.
 
 The shell is wallet-first: the header carries the mark, the network, the sections (a pill nav on a
 desktop, a tab bar at the bottom below 900 px) and **Connect Phantom**, which becomes the wallet's
-pill (avatar, address, the account) with a menu (copy address, Portfolio, Your data, Disconnect).
-The sections keep their routes: Markets `#markets`, Trade `#trade`, Portfolio `#account`, Your data
-`#local`.
+pill (avatar, address, the account) with a menu (copy address, Portfolio, Local Data, Disconnect).
+The sections keep their routes: Markets `#markets`, Trade `#trade`, Portfolio `#account`, Local Data
+`#local` ("Your data" until AA 00062).
 
 | File                        | What it holds                                                                                                                                                                       |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -272,7 +299,7 @@ until closed, and the toast keeps the page's `data-testid`. A standing explanati
 A confirmation before a signed action that cancels the live offer: `Dialog` (native `<dialog>`,
 Escape closes it) with `actions={<><Button variant="secondary">Keep my offer</Button><Button>…</Button></>}`,
 instead of `window.confirm`. A destructive action with a typed phrase: `TypedConfirmDialog` (as
-Your data's CLEAR ALL). Nothing to show: `EmptyState icon="…" title="…"`.
+Local Data's CLEAR ALL). Nothing to show: `EmptyState icon="…" title="…"`.
 
 **Progress.** A signed action runs through the app's `ActivityStore` (`src/activity/`): the page
 wraps it in `activity.run(kind, …)` and reports its relay jobs with `activity.job(job)` (its

@@ -4,10 +4,11 @@
 // modal. The pieces come from ./design; this file only wires them to the wallet and the store.
 //
 // A create-and-trade market: the order books (Markets) and making and taking offers (Trade) come
-// first; the holdings (Portfolio, route #account) and the browser's records (Your data, route
-// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working. There is
-// no About page (AA 00060 FR-029; the known limitations are in the README and the RUNBOOK): its old
-// route #about, like any unknown route, opens Markets.
+// first; the holdings (Portfolio, route #account) and the browser's records (Local Data, route
+// #local; "Your data" until AA 00062, spec FR-008) after. The routes are the ones MN Bank had, so
+// links and bookmarks keep working. There is no About page (AA 00060 FR-029; the known limitations
+// are in the README and the RUNBOOK): its old route #about, like any unknown route, opens Markets.
+// AA 00062: the ProverProvider (./prover/ProverContext.tsx) gives the pages the customer's own prover.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
@@ -45,6 +46,7 @@ import { LocalData } from './pages/LocalData.js';
 import { Markets } from './pages/Markets.js';
 import { Trade } from './pages/Trade.js';
 import { findAccount } from './passport/records.js';
+import { ProverProvider } from './prover/ProverContext.js';
 import { RelayNotices, RelayStatusProvider, useRelayStatus } from './relay/RelayStatus.js';
 import { signingPaused } from './relay/status.js';
 import { storageText } from './store/messages.js';
@@ -67,7 +69,7 @@ export const SECTIONS = [
   { id: 'markets', label: 'Markets', icon: 'markets' },
   { id: 'trade', label: 'Trade', icon: 'trade' },
   { id: 'account', label: 'Portfolio', icon: 'portfolio' },
-  { id: 'local', label: 'Your data', icon: 'data' },
+  { id: 'local', label: 'Local Data', icon: 'data' },
 ] as const satisfies ReadonlyArray<TabItem>;
 type SectionId = (typeof SECTIONS)[number]['id'];
 
@@ -213,7 +215,7 @@ function WalletArea({
               <Icon name="portfolio" /> Portfolio
             </a>
             <a role="menuitem" className="menu-item" href="#local" onClick={() => setMenu(false)}>
-              <Icon name="data" /> Your data
+              <Icon name="data" /> Local Data
             </a>
             <div className="menu-sep" />
             <button
@@ -377,7 +379,7 @@ function Shell({
             <section data-testid={`section-${section}`}>
               <PageHead title={pending} />
               <EmptyState title="Coming soon">
-                This section is being built. Your records are under <a href="#local">Your data</a>.
+                This section is being built. Your records are under <a href="#local">Local Data</a>.
               </EmptyState>
             </section>
           )}
@@ -488,7 +490,9 @@ export function App() {
                   <AssetFilterProvider site={config.assets}>
                     <ActivityProvider store={activity}>
                       <ToastProvider>
-                        <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                        <ProverProvider relayUrl={config.relayUrl}>
+                          <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                        </ProverProvider>
                       </ToastProvider>
                     </ActivityProvider>
                   </AssetFilterProvider>

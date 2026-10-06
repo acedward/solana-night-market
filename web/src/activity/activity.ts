@@ -18,6 +18,9 @@
 
 import type { JobView } from '@nightmarket/core';
 
+import type { ClientProofProgress } from '../prover/client-prover.js';
+import { CLIENT_PROOF_STAGE_WORDS } from '../prover/i62a.js';
+
 /** What the customer started (the operation, not the relay's job: a withdrawal may run two jobs). */
 export type ActivityKind =
   | 'register'
@@ -146,6 +149,8 @@ export const STAGE_WORDS: Record<string, string> = {
   submitted: 'Sent to Midnight',
   succeeded: 'Done',
   failed: 'Failed',
+  // AA 00062 (I-62a): the market waits for the proof of the customer's own prover.
+  ...CLIENT_PROOF_STAGE_WORDS,
 };
 
 /** A make's stages: it is an offer on the order book, not a transaction. */
@@ -217,6 +222,9 @@ export interface Activity {
   /** Wallet approvals given so far in this action, and when the last one came. */
   approvals: number;
   approvedAt: number | null;
+  /** AA 00062 P4.3: the customer's own prover is working on this action's proof ("Proving on your
+   *  prover…", with its own elapsed time), or null. */
+  clientProof: ClientProofProgress | null;
 }
 
 export class ActivityStore {
@@ -247,10 +255,19 @@ export class ActivityStore {
       jobSince: null,
       approvals: 0,
       approvedAt: null,
+      clientProof: null,
     };
     this.hidden = false;
     this.emit();
     return this.seq;
+  }
+
+  /** AA 00062 P4.3: what the customer's prover is doing for this action (null: nothing now). */
+  clientProof(progress: ClientProofProgress | null): void {
+    const a = this.current;
+    if (!a) return;
+    this.current = { ...a, clientProof: progress };
+    this.emit();
   }
 
   /** A job update from the relay (the page's `onJob`). */

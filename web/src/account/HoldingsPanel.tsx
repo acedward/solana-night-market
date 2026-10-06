@@ -187,7 +187,7 @@ export function HoldingsPanel({ network, relayUrl }: { network: NetworkProfile; 
       >
         {account ? (
           <p className="small muted">
-            This browser does not hold your account&apos;s key. Import your backup file on Your data.
+            This browser does not hold your account&apos;s key. Import your backup file on Local Data.
           </p>
         ) : (
           <>

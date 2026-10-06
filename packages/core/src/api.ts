@@ -8,6 +8,7 @@
 import { z } from 'zod';
 
 import { RELAY_ACTIONS, type RelayActionName, SignedRelayActionSchema } from './auth.js';
+import { ClientProofFieldSchema, ClientProvingConfigSchema, ClientProvingHealthSchema } from './client-proving.js';
 
 export const API_PATHS = {
   health: '/health',
@@ -15,6 +16,8 @@ export const API_PATHS = {
   nonce: '/v1/auth/nonce',
   action: (action: RelayActionName) => `/v1/actions/${action}`,
   job: (requestId: string) => `/v1/jobs/${requestId}`,
+  /** AA 00062 (I-62a): a job's client-proof hand-off (`GET` the request, `POST` the proof; ./client-proving.ts). */
+  clientProof: (requestId: string) => `/v1/jobs/${requestId}/client-proof`,
   queue: '/v1/queue',
   accountState: (account: string) => `/v1/accounts/${account}/state`,
   accountInbox: (account: string) => `/v1/accounts/${account}/inbox`,
@@ -90,6 +93,9 @@ export const JobViewSchema = z.object({
   /** Public outcome (addresses, hashes, the new coin's public data). */
   result: z.record(z.string(), z.unknown()).optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
+  /** AA 00062 (I-62a): present exactly while a client-proof hand-off is open (`CLIENT_PROVING=required`);
+   *  `state` stays `running` meanwhile (./client-proving.ts). */
+  clientProof: ClientProofFieldSchema.optional(),
 });
 export type JobView = z.infer<typeof JobViewSchema>;
 
@@ -171,6 +177,8 @@ export const HealthResponseSchema = z.object({
      *  500 = a generic failure (a replayed settlement answers 500 too). Null when none. */
     lastRefusal: z.object({ httpStatus: z.number().int(), at: z.number().int() }).nullable().optional(),
   }),
+  /** AA 00062: the client-proving mode, only when it is `required` (absent: `off`). */
+  clientProving: ClientProvingHealthSchema.optional(),
 });
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
@@ -197,5 +205,8 @@ export const PublicConfigSchema = z.object({
     .string()
     .regex(/^[0-9a-f]{64}$/)
     .optional(),
+  /** AA 00062 (I-62a): client proving, only when it is `required` (absent: `off`, as from an older relay):
+   *  the page then has the user's own prover prove these circuits (./client-proving.ts). */
+  clientProving: ClientProvingConfigSchema.optional(),
 });
 export type PublicConfig = z.infer<typeof PublicConfigSchema>;

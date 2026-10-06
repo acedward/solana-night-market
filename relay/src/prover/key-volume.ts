@@ -31,6 +31,17 @@ export const KEY_VOLUME_BUNDLES = ['account', 'faucet'] as const;
 export const KEYED_BUNDLES = ['account', 'faucet'] as const;
 
 /**
+ * The bridge bundle (AA 00060 P0.6): the 00050 template's compiled bridge, which Bridge out proves
+ * `lockForSolana` with. The operator installs it beside the key set as `<key volume>/bridge/`
+ * (RUNBOOK 17.3); the key job never builds it, and its install step leaves it in place. It is NOT part
+ * of the key set (P16): the fingerprint (./keys.ts `scanKeyTree`) leaves this directory out, so the pin
+ * stays the account and faucet set's with or without bridging. Its own start-up checks are
+ * ../bridge/registry-check.ts: each bridge's deployed `lockForSolana` verifier key against
+ * `bridge/keys/lockForSolana.verifier`, and each bridge's sealed SPL mint against the registry.
+ */
+export const BRIDGE_BUNDLE = 'bridge';
+
+/**
  * The prover keys the key job keeps, as `<bundle>/<circuit>`. Everything else is pruned after
  * the compile (the full account bundle is about 12 GB with every key).
  *

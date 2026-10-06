@@ -12,7 +12,7 @@ import { KernelClient } from '@nightmarket/core';
 
 import { addDustAndSubmit } from './bridge/dust-submit.js';
 import { LandingEntitlements, landingEntitlementKey } from './bridge/out-actions.js';
-import { bridgeKeyProblems, loadBridgeLedger, type ReadContractState } from './bridge/registry-check.js';
+import { BRIDGE_BUNDLE, bridgeKeyProblems, loadBridgeLedger, type ReadContractState } from './bridge/registry-check.js';
 import { AccountCaps } from './actions/account-caps.js';
 import { AccountGate } from './actions/account-gate.js';
 import {
@@ -90,6 +90,8 @@ async function main(): Promise<void> {
   // key and ZKIR, and a pinned fingerprint must match. When a volume is configured and any of that
   // fails, the relay does not start: a missing key would otherwise surface only in a customer's job.
   // (No deployed callee is checked: MN Bank checked the bridge vault's keys; Night Market has none.)
+  // The fingerprint covers the key set only (AA 00060 P16): a bridge bundle beside it (`<volume>/bridge/`)
+  // leaves the pin unchanged and is checked on its own below, with the journey registry.
   const deployed: Record<string, string> = {};
   // The demo-token endpoint also proves the faucet's mint and the account's deposit (B3).
   const required = config.demoTokens.enabled
@@ -475,7 +477,7 @@ async function main(): Promise<void> {
       transcripts: async () => ({
         runtime: (await import('@midnight-ntwrk/compact-runtime-0.20')) as never,
         bridgeLedger: (
-          (await import(join(managed, 'bridge', 'contract', 'index.js'))) as { ledger: (s: unknown) => never }
+          (await import(join(managed, BRIDGE_BUNDLE, 'contract', 'index.js'))) as { ledger: (s: unknown) => never }
         ).ledger,
         stateAt: async (address, blockHash) =>
           (await pdp.queryZSwapAndContractState(address, { type: 'blockHash', blockHash }))?.[1] ?? null,

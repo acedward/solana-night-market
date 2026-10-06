@@ -26,6 +26,9 @@
 #   <root>/account/{contract,compiler,zkir,keys}
 #   <root>/faucet/{contract,compiler,zkir,keys}
 #   <root>/.night-market-keys.json   the verification report (public values), written last
+# With bridging, the operator also installs the bridge bundle as <root>/bridge/ (RUNBOOK 17.3). This job
+# never builds it and leaves it in place; it is not part of the key set, so the fingerprint ignores it
+# (AA 00060 P16).
 #
 # Checks (relay/src/tools/key-volume.ts `verify`): verifier keys = compiled expectedVk; the kept
 # prover keys are present; the fingerprint = RELAY_KEYS_FINGERPRINT. Any failure exits non-zero,

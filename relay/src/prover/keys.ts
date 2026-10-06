@@ -2,8 +2,12 @@
 // pinned one-shot and mounted read-only at MIDNIGHT_MANAGED_PATH (plan P0.5 decision). The relay
 // image carries no keys.
 //
-// Its identity is a FINGERPRINT over every verifier key: sha256 of the sorted lines
-// "<contract>/<circuit> <sha256 of the .verifier file>". When a key volume is configured, the relay
+// Its identity is a FINGERPRINT over every verifier key of the key set: sha256 of the sorted lines
+// "<contract>/<circuit> <sha256 of the .verifier file>". The bridge bundle (`<root>/bridge/`, AA 00060)
+// sits in the same volume but is not part of the set (P16, `NOT_IN_KEY_SET`): it is left out of the
+// scan, so the pin is the same with or without bridging, and it has its own start-up checks
+// (../bridge/registry-check.ts). This one scan is what the relay's start-up check, /health and the key
+// job's `verify` (../tools/key-volume.ts) all use. When a key volume is configured, the relay
 // refuses to start (plan P4-A) unless:
 //   - a pinned fingerprint, when configured, equals the volume's;
 //   - every circuit the relay proves (./required.ts) has its prover key, verifier key and ZKIR;
@@ -14,6 +18,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { BRIDGE_BUNDLE } from './key-volume.js';
 
 export interface KeyTreeCircuit {
   contract: string;
@@ -35,11 +41,16 @@ export class KeyVolumeError extends Error {
 
 const sha256 = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
 
-/** Scan `<root>/<contract>/keys/*.verifier` (the compactc layout). */
+/** The key volume's top-level directories that are not part of the key set, so not in its fingerprint
+ *  (AA 00060 P16): the bridge bundle. Every other directory with keys is, as before. */
+export const NOT_IN_KEY_SET: readonly string[] = [BRIDGE_BUNDLE];
+
+/** Scan `<root>/<contract>/keys/*.verifier` (the compactc layout), the key set's bundles only. */
 export function scanKeyTree(root: string): KeyTree {
   if (!existsSync(root) || !statSync(root).isDirectory()) throw new KeyVolumeError('the key volume is not mounted');
   const circuits: KeyTreeCircuit[] = [];
   for (const contract of readdirSync(root).sort()) {
+    if (NOT_IN_KEY_SET.includes(contract)) continue;
     const keysDir = join(root, contract, 'keys');
     if (!existsSync(keysDir) || !statSync(keysDir).isDirectory()) continue;
     for (const file of readdirSync(keysDir).sort()) {

@@ -4,6 +4,9 @@
 // wrapping). Covers discovery, connect, the signature check (Ledger refusal, mismatch), the wallet's
 // errors (rejection, lock, timeout) and the page's signing panel.
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import nacl from 'tweetnacl';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -17,8 +20,10 @@ import {
 } from '@nightmarket/core';
 import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
 
-import { solanaWalletAdapter } from '../src/wallet/phantom-adapter.js';
-import { SignPromptStore, messageFingerprint, type SignPrompt } from '../src/wallet/sign-prompt.js';
+import { REGISTRATION_FIRST_LINE, landingMessageText } from '@nightmarket/core/bridge';
+
+import { WALLET_REQUEST_GAP_MS, solanaWalletAdapter, walletPacer } from '../src/wallet/phantom-adapter.js';
+import { SignPromptStore, messageFingerprint, messageKind, type SignPrompt } from '../src/wallet/sign-prompt.js';
 import { OFFCHAIN_SIGNING_DOMAIN, classifyWalletSignature, offchainWrappings } from '../src/wallet/solana-signature.js';
 import {
   discoverSolanaWallets,
@@ -339,5 +344,203 @@ describe('the adapter (connect, sign, refuse)', () => {
     const s2 = await connectFirst(b.adapter);
     const e = await s2.signing.relayAction(envelopeFor(s2.signing.deviceKey)).catch((x: unknown) => x);
     expect((e as WalletError).kind).toBe('hardware');
+  });
+});
+
+describe('AA 00060 P5: Nightly, paced requests, and the new prompt kinds', () => {
+  it("Nightly's other-chain wallets (Sui, Aptos, IOTA, Cedra, all named Nightly) are not offered", () => {
+    const solana = fakeStandardWallet({ name: 'Nightly', chains: ['solana:mainnet', 'solana:mainnet-beta'] });
+    let seen: SolanaWalletHandle[] = [];
+    cleanups.push(discoverSolanaWallets(window, (h) => (seen = h)));
+    for (const chain of ['sui:mainnet', 'aptos:mainnet', 'iota:mainnet', 'cedra:mainnet']) {
+      registerWallet(fakeStandardWallet({ name: 'Nightly', chains: [chain] }).wallet);
+      // Each has no solana: chain, so it is not a Solana signer.
+    }
+    expect(seen).toEqual([]);
+    registerWallet(solana.wallet);
+    expect(seen.map((h) => h.name)).toEqual(['Nightly']);
+  });
+
+  it('walletPacer: one request at a time, each at least the gap after the previous one ended', async () => {
+    let clock = 0;
+    const slept: number[] = [];
+    const pace = walletPacer(
+      750,
+      () => clock,
+      async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    );
+    const order: string[] = [];
+    const job = (name: string, takes: number) => async () => {
+      order.push(`start ${name} @${clock}`);
+      clock += takes;
+      order.push(`end ${name} @${clock}`);
+      return name;
+    };
+    const results = await Promise.all([pace(job('a', 100)), pace(job('b', 50)), pace(job('c', 10))]);
+    expect(results).toEqual(['a', 'b', 'c']);
+    expect(order).toEqual(['start a @0', 'end a @100', 'start b @850', 'end b @900', 'start c @1650', 'end c @1660']);
+    expect(slept).toEqual([750, 750]);
+    // A failed request still counts as ended; the next waits too.
+    await expect(pace(async () => Promise.reject(new Error('x')))).rejects.toThrow('x');
+    clock += 1000;
+    await pace(async () => 'later');
+    expect(slept).toEqual([750, 750, 750]);
+  });
+
+  it('a wallet that drops a request asked right after the previous answer gets both, through the adapter', async () => {
+    const kp = keyPair(12);
+    const account = {
+      address: solanaAddressOf(bytesToHex(kp.publicKey)),
+      publicKey: kp.publicKey,
+      chains: ['solana:mainnet'],
+      features: ['solana:signMessage'],
+    };
+    let lastAnswered = Number.NEGATIVE_INFINITY;
+    const arrivals: number[] = [];
+    const wallet: StandardWallet = {
+      version: '1.0.0',
+      name: 'Nightly',
+      icon: 'data:image/svg+xml;base64,PHN2Zy8+',
+      chains: ['solana:mainnet'],
+      accounts: [account],
+      features: {
+        'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [account] }) },
+        'solana:signMessage': {
+          version: '1.1.0',
+          signMessage: async ({ message }: { account: unknown; message: Uint8Array }) => {
+            const at = Date.now();
+            arrivals.push(at);
+            // G-NIGHTLY run 1: asked within 300 ms of the previous answer, no prompt shows: it never answers.
+            if (at - lastAnswered < 300) return new Promise(() => undefined);
+            lastAnswered = Date.now();
+            return [{ signature: nacl.sign.detached(message, kp.secretKey), signedMessage: message }];
+          },
+        },
+      },
+    };
+    registerWallet(wallet);
+    const prompts = new SignPromptStore();
+    const a = solanaWalletAdapter({ display, prompts, timeoutMs: 3_000, win: window });
+    const session = await connectFirst(a);
+    const env = (n: number) => ({ ...envelopeFor(bytesToHex(kp.publicKey)), nonce: `0x${String(n).repeat(64)}` });
+    const [s1, s2] = await Promise.all([session.signing.relayAction(env(1)), session.signing.relayAction(env(2))]);
+    expect(s1).toMatch(/^[0-9a-f]{128}$/);
+    expect(s2).toMatch(/^[0-9a-f]{128}$/);
+    expect(arrivals).toHaveLength(2);
+    expect(arrivals[1]! - arrivals[0]!).toBeGreaterThanOrEqual(WALLET_REQUEST_GAP_MS - 20);
+  });
+
+  it('a transaction with facts opens the solana-transaction prompt, and closes it after', async () => {
+    const kp = keyPair(13);
+    const account = {
+      address: solanaAddressOf(bytesToHex(kp.publicKey)),
+      publicKey: kp.publicKey,
+      chains: ['solana:mainnet'],
+      features: ['solana:signMessage', 'solana:signAndSendTransaction'],
+    };
+    const seen: Array<SignPrompt | null> = [];
+    const prompts = new SignPromptStore();
+    prompts.subscribe(() => seen.push(prompts.get()));
+    const wallet: StandardWallet = {
+      version: '1.0.0',
+      name: 'Nightly',
+      icon: 'data:image/svg+xml;base64,PHN2Zy8+',
+      chains: ['solana:mainnet'],
+      accounts: [account],
+      features: {
+        'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [account] }) },
+        'solana:signMessage': { version: '1.1.0', signMessage: async () => [] },
+        'solana:signAndSendTransaction': {
+          version: '1.0.0',
+          signAndSendTransaction: async () => [{ signature: new Uint8Array(64).fill(1) }],
+        },
+      },
+    };
+    registerWallet(wallet);
+    const a = solanaWalletAdapter({ display, prompts, timeoutMs: 3_000, win: window });
+    const session = await connectFirst(a);
+    const facts = { title: 'Lock 1 X', facts: [{ label: 'Program', value: 'P', mono: true }] };
+    const sig = await session.transactions!.signAndSend!(new Uint8Array([1, 2, 3]), 'solana:localnet', facts);
+    expect(sig).toHaveLength(64);
+    expect(seen[0]).toMatchObject({ kind: 'solana-transaction', wallet: 'Nightly', transaction: facts });
+    expect(seen.at(-1)).toBeNull();
+  });
+
+  it('P10.6 (audit F1): a refusal BEFORE the wallet is called says so; an error from the wallet keeps its code', async () => {
+    const kp = keyPair(15);
+    const account = {
+      address: solanaAddressOf(bytesToHex(kp.publicKey)),
+      publicKey: kp.publicKey,
+      chains: ['solana:mainnet'],
+      features: ['solana:signMessage', 'solana:signAndSendTransaction'],
+    };
+    let called = 0;
+    const wallet: StandardWallet = {
+      version: '1.0.0',
+      name: 'Disconnecting',
+      icon: 'data:image/svg+xml;base64,PHN2Zy8+',
+      chains: ['solana:mainnet'],
+      accounts: [account],
+      features: {
+        'standard:connect': { version: '1.0.0', connect: async () => ({ accounts: [account] }) },
+        'solana:signMessage': { version: '1.1.0', signMessage: async () => [] },
+        'solana:signAndSendTransaction': {
+          version: '1.0.0',
+          signAndSendTransaction: async () => {
+            called++;
+            throw { code: 4900, message: 'Disconnected' };
+          },
+        },
+      },
+    };
+    registerWallet(wallet);
+    let paused: string | null = 'The token lists differ.';
+    const a = solanaWalletAdapter({
+      display,
+      prompts: new SignPromptStore(),
+      timeoutMs: 3_000,
+      gate: () => paused,
+      win: window,
+    });
+    const session = await connectFirst(a);
+    const refused = (await session.transactions!.signAndSend!(new Uint8Array([1]), 'solana:localnet').catch(
+      (e: unknown) => e,
+    )) as WalletError & { beforeCall?: boolean; code?: number };
+    expect(called).toBe(0);
+    expect(refused.kind).toBe('paused');
+    expect(refused.beforeCall).toBe(true);
+    paused = null;
+    const after = (await session.transactions!.signAndSend!(new Uint8Array([1]), 'solana:localnet').catch(
+      (e: unknown) => e,
+    )) as WalletError & { beforeCall?: boolean; code?: number };
+    expect(called).toBe(1);
+    expect(after.code).toBe(4900);
+    expect(after.beforeCall).not.toBe(true);
+  });
+
+  it('messageKind: the landing key (I-5) and the registration (I-4) have their own kinds; the others are as before', () => {
+    const landing = landingMessageText({
+      origin: 'https://market.example',
+      midnightNetwork: 'stagenet',
+      solanaGenesisHash: '11111111111111111111111111111111',
+      walletAddress: solanaAddressOf(bytesToHex(keyPair(14).publicKey)),
+    });
+    expect(messageKind(landing)).toBe('landing-key');
+    expect(messageKind(`${REGISTRATION_FIRST_LINE}\nShow my Midnight account in my Solana wallet`)).toBe(
+      'rpc-registration',
+    );
+    expect(messageKind('Night Market - stagenet\nProve you hold this key\n')).toBe('relay-envelope');
+    expect(messageKind('Site: Night Market - stagenet \nWithdraw shielded\n')).toBe('account-call');
+  });
+
+  it("T5.3 every P0 golden (10b29b1's messages) keeps its kind", () => {
+    const goldens = JSON.parse(readFileSync(join(__dirname, '../../test/fixtures/messages-10b29b1.json'), 'utf8')) as {
+      messages: { id: string; family: 'relay-envelope' | 'account-call'; text: string }[];
+    };
+    expect(goldens.messages).toHaveLength(20);
+    for (const m of goldens.messages) expect(messageKind(m.text), m.id).toBe(m.family);
   });
 });

@@ -13,3 +13,15 @@ packages/core/src/tokens/mint-test-tokens/metadata.stagenet.json
 *.md
 # Kernel responses captured verbatim from the staging exchange; never reformat
 packages/core/test/fixtures/kernel/staging-*/
+# AA 00060 P0.4: message goldens captured byte for byte by scripts/message-goldens.ts; never reformat
+test/fixtures/messages-10b29b1.json
+# AA 00060 P4.4: the generator's goldens, exactly what scripts/bridge-tokens.ts writes; never reformat
+test/fixtures/bridge-tokens/*.out.json
+# AA 00060 P7.4: 00058's frozen vectors, copied byte for byte (00058-interfaces.PROVENANCE.md); never reformat
+test/fixtures/00058-interfaces.json
+# AA 00060 P8.2: 00059's frozen I-4 vectors, copied byte for byte (00059-account-registration-vectors.PROVENANCE.md); never reformat
+test/fixtures/00059-account-registration-vectors.json
+# AA 00060 P6.2: the vendored bridge contract, byte for byte (web/src/bridge/vendor/bridge/PROVENANCE.md); never reformat
+web/src/bridge/vendor/bridge/
+# AA 00060 P10.3 C13: a live bridge-node answer, copied byte for byte (00058-live-transfer-s2m-1.PROVENANCE.md); never reformat
+test/fixtures/00058-live-transfer-s2m-1.json

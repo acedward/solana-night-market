@@ -45,7 +45,7 @@ export type AdmissionOutcome =
     }
   | {
       ok: false;
-      status: 400 | 401 | 403 | 429 | 503;
+      status: 400 | 401 | 403 | 409 | 429 | 503;
       /** The error code the route answers with (`unauthorised` for a signer refusal). */
       code: string;
       reason: string;
@@ -56,6 +56,16 @@ export type AdmissionOutcome =
     };
 
 export type AdmissionCheck = (request: AdmissionRequest) => Promise<AdmissionOutcome>;
+
+/**
+ * AA 00060 P10.3 (audit C2): the check an UNSIGNED action (an `entitlement` action) must pass before it may
+ * charge anything to the account or device it names: the owner's rate limit, the failure budget, the
+ * account's one-job gate, a queue slot. It holds nothing; `adds` are merged into the queued job's payload.
+ */
+export type PreauthOutcome =
+  | { ok: true; adds?: Record<string, unknown> }
+  | { ok: false; status: 400 | 403 | 409 | 429 | 503; code: string; reason: string };
+export type PreauthCheck = (request: { account?: string; payload: unknown; client: string }) => Promise<PreauthOutcome>;
 
 /**
  * Several checks in order: the first refusal wins, and everything the earlier checks claimed is given

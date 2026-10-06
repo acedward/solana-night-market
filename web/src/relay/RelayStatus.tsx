@@ -20,14 +20,18 @@ const Ctx = createContext<RelayStatusValue | null>(null);
 export function RelayStatusProvider({
   relayUrl,
   pollMs = HEALTH_POLL_MS,
+  siteTokensDigest = null,
   children,
 }: {
   relayUrl: string;
   pollMs?: number;
+  /** AA 00060 P4.3: this site's token-list digest (core `tokensDigest`), compared with the relay's. */
+  siteTokensDigest?: string | null;
   children: ReactNode;
 }) {
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const [state, setState] = useState<RelayState>({ health: null, reachable: null, checkedAt: null });
+  const [relayTokensDigest, setRelayTokensDigest] = useState<string | null>(null);
   const inFlight = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(() => {
@@ -45,6 +49,11 @@ export function RelayStatusProvider({
               checkedAt: Date.now(),
             }));
           },
+        )
+        .then(() =>
+          // AA 00060 P4.3: the relay's token-list digest, read with every refresh (it changes only
+          // with the relay's configuration). An unreadable answer keeps the last one.
+          relay.tokensDigest().then(setRelayTokensDigest, () => undefined),
         )
         .finally(() => {
           inFlight.current = null;
@@ -67,7 +76,10 @@ export function RelayStatusProvider({
     };
   }, [refresh, pollMs]);
 
-  const value = useMemo(() => ({ ...state, refresh }), [state, refresh]);
+  const value = useMemo(
+    () => ({ ...state, siteTokensDigest, relayTokensDigest, refresh }),
+    [state, siteTokensDigest, relayTokensDigest, refresh],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

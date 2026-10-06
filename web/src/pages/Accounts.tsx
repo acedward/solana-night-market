@@ -9,8 +9,16 @@
 // wallet signature, the relay deploys and activates), the tokens (private shielded coins and public
 // unshielded balances), withdrawals to a Midnight wallet (one signature each), demo tokens, the
 // pending items and the job tracker (AA 00047 lane B2).
+//
+// AA 00060 P12.1c (spec FR-023): the page shows the holdings and a list of five actions (../account/
+// PortfolioActions.tsx), each opening its own flow as a sub-page (`#account?action=<id>`); no form is
+// inline on the Portfolio itself. Every flow stays mounted (hidden while another view is open), so an
+// open transfer keeps being followed and Bridge out's landing key stays in memory exactly as before.
+// The right column holds the job tracker, "Show in my wallet" and the pending items. The free demo pack
+// is offered only here (action 4, "Mint Midnight tokens").
+// P12.1 (FR-020): each bridged token's row shows its total, Midnight and Solana (../bridge/portfolio.ts).
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import {
   confirmedOnChain,
@@ -31,6 +39,16 @@ import type { AccountCheckProblem } from '@nightmarket/core/passport';
 
 import { useActivity } from '../activity/ActivityContext.js';
 import { stageWords, type ActivityKind } from '../activity/activity.js';
+import { PassportHoldings } from '../account/PassportHoldings.js';
+import {
+  NOT_ON_THIS_MARKET,
+  PORTFOLIO_ACTIONS,
+  PortfolioActionList,
+  usePortfolioAction,
+  type ActionState,
+  type PortfolioActionId,
+  type SplFaucetSeam,
+} from '../account/PortfolioActions.js';
 import { RestoreKeyDialog } from '../account/RestoreKeyDialog.js';
 import { useUnshieldedBalances } from '../account/useAccountView.js';
 import { WholeCoinExit, type WholeCoinExitOffer } from '../account/WholeCoinExit.js';
@@ -54,14 +72,22 @@ import {
   Select,
   StageTracker,
   StatusPill,
-  Sub,
   TextInput,
   Toast,
-  TokenIcon,
   UnitInput,
   type TrackerStage,
 } from '../design/index.js';
 import { useAssetFilter } from '../assets/AssetFilterContext.js';
+import { useBridges } from '../bridge/BridgeContext.js';
+import { BridgeIn } from '../bridge/in/BridgeIn.js';
+import { isFinal as isFinalIn } from '../bridge/in/operations.js';
+import { readBridgeIns } from '../bridge/in/records.js';
+import { BridgeOut } from '../bridge/out/BridgeOut.js';
+import { isFinalOut, readBridgeOuts } from '../bridge/out/records.js';
+import { bridgedHoldings } from '../bridge/portfolio.js';
+import { useSolanaHoldings } from '../bridge/SolanaLinesContext.js';
+import { ShowInWallet } from '../bridge/rpc/ShowInWallet.js';
+import { useSplFaucetSeam } from '../bridge/faucet/MintSolanaTokens.js';
 import { useTokenRegistry } from '../market/MarketContext.js';
 import {
   awaitChange,
@@ -79,13 +105,14 @@ import {
   type OperationEnv,
 } from '../passport/operations.js';
 import { findAccount, listJobs, readCoins, readSecret } from '../passport/records.js';
+import { useMidnightReadFailure } from '../passport/read-status.js';
 import { useRelayStatus } from '../relay/RelayStatus.js';
 import { RelayClient, RelayError } from '../relay/client.js';
 import { storageText } from '../store/messages.js';
 import { useStore } from '../store/StoreContext.js';
 import { confirmCancelsOffer as confirmOffer, reconcileFromChain } from '../trade/operations.js';
 import { useConnectPrompt } from '../wallet/connect-prompt.js';
-import { useWallet } from '../wallet/WalletContext.js';
+import { useWallet, useWalletName } from '../wallet/WalletContext.js';
 
 const short = (s: string, head = 8, tail = 6) =>
   s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
@@ -96,6 +123,7 @@ const JOB_TITLE: Record<string, string> = {
   'withdraw-unshielded': 'Withdrawing public tokens',
   'append-inbox': 'Saving your change',
   'demo-tokens': 'Delivering your demo tokens',
+  // An older browser's record only: offers cannot be cancelled since AA 00060 FR-028.
   'cancel-offers': 'Cancelling your offer',
   'restore-enc-key': 'Restoring your encryption key',
 };
@@ -163,101 +191,6 @@ function JobTracker({ job }: { job: JobView }) {
   );
 }
 
-function PassportHoldings({
-  coins,
-  tokens,
-  unshielded,
-}: {
-  coins: StoredCoin[];
-  tokens: TokenRegistry | null;
-  unshielded: Array<{ colour: string; amount: bigint }>;
-}) {
-  // Listed in the market's token order (the registry's); unknown colours last.
-  const order = (colour: string) => {
-    const i = tokens?.tokens.findIndex((t) => t.midnightColour === colour) ?? -1;
-    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
-  };
-  const rows = holdingsByColour(coins)
-    .map((h) => ({ h, token: tokens?.byColour(h.color) }))
-    .sort((a, b) => order(a.h.color) - order(b.h.color));
-  const open = unshielded
-    .filter((u) => u.amount > 0n)
-    .map((u) => ({ u, token: tokens?.byColour(u.colour) }))
-    .sort((a, b) => order(a.u.colour) - order(b.u.colour));
-  if (rows.length === 0 && open.length === 0) {
-    return (
-      <EmptyState data-testid="passport-empty" icon="gift" title="No tokens yet">
-        Get the free demo pack, or send tokens to your account. They show here once they land.
-      </EmptyState>
-    );
-  }
-  return (
-    <ul className="token-list" aria-label="Your tokens" data-testid="passport-holdings">
-      {rows.map(({ h, token: t }) => {
-        const dec = t?.decimals ?? 0;
-        const symbol = t?.symbol ?? short(h.color);
-        return (
-          <li
-            key={h.color}
-            className="token-row"
-            data-testid="passport-row"
-            data-colour={h.color}
-            data-symbol={t?.symbol ?? ''}
-          >
-            <TokenIcon symbol={symbol} />
-            <span className="token-meta">
-              <span className="token-sym">
-                {symbol}
-                <span className="kind-chip">{t && t.privacy !== 'shielded' ? 'public' : 'private'}</span>
-              </span>
-              {t?.name ? <span className="token-name">{t.name}</span> : null}
-            </span>
-            <span className="token-amount">
-              <span className="num" data-testid="passport-amount" data-raw={h.total.toString()}>
-                {formatUnits(h.total, dec, { minFractionDigits: 2, grouping: true })}
-              </span>
-              <Sub>
-                up to{' '}
-                <span data-testid="passport-largest" data-raw={h.largest.toString()}>
-                  {formatUnits(h.largest, dec, { minFractionDigits: 2, grouping: true })}
-                </span>{' '}
-                in one go
-              </Sub>
-            </span>
-          </li>
-        );
-      })}
-      {open.map(({ u, token: t }) => {
-        const symbol = t?.symbol ?? short(u.colour);
-        return (
-          <li
-            key={`u-${u.colour}`}
-            className="token-row"
-            data-testid="passport-row"
-            data-kind="unshielded"
-            data-colour={u.colour}
-            data-symbol={t?.symbol ?? ''}
-          >
-            <TokenIcon symbol={symbol} />
-            <span className="token-meta">
-              <span className="token-sym">
-                {symbol}
-                <span className="kind-chip">public</span>
-              </span>
-              <span className="token-name">{t?.name ? `${t.name} · public balance` : 'public balance'}</span>
-            </span>
-            <span className="token-amount">
-              <span className="num" data-testid="passport-amount" data-raw={u.amount.toString()}>
-                {formatUnits(u.amount, t?.decimals ?? 0, { minFractionDigits: 2, grouping: true })}
-              </span>
-            </span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 /** A withdrawal from the public (unshielded) balance to an unshielded wallet (`mn_addr_…`): one signature. */
 function UnshieldedWithdrawForm({
   balances,
@@ -270,6 +203,7 @@ function UnshieldedWithdrawForm({
   onSend: (color: string, amount: bigint, recipient: string, balance: bigint) => void;
   busy: boolean;
 }) {
+  const wallet = useWalletName();
   const [color, setColor] = useState('');
   const [amount, setAmount] = useState('');
   const [recipient, setRecipient] = useState('');
@@ -337,7 +271,7 @@ function UnshieldedWithdrawForm({
         />
       </Field>
       <p className="small muted panel-intro">
-        You approve once: Phantom shows the amount, the token and the recipient before you approve.
+        You approve once: {wallet.name} shows the amount, the token and the recipient before you approve.
       </p>
       {error && (
         <Notice tone="danger" role="alert" data-testid="wu-error" className="panel-intro">
@@ -364,6 +298,7 @@ function SendForm({
   onSend: (color: string, amount: bigint, recipient: string) => void;
   busy: boolean;
 }) {
+  const wallet = useWalletName();
   const held = holdingsByColour(coins);
   const [color, setColor] = useState('');
   const [amount, setAmount] = useState('');
@@ -437,9 +372,9 @@ function SendForm({
           />
         </Field>
         <p className="small muted panel-intro">
-          You approve once for the payment: Phantom shows the amount, the token and the recipient. Any change stays in
-          your account, and Phantom asks for one more approval to save it in your account&apos;s inbox, so a backup can
-          always restore it.
+          You approve once for the payment: {wallet.name} shows the amount, the token and the recipient. Any change
+          stays in your account, and {wallet.name} asks for one more approval to save it in your account&apos;s inbox,
+          so a backup can always restore it.
         </p>
         {error && (
           <Notice tone="danger" role="alert" data-testid="send-error" className="panel-intro">
@@ -454,15 +389,38 @@ function SendForm({
   );
 }
 
-export function Accounts({ network, relayUrl }: { network: NetworkProfile; relayUrl: string }) {
+export function Accounts({
+  network,
+  relayUrl,
+  injectorUrl = null,
+  splFaucet: splFaucetGiven,
+}: {
+  network: NetworkProfile;
+  relayUrl: string;
+  /** AA 00060 P8: config.json `injector.url`, for "Show in my wallet". */
+  injectorUrl?: string | null;
+  /** AA 00060 FR-024 (plan P13): the "Mint Solana tokens" flow. Absent: the relay's own test SPL faucet
+   *  (web/src/bridge/faucet/MintSolanaTokens.tsx `useSplFaucetSeam`), offered when the relay serves it; null:
+   *  none (the action is listed as not available on this market). */
+  splFaucet?: SplFaucetSeam | null;
+}) {
+  // AA 00060 P13: the action is enabled only when this market's relay offers its test SPL faucet.
+  const relayFaucet = useSplFaucetSeam(relayUrl);
+  const splFaucet = splFaucetGiven === undefined ? relayFaucet : splFaucetGiven;
   const tokens = useTokenRegistry();
   const activity = useActivity();
   const connect = useConnectPrompt();
   const { store, revision, status: storageStatus } = useStore();
   const { spendingPaused } = useRelayStatus();
   const wallet = useWallet();
+  const walletName = useWalletName();
   const relay = useMemo(() => new RelayClient(relayUrl), [relayUrl]);
   const chain = useChain();
+  // AA 00060 P7: the site's journey registry passed its checks, so Bridge in is offered.
+  const bridgeState = useBridges();
+  const bridging = bridgeState.state === 'ready';
+  // AA 00060 P12.1c (FR-023): the open action's sub-page (`#account?action=<id>`), or null.
+  const action = usePortfolioAction();
   const [job, setJob] = useState<JobView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -507,6 +465,49 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
         .filter((b) => b.amount > 0n && assets.showsColour(b.colour)) ?? [],
     [unshieldedRead.view, assets],
   );
+  // AA 00060 P12.1 (FR-020): one row per bridged token: its total, Midnight and the wallet's SPL on Solana.
+  const bridgeEntries = useMemo(
+    () =>
+      bridgeState.state === 'ready' ? bridgeState.registry.entries.filter((e) => assets.showsColour(e.colour)) : [],
+    [bridgeState, assets],
+  );
+  // P12.1d (FR-025): ONE Solana read shared with the compact list beside the books (../bridge/
+  // SolanaLinesContext.tsx), read again when the account's bridged coins change and on "Refresh balances".
+  const { lines: solanaLines, refresh: refreshSolana } = useSolanaHoldings(coins);
+  // P11 (light review L-B1): after a failed refresh on Midnight, its line is "unavailable", with no total.
+  const midnightFailure = useMidnightReadFailure(account && hasSecret ? account.address : null);
+  const bridged = useMemo(
+    () => bridgedHoldings(bridgeEntries, hasSecret ? shownCoins : null, solanaLines, midnightFailure),
+    [bridgeEntries, hasSecret, shownCoins, solanaLines, midnightFailure],
+  );
+  // FR-023: whether this market hands out demo tokens (action 4), and the open transfers (actions 2, 3).
+  const [demoOffered, setDemoOffered] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    relay.demoTokensInfo().then(
+      (i) => live && setDemoOffered(i !== null),
+      () => live && setDemoOffered(false),
+    );
+    return () => {
+      live = false;
+    };
+  }, [relay]);
+  const openTransfers = useMemo(
+    () =>
+      store && scope && account
+        ? {
+            in: readBridgeIns(store, scope, account.address).filter((r) => !isFinalIn(r)).length,
+            out: readBridgeOuts(store, scope, account.address).filter((r) => !isFinalOut(r)).length,
+          }
+        : { in: 0, out: 0 },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store, scope, account, revision],
+  );
+  // Opening an action moves the focus (and the view) to its flow; "All actions" goes back.
+  const backRef = useRef<HTMLAnchorElement>(null);
+  useEffect(() => {
+    if (action) backRef.current?.focus();
+  }, [action]);
   const [withdrawKind, setWithdrawKind] = useState<'shielded' | 'unshielded'>('shielded');
   // Whether a withdrawal to a wallet also needs F-B6's envelope (questions Q13: off by default).
   const [recipientEnvelope, setRecipientEnvelope] = useState(false);
@@ -538,6 +539,12 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     };
   }, [store, scope, wallet.signing, relay, chain, activity]);
   const dismiss = useCallback(() => setMessage(null), []);
+  // AA 00060 P7 (FR-003): Bridge in's completion is the page's own decode, from a fresh walk.
+  const bridgePageCoins = useCallback(async () => {
+    const e = env();
+    if (!e || !account || !hasSecret) return [];
+    return (await syncAccount(e, account.address)).coins;
+  }, [env, account, hasSecret]);
 
   const sync = useCallback(async () => {
     const e = env();
@@ -685,7 +692,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
     });
 
   const lede =
-    'Your tokens on Midnight, controlled by your Phantom wallet. Balances come from the coins this browser keeps, checked against your account’s inbox on Midnight.';
+    'Your tokens on Midnight, controlled by your Solana wallet. Balances come from the coins this browser keeps, checked against your account’s inbox on Midnight.';
 
   if (wallet.status !== 'connected' || !scope) {
     return (
@@ -697,7 +704,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
           action={
             connect ? (
               <Button data-testid="account-connect-cta" onClick={connect}>
-                <Icon name="wallet" /> Connect Phantom
+                <Icon name="wallet" /> Connect wallet
               </Button>
             ) : undefined
           }
@@ -705,7 +712,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
           <span data-testid="account-connect">
             {wallet.supported
               ? 'Connect your Solana wallet to see your account. It only signs messages: it needs no SOL, and the market pays every Midnight fee.'
-              : 'Accounts controlled by a Solana wallet (Phantom) are coming to this site. Until then, browse the order books on Markets.'}
+              : 'Accounts controlled by a Solana wallet are coming to this site. Until then, browse the order books on Markets.'}
           </span>
         </EmptyState>
       </section>
@@ -713,6 +720,22 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
   }
 
   const registering = pendingJobs.find((j) => j.job.action === 'register' && j.account === null);
+  // FR-023: what each action can do now (a reason when it cannot), and its open transfers.
+  const bridgeReason =
+    bridgeState.state === 'refused'
+      ? bridgeState.reason
+      : bridgeState.state === 'checking'
+        ? 'Checking this market’s bridges…'
+        : NOT_ON_THIS_MARKET;
+  const actionStates: Record<PortfolioActionId, ActionState> = {
+    send: { disabled: null },
+    'bridge-in': { disabled: bridging ? null : bridgeReason, pending: openTransfers.in },
+    'bridge-out': { disabled: bridging ? null : bridgeReason, pending: openTransfers.out },
+    'mint-midnight': { disabled: demoOffered === false ? NOT_ON_THIS_MARKET : null },
+    'mint-solana': {
+      disabled: splFaucet?.offered ? null : splFaucet?.offered === null ? 'Checking this market…' : NOT_ON_THIS_MARKET,
+    },
+  };
   const unsecured = unsecuredCoins(coins);
   // R2-5 / R2-6: changes the chain does not show yet, and inbox notes it does not confirm (counted only).
   const waiting = pendingChanges(coins);
@@ -731,7 +754,10 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
               variant="secondary"
               data-testid="refresh-balances"
               disabled={syncing || !!busy}
-              onClick={() => void sync()}
+              onClick={() => {
+                refreshSolana();
+                void sync();
+              }}
             >
               {syncing ? 'Refreshing…' : 'Refresh balances'}
             </Button>
@@ -800,7 +826,7 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
                 />
               )}
               <div data-testid="account" data-account={account.address}>
-                <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} />
+                <PassportHoldings coins={shownCoins} tokens={tokens} unshielded={unshielded} bridged={bridged} />
                 {!unshieldedRead.served && (
                   <p className="table-note" data-testid="unshielded-not-served">
                     This market does not report public (unshielded) balances yet.
@@ -823,52 +849,111 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
               </div>
             </Panel>
           )}
-          {account && hasSecret && (
-            <Panel title="Withdraw to a Midnight wallet" data-testid="withdraw-section">
-              <Field label="From">
-                <Segmented<'shielded' | 'unshielded'>
-                  label="From"
-                  options={[
-                    { value: 'shielded', label: 'Private tokens', testId: 'withdraw-kind-shielded' },
-                    { value: 'unshielded', label: 'Public tokens', testId: 'withdraw-kind-unshielded' },
-                  ]}
-                  value={withdrawKind}
-                  onChange={setWithdrawKind}
-                />
-              </Field>
-              {withdrawKind === 'shielded' && exitOffer && (
-                <WholeCoinExit
-                  offer={exitOffer}
-                  coins={coins}
-                  tokens={tokens}
-                  busy={!!busy}
-                  onWithdraw={(c, a, r) => void send(c, a, r)}
-                  onDismiss={() => setExitOffer(null)}
-                />
-              )}
-              {withdrawKind === 'shielded' ? (
-                <SendForm
-                  coins={shownCoins}
-                  tokens={tokens}
-                  network={network.name}
-                  onSend={(c, a, r) => void send(c, a, r)}
-                  busy={!!busy}
-                />
-              ) : (
-                <UnshieldedWithdrawForm
-                  balances={unshielded}
-                  tokens={tokens}
-                  onSend={(c, a, r, b) => void sendUnshielded(c, a, r, b)}
-                  busy={!!busy}
-                />
-              )}
+          {account && hasSecret && action === null && (
+            <Panel title="What you can do" data-testid="actions-section">
+              <PortfolioActionList states={actionStates} />
             </Panel>
+          )}
+          {account && hasSecret && action !== null && (
+            <div className="portfolio-flow-head" data-testid="portfolio-flow" data-action={action}>
+              <a href="#account" className="portfolio-back" data-testid="portfolio-back" ref={backRef}>
+                <Icon name="arrowLeft" /> All actions
+              </a>
+            </div>
+          )}
+          {account && hasSecret && action !== null && actionStates[action].disabled && (
+            <Notice tone="info" role="status" data-testid="portfolio-action-unavailable">
+              {PORTFOLIO_ACTIONS.find((a) => a.id === action)?.label}: {actionStates[action].disabled}
+            </Notice>
+          )}
+          {/* Every flow stays mounted; only the open action's is shown (FR-023). */}
+          {account && hasSecret && (
+            <div data-flow="send" hidden={action !== 'send'}>
+              <Panel title="Send tokens to a Midnight wallet" data-testid="withdraw-section">
+                <Field label="From">
+                  <Segmented<'shielded' | 'unshielded'>
+                    label="From"
+                    options={[
+                      { value: 'shielded', label: 'Private tokens', testId: 'withdraw-kind-shielded' },
+                      { value: 'unshielded', label: 'Public tokens', testId: 'withdraw-kind-unshielded' },
+                    ]}
+                    value={withdrawKind}
+                    onChange={setWithdrawKind}
+                  />
+                </Field>
+                {withdrawKind === 'shielded' && exitOffer && (
+                  <WholeCoinExit
+                    offer={exitOffer}
+                    coins={coins}
+                    tokens={tokens}
+                    busy={!!busy}
+                    onWithdraw={(c, a, r) => void send(c, a, r)}
+                    onDismiss={() => setExitOffer(null)}
+                  />
+                )}
+                {withdrawKind === 'shielded' ? (
+                  <SendForm
+                    coins={shownCoins}
+                    tokens={tokens}
+                    network={network.name}
+                    onSend={(c, a, r) => void send(c, a, r)}
+                    busy={!!busy}
+                  />
+                ) : (
+                  <UnshieldedWithdrawForm
+                    balances={unshielded}
+                    tokens={tokens}
+                    onSend={(c, a, r, b) => void sendUnshielded(c, a, r, b)}
+                    busy={!!busy}
+                  />
+                )}
+              </Panel>
+            </div>
+          )}
+          {account && hasSecret && bridging && (
+            <div data-flow="bridge-in" hidden={action !== 'bridge-in'}>
+              <BridgeIn
+                network={network.name}
+                account={account.address}
+                accountCheck={
+                  accountCheck.status === 'ok'
+                    ? 'ok'
+                    : accountCheck.status === 'failed' || accountCheck.status === 'error'
+                      ? 'failed'
+                      : 'pending'
+                }
+                pageCoins={bridgePageCoins}
+                busy={!!busy}
+              />
+            </div>
+          )}
+          {account && hasSecret && bridging && (
+            <div data-flow="bridge-out" hidden={action !== 'bridge-out'}>
+              <BridgeOut
+                network={network}
+                account={account.address}
+                accountChecked={accountCheck.status === 'ok'}
+                coins={coins}
+                env={env}
+                busy={!!busy}
+              />
+            </div>
+          )}
+          {account && hasSecret && (
+            <div data-flow="mint-midnight" hidden={action !== 'mint-midnight'}>
+              <DemoTokens network={network} relayUrl={relayUrl} />
+            </div>
+          )}
+          {account && hasSecret && splFaucet?.offered && (
+            <div data-flow="mint-solana" hidden={action !== 'mint-solana'}>
+              <splFaucet.Flow account={account.address} walletAddress={wallet.address} onDone={refreshSolana} />
+            </div>
           )}
           {!account && (
             <Card title="Open your free account" data-testid="no-account">
               <ul className="onboarding">
                 <li>
-                  <strong>One approval in Phantom</strong>
+                  <strong>One approval in {walletName.name}</strong>
                   It proves you own this wallet. It moves no funds and costs nothing.
                 </li>
                 <li>
@@ -909,7 +994,16 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
         <div className="area-side stack-gap">
           {job && <JobTracker job={job} />}
 
-          {account && <DemoTokens network={network} relayUrl={relayUrl} />}
+          {account && secret && injectorUrl && (
+            <ShowInWallet
+              injectorUrl={injectorUrl}
+              network={network.name}
+              account={account.address}
+              viewingKey={secret.encSecretKey}
+              accountChecked={accountCheck.status === 'ok'}
+              busy={!!busy}
+            />
+          )}
 
           {account && (
             <Panel tone="quiet" as="aside" title="Pending" data-testid="pending-box">
@@ -990,8 +1084,11 @@ export function Accounts({ network, relayUrl }: { network: NetworkProfile; relay
             <Panel tone="quiet" as="aside" title="How it works">
               <ul className="onboarding">
                 <li>
-                  <strong>Your keys stay in Phantom</strong>
-                  Phantom only signs short messages you can read. Night Market never sends a Solana transaction.
+                  <strong>Your keys stay in {walletName.name}</strong>
+                  {walletName.Name} signs short messages you can read for every market action.{' '}
+                  {bridging
+                    ? 'It signs a Solana transaction only when you bridge tokens in, after the page shows you what it does.'
+                    : 'Night Market never sends a Solana transaction.'}
                 </li>
                 <li>
                   <strong>Private by default</strong>

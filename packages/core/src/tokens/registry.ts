@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import { normaliseHex32 } from '../hex.js';
 import type { NetworkName } from '../network.js';
+import { siteIconPath } from './icon.js';
 import stagenetRecord from './mint-test-tokens/metadata.stagenet.json';
 
 export const TOKEN_PRIVACIES = ['shielded', 'unshielded'] as const;
@@ -41,6 +42,9 @@ export interface TokenEntry {
   /** The issuer's domain separator (`mint-test-tokens:<symbol>`); '' when unknown. */
   domainSeparator: string;
   source: TokenSource | null;
+  /** The token's icon on the site's own origin (AA 00060 FR-022, ./icon.ts), when configured; the page
+   *  shows its text badge otherwise. Display only: it is not part of the token-list digest. */
+  icon?: string;
 }
 
 export class TokenRegistryError extends Error {
@@ -171,6 +175,9 @@ export const TokenConfigSchema = z.object({
           .regex(/^([0-9a-fA-F]{64})?$/)
           .default(''),
         domainSeparator: z.string().max(64).default(''),
+        /** AA 00060 FR-022: the token's icon, a path on the site's own origin (./icon.ts). A value that is
+         *  not one is ignored (the token keeps its text badge); it never fails the list. */
+        icon: z.unknown().optional(),
       }),
     )
     .min(1),
@@ -185,16 +192,20 @@ function configuredTokens(config: unknown): { mode: 'extend' | 'replace'; tokens
   }
   return {
     mode: parsed.data.mode,
-    tokens: parsed.data.tokens.map((t) => ({
-      symbol: t.symbol,
-      name: t.name ?? t.symbol,
-      decimals: t.decimals,
-      privacy: t.privacy,
-      midnightColour: normaliseHex32(t.midnightColour),
-      contract: t.contract === '' ? '' : normaliseHex32(t.contract),
-      domainSeparator: t.domainSeparator,
-      source: null,
-    })),
+    tokens: parsed.data.tokens.map((t) => {
+      const icon = siteIconPath(t.icon);
+      return {
+        symbol: t.symbol,
+        name: t.name ?? t.symbol,
+        decimals: t.decimals,
+        privacy: t.privacy,
+        midnightColour: normaliseHex32(t.midnightColour),
+        contract: t.contract === '' ? '' : normaliseHex32(t.contract),
+        domainSeparator: t.domainSeparator,
+        source: null,
+        ...(icon ? { icon } : {}),
+      };
+    }),
   };
 }
 

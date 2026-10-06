@@ -33,6 +33,8 @@ import {
   type WithdrawUnshieldedPayload,
 } from '@nightmarket/core';
 
+import { BridgeRegistry } from '@nightmarket/core/bridge';
+
 import { testDevice, testScheme } from '../../packages/core/test/fixtures/test-signing.js';
 import { AccountCaps } from '../src/actions/account-caps.js';
 import {
@@ -43,6 +45,8 @@ import {
   withTrade,
 } from '../src/actions/catalogue.js';
 import { FailureBudget } from '../src/actions/failure-budget.js';
+import { withBridgeOut } from '../src/actions/catalogue.js';
+import { LandingEntitlements, landingEntitlementKey } from '../src/bridge/out-actions.js';
 import { RegistrationCaps } from '../src/actions/registration-caps.js';
 import { demoTokens } from '../src/demo/action.js';
 import { DemoTokenClaims } from '../src/demo/claims.js';
@@ -63,7 +67,7 @@ const ACCOUNT = '5e'.repeat(32);
 const AUTH_NONCE = 3n;
 const COLOUR_A = 'a1'.repeat(32);
 
-type Kind = 'relay-action' | 'passport-call';
+type Kind = 'relay-action' | 'passport-call' | 'entitlement' | 'unsigned';
 const KIND: Record<RelayActionName, Kind> = {
   register: 'relay-action',
   withdraw: 'passport-call',
@@ -75,7 +79,17 @@ const KIND: Record<RelayActionName, Kind> = {
   'cancel-offers': 'passport-call',
   // AA 00047 P10.R: "Restore my encryption key", authorised by its own signature (R2-3).
   'restore-enc-key': 'passport-call',
+  // AA 00060 P6.3: authorised by a landing entitlement (relay/test/bridge-out.test.ts tests them).
+  'bridge-out': 'entitlement',
+  'bridge-out-entitle': 'entitlement',
+  // AA 00060 P13: the test SPL faucet, unsigned (relay/test/spl-faucet.test.ts tests it).
+  'spl-faucet': 'unsigned',
 };
+/** The signed actions this file walks through (the entitlement and unsigned ones have their own tests). */
+const SIGNED_ACTIONS = RELAY_ACTIONS.filter(
+  // AA 00060 spec FR-028: `cancel-offers` is refused before anything (its own tests below).
+  (a) => KIND[a] !== 'entitlement' && KIND[a] !== 'unsigned' && a !== 'cancel-offers',
+);
 
 /** A sponsor that records every time a job borrows its wallet (that would be work). */
 class CountingSponsor extends FakeSponsor {
@@ -102,6 +116,8 @@ function productionRelay(
     appendsPerDay?: number;
     /** F-B6's second signature for a withdrawal's encryption key (questions Q13; off by default). */
     fb6?: boolean;
+    /** AA 00060 P10.3 C2: Bridge out's two unsigned actions, with fakes at the edges. */
+    bridgeOut?: boolean;
   } = {},
 ) {
   const device = newDevice();
@@ -159,6 +175,33 @@ function productionRelay(
       log,
     }),
   );
+  // AA 00060 P10.3 C2: Bridge out wired as main.ts wires it, its chain reads faked (tx1 is never found).
+  const entitleReads = { tx1: 0 };
+  if (opts.bridgeOut) {
+    withBridgeOut(catalogue, {
+      bridges: new BridgeRegistry('undeployed', '11111111111111111111111111111111', []),
+      entitlements: new LandingEntitlements({ key: landingEntitlementKey('11'.repeat(32)), network: 'undeployed' }),
+      ledger: async () => {
+        throw new Error('not used here');
+      },
+      transcripts: async () => {
+        throw new Error('not used here');
+      },
+      prove: async () => {
+        throw new Error('not used here');
+      },
+      submitWithDust: async () => {
+        throw new Error('not used here');
+      },
+      awaitLanded: async () => false,
+      log,
+      tx1: async () => {
+        entitleReads.tx1 += 1;
+        return null;
+      },
+      liveDevice: async () => true,
+    });
+  }
   const health = async (): Promise<HealthResponse> => {
     throw new Error('not used here');
   };
@@ -175,7 +218,8 @@ function productionRelay(
     chain: notImplementedChainReader,
     scheme: testScheme,
     passportCall: passportCallAuthoriser(() => rt, testArm, replay),
-    clientAddress: () => '198.51.100.7',
+    // Tests may name the client (AA 00060 P10.3 C2: an attacker beside the account's own browser).
+    clientAddress: (c) => c.req.header('x-test-client') ?? '198.51.100.7',
   });
   // Hold the prover lane with a job that never ends, so an accepted call stays QUEUED: it has done
   // no work, and its authorisation stays claimed (the replay test needs that).
@@ -195,6 +239,7 @@ function productionRelay(
     entitlements,
     held: HELD,
     queued: () => queue.stats().jobs - HELD,
+    entitleReads,
   };
 }
 type Relay = ReturnType<typeof productionRelay>;
@@ -242,6 +287,8 @@ function payloadFor(action: RelayActionName, n = 0, authNonce = AUTH_NONCE): Rec
       };
       return action === 'take' ? ({ ...make, offerId: 'cd'.repeat(32) } satisfies TakePayload) : make;
     }
+    default:
+      throw new Error(`${action} is not a signed action`);
   }
 }
 
@@ -294,10 +341,10 @@ async function body(r: Relay, action: RelayActionName, t: Tamper = {}) {
   return { account, payload, passportAuth };
 }
 
-const post = (r: Relay, action: string, b: unknown) =>
+const post = (r: Relay, action: string, b: unknown, client?: string) =>
   r.app.request(`/v1/actions/${action}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(client ? { 'x-test-client': client } : {}) },
     body: JSON.stringify(b),
   });
 
@@ -318,7 +365,7 @@ describe('the production catalogue', () => {
   });
 });
 
-describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (action) => {
+describe.each(SIGNED_ACTIONS)('POST /v1/actions/%s (production catalogue)', (action) => {
   const kind = KIND[action];
 
   it('accepts a correct call, and queues exactly one job', async () => {
@@ -419,6 +466,39 @@ describe.each(RELAY_ACTIONS)('POST /v1/actions/%s (production catalogue)', (acti
     expect(e.error.code).toBe('sponsor-low');
     sponsor.current = { ...sponsor.current, dustSpecks: 10n ** 20n };
     expect((await post(r, action, b)).status).toBe(202); // the same authorisation still works
+  });
+});
+
+// AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): Night Market does not cancel offers. The
+// relay refuses `cancel-offers` (a rotate_enc_key to the account's own key) FIRST: no nonce, no allowance, no
+// queue slot, no proof, no DUST. "Restore my encryption key" (another key) is unchanged.
+describe('FR-028: offers cannot be cancelled', () => {
+  it('a correctly signed cancel is refused before anything, at no cost to anyone', async () => {
+    const sponsor = new CountingSponsor({
+      configured: true,
+      state: 'synced',
+      synced: true,
+      dustSpecks: 10n ** 20n,
+    } as SponsorStatus);
+    const r = productionRelay({ sponsor, env: { RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN: '1' } });
+    const b = await body(r, 'cancel-offers');
+    for (let i = 0; i < 3; i++) {
+      const res = await post(r, 'cancel-offers', b);
+      expect(res.status, `request ${i + 1}`).toBe(403);
+      const e = (await res.json()) as { error: { code: string; message: string } };
+      expect(e.error.code).toBe('offers-cannot-be-cancelled');
+      expect(e.error.message).toContain('Offer Files');
+    }
+    expect(r.queued()).toBe(0);
+    expect(sponsor.walletCalls).toBe(0);
+    // The owner's allowance was not touched: its next call is accepted.
+    expect((await post(r, 'withdraw', await body(r, 'withdraw'))).status).toBe(202);
+  });
+
+  it('"Restore my encryption key" to another key still works', async () => {
+    const r = productionRelay();
+    expect((await post(r, 'restore-enc-key', await body(r, 'restore-enc-key'))).status).toBe(202);
+    expect(r.queued()).toBe(1);
   });
 });
 
@@ -683,5 +763,68 @@ describe('read routes leak nothing secret', () => {
     expect(r.log.lines.join('\n')).not.toContain(signature);
     // A random secret-looking value never appears either (no echo of arbitrary input).
     expect(all).not.toContain(randomBytes(16).toString('hex'));
+  });
+});
+
+// AA 00060 P10.3 C2 (F-A2, F-B2): Bridge out's two unsigned actions name an account and a device key. An
+// INVALID one must cost the named victim nothing: not its per-owner allowance, not its one-job gate.
+describe('C2: unsigned Bridge-out requests cannot spend a named victim’s allowance or gate', () => {
+  const ATTACKER = '203.0.113.9';
+  const randHex = () => randomBytes(32).toString('hex');
+  const entitleBody = (deviceKey: string) => ({
+    account: ACCOUNT,
+    payload: {
+      tx1Hash: randHex(),
+      spentCoin: { nonce: randHex(), color: COLOUR_A, value: '5000000' },
+      amount: '1000000',
+      landingCoinPublicKey: randHex(),
+      deviceKey,
+      useCounter: '0',
+    },
+  });
+  const bridgeOutBody = (deviceKey: string) => ({
+    account: ACCOUNT,
+    payload: {
+      kind: 'lock',
+      entitlement: `le1.${ACCOUNT}.${'11'.repeat(32)}.9999999999.${'22'.repeat(32)}`,
+      landing: { deviceKey, coinPublicKey: 'cc'.repeat(32), colour: COLOUR_A, amount: '1000000' },
+      tx: '00',
+      proven: false,
+      blockHash: 'ab'.repeat(32),
+    },
+  });
+
+  it('invalid bridge-out-entitle requests naming the victim: refused before the queue; the victim still withdraws', async () => {
+    const r = productionRelay({ env: { JOBS_PER_ACCOUNT: '1' }, bridgeOut: true });
+    const victim = r.device.calls.deviceKey;
+    for (let i = 0; i < 5; i++) {
+      const res = await post(r, 'bridge-out-entitle', entitleBody(victim), ATTACKER);
+      expect(res.status, `request ${i + 1}`).toBe(403);
+    }
+    expect(r.queued()).toBe(0);
+    const w = await post(r, 'withdraw', await body(r, 'withdraw'));
+    expect(w.status).toBe(202);
+  });
+
+  it('bridge-out with a forged entitlement naming the victim: refused before the owner allowance is charged', async () => {
+    const r = productionRelay({ env: { JOBS_PER_ACCOUNT: '1' }, bridgeOut: true });
+    const victim = r.device.calls.deviceKey;
+    for (let i = 0; i < 5; i++) {
+      const res = await post(r, 'bridge-out', bridgeOutBody(victim), ATTACKER);
+      expect(res.status, `request ${i + 1}`).toBe(403);
+    }
+    const w = await post(r, 'withdraw', await body(r, 'withdraw'));
+    expect(w.status).toBe(202);
+  });
+
+  it('unauthenticated requests have their own per-client budget (each naming a fresh device)', async () => {
+    const r = productionRelay({ bridgeOut: true, env: { RATE_LIMIT_UNAUTHENTICATED_PER_MIN: '4' } });
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++)
+      statuses.push((await post(r, 'bridge-out-entitle', entitleBody(randHex()), ATTACKER)).status);
+    expect(statuses.slice(0, 4).every((s) => s === 403)).toBe(true);
+    expect(statuses.slice(4)).toEqual([429, 429]);
+    // Another client is not affected.
+    expect((await post(r, 'bridge-out-entitle', entitleBody(randHex()), '198.51.100.99')).status).toBe(403);
   });
 });

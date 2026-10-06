@@ -27,12 +27,11 @@ import {
 import { openEntryPortable, sealEntryPortable } from '@nightmarket/core/passport';
 import { x25519 } from '@noble/curves/ed25519.js';
 
-import { CANCEL_UNAVAILABLE, syncAccount, type OperationEnv } from '../src/passport/operations.js';
+import { syncAccount, type OperationEnv } from '../src/passport/operations.js';
 import { readCoins, readRoster } from '../src/passport/records.js';
 import type { RelayClient } from '../src/relay/client.js';
 import { LocalStore } from '../src/store/store.js';
 import {
-  cancelOffers,
   confirmCancelsOffer,
   guardFor,
   decideApproval,
@@ -556,15 +555,14 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
     expect(make().status).toBe('cancelled');
   });
 
-  it('a cancel the relay reports done while it SETTLED the offer instead shows Filled, never Cancelled', async () => {
+  it('an offer someone settled shows Filled from the chain, never Cancelled', async () => {
     const { relay, e, pk } = await setup();
     relay.results['open-swap'] = listed;
     await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
-    relay.results['cancel-offers'] = { txId: 'c0'.repeat(32) };
-    relay.afterJob['cancel-offers'] = () =>
-      executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'settled-instead');
-    const r = await cancelOffers(e, ACCOUNT);
-    expect(r).toEqual({ txId: 'c0'.repeat(32), cancelled: 0 });
+    // AA 00060 FR-028: the page cancels nothing; the offer was settled by someone.
+    await executeSwap(relay, pk, relay.submitted[0]!.request.payload as never, 'settled-instead');
+    relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
+    await reconcileFromChain(e, ACCOUNT);
     expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'filled', settledTx: 'settled-instead' });
   });
 
@@ -696,7 +694,7 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
     expect(decideApproval(never, view({ authNonce: 4n }), 9e15).status).toBe('live');
   });
 
-  it('R3-6: a REAL coin someone deposits with the wanted nonce never turns a cancelled offer into Filled', async () => {
+  it('R3-6: a REAL coin someone deposits with the wanted nonce never turns an ended offer into Filled', async () => {
     const { relay, e, pk } = await setup();
     relay.results['open-swap'] = listed;
     await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
@@ -715,13 +713,9 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
         nullifiers: [],
       },
     ]);
-    // The owner cancels (the nonce moves).
-    relay.results['cancel-offers'] = { txId: 'c1'.repeat(32) };
-    relay.afterJob['cancel-offers'] = () => {
-      relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
-    };
-    const r = await cancelOffers(e, ACCOUNT);
-    expect(r.cancelled).toBe(1);
+    // Another call of the owner lands (the nonce moves; offers cannot be cancelled, AA 00060 FR-028).
+    relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
+    await reconcileFromChain(e, ACCOUNT);
     const [rec] = readTrades(e.store, e.scope, ACCOUNT);
     expect(rec).toMatchObject({ status: 'cancelled' });
     expect(rec!.settledTx).toBeUndefined();
@@ -778,59 +772,24 @@ describe('an approval ends only on the chain’s word and its signed expiry (AA 
     expect(filled).toMatchObject({ status: 'filled', settledTx: 'swap-tx', fillVerified: true });
   });
 
-  it('R4-4: a cancel with no unread candidate is still Cancelled', async () => {
+  it('R4-4: a moved nonce with no unread candidate is still Cancelled (ended)', async () => {
     const { relay, e } = await setup();
     relay.results['open-swap'] = listed;
     await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
-    relay.results['cancel-offers'] = { txId: 'c1'.repeat(32) };
-    relay.afterJob['cancel-offers'] = () => {
-      relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
-    };
+    relay.state.authNonce = String(BigInt(relay.state.authNonce) + 1n);
     (e.chain as FakeChain).failCalls.add('unrelated-tx'); // a failing read of a non-candidate changes nothing
-    expect((await cancelOffers(e, ACCOUNT)).cancelled).toBe(1);
+    const changed = await reconcileFromChain(e, ACCOUNT);
+    expect(changed.filter((t) => t.status === 'cancelled')).toHaveLength(1);
   });
 });
 
-describe('cancel an offer (audit C6, questions Q30)', () => {
-  it("re-affirms the account's CURRENT key with ONE signature, and cancels the offer once the chain shows the new nonce", async () => {
-    const { relay, e, signed } = await setup();
-    relay.results['open-swap'] = {
-      offerId: 'f3'.repeat(32),
-      kernel: { accepted: true, status: 'live', code: null, reason: null },
-      legSegment: 0,
-      proveSeconds: 1,
-      expiresAt: Date.now() + 3_600_000,
-      bytes: 1,
-    };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
-    relay.results['cancel-offers'] = { txId: 'c0'.repeat(32) };
-    relay.afterJob['cancel-offers'] = () => {
-      relay.state.authNonce = '5';
-    };
-    const r = await cancelOffers(e, ACCOUNT);
-    expect(r).toEqual({ txId: 'c0'.repeat(32), cancelled: 1 });
-    expect(signed).toEqual(['authorise:open-swap', 'authorise:rotateEncKey']);
-    const sub = relay.submitted[1]!;
-    expect(sub.action).toBe('cancel-offers');
-    // The key it names is the CHAIN's key (unchanged), at the chain's nonce.
-    expect(sub.request.payload).toEqual({ newKey: relay.state.encKey, authNonce: '4' });
-    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'cancelled' });
-  });
-
-  it('says plainly when the market cannot cancel yet, and leaves the offer as it is', async () => {
-    const { relay, e } = await setup();
-    relay.results['open-swap'] = {
-      offerId: 'f4'.repeat(32),
-      kernel: { accepted: true, status: 'live', code: null, reason: null },
-      legSegment: 0,
-      proveSeconds: 1,
-      expiresAt: Date.now() + 3_600_000,
-      bytes: 1,
-    };
-    await makeOffer(e, ACCOUNT, orderLegs('sell', BASE, QUOTE, 2n * U, parsePrice('1.05', QUOTE)), PAIR);
-    relay.failNext = 'the cancel-offers operation is not available yet (plan lane P9.R)';
-    relay.failCode = 'not-implemented';
-    await expect(cancelOffers(e, ACCOUNT)).rejects.toThrow(CANCEL_UNAVAILABLE);
-    expect(readTrades(e.store, e.scope, ACCOUNT)[0]).toMatchObject({ status: 'live' });
+// AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): Night Market does not cancel offers.
+describe('offers cannot be cancelled (FR-028)', () => {
+  it('the page has no cancel operation left', async () => {
+    const trade = (await import('../src/trade/operations.js')) as Record<string, unknown>;
+    const passport = (await import('../src/passport/operations.js')) as Record<string, unknown>;
+    expect(trade.cancelOffers).toBeUndefined();
+    expect(passport.cancelOpenApprovals).toBeUndefined();
+    expect(passport.CANCEL_UNAVAILABLE).toBeUndefined();
   });
 });

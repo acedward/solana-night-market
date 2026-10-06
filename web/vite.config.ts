@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
@@ -8,6 +10,9 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   plugins: [react()],
   base: './',
+  // AA 00060 P6.2: Bridge out's lazy chunk (midnight-js) reaches @subsquid/scale-codec, which calls
+  // Node's `assert`: a small browser implementation instead of Vite's throwing stub.
+  resolve: { alias: { assert: fileURLToPath(new URL('./src/shims/assert.ts', import.meta.url)) } },
   // Keep JSON as per-field exports (never one JSON.parse blob), so the bundle carries only the
   // fields of the vendored deployment records that the code actually imports.
   json: { namedExports: true, stringify: false },

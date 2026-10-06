@@ -5,7 +5,8 @@
 //
 //   <viewport>-01-markets-landing      Markets for a new visitor (the "Start trading" steps)
 //   <viewport>-02-trade                Trade, connected, with holdings
-//   <viewport>-03-create-offer         the "Create offer" card filled in, with the exact amounts
+//   <viewport>-03-create-offer         the "Sell twBTC" create row filled in (under Buyers, AA 00060
+//                                      FR-026), with the exact amounts
 //   <viewport>-04-signing-approve      the signing modal while Phantom is open (text + fingerprint,
 //                                      and, for a make, "nothing goes on-chain")
 //   <viewport>-05-offer-preparing      a make after the approval: "Preparing your offer" (the proof)
@@ -28,6 +29,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { connectPhantom } from './mock-phantom.js';
 import { serveExchange } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -145,7 +147,8 @@ for (const vp of VIEWPORTS) {
       await page.goto(`/${pairHash('twUSDM/twUSDC')}`);
       await connectPhantom(page);
       await expect(page.locator('[data-testid=holding][data-symbol="twUSDC"]')).toContainText('1,000.00');
-      await page.getByTestId('buy-best-ask').click();
+      // AA 00060 FR-026: the best ask is the first row under Sellers.
+      await page.getByTestId('trade-book-asks').getByTestId('take-line').first().click();
       await expect(page.getByTestId('take-confirm')).toBeVisible();
       const hold = relay.holdNextJob();
       hold.at(['offer-checked', 'proving', 'merged']);
@@ -186,6 +189,7 @@ for (const vp of VIEWPORTS) {
       await connectPhantom(page);
       await page.getByTestId('open-account').click();
       await expect(page.getByTestId('masthead-account')).toBeVisible();
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-pack')).toHaveText('1,000.00 twUSDC · 0.10 twBTC · 1.00 twETH');
       await page.getByTestId('accounts-message').getByRole('button', { name: 'Dismiss' }).click();
       await page.getByTestId('demo-tokens').scrollIntoViewIfNeeded();

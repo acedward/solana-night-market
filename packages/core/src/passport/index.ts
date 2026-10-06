@@ -36,8 +36,12 @@ export {
   type PlainCoin,
 } from '../../../../vendor/passport/contract/src/wallet/entry-format.js';
 export type { AuthRequest, CallContext } from '../../../../vendor/passport/contract/src/wallet/signer.js';
+// AA 00060 P6.2: the account contract's witnesses, for building a `deposit_shielded` (which calls none).
+export { makeWitnesses as accountWitnesses } from '../../../../vendor/passport/contract/src/wallet/witnesses.js';
 export {
   pureCircuits,
+  // AA 00060 P6.2: Bridge out's return builds `deposit_shielded` in the browser (no key material).
+  Contract as AccountContract,
   type QualifiedCoin,
   type ShieldedCoin,
 } from '../../../../vendor/passport/contract/src/wallet/contract.js';

@@ -63,7 +63,7 @@ describe('canonical JSON and the payload hash', () => {
 });
 
 describe('the RelayAction envelope', () => {
-  it('knows only Night Market actions (no bridge)', () => {
+  it('knows only Night Market actions (its own Bridge out, AA 00060)', () => {
     expect([...RELAY_ACTIONS]).toEqual([
       'register',
       'withdraw',
@@ -74,6 +74,9 @@ describe('the RelayAction envelope', () => {
       'demo-tokens',
       'cancel-offers', // AA 00047 P9.S (questions Q30)
       'restore-enc-key', // AA 00047 P10 (audit round 2, R2-3)
+      'bridge-out', // AA 00060 P6.3
+      'bridge-out-entitle', // AA 00060 P6.3
+      'spl-faucet', // AA 00060 P13
     ]);
   });
 

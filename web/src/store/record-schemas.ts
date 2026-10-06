@@ -114,6 +114,7 @@ const job = z
       'open-swap',
       'take',
       'demo-tokens',
+      // Removed (AA 00060 FR-028), kept so older exports still import.
       'cancel-offers',
       'restore-enc-key',
     ]),
@@ -127,7 +128,104 @@ const job = z
   })
   .strict();
 
+/** AA 00060 P7.3: a Bridge-in record (../bridge/in/records.ts); no secret. */
+const base58 = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,90}$/);
+const bridgeIn = z
+  .object({
+    direction: z.literal('in'),
+    signature: base58.optional(),
+    key: hex32.optional(),
+    message: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]{1,4000}={0,2}$/)
+      .optional(),
+    lastValidBlockHeight: decimal.optional(),
+    fromSlot: decimal.optional(),
+    lookupErrors: z.number().int().min(0).max(100_000).optional(),
+    blockhashExpired: z.boolean().optional(),
+    searchBefore: base58.optional(),
+    source: base58.optional(),
+    colour: hex32,
+    mint: base58,
+    symbol: text(16),
+    amount: decimal,
+    bridgeApi: z.string().regex(/^https?:\/\/[^\s/]{1,200}$/),
+    balanceBefore: decimal,
+    createdAt: ms,
+    state: z.enum([
+      'signing',
+      'unknown',
+      'sent',
+      'locked',
+      'bridging',
+      'completed',
+      'undeliverable',
+      'failed',
+      'dismissed',
+    ]),
+    lockNonce: decimal.optional(),
+    progress: text(300).optional(),
+    reason: z
+      .object({ code: text(40), message: text(500) })
+      .strict()
+      .optional(),
+    checkedAt: ms.optional(),
+  })
+  .strict();
+
+/** AA 00060 P6.2: a Bridge-out record (../bridge/out/records.ts). Public values only: the landing key's
+ *  PUBLIC coin key and check value, the predicted landing coin, the relay's entitlement (a MAC, not a
+ *  secret of the customer's); never a signature, the master key or a per-transfer key (spec SC-005). */
+const bridgeOut = z
+  .object({
+    direction: z.literal('out'),
+    authNonce: decimal,
+    colour: hex32,
+    symbol: text(16),
+    amount: decimal,
+    bridgeContract: hex32,
+    bridgeProgram: base58,
+    bridgeApi: z.string().regex(/^https?:\/\/[^\s/]{1,200}$/),
+    wallet: base58,
+    spentCoin: z.object({ nonce: hex32, color: hex32, value: decimal }).strict(),
+    landingCoinPublicKey: hex32,
+    landingNonce: hex32,
+    landingCommitment: hex32,
+    check: z.string().regex(/^[0-9a-f]{32}$/),
+    createdAt: ms,
+    state: z.enum([
+      'tx1-signing',
+      'tx1-sent',
+      'landed',
+      'tx2-sent',
+      'locked',
+      'arrived',
+      'returning',
+      'returned',
+      'failed',
+    ]),
+    tx1Id: z
+      .string()
+      .regex(/^[0-9a-fA-F]{1,200}$/)
+      .optional(),
+    entitlement: z
+      .string()
+      .regex(/^le1\.[0-9a-f]{64}\.[0-9a-f]{64}\.[1-9][0-9]{0,11}\.[0-9a-f]{64}$/)
+      .optional(),
+    tx2Id: z
+      .string()
+      .regex(/^[0-9a-fA-F]{1,200}$/)
+      .optional(),
+    withdrawalId: decimal.optional(),
+    progress: text(300).optional(),
+    checkedAt: ms.optional(),
+  })
+  .strict();
+
+const bridge = z.union([bridgeIn, bridgeOut]);
+
 export const RECORD_DATA_SCHEMAS: Record<RecordKind, z.ZodType> = {
+  bridge,
   profile,
   settings,
   account,
@@ -148,7 +246,7 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
   const r = (isAssetFilter ? AssetFilterDataSchema : RECORD_DATA_SCHEMAS[key.kind]).safeParse(data);
   if (!r.success) return `a ${key.kind} record is not in the shape this page writes`;
   const scopeAccount = key.scope.global ? null : key.scope.account;
-  const needsAccount = ['account', 'coins', 'roster', 'offer'].includes(key.kind);
+  const needsAccount = ['account', 'coins', 'roster', 'offer', 'bridge'].includes(key.kind);
   if (needsAccount && !scopeAccount) return `a ${key.kind} record is not filed under an account`;
   if (['profile'].includes(key.kind) && scopeAccount) return 'a profile record is filed under an account';
   const d = r.data as Record<string, unknown>;
@@ -164,6 +262,14 @@ export function recordDataProblem(key: ParsedKey, data: unknown): string | null 
       break;
     case 'job':
       if (key.id !== d.requestId) return 'a job record does not match its key';
+      break;
+    case 'bridge':
+      if (
+        d.direction === 'out'
+          ? key.id !== `out-${String(d.authNonce)}`
+          : key.id !== `in-${String(d.key ?? d.signature)}` || (d.key === undefined && d.signature === undefined)
+      )
+        return 'a bridge record does not match its key';
       break;
     case 'secret':
       // A secret and its public key must be one pair (security review F-B5).

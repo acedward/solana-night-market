@@ -24,6 +24,7 @@ import {
   RELAY_ACTIONS,
   RegisterPayloadSchema,
   RestoreEncKeyPayloadSchema,
+  SplFaucetPayloadSchema,
   TakePayloadSchema,
   WithdrawPayloadSchema,
   WithdrawUnshieldedPayloadSchema,
@@ -33,10 +34,21 @@ import {
 
 import type { AuthKind } from '../auth/verifiers.js';
 import { dailyAdmission, makeAdmission, takeAdmission, withdrawAdmission, type AccountCaps } from './account-caps.js';
-import { admitAll, type AdmissionCheck } from './admission.js';
+import { admitAll, type AdmissionCheck, type PreauthCheck } from './admission.js';
 import { registrationAdmission, type RegistrationCaps } from './registration-caps.js';
 import { PublicError, type JobExecutor } from '../queue/jobs.js';
 import { cooldownAdmission, openSwapExecutor, takeExecutor, type TradeDeps } from '../trade/executors.js';
+import {
+  BridgeOutEntitlePayloadSchema,
+  BridgeOutPayloadSchema,
+  bridgeOutAdmission,
+  bridgeOutEntitleExecutor,
+  bridgeOutExecutor,
+  bridgeOutPreauth,
+  entitlePreauth,
+  type BridgeOutDeps,
+  type EntitleDeps,
+} from '../bridge/out-actions.js';
 import { expiryAdmission } from '../trade/expiry.js';
 
 export interface ActionDefinition {
@@ -57,11 +69,45 @@ export interface ActionDefinition {
   executor: JobExecutor;
   /** The plan lane that implements the executor. */
   implementedBy: string;
+  /** AA 00060: false while the deployment does not offer the action (an `entitlement` action without its
+   *  executor: no journey registry or no key volume); the route refuses it before anything else. */
+  available?: boolean;
+  /** AA 00060 P10.3 (audit C2): for an unsigned action, what must hold BEFORE the named owner and account
+   *  are charged anything (./admission.ts `PreauthCheck`). */
+  preauth?: PreauthCheck;
+  /** AA 00060 P10.3 (audit C2): false when the action does not take the account's one-job gate (a
+   *  read-only, instant action an unsigned caller may send for any account). Default true. */
+  accountGate?: boolean;
+  /** AA 00060 spec FR-028: an action this market no longer offers. The route refuses it FIRST, before
+   *  its body is read, any nonce or allowance is used, or anything is queued, proven or paid. */
+  refused?: { status: 403; code: string; reason: string };
 }
+
+/** AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): the market does not cancel offers. */
+export const OFFER_CANCEL_REFUSED = {
+  status: 403,
+  code: 'offers-cannot-be-cancelled',
+  reason:
+    'Night Market does not cancel offers: an offer ends at its signed expiry, or when the account approves another action. A future Offer Files feature will provide cancellation for every client.',
+} as const;
+
+/** The actions authorised by what their body carries (AA 00060 P6.3), not by a wallet signature. */
+export const ENTITLEMENT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
+  'bridge-out',
+  'bridge-out-entitle',
+]);
+
+/** The actions with no authorisation at all, charged to the requesting client only (AA 00060 P13). */
+export const OPEN_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>(['spl-faucet']);
+
+/** Every action that carries no wallet signature. */
+export const UNSIGNED_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([
+  ...ENTITLEMENT_ACTIONS,
+  ...OPEN_ACTIONS,
+]);
 
 import {
   appendInboxExecutor,
-  cancelOffersExecutor,
   registerExecutor,
   restoreEncKeyExecutor,
   withdrawExecutor,
@@ -110,6 +156,18 @@ export function defaultCatalogue(): Map<RelayActionName, ActionDefinition> {
     def('cancel-offers', 'prover', 'P9.I'),
     // AA 00047 P10 (audit round 2, R2-3): the site's "Restore my encryption key" (executor: P10.R).
     def('restore-enc-key', 'prover', 'P10.R'),
+    // AA 00060 P6.3: Bridge out's second transaction and the entitlement's re-issue (executors:
+    // ../bridge/out-actions.ts, wired by `withBridgeOut`).
+    { ...def('bridge-out', 'prover', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
+    { ...def('bridge-out-entitle', 'relay', 'AA 00060 P6.3', { auth: 'entitlement' }), available: false },
+    // AA 00060 P13 (spec FR-024): "Mint Solana tokens", the test SPL faucet (executor: ../faucet/spl-faucet.ts,
+    // wired by `withSplFaucet` only when SPL_FAUCET_KEYS_FILE is set). No DUST, no prover, no account.
+    {
+      ...def('spl-faucet', 'relay', 'AA 00060 P13', { auth: 'unsigned', requiresAccount: false }),
+      requiresSponsor: false,
+      accountGate: false,
+      available: false,
+    },
   ];
   const map = new Map(list.map((d) => [d.action, d]));
   for (const a of RELAY_ACTIONS) if (!map.has(a)) throw new Error(`action ${a} has no definition`);
@@ -145,10 +203,12 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
   // authorised by its own F3 signature like the other gated calls; the arm's check refuses any key
   // but the on-chain `enc_key` (relay/src/passport/ed25519-arm.ts `cancelKeepsTheKey`), and the key
   // volume keeps the rotate prover key (relay/src/prover/required.ts).
+  // AA 00060 spec FR-028: no longer offered. The route refuses it before anything else (no nonce, no
+  // allowance, no queue slot, no proof, no DUST); "Restore my encryption key" below stays.
   set('cancel-offers', {
     auth: 'passport-call',
     payload: CancelOffersPayloadSchema,
-    executor: cancelOffersExecutor(deps),
+    refused: OFFER_CANCEL_REFUSED,
   });
   // AA 00047 P10 (audit round 2 R2-3, questions Q36): "Restore my encryption key", the same circuit
   // to the BROWSER's key (@nightmarket/core `RestoreEncKeyPayloadSchema`, `restoreEncKeyRequest`), for
@@ -194,6 +254,58 @@ export function withTrade(
     payload: TakePayloadSchema,
     admit: deps.cooldown ? admitAll(takeExpiry, cooldownAdmission(deps.cooldown)) : takeExpiry,
     executor: takeExecutor(deps),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with Bridge out (AA 00060 P6.3, ../bridge/out-actions.ts): `bridge-out` (one sponsored
+ * second transaction against a single-use landing entitlement, every check before any slot, proof or
+ * DUST) on the prover lane, and `bridge-out-entitle` (no DUST: the indexer evidence re-issues an
+ * entitlement) on the relay lane.
+ */
+export function withBridgeOut(
+  map: Map<RelayActionName, ActionDefinition>,
+  deps: BridgeOutDeps & EntitleDeps,
+): Map<RelayActionName, ActionDefinition> {
+  map.set('bridge-out', {
+    ...map.get('bridge-out')!,
+    available: true,
+    auth: 'entitlement',
+    payload: BridgeOutPayloadSchema as never,
+    preauth: bridgeOutPreauth(deps.entitlements),
+    admit: bridgeOutAdmission(deps),
+    executor: bridgeOutExecutor(deps),
+  });
+  map.set('bridge-out-entitle', {
+    ...map.get('bridge-out-entitle')!,
+    available: true,
+    auth: 'entitlement',
+    requiresSponsor: false,
+    payload: BridgeOutEntitlePayloadSchema as never,
+    // Audit C2: the whole check runs before anything is charged, and the job takes no account gate.
+    preauth: entitlePreauth(deps),
+    accountGate: false,
+    executor: bridgeOutEntitleExecutor(),
+  });
+  return map;
+}
+
+/**
+ * The catalogue with the test SPL faucet (AA 00060 P13, spec FR-024; ../faucet/spl-faucet.ts): unsigned,
+ * on the relay lane, admitted only for a wallet that has not claimed this period, under the per-client and
+ * per-period caps, while the faucet's chain checks hold.
+ */
+export function withSplFaucet(
+  map: Map<RelayActionName, ActionDefinition>,
+  faucet: { admit: AdmissionCheck; executor: JobExecutor },
+): Map<RelayActionName, ActionDefinition> {
+  map.set('spl-faucet', {
+    ...map.get('spl-faucet')!,
+    available: true,
+    payload: SplFaucetPayloadSchema,
+    admit: faucet.admit,
+    executor: faucet.executor,
   });
   return map;
 }

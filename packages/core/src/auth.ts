@@ -43,6 +43,14 @@ export const RELAY_ACTIONS = [
   // AA 00047 P10 (audit round 2, R2-3; questions Q36): put THIS browser's encryption key back on an
   // account whose on-chain key was changed, with the same circuit to another key (./accounts.ts).
   'restore-enc-key',
+  // AA 00060 P6.3: Bridge out's second transaction (the lock, or the return to the account), paid for by
+  // a single-use landing entitlement, and the entitlement's re-issue after an indexer check
+  // (./bridge/out.ts).
+  'bridge-out',
+  'bridge-out-entitle',
+  // AA 00060 P13 (spec FR-024): "Mint Solana tokens", the test SPL faucet; unsigned, charged to the
+  // requesting client only (./spl-faucet.ts).
+  'spl-faucet',
 ] as const;
 export type RelayActionName = (typeof RELAY_ACTIONS)[number];
 
@@ -168,7 +176,10 @@ export type AuthFailureCode =
   | 'bad-signature'
   | 'wrong-signer'
   | 'unknown-nonce'
-  | 'replayed';
+  | 'replayed'
+  // AA 00060 spec FR-028: a passport call that would only cancel offers (a key rotation to the account's own
+  // key); the relay answers it 403 `offers-cannot-be-cancelled`.
+  | 'offers-cannot-be-cancelled';
 
 export type AuthResult =
   { ok: true; signer: string; message: RelayActionMessage } | { ok: false; code: AuthFailureCode; reason: string };

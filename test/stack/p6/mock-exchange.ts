@@ -3,7 +3,10 @@
 //
 //   kernel (PORT, default 9999): `POST /v1/offers` stores the offer; `GET /v1/offers` lists live
 //     offers; `GET /v1/offers/:id` serves its `swapoffer1…` string; `GET /v1/offers/:id/status`.
-//     No validation: the real kernel's is the stagenet run's.
+//     No validation: the real kernel's is the stagenet run's. With MOCK_COMPUTE_LEGS=1 (AA 00060 P9.5, the
+//     owner's by-hand session: the page's order book needs them) each offer's `computed.gives`/`wants` are
+//     its shielded and unshielded imbalances over all segments (positive: gives; negative: wants; DUST
+//     left out), as the real kernel serves them; otherwise both are empty, as before.
 //   batcher (BATCHER_PORT, default 3334): `POST /send-input` with the SPA's body. It deserializes the
 //     settlement, adds DUST from its own wallet (MOCK_BATCHER_SEED_FILE, a localnet dev seed; never
 //     the relay's sponsor seed: one wallet process per seed) exactly as `midnight-balancer` does,
@@ -20,7 +23,53 @@ import { decodeOffer } from '@nightmarket/core';
 
 import { openFacadeWallet, type OpenedWallet } from '../../../relay/src/sponsor/facade.js';
 
-const offers = new Map<string, { offer: string; status: string; firstSeenAt: string }>();
+type Leg = { token: string; amount: string; type: string };
+const offers = new Map<string, { offer: string; status: string; firstSeenAt: string; gives: Leg[]; wants: Leg[] }>();
+const COMPUTE_LEGS = process.env.MOCK_COMPUTE_LEGS === '1';
+
+/** An offer's legs from its transaction's imbalances (MOCK_COMPUTE_LEGS=1); empty when it does not decode. */
+async function legsOf(offer: string): Promise<{ gives: Leg[]; wants: Leg[] }> {
+  if (!COMPUTE_LEGS) return { gives: [], wants: [] };
+  try {
+    const ledger = (await import('@midnightntwrk/ledger-v9')) as unknown as {
+      Transaction: { deserialize(s: string, p: string, b: string, raw: Uint8Array): unknown };
+    };
+    const tx = ledger.Transaction.deserialize('signature', 'proof', 'binding', decodeOffer(offer)) as {
+      intents?: Map<number, unknown>;
+      fallibleOffer?: Map<number, unknown>;
+      imbalances(segment: number): Map<{ tag: string; raw?: string }, bigint>;
+    };
+    const segments = new Set<number>([0]);
+    for (const m of [tx.intents, tx.fallibleOffer])
+      if (m instanceof Map) for (const k of m.keys()) segments.add(Number(k));
+    const sums = new Map<string, { token: string; type: string; amount: bigint }>();
+    for (const s of segments) {
+      for (const [token, delta] of tx.imbalances(s)) {
+        if (token.tag === 'dust' || token.raw === undefined) continue;
+        const key = `${token.tag}:${token.raw}`;
+        const cur = sums.get(key) ?? {
+          token: String(token.raw).toLowerCase(),
+          type: token.tag.toUpperCase(),
+          amount: 0n,
+        };
+        cur.amount += delta;
+        sums.set(key, cur);
+      }
+    }
+    const legs = [...sums.values()];
+    return {
+      gives: legs
+        .filter((l) => l.amount > 0n)
+        .map((l) => ({ token: l.token, type: l.type, amount: l.amount.toString() })),
+      wants: legs
+        .filter((l) => l.amount < 0n)
+        .map((l) => ({ token: l.token, type: l.type, amount: (-l.amount).toString() })),
+    };
+  } catch (e) {
+    say(`could not compute the legs of an offer: ${String(e)}`);
+    return { gives: [], wants: [] };
+  }
+}
 const port = Number(process.env.PORT ?? 9999);
 const batcherPort = Number(process.env.BATCHER_PORT ?? 3334);
 const say = (s: string) => process.stdout.write(`mock-exchange: ${s}\n`);
@@ -35,9 +84,9 @@ const json = (res: ServerResponse, value: unknown, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(value));
 };
-const computed = (o: { status: string; firstSeenAt: string }) => ({
-  gives: [],
-  wants: [],
+const computed = (o: { status: string; firstSeenAt: string; gives: Leg[]; wants: Leg[] }) => ({
+  gives: o.gives,
+  wants: o.wants,
   expiresAt: null,
   firstSeenAt: o.firstSeenAt,
   status: o.status,
@@ -46,11 +95,11 @@ const computed = (o: { status: string; firstSeenAt: string }) => ({
 createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://kernel');
   if (req.method === 'POST' && url.pathname === '/v1/offers') {
-    void body(req).then((text) => {
+    void body(req).then(async (text) => {
       const { offer } = JSON.parse(text) as { offer: string };
       const offerId = createHash('sha256').update(decodeOffer(offer)).digest('hex');
       if (offers.has(offerId)) return json(res, { error: 'DUPLICATE_OFFER', offerId }, 409);
-      offers.set(offerId, { offer, status: 'live', firstSeenAt: new Date().toISOString() });
+      offers.set(offerId, { offer, status: 'live', firstSeenAt: new Date().toISOString(), ...(await legsOf(offer)) });
       say(`accepted offer ${offerId} (${offer.length} chars)`);
       json(res, { offerId }, 201);
     });

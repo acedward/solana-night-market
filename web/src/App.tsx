@@ -5,16 +5,19 @@
 //
 // A create-and-trade market: the order books (Markets) and making and taking offers (Trade) come
 // first; the holdings (Portfolio, route #account) and the browser's records (Your data, route
-// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working. The About
-// page (route #about, AA 00047 P11.D, questions Q58) is linked from the footer, not the header.
+// #local) after. The routes are the ones MN Bank had, so links and bookmarks keep working. There is
+// no About page (AA 00060 FR-029; the known limitations are in the README and the RUNBOOK): its old
+// route #about, like any unknown route, opens Markets.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
-import { registryFor, shortSolanaAddress, type NetworkProfile } from '@nightmarket/core';
+import { registryFor, shortSolanaAddress, tokensDigest, type NetworkProfile } from '@nightmarket/core';
 
 import { ActivityProvider } from './activity/ActivityContext.js';
 import { ActivityStore } from './activity/activity.js';
 import { AssetFilterNote, AssetFilterProvider } from './assets/AssetFilterContext.js';
+import { BridgeNotice, BridgeProvider, useBridges } from './bridge/BridgeContext.js';
+import { SolanaLinesProvider } from './bridge/SolanaLinesContext.js';
 import { ChainProvider } from './chain/ChainContext.js';
 import { loadSiteConfig, type SiteConfig } from './config.js';
 import {
@@ -36,13 +39,14 @@ import {
   type TabItem,
 } from './design/index.js';
 import { MarketProvider } from './market/MarketContext.js';
-import { About } from './pages/About.js';
+import WalletProbe from './dev/WalletProbe.js';
 import { Accounts } from './pages/Accounts.js';
 import { LocalData } from './pages/LocalData.js';
 import { Markets } from './pages/Markets.js';
 import { Trade } from './pages/Trade.js';
 import { findAccount } from './passport/records.js';
-import { RelayNotices, RelayStatusProvider } from './relay/RelayStatus.js';
+import { RelayNotices, RelayStatusProvider, useRelayStatus } from './relay/RelayStatus.js';
+import { signingPaused } from './relay/status.js';
 import { storageText } from './store/messages.js';
 import { StoreProvider, useStore } from './store/StoreContext.js';
 import { WalletProvider, useWallet, type WalletAdapter } from './wallet/WalletContext.js';
@@ -51,6 +55,14 @@ import { solanaWalletAdapter } from './wallet/phantom-adapter.js';
 import { SignPromptStore } from './wallet/sign-prompt.js';
 import { SigningPrompt } from './wallet/SigningPrompt.js';
 
+// AA 00060 P1.6: the dev-only wallet probe (G-NIGHTLY), shown only when config.json has `devProbe: true`
+// and the page is at #wallet-probe. It is imported statically ON PURPOSE: as a lazy chunk, Rollup moved
+// the modules it shares with the page (zod among them) into a separate chunk that runs BEFORE
+// ./no-eval.ts, which broke the RUNBOOK's CSP (`script-src eval`) and the store's first writes
+// (e2e chain.spec / zswap-decode.spec / smoke.spec, 2026-10-04).
+const PROBE_ROUTE = 'wallet-probe';
+const isProbeRoute = () => window.location.hash.replace(/^#/, '').split('?')[0] === PROBE_ROUTE;
+
 export const SECTIONS = [
   { id: 'markets', label: 'Markets', icon: 'markets' },
   { id: 'trade', label: 'Trade', icon: 'trade' },
@@ -58,16 +70,12 @@ export const SECTIONS = [
   { id: 'local', label: 'Your data', icon: 'data' },
 ] as const satisfies ReadonlyArray<TabItem>;
 type SectionId = (typeof SECTIONS)[number]['id'];
-/** Pages linked from the footer, not from the header's sections (questions Q58). */
-const FOOTER_PAGES = ['about'] as const;
-type PageId = SectionId | (typeof FOOTER_PAGES)[number];
 
-const sectionFromHash = (): PageId => {
+/** The section a hash names; any other hash (the removed #about among them, FR-029) opens Markets. */
+const sectionFromHash = (): SectionId => {
   // A section may carry parameters after '?' (#trade?pair=twBTC/twUSDC&offer=…, from the Markets page).
   const h = window.location.hash.replace(/^#/, '').split('?')[0] ?? '';
-  const footerPage = FOOTER_PAGES.find((p) => p === h);
-  if (footerPage) return footerPage;
-  return (SECTIONS.find((s) => s.id === h)?.id ?? 'markets') as SectionId;
+  return SECTIONS.find((s) => s.id === h)?.id ?? 'markets';
 };
 
 /**
@@ -239,7 +247,7 @@ function WalletArea({
           'Connecting…'
         ) : (
           <>
-            <span className="connect-long">Connect Phantom</span>
+            <span className="connect-long">Connect wallet</span>
             <span className="connect-short">Connect</span>
           </>
         )}
@@ -248,11 +256,11 @@ function WalletArea({
         <div className="menu" role="menu" aria-label="Choose a wallet" data-testid="wallet-menu">
           {!w.supported ? (
             <p className="small" data-testid="wallet-unsupported">
-              Solana wallets (Phantom) are coming to this site. You can already browse the order books.
+              Solana wallets are coming to this site. You can already browse the order books.
             </p>
           ) : w.options.length === 0 ? (
             <p className="small" data-testid="wallet-none">
-              No Solana wallet found in this browser. Install Phantom, then reload.
+              No Solana wallet found in this browser. Install one (for example Phantom or Nightly), then reload.
             </p>
           ) : (
             <>
@@ -308,7 +316,7 @@ function Shell({
   prompts: SignPromptStore;
   activity: ActivityStore;
 }) {
-  const [section, setSection] = useState<PageId>(sectionFromHash);
+  const [section, setSection] = useState<SectionId>(sectionFromHash);
   useEffect(() => {
     const on = () => setSection(sectionFromHash());
     window.addEventListener('hashchange', on);
@@ -323,6 +331,7 @@ function Shell({
   }, []);
   const { status } = useStore();
   const wallet = useWallet();
+  const bridges = useBridges();
   const pending = SECTIONS.find((s) => s.id === section)?.label ?? '';
   const storage = status === 'ok' ? null : storageText(status);
   return (
@@ -353,12 +362,13 @@ function Shell({
           </Toast>
         )}
         <main className="wrap app-main">
-          {section === 'about' ? (
-            <About networkName={`Midnight ${network.name}`} />
-          ) : section === 'local' ? (
+          {section === 'local' ? (
             <LocalData network={network.name} />
           ) : section === 'account' ? (
-            <Accounts network={network} relayUrl={config.relayUrl} />
+            <>
+              <BridgeNotice />
+              <Accounts network={network} relayUrl={config.relayUrl} injectorUrl={config.injector?.url ?? null} />
+            </>
           ) : section === 'markets' ? (
             <Markets network={network} relayUrl={config.relayUrl} />
           ) : section === 'trade' ? (
@@ -372,7 +382,7 @@ function Shell({
             </section>
           )}
         </main>
-        <SiteFooter networkName={`Midnight ${network.name}`} />
+        <SiteFooter networkName={`Midnight ${network.name}`} bridging={bridges.state === 'ready'} />
         <ProfileRecorder network={network.name} />
         <SigningPrompt prompts={prompts} activity={activity} timeoutSeconds={config.walletTimeoutSeconds} />
       </div>
@@ -383,7 +393,11 @@ function Shell({
 /** The Solana wallet adapter (AA 00047 lane B2): Phantom, and any Wallet Standard wallet that signs
  *  Solana messages. Its messages use the network's label and the site's token list (the same one the
  *  relay renders with, questions Q12); without a token list there is nothing to trade, and no adapter. */
-function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletAdapter | null {
+function walletAdapterFor(
+  config: SiteConfig,
+  prompts: SignPromptStore,
+  gate: () => string | null = () => null,
+): WalletAdapter | null {
   let tokens;
   try {
     tokens = registryFor(config.network.name, config.tokens);
@@ -394,7 +408,32 @@ function walletAdapterFor(config: SiteConfig, prompts: SignPromptStore): WalletA
     display: { network: config.network.name, tokens },
     prompts,
     timeoutMs: config.walletTimeoutSeconds * 1000,
+    gate,
   });
+}
+
+/** AA 00060 P4.3 (spec FR-014): this site's token-list digest, or null without a token list. */
+function siteTokensDigest(config: SiteConfig): string | null {
+  try {
+    return tokensDigest(registryFor(config.network.name, config.tokens));
+  } catch {
+    return null;
+  }
+}
+
+/** AA 00060 P4.3: why the wallet must not be asked to sign now, or null (one page, one App). The wallet
+ *  adapter reads it before every request; <SigningGate> keeps it current. */
+const signingGate: { reason: string | null } = { reason: null };
+
+/** Keeps the wallet's signing gate in step with the market's status: while the site's and the market's
+ *  token lists differ, every wallet request is refused before the wallet is asked (AA 00060 P4.3). */
+function SigningGate() {
+  const status = useRelayStatus();
+  const reason = signingPaused(status);
+  useEffect(() => {
+    signingGate.reason = reason;
+  }, [reason]);
+  return null;
 }
 
 function Loading({ children }: { children: ReactNode }) {
@@ -416,7 +455,17 @@ export function App() {
   }, []);
   const prompts = useMemo(() => new SignPromptStore(), []);
   const activity = useMemo(() => new ActivityStore(), []);
-  const adapter = useMemo(() => (config ? walletAdapterFor(config, prompts) : null), [config, prompts]);
+  const adapter = useMemo(
+    () => (config ? walletAdapterFor(config, prompts, () => signingGate.reason) : null),
+    [config, prompts],
+  );
+  const siteDigest = useMemo(() => (config ? siteTokensDigest(config) : null), [config]);
+  const [probeRoute, setProbeRoute] = useState(isProbeRoute);
+  useEffect(() => {
+    const on = () => setProbeRoute(isProbeRoute());
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
   if (failed)
     return (
       <div className="wrap app-banner">
@@ -426,21 +475,27 @@ export function App() {
       </div>
     );
   if (!config) return <Loading>Loading Night Market…</Loading>;
+  if (config.devProbe === true && probeRoute) return <WalletProbe config={config} />;
   return (
     <StoreProvider>
       <WalletProvider adapter={adapter}>
-        <RelayStatusProvider relayUrl={config.relayUrl}>
-          <ChainProvider network={config.network}>
-            <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
-              <AssetFilterProvider site={config.assets}>
-                <ActivityProvider store={activity}>
-                  <ToastProvider>
-                    <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
-                  </ToastProvider>
-                </ActivityProvider>
-              </AssetFilterProvider>
-            </MarketProvider>
-          </ChainProvider>
+        <RelayStatusProvider relayUrl={config.relayUrl} siteTokensDigest={siteDigest}>
+          <SigningGate />
+          <BridgeProvider bridges={config.bridges} network={config.network.name} solana={config.solana}>
+            <SolanaLinesProvider injectorUrl={config.injector?.url ?? null}>
+              <ChainProvider network={config.network}>
+                <MarketProvider network={config.network} tokens={config.tokens} pairs={config.pairs}>
+                  <AssetFilterProvider site={config.assets}>
+                    <ActivityProvider store={activity}>
+                      <ToastProvider>
+                        <Shell network={config.network} config={config} prompts={prompts} activity={activity} />
+                      </ToastProvider>
+                    </ActivityProvider>
+                  </AssetFilterProvider>
+                </MarketProvider>
+              </ChainProvider>
+            </SolanaLinesProvider>
+          </BridgeProvider>
         </RelayStatusProvider>
       </WalletProvider>
     </StoreProvider>

@@ -276,7 +276,7 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     const { relay } = await setup(page, { seeded: true });
     relay.landButFail.add('withdraw');
     relay.omitWithdrawalsFromReport = true; // the input's spend and the change's leaf: hidden
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     await page.getByTestId('withdraw-kind-shielded').click();
@@ -303,7 +303,7 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     page,
   }) => {
     const { relay } = await setup(page, { seeded: true });
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
     await page.getByTestId('withdraw-kind-shielded').click();
@@ -342,7 +342,7 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     expect(stored).not.toContain('"pending"');
   });
 
-  test('R3-6: a real coin someone deposits with the offer’s wanted nonce never makes the cancelled offer Filled', async ({
+  test('R3-6: a real coin someone deposits with the offer’s wanted nonce never makes the ended offer Filled', async ({
     page,
   }) => {
     const { relay } = await setup(page, { seeded: true });
@@ -354,8 +354,10 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
     };
     // The relay saw the wanted coin; an attacker pays for it and files its note, in a deposit.
     await relay.plantWantedCoin({ nonce: make.wantNonce, color: make.wantColor, value: BigInt(make.wantAmount) });
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('Cancelled: your offer can no longer be taken');
+    // Another call of the account lands (offers cannot be cancelled, AA 00060 FR-028): the offer has ended.
+    relay.anotherCallLanded();
+    await page.reload();
+    await connectPhantom(page);
     await expect(myMake(page)).toHaveAttribute('data-state', 'cancelled');
     expect(await recordedSettlement(page)).toBeNull();
   });
@@ -363,8 +365,10 @@ test.describe('round 3’s attacks, against the page’s own decode', () => {
   test('R3-6: the maker’s offer settled by someone is Filled by its decoded swap transaction', async ({ page }) => {
     const { relay, indexer } = await setup(page, { seeded: true });
     await makeAnOffer(page);
-    relay.settleOnCancel = true; // asked to cancel, this relay settles the offer it holds instead
-    await page.getByTestId('cancel-offer').click();
+    // Someone settles the offer this relay holds (AA 00060 FR-028: the page cancels nothing).
+    await relay.settleHeldOfferBySomeone();
+    await page.reload();
+    await connectPhantom(page);
     await expect(myMake(page)).toHaveAttribute('data-state', 'filled');
     const swapTx = [...relay.chainTxs.entries()].find(([, t]) => t.raw)![0];
     expect(await recordedSettlement(page)).toBe(swapTx);

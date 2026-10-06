@@ -9,11 +9,19 @@
     ".": "./src/index.ts",
     "./passport": "./src/passport/index.ts",
     "./passport/gated": "./src/passport/gated.ts",
-    "./solana-auth": "./src/solana-auth.ts"
+    "./solana-auth": "./src/solana-auth.ts",
+    "./solana-signature": "./src/solana-signature.ts",
+    "./bridge": "./src/bridge/index.ts",
+    "./bridge/landing-wallet": "./src/bridge/landing-wallet.ts",
+    "./bridge/landing-spend": "./src/bridge/landing-spend.ts",
+    "./bridge/out": "./src/bridge/out.ts",
+    "./solana": "./src/solana/index.ts"
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.19.0",
     "@midnight-ntwrk/compact-runtime-0.20": "npm:@midnight-ntwrk/compact-runtime@0.20.0",
+    "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
+    "@midnightntwrk/wallet-sdk-hd": "3.1.0-beta.1",
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
     "@scure/base": "2.0.0",

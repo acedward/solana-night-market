@@ -2,12 +2,17 @@
 // redactor, check the key volume (and refuse to start when it lacks any circuit the relay proves,
 // plan P4-A), open the sponsor wallet (under the funding lock when one is configured), wire the
 // Ed25519 arm and the Solana envelope scheme when the key volume is loaded (lane B3:
-// ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, and serve.
+// ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, the test SPL faucet when its keys
+// are configured (AA 00060 P13), and serve.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { KernelClient } from '@nightmarket/core';
 
+import { addDustAndSubmit } from './bridge/dust-submit.js';
+import { LandingEntitlements, landingEntitlementKey } from './bridge/out-actions.js';
+import { BRIDGE_BUNDLE, bridgeKeyProblems, loadBridgeLedger, type ReadContractState } from './bridge/registry-check.js';
 import { AccountCaps } from './actions/account-caps.js';
 import { AccountGate } from './actions/account-gate.js';
 import {
@@ -16,6 +21,8 @@ import {
   withAccountCaps,
   withDemoTokens,
   withRegistrationCaps,
+  withBridgeOut,
+  withSplFaucet,
   withTrade,
 } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
@@ -25,7 +32,7 @@ import { createApp } from './app.js';
 import { NonceStore } from './auth/nonces.js';
 import { passportCallAuthoriser } from './auth/passport-call.js';
 import { DigestReplayGuard } from './auth/verifiers.js';
-import { IndexerClient } from './chain/indexer.js';
+import { IndexerClient, ledgerEventDecoder } from './chain/indexer.js';
 import {
   IndexerChainReader,
   notImplementedChainReader,
@@ -37,6 +44,10 @@ import { demoTokens, demoTokensInfo } from './demo/action.js';
 import { ClaimsStoreError, DemoTokenClaims } from './demo/claims.js';
 import { DemoFaucets } from './demo/faucet.js';
 import { resolvePack, type ResolvedPackItem } from './demo/pack.js';
+import { FaucetClaimsError, SplFaucetClaims } from './faucet/claims.js';
+import { secretForms } from './faucet/keys.js';
+import { FaucetSolanaRpc } from './faucet/solana-rpc.js';
+import { FaucetConfigError, SplFaucet } from './faucet/spl-faucet.js';
 import { healthCollector, httpProbes } from './health.js';
 import { Redactor, createLogger } from './log.js';
 import { ProofServerClient } from './prover/client.js';
@@ -44,6 +55,8 @@ import { cachedKeyCheck, checkKeyVolume, keyVolumeProblems } from './prover/keys
 import { DEMO_TOKEN_PROVEN_CIRCUITS, RELAY_PROVEN_CIRCUITS } from './prover/required.js';
 import { accountKeysChecker, type OnChainAccountState } from './passport/account-keys.js';
 import { wiredArm } from './passport/arm.js';
+import { isLiveDevice } from './passport/ed25519-arm.js';
+import type { SponsorWalletHandle } from './passport/wallet-provider.js';
 import { PassportRuntime, PassportRuntimeError } from './passport/runtime.js';
 import { JobQueue } from './queue/jobs.js';
 import { FacadeSponsorSession, openFacadeWallet } from './sponsor/facade.js';
@@ -58,7 +71,7 @@ async function main(): Promise<void> {
   const redactor = new Redactor();
   let loaded: ReturnType<typeof loadConfig>;
   try {
-    loaded = loadConfig(process.env, (p) => readFileSync(p, 'utf8'));
+    loaded = loadConfig(process.env, (p) => readFileSync(p, 'utf8'), { fileMode: (p) => statSync(p).mode });
   } catch (e) {
     const msg = e instanceof ConfigError ? e.message : 'the configuration could not be loaded';
     process.stderr.write(`${JSON.stringify({ t: new Date().toISOString(), level: 'error', msg: `config: ${msg}` })}\n`);
@@ -67,12 +80,18 @@ async function main(): Promise<void> {
   const { config, secrets } = loaded;
   redactor.addSecret(secrets.sponsorSeedHex);
   redactor.addSecret(secrets.sponsorSeedSource);
+  // AA 00060 P13: the faucet's mint authority keys, in every text form, and its RPC URL (it may carry a key).
+  redactor.addSecret(secrets.splFaucetKeysSource);
+  for (const k of secrets.splFaucetKeys?.values() ?? []) for (const f of secretForms(k)) redactor.addSecret(f);
+  redactor.addSecret(config.splFaucet?.rpcUrl);
   const log = createLogger({ level: config.logLevel, redactor }, { service: 'relay', network: config.network.name });
 
   // The key volume (plan P4-A): every circuit the relay proves must have its prover key, verifier
   // key and ZKIR, and a pinned fingerprint must match. When a volume is configured and any of that
   // fails, the relay does not start: a missing key would otherwise surface only in a customer's job.
   // (No deployed callee is checked: MN Bank checked the bridge vault's keys; Night Market has none.)
+  // The fingerprint covers the key set only (AA 00060 P16): a bridge bundle beside it (`<volume>/bridge/`)
+  // leaves the pin unchanged and is checked on its own below, with the journey registry.
   const deployed: Record<string, string> = {};
   // The demo-token endpoint also proves the faucet's mint and the account's deposit (B3).
   const required = config.demoTokens.enabled
@@ -161,6 +180,36 @@ async function main(): Promise<void> {
       log.error('the Passport runtime could not be loaded; account actions are unavailable', { error: e });
     }
   }
+  // AA 00060 P4.2 (spec FR-014): with a journey registry, each bridge's deployed `lockForSolana` verifier
+  // key must be the key volume's, or Bridge out would be proven with keys the contract refuses.
+  if (config.bridges) {
+    if (!runtime || !config.managedPath) {
+      log.error('BRIDGE_REGISTRY_FILE is set but the key volume is not loaded; refusing to start');
+      process.exit(78);
+    }
+    const rt = runtime;
+    // AA 00060 P10.3 (audit C11, F-A10): with the key volume's bridge module, each bridge's sealed
+    // `sourceMint` must be the registry's SPL mint too. P10.4 (audit D7, R-B5): a module or decoder that
+    // does not load stops the start; the check is never skipped.
+    let bridgeLedger: (data: unknown) => { sourceMint: Uint8Array };
+    try {
+      bridgeLedger = await loadBridgeLedger(config.managedPath);
+    } catch (e) {
+      log.error('the journey registry cannot be checked; refusing to start', { error: (e as Error).message });
+      process.exit(78);
+    }
+    const problems = await bridgeKeyProblems(
+      config.bridges,
+      config.managedPath,
+      async (address) => (await rt.contractState(address)) as Awaited<ReturnType<ReadContractState>>,
+      bridgeLedger,
+    );
+    if (problems.length > 0) {
+      log.error('the journey registry does not match the key volume or the chain; refusing to start', { problems });
+      process.exit(78);
+    }
+    log.info('journey registry checked', { bridges: config.bridges.entries.map((b) => b.symbol) });
+  }
   // AA 00047 P11 (R3-5): a history past one indexer page is read through the WebSocket subscription.
   const indexer = new IndexerClient({
     indexerUrl: config.network.midnight.indexerUrl,
@@ -241,6 +290,39 @@ async function main(): Promise<void> {
     });
   }
 
+  // AA 00060 P13 (spec FR-024): the test SPL faucet, when SPL_FAUCET_KEYS_FILE is set (config.ts checked the
+  // file, the registry, the data dir and the RPC). Its chain checks run now; a refusal that is not final
+  // (the RPC cannot be read) is checked again on demand, and mainnet-beta is refused for good.
+  let splFaucet: SplFaucet | null = null;
+  if (config.splFaucet && config.bridges && secrets.splFaucetKeys) {
+    const f = config.splFaucet;
+    try {
+      splFaucet = new SplFaucet({
+        registry: config.bridges,
+        keys: secrets.splFaucetKeys,
+        rpc: new FaucetSolanaRpc(f.rpcUrl),
+        claims: new SplFaucetClaims({ file: f.claimsFile, periodSeconds: f.periodHours * 3600 }),
+        amountWhole: f.amountWhole,
+        periodSeconds: f.periodHours * 3600,
+        claimsPerPeriod: f.claimsPerPeriod,
+        perClientPerPeriod: f.perClientPerPeriod,
+        log: log.child({ component: 'spl-faucet' }),
+      });
+    } catch (e) {
+      if (e instanceof FaucetConfigError || e instanceof FaucetClaimsError) {
+        log.error('the SPL faucet cannot start; refusing to start', { reason: e.message });
+        process.exit(78);
+      }
+      throw e;
+    }
+    const s = await splFaucet.check();
+    log.info('SPL faucet configured', {
+      state: s.kind === 'off' ? `off: ${s.reason}` : s.kind,
+      tokens: splFaucet.tokens.map((t) => `${t.entry.symbol}:${f.amountWhole}`).join(','),
+      periodHours: f.periodHours,
+    });
+  }
+
   // Security review F-B3: `append-inbox` is sponsored only against a single-use entitlement the
   // relay issued for a change coin (./actions/entitlements.ts); the MAC key comes from the seed.
   const entitlements = new AppendEntitlements({
@@ -249,6 +331,27 @@ async function main(): Promise<void> {
     ttlSeconds: config.limits.appendEntitlementTtlSeconds,
     maxPerAccountPerDay: config.limits.appendsPerAccountPerDay,
   });
+  // AA 00060 P6.3: Bridge out's single-use landing entitlements (./bridge/out-actions.ts), MAC'd with a
+  // key from the seed so they survive a restart; only with a journey registry and the key volume.
+  // P10.3 (audit C1): spent landing coins and their failed attempts are kept in RELAY_DATA_DIR, so a
+  // restart (or a re-issue) never makes a spent landing coin sponsorable again.
+  if (config.bridges && runtime && config.managedPath && !config.dataDir) {
+    log.error(
+      'BRIDGE_REGISTRY_FILE needs RELAY_DATA_DIR (spent landing entitlements must survive a restart); refusing to start',
+    );
+    process.exit(78);
+  }
+  const landing =
+    config.bridges && runtime && config.managedPath && config.dataDir
+      ? {
+          entitlements: new LandingEntitlements({
+            key: landingEntitlementKey(secrets.sponsorSeedHex),
+            network: config.network.name,
+            file: join(config.dataDir, 'landing-entitlements.json'),
+          }),
+          bridges: config.bridges,
+        }
+      : undefined;
   // Stateless nonces (AA 00047 P10, R2-8): only used ones are remembered.
   const nonces = new NonceStore(config.limits.nonceTtlSeconds, config.limits.maxUsedNonces);
   // Audit C4 (AA 00047 P9): registration caps and the failure budget (RUNBOOK section 9).
@@ -303,6 +406,7 @@ async function main(): Promise<void> {
           withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
           replay,
           entitlements,
+          ...(landing ? { landing } : {}),
           log: log.child({ component: 'accounts' }),
           // AA 00047 P11 (R3-7): a coin is checked unspent before a proof is spent on it.
           ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
@@ -348,8 +452,90 @@ async function main(): Promise<void> {
       }),
     );
   }
+  if (splFaucet) {
+    const faucet = splFaucet;
+    catalogue = withSplFaucet(catalogue, {
+      admit: ({ payload, client }) => faucet.admit(payload, client ?? 'unknown'),
+      executor: faucet.executor(),
+    });
+  }
   catalogue = withRegistrationCaps(catalogue, registrationCaps);
   catalogue = withAccountCaps(catalogue, accountCaps);
+  // AA 00060 P6.3: Bridge out's second transaction and the entitlement re-issue.
+  if (landing && wired && runtime && config.managedPath) {
+    const rt = runtime;
+    const managed = config.managedPath;
+    const pdp = rt.publicDataProvider as {
+      queryZSwapAndContractState(a: string, c: unknown): Promise<[unknown, unknown, unknown] | null>;
+      queryContractState(a: string): Promise<unknown>;
+    };
+    const display = { network: config.network.name, tokens: config.tokens };
+    catalogue = withBridgeOut(catalogue, {
+      bridges: landing.bridges,
+      entitlements: landing.entitlements,
+      ledger: () => import('@midnightntwrk/ledger-v9'),
+      transcripts: async () => ({
+        runtime: (await import('@midnight-ntwrk/compact-runtime-0.20')) as never,
+        bridgeLedger: (
+          (await import(join(managed, BRIDGE_BUNDLE, 'contract', 'index.js'))) as { ledger: (s: unknown) => never }
+        ).ledger,
+        stateAt: async (address, blockHash) =>
+          (await pdp.queryZSwapAndContractState(address, { type: 'blockHash', blockHash }))?.[1] ?? null,
+        latestState: (address) => pdp.queryContractState(address),
+      }),
+      prove: (tx) =>
+        (rt.proofProvider as { proveTx(t: unknown, o: unknown): Promise<unknown> }).proveTx(tx, { timeout: 900_000 }),
+      // P10.4 (audit D2, R-A1): after the 180 s wait, watch up to an hour more; a lock that lands then has
+      // its landing coin recorded spent.
+      lateLanding: async (txId) => {
+        const watch = (pdp as unknown as { watchForTxData(id: string): Promise<{ status?: unknown }> }).watchForTxData(
+          txId,
+        );
+        const out = await Promise.race([
+          watch.catch(() => null),
+          new Promise<null>((r) => setTimeout(() => r(null), 3_600_000).unref?.()),
+        ]);
+        return out !== null && String(out.status) === 'SucceedEntirely';
+      },
+      awaitLanded: async (txId) => {
+        const watch = (pdp as unknown as { watchForTxData(id: string): Promise<{ status?: unknown }> }).watchForTxData(
+          txId,
+        );
+        const out = await Promise.race([
+          watch.catch(() => null),
+          new Promise<null>((r) => setTimeout(() => r(null), 180_000)),
+        ]);
+        return out !== null && String(out.status) === 'SucceedEntirely';
+      },
+      submitWithDust: (tx) =>
+        sponsor.withWallet((w) =>
+          addDustAndSubmit(w as SponsorWalletHandle, tx, {
+            onWait: () => log.info('waiting for the sponsor wallet to generate enough DUST'),
+          }),
+        ),
+      tx1: async (account, tx1Hash) => {
+        const txs = await indexer.accountTransactions(account);
+        const tx = txs?.txs.find((t) => t.hash.replace(/^0x/, '').toLowerCase() === tx1Hash);
+        if (!tx) return null;
+        const decode = await ledgerEventDecoder();
+        const outputs: string[] = [];
+        for (const ev of tx.events) {
+          const d = decode(ev.raw) as { tag?: string; commitment?: string };
+          if (d.tag === 'zswapOutput' && d.commitment) outputs.push(d.commitment);
+        }
+        return { entryPoints: tx.entryPoints ?? [], outputs };
+      },
+      liveDevice: async (account, deviceKey, useCounter) => {
+        const l = await rt.ledgerState(account);
+        if (!l) return false;
+        const { ed25519DeviceForKey } = await import('@nightmarket/core/passport');
+        return isLiveDevice(l, ed25519DeviceForKey(deviceKey, display), account, useCounter);
+      },
+      log: log.child({ component: 'bridge-out' }),
+    });
+    log.info('bridge out enabled', { bridges: landing.bridges.entries.map((b) => b.symbol) });
+  }
+  const faucetForApp = splFaucet;
   const app = createApp({
     config,
     version: RELAY_VERSION,
@@ -363,6 +549,7 @@ async function main(): Promise<void> {
     health,
     chain,
     ...(wired ? { scheme: wired.scheme, passportCall: passportCallAuthoriser(() => runtime, wired.arm, replay) } : {}),
+    ...(faucetForApp ? { splFaucet: (w?: string) => faucetForApp.info(w) } : {}),
     demoTokens: demoTokensInfo({
       claims: claims ?? new DemoTokenClaims({ file: null, dailyCap: config.demoTokens.dailyCap }),
       pack: demoPack,

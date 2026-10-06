@@ -127,6 +127,8 @@ export interface JobHold {
 
 export class MockRelay {
   readonly submitted: Submitted[] = [];
+  /** AA 00060 P4.3: the token-list digest `/v1/config` publishes (none: an older relay). */
+  tokensDigest: string | null = null;
   /** Requests refused before anything was queued: `action: code/detail`. */
   readonly refused: string[] = [];
   deviceKey: string | null = null;
@@ -187,6 +189,9 @@ export class MockRelay {
   offerStatus: Record<string, string> = {};
   /** What the exchange says about the next make when the relay stops waiting (`live` = listed). */
   makeListing = 'live';
+  /** Told of every make as the relay posts it to the exchange (AA 00060 FR-026: a test lists it in the
+   *  exchange's book, as the kernel does, before the page reads the book again). */
+  onMake: ((offerId: string, payload: Record<string, string>) => void) | null = null;
   /** Render with another token list than the browser (a symbol the relay does not share): every
    *  account call's rebuilt message then differs, and the check must refuse it (questions Q12). */
   mismatchedTokens = false;
@@ -420,6 +425,17 @@ export class MockRelay {
     }
   }
 
+  /** AA 00060 FR-028 (the page cancels nothing): someone settles the maker's offer this relay holds. */
+  async settleHeldOfferBySomeone(): Promise<void> {
+    await this.settleHeldOffer();
+  }
+
+  /** AA 00060 FR-028: another signed call of the account landed (a withdrawal, say): its nonce moved. */
+  anotherCallLanded(): void {
+    this.authNonce += 1n;
+    this.useCounter += 1n;
+  }
+
   /** The maker's offer this relay holds (the last make), settled by someone: what the chain shows. */
   private async settleHeldOffer() {
     const make = [...this.submitted].reverse().find((x) => x.action === 'open-swap');
@@ -584,6 +600,7 @@ export class MockRelay {
         const offerId = randomBytes(32).toString('hex');
         const status = this.makeListing;
         this.offerStatus[offerId] = status;
+        this.onMake?.(offerId, p as Record<string, string>);
         s.stages = ['proving', 'proven', 'posted', status === 'live' ? 'listed' : `status-${status}`];
         s.result = {
           offerId,
@@ -692,6 +709,7 @@ export class MockRelay {
         network: 'stagenet',
         relayVersion: 'e2e',
         limits: { authMaxTtlSeconds: 600, jobTtlSeconds: 3600 },
+        ...(this.tokensDigest ? { tokensDigest: this.tokensDigest } : {}),
       });
     if (path === '/v1/auth/nonce') {
       const nonce = `0x${randomBytes(32).toString('hex')}`;

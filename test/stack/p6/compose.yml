@@ -83,6 +83,8 @@ services:
       PORT: '9999'
       BATCHER_PORT: '3334'
       MOCK_BATCHER_SEED_FILE: /run/nm/batcher.seed
+      # AA 00060 P9.5: the offers' legs for the page's order book (the owner's by-hand session only).
+      MOCK_COMPUTE_LEGS: '${MOCK_COMPUTE_LEGS:-}'
     volumes: ['app:/app:ro', '${RUN_DIR:?}:/run/nm:ro']
     mem_limit: ${KERNEL_MEM_LIMIT:-2g}
     networks:
@@ -121,6 +123,12 @@ services:
       RESTORES_PER_ACCOUNT_PER_DAY: '${CAP_RESTORES_PER_DAY:-3}'
       # AA 00047 P11.I: the sponsored-withdrawal allowance (Q46; run-local.sh lowers it in the caps phase).
       WITHDRAWS_DAILY_CAP: '${CAP_WITHDRAWS_PER_DAY:-100}'
+      # AA 00060 P6: Bridge out (the journey registry; empty: no bridging).
+      BRIDGE_REGISTRY_FILE: '${BRIDGE_REGISTRY_FILE:-}'
+      # AA 00060 P13: the test SPL faucet ("Mint Solana tokens"; empty: off). A harness writes the keys file
+      # into RUN_DIR (mounted at /run/nm) with `bun relay/src/tools/spl-faucet-keys.ts`, mode 600.
+      SPL_FAUCET_KEYS_FILE: '${SPL_FAUCET_KEYS_FILE:-}'
+      SPL_FAUCET_RPC_URL: '${SPL_FAUCET_RPC_URL:-}'
       LOG_LEVEL: info
     volumes:
       - '${KEYS_DIR:?}:/app/vendor/passport/contract/contracts/managed:ro'

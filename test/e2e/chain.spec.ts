@@ -26,6 +26,7 @@ import { INDEXER, type Tamper } from './mock-indexer.js';
 import { connectPhantom } from './mock-phantom.js';
 import { ACCOUNT, RELAY } from './mock-relay.js';
 import { KERNEL } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const lines = (text: string) => text.split('\n');
@@ -48,7 +49,8 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
     expect(indexer.queries).toContain(`state:${ACCOUNT}`);
     await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'ok');
     await expect(page.getByTestId('account-check')).toContainText('your wallet as its only device');
-    // Only then the deposit: the demo pack, one more approval.
+    // Only then the deposit: the demo pack (the Portfolio's "Mint Midnight tokens"), one more approval.
+    await openAction(page, 'mint-midnight');
     await page.getByTestId('get-demo-tokens').click();
     await expect(page.getByTestId('demo-message')).toContainText('Demo tokens delivered');
     expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
@@ -77,6 +79,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
       await expect(page.getByTestId('account-check')).toHaveAttribute('data-state', 'failed');
       await expect(page.locator(`[data-testid=account-check-problem][data-code="${code}"]`)).toBeVisible();
       // No deposit into it: the demo tokens are refused before any approval.
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-account-refused')).toBeVisible();
       await expect(page.getByTestId('get-demo-tokens')).toBeDisabled();
       expect(phantom.requests).toHaveLength(1); // the registration's, nothing since
@@ -89,7 +92,7 @@ test.describe('the browser checks its account on the chain (audit C3, questions 
   }) => {
     const { phantom, relay } = await setup(page, { seeded: true });
     relay.lies = true; // the relay's own account routes now misreport everything
-    await page.goto('/#account');
+    await page.goto('/#account?action=send');
     await connectPhantom(page);
     // The chain's numbers: 25 utwUSDC (the lying relay says 25,000), the inbox's three coins.
     await expect(page.locator('[data-testid=passport-row][data-kind="unshielded"]')).toContainText('25.00');
@@ -148,7 +151,8 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
 
     // A take: ten minutes (AA 00047 P11.F, R4-1: the relay's maximum, so a busy queue can still reach it).
     await page.getByTestId('trade-pair').selectOption('twETH/twBTC');
-    await page.getByTestId('sell-best-bid').click();
+    // AA 00060 FR-026: the best bid is the first row under Buyers.
+    await page.getByTestId('trade-book-bids').getByTestId('take-line').first().click();
     await expect(page.getByTestId('take-validity')).toContainText('valid for 10 minutes');
     const t1 = nowS();
     await page.getByTestId('take-sign').click();
@@ -158,10 +162,13 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     expect(takeUntil).toBeLessThanOrEqual(nowS() + 600);
   });
 
-  test('Cancel offer: one approval, the chain’s nonce moves, and only then the offer shows Cancelled', async ({
+  // AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): offers cannot be cancelled in Night
+  // Market. No cancel control anywhere; the banner shows the expiry; the offer ends when the chain shows
+  // another call of the account (its nonce moved), and only then it shows Cancelled (ended).
+  test('FR-028: no cancel control; the banner shows the expiry; the offer ends only when the chain shows another call', async ({
     page,
   }) => {
-    const { phantom, relay, indexer } = await setup(page, { seeded: true });
+    const { phantom, relay } = await setup(page, { seeded: true });
     await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
     await connectPhantom(page);
     await expect(holding(page, 'twBTC')).toContainText('0.10');
@@ -169,42 +176,20 @@ test.describe('offers sign a real expiry, and can be cancelled (audit C6, questi
     await page.getByTestId('make-quantity').fill('0.05');
     await page.getByTestId('make-price').fill('60000');
     await page.getByTestId('make-sign').click();
-    await expect(page.getByTestId('live-offer-banner')).toBeVisible();
-    const before = indexer.queries.length;
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('Cancelled: your offer can no longer be taken');
-    expect(relay.submitted.map((s) => [s.action, s.verified])).toEqual([
-      ['open-swap', 'ok'],
-      ['cancel-offers', 'ok'],
-    ]);
-    // The account's own key, re-affirmed: the call changes nothing but the nonce.
-    expect(relay.submitted[1]!.body.payload).toMatchObject({ newKey: relay.encKey, authNonce: '3' });
-    expect(phantom.requests).toHaveLength(2);
-    // F3 v2 (questions Q30, Q32): the account's own key re-affirmed reads as a cancel, not a key change.
-    expect(lines(phantom.requests[1]!.text).slice(1, 3)).toEqual([
-      'Cancel all open offers',
-      'Your key does not change',
-    ]);
-    expect(relay.authNonce).toBe(4n);
-    expect(indexer.queries.slice(before)).toContain(`state:${ACCOUNT}`); // the chain confirmed it
+    const banner = page.getByTestId('live-offer-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('the expiry you approved');
+    await expect(banner).toContainText('Offers cannot be cancelled');
+    await expect(page.getByTestId('cancel-offer')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /cancel/i })).toHaveCount(0);
+    expect(relay.submitted.map((s) => s.action)).toEqual(['open-swap']);
+    expect(phantom.requests).toHaveLength(1);
+    // Another call of the account landed: once the chain shows it (and no fill), the offer has ended.
+    relay.anotherCallLanded();
+    await page.reload();
+    await connectPhantom(page);
     await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'cancelled');
     await expect(page.getByTestId('live-offer-banner')).toHaveCount(0);
-  });
-
-  test('a market that cannot cancel yet says so, and the offer stays as it is', async ({ page }) => {
-    const { relay } = await setup(page, { seeded: true });
-    relay.cancelMode = 'not-implemented';
-    await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
-    await connectPhantom(page);
-    await expect(holding(page, 'twBTC')).toContainText('0.10');
-    await page.getByTestId('side-sell').click();
-    await page.getByTestId('make-quantity').fill('0.05');
-    await page.getByTestId('make-price').fill('60000');
-    await page.getByTestId('make-sign').click();
-    await expect(page.getByTestId('live-offer-banner')).toBeVisible();
-    await page.getByTestId('cancel-offer').click();
-    await expect(page.getByTestId('trade-message')).toContainText('This market cannot cancel offers yet');
-    await expect(page.locator('[data-testid=my-trade][data-role=make]')).toHaveAttribute('data-state', 'live');
   });
 });
 
@@ -213,7 +198,7 @@ test('a withdrawal’s change is computed in the page: a relay that reports anot
 }) => {
   const { phantom, relay } = await setup(page, { seeded: true });
   relay.misreportChange = true;
-  await page.goto('/#account');
+  await page.goto('/#account?action=send');
   await connectPhantom(page);
   await expect(portfolioRow(page, 'twUSDC')).toContainText('1,000.00');
   await page.getByTestId('withdraw-kind-shielded').click();

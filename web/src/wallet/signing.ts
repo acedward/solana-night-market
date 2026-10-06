@@ -19,7 +19,15 @@
 // a Ledger-wrapped or mismatched signature, ./solana-signature.ts); the tests hand it a tweetnacl key.
 
 import { bytesToHex, hexToBytes } from '@nightmarket/core';
-import { solanaRelayActionScheme } from '@nightmarket/core/solana-auth';
+import {
+  deriveLandingMaster,
+  registrationMessageText,
+  type LandingMaster,
+  type LandingMessageExpect,
+  type LandingMessageParams,
+  type RegistrationText,
+} from '@nightmarket/core/bridge';
+import { solanaRelayActionScheme, verifyEd25519Strict } from '@nightmarket/core/solana-auth';
 import type {
   AccountStateView,
   DeviceSigner,
@@ -29,6 +37,7 @@ import type {
   RelayActionScheme,
 } from '@nightmarket/core';
 import {
+  assertSafeEd25519Message,
   callContext,
   ed25519DeviceOf,
   findUseCounter,
@@ -67,6 +76,17 @@ export interface ActionSigning {
   /** This device's current use counter on the account, from a hint (the last one used), or null
    *  when it is not a device of the account. */
   useCounter(state: AccountStateView, hint: bigint): bigint | null;
+  /** AA 00060 P8 (I-4): sign the RPC injector's registration text, which this page RENDERS from the
+   *  typed fields (it never signs a text an injector hands it). Resolves to the exact text and the
+   *  signature (128 hex), checked strictly against the device key before anything is sent. */
+  rpcRegistration?(fields: RegistrationText): Promise<{ message: string; signature: string }>;
+  /** AA 00060 P6 (I-5): derive the Bridge-out landing key's master: the wallet signs the landing-key
+   *  text twice (two prompts), both must be the same valid signature, and the master must match the
+   *  check recorded earlier (`storedCheck`). The signatures never leave the tab. */
+  landingMaster?(
+    params: LandingMessageParams,
+    o: { expect?: Omit<LandingMessageExpect, 'publicKey'>; storedCheck?: string | null },
+  ): Promise<LandingMaster>;
 }
 
 /** The wallet signed, but not the envelope's bytes with the device key (never sent to the relay). */
@@ -92,6 +112,21 @@ export function ed25519ActionSigning(
   const device = ed25519DeviceOf(signer, display);
   return {
     deviceKey: signer.deviceKey,
+    landingMaster(params, o) {
+      return deriveLandingMaster((m) => signer.signMessage(m), params, hexToBytes(signer.deviceKey, 32), {
+        ...(o.expect ? { expect: o.expect } : {}),
+        storedCheck: o.storedCheck ?? null,
+      });
+    },
+    async rpcRegistration(fields) {
+      if (fields.solanaAddress !== signer.address) throw new EnvelopeSignatureError();
+      const message = registrationMessageText(fields);
+      const bytes = new TextEncoder().encode(message);
+      assertSafeEd25519Message(bytes);
+      const signature = await signer.signMessage(bytes);
+      if (!verifyEd25519Strict(signer.deviceKey, bytes, signature)) throw new EnvelopeSignatureError();
+      return { message, signature: bytesToHex(signature) };
+    },
     async relayAction(message) {
       if (message.owner !== signer.deviceKey) throw new EnvelopeSignatureError();
       const signature = await signer.signMessage(envelope.messageBytes(message));

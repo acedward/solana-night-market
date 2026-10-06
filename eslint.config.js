@@ -16,6 +16,8 @@ export default defineConfig([
     'playwright-report/**',
     'test-results/**',
     'packages/core/src/passport/vendor/offer-codec.ts',
+    // AA 00060 P6.2: the vendored bridge contract (compiled output, byte for byte).
+    'web/src/bridge/vendor/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

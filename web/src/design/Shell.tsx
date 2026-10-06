@@ -1,7 +1,7 @@
 // The frame every page sits in (AA 00047 P8.1, spec FR-006b): a wallet-first header (the Night
 // Market mark and name, the network, the sections, and the wallet on the right), and a short
-// testnet footer, which links the About page (#about, AA 00047 P11.D). On a phone the sections move
-// to a tab bar at the bottom of the screen.
+// testnet footer. The footer links no About page (AA 00060 FR-029: the known limitations are in the
+// README and the RUNBOOK). On a phone the sections move to a tab bar at the bottom of the screen.
 //
 //   <Masthead network={<span className="net-pill">Midnight stagenet</span>}
 //             nav={<TabNav items={SECTIONS} current="markets" />}>
@@ -77,22 +77,26 @@ export function TabNav({
   );
 }
 
-export function SiteFooter({ networkName = 'Midnight stagenet' }) {
+/** `bridging`: the site offers Bridge in (AA 00060 P7), so its wallet signs one kind of Solana transaction. */
+export function SiteFooter({ networkName = 'Midnight stagenet', bridging = false }) {
   return (
     <footer className="site-foot">
       <div className="wrap">
         <p className="testnet" data-testid="testnet-notice">
           Testnet only — {networkName}. Tokens have no real value. A proof of concept.
         </p>
-        <p>
-          The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night Market
-          never sends a Solana transaction, and never asks for your seed phrase or private key.
-        </p>
-        <p>
-          <a href="#about" data-testid="about-link">
-            About Night Market and its known limitations
-          </a>
-        </p>
+        {bridging ? (
+          <p data-testid="footer-wallet-bridging">
+            The tokens are Midnight test tokens from public faucets. Your Solana wallet signs messages for every market
+            action; it signs a Solana transaction only when you bridge tokens in, after the page shows you what it does.
+            Night Market never asks for your seed phrase or private key.
+          </p>
+        ) : (
+          <p>
+            The tokens are Midnight test tokens from public faucets. Your Solana wallet only signs messages: Night
+            Market never sends a Solana transaction, and never asks for your seed phrase or private key.
+          </p>
+        )}
       </div>
     </footer>
   );

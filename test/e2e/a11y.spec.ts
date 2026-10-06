@@ -17,6 +17,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { connectPhantom } from './mock-phantom.js';
 import { customerRecords, seedRecords, serveExchange } from './visual-fixtures.js';
+import { openAction } from './portfolio-fixtures.js';
 import { setup } from './wallet-fixtures.js';
 
 const VIEWPORTS = [
@@ -124,10 +125,15 @@ for (const vp of VIEWPORTS) {
       await page.getByTestId('accounts-message').getByRole('button', { name: 'Dismiss' }).click();
       await page.getByTestId('open-account').click();
       await expect(page.getByTestId('masthead-account')).toBeVisible();
+      // AA 00060 FR-023: the Portfolio's list of actions, then the demo tokens (Mint Midnight tokens).
+      await expect(page.getByTestId('portfolio-actions')).toBeVisible();
+      await axe(page, 'portfolio, the list of actions');
+      await openAction(page, 'mint-midnight');
       await expect(page.getByTestId('demo-pack')).toBeVisible();
       await axe(page, 'portfolio, the demo tokens');
       await page.getByTestId('get-demo-tokens').click();
       await expect(page.getByTestId('demo-message')).toContainText('Demo tokens delivered');
+      await page.getByTestId('portfolio-back').click();
       await axe(page, 'portfolio with balances');
       await page.getByTestId('tab-trade').click();
       await expect(page.getByTestId('holdings-panel')).toHaveAttribute('data-state', 'account');
@@ -236,14 +242,16 @@ for (const vp of VIEWPORTS) {
       await expect(page.getByTestId('market-feed-status')).toHaveAttribute('data-status', 'ready');
       for (const [hash, ready] of [
         ['#markets', 'market-feed-status'],
-        [`#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`, 'make-section'],
+        [`#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`, 'trade-book'],
         ['#account', 'passport-section'],
         ['#local', 'local-data'],
       ] as const) {
         await page.goto(`/${hash}`);
         await expect(page.getByTestId(ready)).toBeVisible();
         if (hash.startsWith('#trade')) {
-          // The Create offer card filled in, so its preview and the submit button are stops too.
+          // A create row open and filled in (AA 00060 FR-026), so its preview and the submit button
+          // are stops too.
+          await page.getByTestId('side-sell').click();
           await page.getByTestId('make-quantity').fill('0.05');
           await page.getByTestId('make-price').fill('61500');
           await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -324,7 +332,8 @@ for (const vp of VIEWPORTS) {
 
       // The progress view of a take: Escape hides it ("Continue in background"); the take goes on.
       await page.getByTestId('trade-pair').selectOption('twUSDM/twUSDC');
-      await page.getByTestId('buy-best-ask').click();
+      // AA 00060 FR-026: the best ask is the first row under Sellers.
+      await page.getByTestId('trade-book-asks').getByTestId('take-line').first().click();
       const holdTake = relay.holdNextJob();
       await page.getByTestId('take-sign').click();
       await expect(page.getByTestId('activity-progress')).toBeVisible();

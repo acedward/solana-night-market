@@ -21,7 +21,11 @@ import {
   resolveNetwork,
 } from '@nightmarket/core';
 
+import { BridgeRegistryError, parseJourneyRegistry, type BridgeRegistry } from '@nightmarket/core/bridge';
+
+import { tokenListProblems } from './bridge/registry-check.js';
 import type { ClientPrefixes } from './client-key.js';
+import { FaucetKeysError, modeTooOpen, parseFaucetKeys, type FaucetKey } from './faucet/keys.js';
 import { LOG_LEVELS, type LogLevel } from './log.js';
 import { DEFAULT_HOLD_FLOOR_SECONDS } from './queue/prover-lock.js';
 
@@ -32,6 +36,10 @@ export class ConfigError extends Error {
 export interface RelayConfig {
   network: NetworkProfile;
   tokens: TokenRegistry;
+  /** AA 00060 (spec FR-014): the journey registry (I-1) from BRIDGE_REGISTRY_FILE, or null. Every
+   *  bridged token must be in `tokens` (checked here), and every bridge's deployed `lockForSolana`
+   *  verifier key must be the key volume's (checked at start-up, ./bridge/registry-check.ts). */
+  bridges: BridgeRegistry | null;
   host: string;
   port: number;
   /** Trust the last X-Forwarded-For entry (set by our own reverse proxy) for rate limiting. */
@@ -81,6 +89,9 @@ export interface RelayConfig {
     maxUsedNonces: number;
     actionsPerMinute: number;
     actionsPerOwnerPerMinute: number;
+    /** AA 00060 P10.3 (audit C2): unsigned actions (Bridge out's) per client per minute, beside the
+     *  per-client action limit; they never charge the owner they name before they are verified. */
+    unauthenticatedPerMinute: number;
     authMaxTtlSeconds: number;
     nonceTtlSeconds: number;
     jobTtlSeconds: number;
@@ -135,8 +146,27 @@ export interface RelayConfig {
   /** Where the relay keeps its only persistent state (the demo-token claims); null: none. */
   dataDir: string | null;
   demoTokens: DemoTokensConfig;
+  /** AA 00060 P13 (spec FR-024): the test SPL faucet ("Mint Solana tokens"); null: not configured. Its keys
+   *  are in `RelaySecrets.splFaucetKeys`. */
+  splFaucet: SplFaucetConfig | null;
   healthCacheSeconds: number;
   logLevel: LogLevel;
+}
+
+/** The test SPL faucet (AA 00060 P13, spec FR-024; deploy/.env.example). */
+export interface SplFaucetConfig {
+  /** The Solana RPC the faucet reads and sends through (it may carry a key: registered with the redactor). */
+  rpcUrl: string;
+  /** Whole tokens of each mint per claim (a decimal, applied in each mint's decimals). */
+  amountWhole: string;
+  /** One claim per wallet per this many hours. */
+  periodHours: number;
+  /** Claims admitted per period across all wallets. */
+  claimsPerPeriod: number;
+  /** Claims admitted per period from one client address. */
+  perClientPerPeriod: number;
+  /** `<RELAY_DATA_DIR>/spl-faucet-claims.json`. */
+  claimsFile: string;
 }
 
 /** The demo-token endpoint (spec FR-007, plan B3). */
@@ -187,6 +217,10 @@ export interface RelaySecrets {
   sponsorSeedHex: string | null;
   /** The raw secret text as read, so the redactor can also cut out a mnemonic. */
   sponsorSeedSource: string | null;
+  /** AA 00060 P13: the faucet's mint authority keys, SPL mint → key (SPL_FAUCET_KEYS_FILE); null: none. */
+  splFaucetKeys: Map<string, FaucetKey> | null;
+  /** The keys file's raw text, for the redactor. */
+  splFaucetKeysSource: string | null;
 }
 
 type Env = Record<string, string | undefined>;
@@ -281,7 +315,17 @@ function overridesFromEnv(env: Env): NetworkOverrides {
   return overrides;
 }
 
-export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig; secrets: RelaySecrets } {
+export interface LoadConfigOptions {
+  /** A file's mode bits (stat), for the secret files' permission check (SPL_FAUCET_KEYS_FILE must be 600);
+   *  absent: not checked (unit tests). main.ts always passes it. */
+  fileMode?: (path: string) => number;
+}
+
+export function loadConfig(
+  env: Env,
+  readFile: ReadFile,
+  options: LoadConfigOptions = {},
+): { config: RelayConfig; secrets: RelaySecrets } {
   const networkName = str(env.RELAY_NETWORK);
   if (!networkName || !isNetworkName(networkName))
     throw new ConfigError('RELAY_NETWORK must be "undeployed" or "stagenet"');
@@ -306,6 +350,31 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     tokens = registryFor(network.name, tokenConfig);
   } catch (e) {
     throw new ConfigError((e as Error).message);
+  }
+
+  // AA 00060 P4.2: the journey registry. A bridged token missing from TOKENS_FILE, or listed there with
+  // another symbol or decimals, would make every message naming it differ between the site and the
+  // relay: refuse to start, naming the entry.
+  let bridges: BridgeRegistry | null = null;
+  const bridgeFile = str(env.BRIDGE_REGISTRY_FILE);
+  if (bridgeFile) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFile(bridgeFile));
+    } catch {
+      throw new ConfigError('BRIDGE_REGISTRY_FILE cannot be read as JSON');
+    }
+    try {
+      bridges = parseJourneyRegistry(raw, { midnightNetwork: network.midnightNetworkId });
+    } catch (e) {
+      if (e instanceof BridgeRegistryError) throw new ConfigError(`BRIDGE_REGISTRY_FILE: ${e.message}`);
+      throw e;
+    }
+    const problems = tokenListProblems(bridges, tokens);
+    if (problems.length > 0) throw new ConfigError(`BRIDGE_REGISTRY_FILE: ${problems.join('; ')}`);
+    if (!str(env.MIDNIGHT_MANAGED_PATH)) {
+      throw new ConfigError("BRIDGE_REGISTRY_FILE needs the key volume (MIDNIGHT_MANAGED_PATH) with the bridge's keys");
+    }
   }
 
   const logLevel = (str(env.LOG_LEVEL) ?? 'info') as LogLevel;
@@ -350,9 +419,72 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
   if (demoEnabled && !dataDir)
     throw new ConfigError('DEMO_TOKENS_ENABLED needs RELAY_DATA_DIR (the claims store is its only persistent state)');
 
+  // AA 00060 P13 (spec FR-024): the test SPL faucet, only when its keys file is set. It mints only the
+  // journey registry's tokens, keeps its claims in RELAY_DATA_DIR, and sends through its own Solana RPC.
+  let splFaucet: SplFaucetConfig | null = null;
+  let splFaucetKeys: Map<string, FaucetKey> | null = null;
+  let splFaucetKeysSource: string | null = null;
+  const faucetKeysFile = str(env.SPL_FAUCET_KEYS_FILE);
+  if (faucetKeysFile) {
+    if (!bridges)
+      throw new ConfigError(
+        'SPL_FAUCET_KEYS_FILE needs BRIDGE_REGISTRY_FILE: the faucet mints only the tokens of the journey registry',
+      );
+    if (!dataDir)
+      throw new ConfigError('SPL_FAUCET_KEYS_FILE needs RELAY_DATA_DIR (the claims must survive a restart)');
+    const rpcUrl = str(env.SPL_FAUCET_RPC_URL);
+    if (!rpcUrl)
+      throw new ConfigError('SPL_FAUCET_KEYS_FILE needs SPL_FAUCET_RPC_URL (the Solana RPC it mints through)');
+    try {
+      const u = new URL(rpcUrl);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('scheme');
+    } catch {
+      throw new ConfigError('SPL_FAUCET_RPC_URL is not an http(s) URL');
+    }
+    if (options.fileMode) {
+      let mode: number;
+      try {
+        mode = options.fileMode(faucetKeysFile);
+      } catch {
+        throw new ConfigError('SPL_FAUCET_KEYS_FILE cannot be read');
+      }
+      if (modeTooOpen(mode))
+        throw new ConfigError('SPL_FAUCET_KEYS_FILE must not be readable by group or others (chmod 600)');
+    }
+    try {
+      splFaucetKeysSource = readFile(faucetKeysFile);
+    } catch {
+      throw new ConfigError('SPL_FAUCET_KEYS_FILE cannot be read');
+    }
+    try {
+      splFaucetKeys = parseFaucetKeys(splFaucetKeysSource, new Set(bridges.entries.map((e) => e.splMint)));
+    } catch (e) {
+      if (e instanceof FaucetKeysError) throw new ConfigError(e.message);
+      throw new ConfigError('SPL_FAUCET_KEYS_FILE cannot be parsed');
+    }
+    const amountWhole = str(env.SPL_FAUCET_AMOUNT) ?? '1000';
+    if (!/^[0-9]{1,20}(\.[0-9]{1,18})?$/.test(amountWhole) || /^0+(\.0+)?$/.test(amountWhole))
+      throw new ConfigError('SPL_FAUCET_AMOUNT must be a positive decimal number of whole tokens');
+    splFaucet = {
+      rpcUrl,
+      amountWhole,
+      periodHours: int(env.SPL_FAUCET_PERIOD_H, 24, 'SPL_FAUCET_PERIOD_H', 1, 8760),
+      claimsPerPeriod: int(env.SPL_FAUCET_CLAIMS_PER_PERIOD, 200, 'SPL_FAUCET_CLAIMS_PER_PERIOD', 1, 1_000_000),
+      perClientPerPeriod: int(
+        env.SPL_FAUCET_PER_CLIENT_PER_PERIOD,
+        3,
+        'SPL_FAUCET_PER_CLIENT_PER_PERIOD',
+        1,
+        1_000_000,
+      ),
+      claimsFile: `${dataDir.replace(/\/+$/, '')}/spl-faucet-claims.json`,
+    };
+  }
+
   const config: RelayConfig = {
     network,
     tokens,
+    bridges,
     host: str(env.RELAY_HOST) ?? '0.0.0.0',
     port: int(env.RELAY_PORT, 8080, 'RELAY_PORT', 1, 65535),
     trustProxy: bool(env.RELAY_TRUST_PROXY, false, 'RELAY_TRUST_PROXY'),
@@ -389,6 +521,7 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
         'RATE_LIMIT_ACTIONS_PER_OWNER_PER_MIN',
         1,
       ),
+      unauthenticatedPerMinute: int(env.RATE_LIMIT_UNAUTHENTICATED_PER_MIN, 6, 'RATE_LIMIT_UNAUTHENTICATED_PER_MIN', 1),
       authMaxTtlSeconds: int(env.AUTH_MAX_TTL_SECONDS, 600, 'AUTH_MAX_TTL_SECONDS', 30, 3600),
       nonceTtlSeconds: int(env.AUTH_NONCE_TTL_SECONDS, 600, 'AUTH_NONCE_TTL_SECONDS', 30, 3600),
       maxUsedNonces: int(env.AUTH_MAX_USED_NONCES, 200_000, 'AUTH_MAX_USED_NONCES', 1000, 10_000_000),
@@ -493,6 +626,7 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
       path: demoPath,
       claimsFile: dataDir ? `${dataDir.replace(/\/+$/, '')}/demo-token-claims.json` : null,
     },
+    splFaucet,
     healthCacheSeconds: int(env.HEALTH_CACHE_SECONDS, 15, 'HEALTH_CACHE_SECONDS', 0, 600),
     logLevel,
   };
@@ -509,5 +643,5 @@ export function loadConfig(env: Env, readFile: ReadFile): { config: RelayConfig;
     );
   }
 
-  return { config, secrets: { sponsorSeedHex, sponsorSeedSource } };
+  return { config, secrets: { sponsorSeedHex, sponsorSeedSource, splFaucetKeys, splFaucetKeysSource } };
 }

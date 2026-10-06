@@ -52,8 +52,6 @@ import {
   type AccountHistory,
   type AccountStateView,
   type AppendInboxPayload,
-  type CancelOffersPayload,
-  type CancelOffersResult,
   type JobView,
   type PassportAuth,
   type RegisterResult,
@@ -70,7 +68,6 @@ import {
 import {
   accountCheckText,
   appendInboxRequest,
-  cancelOffersRequest,
   withdrawUnshieldedRequest,
   generateEncKeyPairPortable,
   openEntryPortable,
@@ -90,6 +87,7 @@ import { jobErrorText } from '../relay/messages.js';
 import { recordKey, type WalletScope } from '../store/schema.js';
 import type { LocalStore } from '../store/store.js';
 import type { ActionSigning } from '../wallet/signing.js';
+import { noteMidnightRead } from './read-status.js';
 import {
   readAccount,
   readCoins,
@@ -380,6 +378,18 @@ export interface SyncResult {
  * this browser knows (a withdrawal's change not yet filed, Q13) are kept. The relay is not asked.
  */
 export async function syncAccount(env: OperationEnv, account: string): Promise<SyncResult> {
+  // AA 00060 P11 (light review L-B1): every view of a bridged token knows whether this read succeeded.
+  try {
+    const r = await syncAccountOnce(env, account);
+    noteMidnightRead(account, { ok: true });
+    return r;
+  } catch (e) {
+    noteMidnightRead(account, { ok: false, why: e instanceof Error && e.message ? e.message : 'the read failed' });
+    throw e;
+  }
+}
+
+async function syncAccountOnce(env: OperationEnv, account: string): Promise<SyncResult> {
   const { store, scope } = env;
   const secret = readSecret(store, scope, account);
   if (!secret)
@@ -547,9 +557,8 @@ async function relayEnvelope(
 async function submitGated(
   env: OperationEnv,
   account: string,
-  action: 'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'cancel-offers' | 'restore-enc-key',
-  payload:
-    WithdrawPayload | WithdrawUnshieldedPayload | AppendInboxPayload | CancelOffersPayload | RestoreEncKeyPayload,
+  action: 'withdraw' | 'withdraw-unshielded' | 'append-inbox' | 'restore-enc-key',
+  payload: WithdrawPayload | WithdrawUnshieldedPayload | AppendInboxPayload | RestoreEncKeyPayload,
   passportAuth: PassportAuth,
   counter: bigint,
   context: Record<string, unknown>,
@@ -606,12 +615,34 @@ export async function withdrawToWallet(
   env: OperationEnv,
   account: string,
   args: { color: string; amount: bigint; recipient: string },
-  opts: { recipientEnvelope?: boolean } = {},
-): Promise<{ txId: string; change: StoredCoin | null; changeMismatch: boolean }> {
+  opts: {
+    recipientEnvelope?: boolean;
+    /** AA 00060 P6: a Bridge-out's tx1 (the relay returns a landing entitlement with the result). */
+    purpose?: 'bridge-out';
+    /** AA 00060 P6: the coin to spend (Bridge out chooses it to derive the landing key's transfer). */
+    coin?: StoredCoin & { mtIndex: string };
+    /** AA 00060 P6: refuse (before the wallet is asked) unless the account's auth nonce is this one. */
+    expectAuthNonce?: string;
+    /** AA 00060 P6: told the coin and the auth nonce right before the wallet is asked (the bridge-out
+     *  record is written then, before each step). */
+    onPrepared?: (p: { coin: StoredCoin; authNonce: string; counter: bigint }) => void;
+  } = {},
+): Promise<{
+  txId: string;
+  change: StoredCoin | null;
+  changeMismatch: boolean;
+  /** AA 00060 P6: for `purpose: 'bridge-out'`, the relay's single-use landing entitlement. */
+  landingEntitlement?: string;
+  spent: StoredCoin;
+  authNonce: string;
+}> {
   const to = recipientOf(args.recipient, env.scope.network);
   const coins = readCoins(env.store, env.scope, account);
-  const coin = chooseCoin(coins, args.color, args.amount);
+  const coin = opts.coin ?? chooseCoin(coins, args.color, args.amount);
   const { state, counter, ctx } = await gatedContext(env, account);
+  if (opts.expectAuthNonce !== undefined && state.authNonce !== opts.expectAuthNonce) {
+    throw new OperationError('Your account moved on since this started. Nothing was sent; try again.');
+  }
   const payload: WithdrawPayload = {
     recipient: to.coinPublicKey,
     ...(to.encryptionPublicKey ? { recipientEncryptionKey: to.encryptionPublicKey } : {}),
@@ -619,8 +650,15 @@ export async function withdrawToWallet(
     amount: args.amount.toString(10),
     coin: { nonce: coin.nonce, color: coin.color, value: coin.value, mtIndex: coin.mtIndex },
     authNonce: state.authNonce,
+    ...(opts.purpose ? { purpose: opts.purpose } : {}),
   };
-  const passportAuth = await env.signing.authorise(ctx, { kind: 'gated', request: withdrawRequest(payload) }, counter);
+  opts.onPrepared?.({ coin, authNonce: state.authNonce, counter });
+  const { purpose: _purpose, ...signedPayload } = payload;
+  const passportAuth = await env.signing.authorise(
+    ctx,
+    { kind: 'gated', request: withdrawRequest(signedPayload) },
+    counter,
+  );
   // The change follows from what the wallet signed (the coin and the amount): computed here, never
   // taken from the relay (Q28 A), and written down before the approval leaves the page (R2-5).
   const expected = predictWithdrawChange(coin, args.amount);
@@ -670,7 +708,14 @@ export async function withdrawToWallet(
   );
   env.store.put(env.scope, 'coins', next, { account });
   if (change) putCoin(env, account, change);
-  return { txId: result.txId, change, changeMismatch };
+  return {
+    txId: result.txId,
+    change,
+    changeMismatch,
+    ...(result.landingEntitlement ? { landingEntitlement: result.landingEntitlement } : {}),
+    spent: coin,
+    authNonce: state.authNonce,
+  };
 }
 
 /** Add or replace one coin of the account's list (by its commitment). */
@@ -811,49 +856,10 @@ export async function secureChange(env: OperationEnv, account: string, given: St
   return { txId: String((done.result as { txId?: unknown } | undefined)?.txId ?? '') };
 }
 
-/** What the page says when the market cannot land a cancel yet. */
-export const CANCEL_UNAVAILABLE =
-  'This market cannot cancel offers yet. Nothing was signed on chain; your offer stops working on its own at the expiry you signed.';
-
-/**
- * "Cancel offer" (audit C6, questions Q30): end EVERY open approval of the account at once, its open
- * offers included. The wallet signs the arm's `rotate_enc_key` with the account's CURRENT key (read
- * from the chain, so the call changes nothing but the auth nonce), the relay lands it, and the
- * account's nonce moves: every approval signed at the old nonce (a listed offer, a take a relay may
- * be holding) can never execute. Done only when the CHAIN shows the new nonce.
- */
-export async function cancelOpenApprovals(
-  env: OperationEnv,
-  account: string,
-): Promise<{ txId: string; authNonce: string }> {
-  const { state, counter, ctx } = await gatedContext(env, account);
-  const signedAt = BigInt(state.authNonce);
-  const payload: CancelOffersPayload = { newKey: state.encKey, authNonce: state.authNonce };
-  const passportAuth = await env.signing.authorise(
-    ctx,
-    { kind: 'gated', request: cancelOffersRequest(payload) },
-    counter,
-  );
-  let done: JobView;
-  try {
-    done = await submitGated(env, account, 'cancel-offers', payload, passportAuth, counter, {});
-  } catch (e) {
-    if (unavailable(e)) throw new OperationError(CANCEL_UNAVAILABLE);
-    throw e;
-  }
-  const txId = String((done.result as Partial<CancelOffersResult> | undefined)?.txId ?? '');
-  // The relay's "succeeded" is not the proof: the chain's nonce is (Q26).
-  const deadline = Date.now() + NEW_ACCOUNT_WAIT_MS;
-  for (;;) {
-    const now = await env.chain.accountState(account);
-    if (now && BigInt(now.authNonce) > signedAt) return { txId, authNonce: now.authNonce };
-    if (Date.now() >= deadline)
-      throw new OperationError(
-        'The market reported the cancel done, but Midnight does not show it yet. Refresh in a minute; until the chain shows it, treat your offer as open.',
-      );
-    await sleep(NEW_ACCOUNT_POLL_MS);
-  }
-}
+// AA 00060 spec FR-028 (owner, 2026-10-05; supersedes 00047 Q30): Night Market does not cancel offers.
+// The former "Cancel offer" (the arm's rotate_enc_key to the account's CURRENT key) is removed here, and
+// the relay refuses it (`offers-cannot-be-cancelled`). Offers end at their signed expiry, or when any
+// other signed call of the account moves its nonce. A future Offer Files feature cancels for every client.
 
 /** Coins that exist only in this browser (no inbox entry yet) and that the chain shows: shown as
  *  "not yet secured", with "Save it now". A change still pending (R2-5) is not one of them yet. */

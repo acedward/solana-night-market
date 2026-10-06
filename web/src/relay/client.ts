@@ -15,12 +15,14 @@ import {
   type HealthResponse,
   JobViewSchema,
   NonceResponseSchema,
+  SplFaucetInfoSchema,
   ZswapActivitySchema,
   type ActionRequest,
   type DemoTokensInfo,
   type JobView,
   type NonceResponse,
   type RelayActionName,
+  type SplFaucetInfo,
   type ZswapActivity,
 } from '@nightmarket/core';
 
@@ -144,6 +146,28 @@ export class RelayClient {
       return { withdrawRecipientEnvelope: body?.withdrawRecipientEnvelope === true };
     } catch {
       return { withdrawRecipientEnvelope: false };
+    }
+  }
+
+  /** The relay's token-list digest (AA 00060 P4.3, `GET /v1/config` `tokensDigest`), or null when this
+   *  relay does not publish one (an older relay: then there is nothing to compare). Throws when the
+   *  relay cannot be read. */
+  async tokensDigest(): Promise<string | null> {
+    const body = (await this.call(API_PATHS.config)) as { tokensDigest?: unknown } | null;
+    const d = body?.tokensDigest;
+    return typeof d === 'string' && /^[0-9a-f]{64}$/.test(d) ? d : null;
+  }
+
+  /** "Mint Solana tokens" (AA 00060 P13, spec FR-024; packages/core/src/spl-faucet.ts): what a claim mints,
+   *  whether the faucet is on (and why not), and `wallet`'s last claim. Null when this relay does not serve it
+   *  (an older relay). */
+  async splFaucetInfo(wallet?: string): Promise<SplFaucetInfo | null> {
+    const path = wallet ? `${API_PATHS.splFaucet}?wallet=${encodeURIComponent(wallet)}` : API_PATHS.splFaucet;
+    try {
+      return SplFaucetInfoSchema.parse(await this.call(path));
+    } catch (e) {
+      if (e instanceof RelayError && (e.status === 404 || e.status === 405)) return null;
+      throw e;
     }
   }
 

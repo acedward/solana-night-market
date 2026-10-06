@@ -152,7 +152,15 @@ export type TradeCheckOk<A extends TradeAction = TradeAction> = CallCheckOk<Trad
 
 export interface GatedCheckFail {
   ok: false;
-  code: 'malformed' | 'wrong-account' | 'wrong-signer' | 'expired' | 'bad-signature' | 'not-supported';
+  code:
+    | 'malformed'
+    | 'wrong-account'
+    | 'wrong-signer'
+    | 'expired'
+    | 'bad-signature'
+    | 'not-supported'
+    // AA 00060 spec FR-028: a rotate_enc_key to the account's own key (an offer cancel).
+    | 'offers-cannot-be-cancelled';
   reason: string;
 }
 

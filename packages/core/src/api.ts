@@ -21,6 +21,8 @@ export const API_PATHS = {
   accountZswap: (account: string) => `/v1/accounts/${account}/zswap`,
   /** The demo-token pack and limits (AA 00047 B3, ./demo-tokens.ts). */
   demoTokens: '/v1/demo-tokens',
+  /** The test SPL faucet: what a claim mints, and a wallet's last claim (AA 00060 P13, ./spl-faucet.ts). */
+  splFaucet: '/v1/spl-faucet',
 } as const;
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -189,5 +191,11 @@ export const PublicConfigSchema = z.object({
    *  (a Solana envelope over the whole body) for a shielded withdrawal that names a recipient
    *  encryption key. False by default: one wallet prompt per action. */
   withdrawRecipientEnvelope: z.boolean().optional(),
+  /** AA 00060 P4.2 (spec FR-014): the relay's token list digest (./tokens/digest.ts). Optional so a page
+   *  tolerates an older relay (it then has nothing to compare). */
+  tokensDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
 });
 export type PublicConfig = z.infer<typeof PublicConfigSchema>;

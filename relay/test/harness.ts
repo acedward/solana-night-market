@@ -84,6 +84,10 @@ export function harness(
     queue?: JobQueue;
     /** The route's clock (Unix seconds); the system clock unless given. */
     now?: () => number;
+    /** AA 00060 P13: the test SPL faucet's offer (GET /v1/spl-faucet). */
+    splFaucet?: AppDeps['splFaucet'];
+    /** The caller's address (default: one fixed client). */
+    clientAddress?: AppDeps['clientAddress'];
   } = {},
 ) {
   const config = opts.config ?? testConfig();
@@ -128,8 +132,9 @@ export function harness(
     ...(opts.passportCall ? { passportCall: opts.passportCall } : {}),
     ...(opts.failures ? { failures: opts.failures } : {}),
     ...(opts.scheme === null ? {} : { scheme: opts.scheme ?? testScheme }),
-    clientAddress: () => '198.51.100.7',
+    clientAddress: opts.clientAddress ?? (() => '198.51.100.7'),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.splFaucet ? { splFaucet: opts.splFaucet } : {}),
   });
   return { app, config, log, nonces, queue, catalogue };
 }

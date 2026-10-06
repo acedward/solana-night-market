@@ -1090,16 +1090,23 @@ indexer, or the page cannot check any account (it then says so and signs nothing
 P11.B, the indexer's WebSocket endpoint (`wss://…`): a browser does not let an `https://` source
 cover a `wss://` connection (checked in Chromium), and without it an account with more than 500
 actions cannot be read in full (the page then says "could not read your account's whole history" and
-counts only what it could confirm). The value below is tested (`test/e2e/chain.spec.ts` and
-`test/e2e/zswap-decode.spec.ts`, with the tests' own origins in place of these):
+counts only what it could confirm). AA 00062 (spec FR-013, owner Q2 "any URL is OK"): it also allows
+the customer's own proof server, `http://localhost:*` and `http://127.0.0.1:*` (the package on their
+computer) and `https:` (an online proof server at any https URL); only the page calls it, never the
+relay. The value below is tested (`test/e2e/chain.spec.ts`, `test/e2e/zswap-decode.spec.ts` and
+`test/e2e/prover.spec.ts`, with the tests' own origins in place of these; `web/test/csp-docs.test.ts`
+checks that this file, `.env.example` and `SYSTEMD.md` carry the same value):
 
 ```
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
 ```
 
 `'wasm-unsafe-eval'` is for WebAssembly: the contract runtime's (the arm's message builder and the
 account decoder) and ledger-v9's (the history decoder, AA 00047 P11.B; no new directive was needed
-for it). The relay is the same-origin `/relay` here; a relay on another origin (`WEB_RELAY_URL`) and an
+for it). `https:` lets the page reach any https origin (the indexer's and the kernel's among them, still
+listed), but not a `wss:` one: the indexer's WebSocket stays listed. A policy without the three proof-server
+sources still works for every action the market proves itself; only the customer's own proof server is
+then refused (the page says the site's security policy blocks it). The relay is the same-origin `/relay` here; a relay on another origin (`WEB_RELAY_URL`) and an
 indexer set in `config.json` must be added to `connect-src` (the indexer with both its `https:` and
 its `wss:` endpoint; a `config.json` that moves only `indexerUrl` gets the WebSocket at the same host
 and path plus `/ws`).

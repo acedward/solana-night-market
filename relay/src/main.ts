@@ -43,7 +43,13 @@ import {
 } from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
 import { ClientProofDesk } from './client-proving/desk.js';
-import { builtInClientProofVerifier, clientProvingStartProblem } from './client-proving/verifier.js';
+import {
+  builtInClientProofVerifier,
+  ClientProofVerifierLoadError,
+  clientProvingStartProblem,
+  NO_CLIENT_PROOF_VERIFIER,
+  type ClientProofVerifier,
+} from './client-proving/verifier.js';
 import { demoTokens, demoTokensInfo } from './demo/action.js';
 import { ClaimsStoreError, DemoTokenClaims } from './demo/claims.js';
 import { DemoFaucets } from './demo/faucet.js';
@@ -90,14 +96,21 @@ async function main(): Promise<void> {
   redactor.addSecret(config.splFaucet?.rpcUrl);
   const log = createLogger({ level: config.logLevel, redactor }, { service: 'relay', network: config.network.name });
 
-  // AA 00062 (I-62a): CLIENT_PROVING=required needs a REAL client-proof verifier (questions Q3). There is
-  // none built in yet, and never a permissive one: refuse to start rather than accept unchecked proofs.
-  const clientVerifier = config.clientProving.mode === 'required' ? builtInClientProofVerifier() : null;
-  if (config.clientProving.mode === 'required' && !clientVerifier) {
-    log.error(
-      `${clientProvingStartProblem('required', null, { loaded: false, fingerprint: null })}; refusing to start`,
-    );
-    process.exit(78);
+  // AA 00062 (I-62a): CLIENT_PROVING=required needs the REAL client-proof verifier (questions Q3 → A, plan
+  // P3.5): the pinned verifier-only WASM, its SHA-256 checked before it is compiled. If it does not load,
+  // refuse to start rather than accept unchecked proofs; there is never a permissive fallback.
+  let clientVerifier: ClientProofVerifier | null = null;
+  if (config.clientProving.mode === 'required') {
+    try {
+      clientVerifier = await builtInClientProofVerifier({
+        managedPath: config.managedPath,
+        log: log.child({ component: 'client-proof-verifier' }),
+      });
+    } catch (e) {
+      const why = e instanceof ClientProofVerifierLoadError ? e.message : String(e);
+      log.error(`${NO_CLIENT_PROOF_VERIFIER}: ${why}; refusing to start`);
+      process.exit(78);
+    }
   }
 
   // The key volume (plan P4-A): every circuit the relay proves must have its prover key, verifier

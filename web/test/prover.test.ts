@@ -31,6 +31,7 @@ import {
   PINNED_KEY_SET,
   PROVER_COMMAND,
   PROVER_IMAGE,
+  type ClientCircuit,
 } from '../src/prover/constants.js';
 import { clientProvingOf, type ClientProofRequest, type HandOffJobView } from '../src/prover/i62a.js';
 import { ProverError, proverProblemText } from '../src/prover/messages.js';
@@ -404,7 +405,7 @@ describe('the Test (spec FR-010): each check in plain words', () => {
 });
 
 /** A relay for the engine: the client-proving mode, and the hand-off routes. */
-function fakeRelay(mode: 'off' | 'required' = 'required', circuits: readonly string[] = CLIENT_CIRCUITS) {
+function fakeRelay(mode: 'off' | 'required' = 'required', circuits: readonly ClientCircuit[] = CLIENT_CIRCUITS) {
   const posted: Array<{ id: string; proofId: string; proof: string }> = [];
   const r = {
     clientProving: vi.fn(async () =>
@@ -639,7 +640,7 @@ describe('RelayClient: the hand-off while a job is followed', () => {
   });
   const cp = (proofId: string, attempt = 1) => ({
     proofId,
-    circuit: 'withdraw_shielded_with_ed25519',
+    circuit: 'withdraw_shielded_with_ed25519' as const,
     deadline: 9,
     attempt,
     fetched: false,
@@ -697,11 +698,17 @@ describe('RelayClient: the hand-off while a job is followed', () => {
   it('reads clientProving from /v1/config; absent or unknown is "off"', () => {
     expect(clientProvingOf({})).toEqual({ mode: 'off' });
     expect(clientProvingOf({ clientProving: { mode: 'sometimes' } })).toEqual({ mode: 'off' });
-    expect(
-      clientProvingOf({
-        clientProving: { mode: 'required', circuits: ['a'], keySet: 'k', proofServer: 'p', timeoutSeconds: 300 },
-      }),
-    ).toMatchObject({ mode: 'required', timeoutSeconds: 300 });
+    const required = {
+      mode: 'required',
+      circuits: ['append_inbox_with_ed25519'],
+      keySet: PINNED_KEY_SET,
+      proofServer: '9.0.0-rc.8',
+      timeoutSeconds: 300,
+    };
+    expect(clientProvingOf({ clientProving: required })).toEqual(required);
+    // A malformed advertisement (an unknown circuit, a short key set) is not trusted: "off".
+    expect(clientProvingOf({ clientProving: { ...required, circuits: ['a'] } })).toEqual({ mode: 'off' });
+    expect(clientProvingOf({ clientProving: { ...required, keySet: 'k' } })).toEqual({ mode: 'off' });
   });
 });
 

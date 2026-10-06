@@ -19,12 +19,14 @@ import type { TokenRegistry } from '@nightmarket/core';
 import { encodeKey } from '@nightmarket/core/solana';
 import type { BridgeRegistry } from '@nightmarket/core/bridge';
 
-import { deployedVerifierDigests, verifierDigests } from '../prover/key-volume.js';
+import { BRIDGE_BUNDLE, deployedVerifierDigests, verifierDigests } from '../prover/key-volume.js';
 
 /** The circuit Bridge out proves on each bridge. */
 export const BRIDGE_LOCK_CIRCUIT = 'lockForSolana';
-/** The key volume's bridge bundle (the 00050 template's compiled bridge, AA 00060 P0.6). */
-export const BRIDGE_BUNDLE = 'bridge';
+/** The key volume's bridge bundle (the 00050 template's compiled bridge, AA 00060 P0.6). Defined with the key
+ *  set's bundles (../prover/key-volume.ts): it is not part of the set's fingerprint (P16), so these checks are
+ *  the bundle's own. */
+export { BRIDGE_BUNDLE };
 
 /** Check 1: every bridged entry is in the relay's token list with the same colour, symbol and decimals. */
 export function tokenListProblems(bridges: BridgeRegistry, tokens: TokenRegistry): string[] {

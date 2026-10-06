@@ -97,7 +97,8 @@ async function verify(root: string, opts: { inputs?: string; writeMarker: boolea
   const missing = missingProvers(root, kept);
   problems.push(...missing.map((m) => `${m}: prover key or zkir missing`));
 
-  // 4. The fingerprint (the relay's own algorithm) against the pin.
+  // 4. The fingerprint (the relay's own algorithm) against the pin. It covers the key set's bundles only:
+  //    a bridge bundle installed beside them (`<root>/bridge/`, AA 00060 P16) does not change it.
   const fingerprint = scanKeyTree(root).fingerprint;
   const pin = env('RELAY_KEYS_FINGERPRINT')?.toLowerCase() ?? null;
   if (pin === null) warnings.push('RELAY_KEYS_FINGERPRINT is not set: the relay will accept any key set');

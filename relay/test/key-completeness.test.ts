@@ -221,6 +221,45 @@ describe('the relay at start-up (Bun)', () => {
     expect(r.out).toMatch(/fingerprint [0-9a-f]{64} is not RELAY_KEYS_FINGERPRINT/);
   }, 90_000);
 
+  it('AA 00060 P16: pinned to the key set, with bridging on and the bridge bundle beside the set, passes the key check', async () => {
+    const root = volume();
+    const pin = scanKeyTree(root).fingerprint;
+    // The bridge bundle as RUNBOOK 17.3 installs it: `<key volume>/bridge/`.
+    for (const d of ['keys', 'zkir', 'contract']) mkdirSync(join(root, 'bridge', d), { recursive: true });
+    for (const c of ['lockForSolana', 'mintFromSolana']) {
+      writeFileSync(join(root, 'bridge', 'keys', `${c}.verifier`), `vk:bridge/${c}`);
+      writeFileSync(join(root, 'bridge', 'keys', `${c}.prover`), 'pk');
+      writeFileSync(join(root, 'bridge', 'zkir', `${c}.bzkir`), 'ir');
+    }
+    const journeyFile = here('../../test/fixtures/journey-registry.undeployed.json');
+    const journey = JSON.parse(readFileSync(journeyFile, 'utf8')) as {
+      tokens: { colour: string; symbol: string; decimals: number }[];
+    };
+    const cfg = mkdtempSync(join(tmpdir(), 'nm-p16-'));
+    dirs.push(cfg);
+    writeFileSync(
+      join(cfg, 'tokens.json'),
+      JSON.stringify({
+        tokens: journey.tokens.map((t) => ({ symbol: t.symbol, decimals: t.decimals, midnightColour: t.colour })),
+      }),
+    );
+    mkdirSync(join(cfg, 'data'), { mode: 0o700 });
+    const r = await startRelay({
+      MIDNIGHT_MANAGED_PATH: root,
+      RELAY_KEYS_FINGERPRINT: pin,
+      TOKENS_FILE: join(cfg, 'tokens.json'),
+      BRIDGE_REGISTRY_FILE: journeyFile,
+      RELAY_DATA_DIR: join(cfg, 'data'),
+    });
+    expect(r.out).not.toMatch(/is not RELAY_KEYS_FINGERPRINT/);
+    expect(r.out).toContain('"msg":"key volume complete"');
+    expect(r.out).toContain(`"fingerprint":"${pin}"`);
+    // The made-up account keys then fail the NEXT check, the Passport client's own binding: the key check
+    // passed. (The real key set, pinned to 21493588…, starts with bridging on: P16's run, evidence p16/.)
+    expect(r.code).toBe(78);
+    expect(r.out).toContain('the key volume does not match the Passport client');
+  }, 90_000);
+
   it('with RELAY_REQUIRE_KEYS, refuses to start without a key volume or on an empty one', async () => {
     const r = await startRelay({ RELAY_REQUIRE_KEYS: 'true' });
     expect(r.code).toBe(78);

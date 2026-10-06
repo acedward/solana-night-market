@@ -21,6 +21,13 @@
 // mismatch that proof falls back to the ledger building the body, as before), and the request
 // carries a Content-Length, so the proof server sees the same request as before.
 //
+// AA 00062 (I-62a, `CLIENT_PROVING=required`): with `clientProofs`, a key location of one of the four
+// k≥18 account circuits is NEVER sent to the proof server. `prove` hands the ledger's own key-less body
+// for that one proof (`createProvingPayload(preimage, bindingInput)`, a few kilobytes) and the pinned
+// verifier key the location names to the client-proof hand-off (../client-proving/desk.ts), and returns
+// the proof the page's prover made once the relay has checked it. `check` (the ZKIR only) and every
+// other proof (the Zswap proofs, the other circuits) go to the proof server as before.
+//
 // Everything else is midnight-js's: a key location's embedded verifier-key hash picks the bundle
 // (ZKConfigRegistry's rule); the verifier key and ZKIR come from its NodeZkConfigProvider,
 // integrity-checked; the prover key is checked against the same compiler manifest, fail-closed
@@ -100,6 +107,19 @@ export interface ProvingLedger {
   parseCheckResult(result: Uint8Array): (bigint | undefined)[];
 }
 
+/** AA 00062 (I-62a): where `prove` sends the k≥18 circuits in `CLIENT_PROVING=required` mode. */
+export interface ClientProofHandOff {
+  /** The circuit ids proven by the client. */
+  circuits: ReadonlySet<string>;
+  /** Open a hand-off for this one proof and wait for the client's checked proof. */
+  handOff(request: {
+    circuit: string;
+    proofRequest: Uint8Array;
+    keyMaterialOffset: number;
+    verifierKey: Uint8Array;
+  }): Promise<Uint8Array>;
+}
+
 export interface RelayProofProviderOptions {
   /** Per-request timeout, ms (default 300 s, midnight-js's). */
   timeout?: number;
@@ -109,6 +129,8 @@ export interface RelayProofProviderOptions {
   /** How much of a prover key is read at once (default KEY_CHUNK_BYTES). */
   keyChunkBytes?: number;
   ledger?: ProvingLedger;
+  /** AA 00062: the client-proof hand-off (`CLIENT_PROVING=required`); absent: the relay proves everything. */
+  clientProofs?: ClientProofHandOff;
 }
 
 /** A /prove body: in memory (a builtin, or the ledger-built fallback) or streamed from the key file. */
@@ -419,6 +441,32 @@ export async function relayProofProvider(
     return streamedBody(path, proveBodyParts(frame, size, verifierKey, ir), size, entry.hash, label, chunkBytes);
   };
 
+  /**
+   * AA 00062: the hand-off request of a proof the CLIENT must make, or null when the relay proves it.
+   * The location is resolved as for any proof (the bundle whose verifier key hashes to its `?vk=`), so
+   * the verifier key handed on is the pinned one the location names. The key-less body is the ledger's
+   * own; `keyMaterialOffset` is its HEAD's length (where `0x00`, the key material's `None`, sits),
+   * checked against the ledger's binding-less body as for every streamed proof (./prove-body.ts).
+   */
+  const clientRequest = async (
+    serializedPreimage: Uint8Array,
+    keyLocation: string,
+    overwriteBindingInput?: bigint,
+  ): Promise<Parameters<ClientProofHandOff['handOff']>[0] | null> => {
+    const clientProofs = options.clientProofs;
+    if (!clientProofs) return null;
+    const target = await resolveLocation(keyLocation);
+    if (!target || !clientProofs.circuits.has(target.circuitId)) return null;
+    const proofRequest = createProvingPayload(serializedPreimage, overwriteBindingInput);
+    const frame = proveBodyFrame(proofRequest, createProvingPayload(serializedPreimage, undefined));
+    return {
+      circuit: target.circuitId,
+      proofRequest,
+      keyMaterialOffset: frame.head.length,
+      verifierKey: await target.bundle.zk.getVerifierKey(target.circuitId),
+    };
+  };
+
   const collect = async (body: ProveRequestBody): Promise<Uint8Array> => {
     if (body instanceof Uint8Array) return body;
     const bytes = new Uint8Array(await new Response(body.open()).arrayBuffer());
@@ -435,6 +483,9 @@ export async function relayProofProvider(
     },
 
     async prove(serializedPreimage, keyLocation, overwriteBindingInput) {
+      // AA 00062: a k≥18 circuit in `required` mode is proven by the client, never by the proof server.
+      const client = await clientRequest(serializedPreimage, keyLocation, overwriteBindingInput);
+      if (client) return options.clientProofs!.handOff(client);
       return post(proveUrl, await proveRequest(serializedPreimage, keyLocation, overwriteBindingInput), timeoutMs);
     },
 

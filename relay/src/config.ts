@@ -8,6 +8,11 @@
 import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
 import {
+  CLIENT_PROOF_TIMEOUT_DEFAULT_SECONDS,
+  CLIENT_PROOF_TIMEOUT_MAX_SECONDS,
+  CLIENT_PROOF_TIMEOUT_MIN_SECONDS,
+  CLIENT_PROVING_MODES,
+  type ClientProvingMode,
   DEFAULT_EXPIRY_LIMITS,
   DEMO_TOKEN_PATHS,
   WITHDRAWS_DAILY_CAP_DEFAULT,
@@ -65,6 +70,13 @@ export interface RelayConfig {
   managedPath: string | null;
   /** The pinned verifier-key fingerprint of the key volume; the relay refuses to start on another. */
   keysFingerprint: string | null;
+  /**
+   * AA 00062 (I-62a): client proving. `required` hands the four k≥18 account circuits' proofs to the
+   * page (the user's own prover) instead of the contract prover; `off` (the default) is today's relay.
+   * `timeoutSeconds` (CLIENT_PROOF_TIMEOUT_SECONDS, 60–840, default 300) bounds each hand-off; a make's
+   * or a take's signed deadline can make it shorter (./client-proving/desk.ts).
+   */
+  clientProving: { mode: ClientProvingMode; timeoutSeconds: number };
   /** Refuse to start without a key volume (a deployment sets it; CI and UI development do not). */
   requireKeys: boolean;
   sponsor: {
@@ -401,6 +413,10 @@ export function loadConfig(
   const contractProofServerUrl = url('MIDNIGHT_CONTRACT_PROOF_SERVER_URL', 'http://proof-server-contracts:6300');
   const dustProofServerUrl = url('MIDNIGHT_DUST_PROOF_SERVER_URL', 'http://proof-server-dust:6300');
 
+  const clientProvingMode = (str(env.CLIENT_PROVING) ?? 'off') as ClientProvingMode;
+  if (!CLIENT_PROVING_MODES.includes(clientProvingMode))
+    throw new ConfigError(`CLIENT_PROVING must be one of ${CLIENT_PROVING_MODES.join(', ')}`);
+
   const fingerprint = str(env.RELAY_KEYS_FINGERPRINT)?.toLowerCase() ?? null;
   if (fingerprint && !/^[0-9a-f]{64}$/.test(fingerprint))
     throw new ConfigError('RELAY_KEYS_FINGERPRINT must be 64 hex characters');
@@ -502,6 +518,16 @@ export function loadConfig(
     dustProofServerVersion: str(env.DUST_PROOF_SERVER_EXPECTED_VERSION) ?? '9.0.0-rc.6',
     managedPath: str(env.MIDNIGHT_MANAGED_PATH) ?? null,
     keysFingerprint: fingerprint,
+    clientProving: {
+      mode: clientProvingMode,
+      timeoutSeconds: int(
+        env.CLIENT_PROOF_TIMEOUT_SECONDS,
+        CLIENT_PROOF_TIMEOUT_DEFAULT_SECONDS,
+        'CLIENT_PROOF_TIMEOUT_SECONDS',
+        CLIENT_PROOF_TIMEOUT_MIN_SECONDS,
+        CLIENT_PROOF_TIMEOUT_MAX_SECONDS,
+      ),
+    },
     requireKeys: bool(env.RELAY_REQUIRE_KEYS, false, 'RELAY_REQUIRE_KEYS'),
     sponsor: {
       enabled: sponsorEnabled,

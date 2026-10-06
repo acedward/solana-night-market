@@ -7,6 +7,7 @@ export * from './accounts.js';
 export * from './amount.js';
 export * from './api.js';
 export * from './auth.js';
+export * from './client-proving.js';
 export * from './coins.js';
 export * from './demo-tokens.js';
 export * from './enc-key.js';

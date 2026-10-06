@@ -88,6 +88,8 @@ export function harness(
     splFaucet?: AppDeps['splFaucet'];
     /** The caller's address (default: one fixed client). */
     clientAddress?: AppDeps['clientAddress'];
+    /** AA 00062: the client-proof hand-offs (`CLIENT_PROVING=required`); none (`off`) unless given. */
+    clientProofs?: AppDeps['clientProofs'];
   } = {},
 ) {
   const config = opts.config ?? testConfig();
@@ -135,6 +137,7 @@ export function harness(
     clientAddress: opts.clientAddress ?? (() => '198.51.100.7'),
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.splFaucet ? { splFaucet: opts.splFaucet } : {}),
+    ...(opts.clientProofs ? { clientProofs: opts.clientProofs } : {}),
   });
   return { app, config, log, nonces, queue, catalogue };
 }

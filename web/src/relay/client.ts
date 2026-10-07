@@ -111,9 +111,9 @@ export class RelayClient {
   /**
    * Poll a job until it finishes; `onUpdate` sees every state. AA 00062 (I-62a): while the job holds
    * an open hand-off the page has not answered yet (`clientProof`, a new `proofId`), `clientProof`
-   * runs it (the customer's prover, then the proof back to the market) before polling goes on. A job
-   * rebuilt by the market opens a new hand-off with a new id, which is answered in turn. Without
-   * `clientProof` the job is only followed (the market then stops it at the hand-off's deadline).
+   * runs it (the customer's prover, then the proof back to the market) before polling goes on. Each
+   * new `proofId` is answered once (I-62a v2: a job has one). Without `clientProof` the job is only
+   * followed (the market then stops it at the ticket's deadline).
    */
   async waitForJob(
     requestId: string,
@@ -129,8 +129,17 @@ export class RelayClient {
     for (;;) {
       if (opts.signal?.aborted) throw new RelayError(0, 'aborted', 'stopped waiting');
       const job = await this.job(requestId);
-      if (!job)
-        throw new RelayError(404, 'job-lost', 'The market no longer knows this request (it expired or restarted).');
+      if (!job) {
+        // AA 00062 (I-62a v2): a job that waited for the customer's proof had sent nothing yet; the market
+        // keeps those in memory only, so a restart drops them.
+        throw new RelayError(
+          404,
+          'job-lost',
+          answered.size > 0
+            ? "The market restarted (or the request expired) while it waited for your proof server's proof. Nothing was sent and no fee was spent: send it again."
+            : 'The market no longer knows this request (it expired or restarted).',
+        );
+      }
       onUpdate(job);
       if (job.state === 'succeeded' || job.state === 'failed') return job;
       const handOff = job.clientProof;

@@ -14,6 +14,13 @@
 // build a call); neither action spends the sponsor's DUST. The coin the give is paid from is the
 // call's private state for this job only, and is wiped when the job ends (Q5).
 //
+// AA 00062 (`CLIENT_PROVING=required`, I-62a v2 "prove first"): both run on their ACCOUNT's lane. The call
+// is built with the sponsor's cached PUBLIC keys (no wallet held), its proof request captured and the job
+// parked while the user's prover proves it (no prover lane held either); the proof posted back is checked,
+// the account (and, for a take, the maker's offer) found unchanged, and only then is the call finalized
+// under the prover lane (the Zswap builtins) and bound and posted, or merged and handed to the batcher.
+// The staleness check runs once more right before that hand-over (../client-proving/prove-first.ts).
+//
 // Whose failure is it (AA 00047 P11, audit round 3 R3-7 / F-B3-6)? The failure budget charges only
 // failures the requester caused (../actions/failure-budget.ts), and the batcher's refusals read as the
 // counterparty's (`exchange-error`, `take-refused`: a maker who cancelled must not lock takers out).
@@ -42,17 +49,19 @@ import type { ExpiryLimits, OpenSwapResult, TakeResult } from '@nightmarket/core
 
 import type { AdmissionCheck } from '../actions/admission.js';
 import type { DigestReplayGuard } from '../auth/verifiers.js';
+import type { ClientProving, ParkedCall } from '../client-proving/prove-first.js';
 import type { Logger } from '../log.js';
 import type { DeviceArm, TradeAction, TradeCheckOk } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
 import type { SponsorWalletHandle } from '../passport/wallet-provider.js';
 import { assertCoinUnspent, assertCoinUnspentAt, type SpendReader } from '../chain/coin-spend.js';
+import { proverPriority } from '../queue/priority.js';
 import { PublicError, type JobContext, type JobExecutor } from '../queue/jobs.js';
 import type { SponsorSession } from '../sponsor/session.js';
 import { AccountOfferError, proveGuaranteedOffer, type AccountOfferCall } from './account-offer.js';
 import { assertSignedExpiryOpen } from './expiry.js';
-import { fetchOfferBytes, publishOffer, waitOfferStatus } from './publish.js';
+import { fetchOfferBytes, offerStatus, publishOffer, waitOfferStatus } from './publish.js';
 import { judgeTake, type TakeVerdict } from './reconcile.js';
 import { TakeRefusal, checkMakerOffer, mergeForSettlement, submitSettlement } from './settle.js';
 
@@ -87,6 +96,8 @@ export interface TradeDeps {
   coins?: SpendReader;
   /** The pause after the exchange's HTTP 429 (AA 00047 P11.F, R4-3). Absent: none. */
   cooldown?: BatcherCooldown;
+  /** AA 00062 (`CLIENT_PROVING=required`, I-62a v2): prove first. Absent (`off`): the relay proves. */
+  clientProving?: ClientProving;
 }
 
 /**
@@ -302,6 +313,57 @@ function proveError(e: unknown): never {
   throw e;
 }
 
+/**
+ * AA 00062 (I-62a v2): the providers a prove-first make or take builds its call with: the sponsor's cached
+ * PUBLIC keys (no wallet held), and a proof provider whose `proveTx` captures the call's proof request,
+ * parks the job until the user's proof is in (checked and fresh), then finalizes under the prover lane.
+ * `parked()` is the parked call, for the staleness check right before the hand-over.
+ */
+async function proveFirstProviders(
+  cp: ClientProving,
+  rt: PassportRuntime,
+  ctx: JobContext,
+  o: {
+    action: 'open-swap' | 'take';
+    account: string;
+    payload: unknown;
+    privateState: MemoryPrivateStateProvider;
+    alsoFresh?: ParkedCallFresh;
+  },
+): Promise<{ providers: ReturnType<PassportRuntime['keysOnlyProviders']>; parked: () => ParkedCall }> {
+  const keys = await cp.sponsorPublic();
+  const base = rt.keysOnlyProviders(keys, o.privateState);
+  // The baseline BEFORE the build (upstream `buildOpenSwapOffer` builds, then calls `proveTx`).
+  const baseline = await cp.baseline(o.account);
+  const signedDeadline = proverPriority(o.action, o.payload).deadline;
+  let parked: ParkedCall | null = null;
+  const inner = base.proofProvider as object;
+  const proofProvider = Object.assign(Object.create(inner) as object, {
+    proveTx: async (unprovenTx: unknown) => {
+      if (parked) throw new Error('a prove-first trade call was proven twice');
+      parked = await cp.park({
+        ctx,
+        action: o.action,
+        account: o.account,
+        baseline,
+        unprovenTx,
+        ...(signedDeadline !== undefined ? { signedDeadline } : {}),
+        ...(o.alsoFresh ? { alsoFresh: o.alsoFresh } : {}),
+      });
+      return parked.inject();
+    },
+  });
+  return {
+    providers: { ...base, proofProvider },
+    parked: () => {
+      if (!parked) throw new Error('the trade call was never prepared');
+      return parked;
+    },
+  };
+}
+
+type ParkedCallFresh = NonNullable<Parameters<ClientProving['park']>[0]['alsoFresh']>;
+
 /** `open-swap`: make an offer and publish it. */
 export function openSwapExecutor(deps: TradeDeps): JobExecutor {
   return async (raw, ctx) => {
@@ -313,25 +375,51 @@ export function openSwapExecutor(deps: TradeDeps): JobExecutor {
       await withReplayRelease(deps, check.digestHex, () => assertCoinUnspent(coins, check.account, check.payload.coin));
     }
     const prove = deps.prove ?? proveGuaranteedOffer;
+    const cp = deps.clientProving;
     const proven = await withReplayRelease(deps, check.digestHex, () =>
-      ctx.prove(() =>
-        deps.sponsor.withWallet(async (w) => {
-          const privateState = new MemoryPrivateStateProvider();
-          try {
-            const providers = await rt.providers(w as SponsorWalletHandle, privateState);
-            ctx.stage('proving', { circuit: deps.arm.circuits.openSwap });
-            return await prove({
-              rt,
-              providers,
-              account: check.account,
-              offer,
-              circuitId: deps.arm.circuits.openSwap,
-            }).catch(proveError);
-          } finally {
-            privateState.wipe();
-          }
-        }),
-      ),
+      cp
+        ? // AA 00062 (I-62a v2): prove first. Nothing is held while the user's prover proves.
+          (async () => {
+            const privateState = new MemoryPrivateStateProvider();
+            try {
+              const pf = await proveFirstProviders(cp, rt, ctx, {
+                action: 'open-swap',
+                account: check.account,
+                payload: check.payload,
+                privateState,
+              });
+              const out = await prove({
+                rt,
+                providers: pf.providers,
+                account: check.account,
+                offer,
+                circuitId: deps.arm.circuits.openSwap,
+              }).catch(proveError);
+              // Right before the exchange lists it: a make that went stale could never settle.
+              await pf.parked().assertFresh();
+              return out;
+            } finally {
+              privateState.wipe();
+            }
+          })()
+        : ctx.prove(() =>
+            deps.sponsor.withWallet(async (w) => {
+              const privateState = new MemoryPrivateStateProvider();
+              try {
+                const providers = await rt.providers(w as SponsorWalletHandle, privateState);
+                ctx.stage('proving', { circuit: deps.arm.circuits.openSwap });
+                return await prove({
+                  rt,
+                  providers,
+                  account: check.account,
+                  offer,
+                  circuitId: deps.arm.circuits.openSwap,
+                }).catch(proveError);
+              } finally {
+                privateState.wipe();
+              }
+            }),
+          ),
     );
     ctx.stage('proven', { offerId: proven.offerId });
     const posted = await publishOffer(proven.blob, {
@@ -416,6 +504,101 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
       );
     }
     const prove = deps.prove ?? proveGuaranteedOffer;
+    /** Merge the proven take with the maker's offer, check its cost, and hand it to the batcher. */
+    const settle = async (
+      taker: Awaited<ReturnType<typeof proveGuaranteedOffer>>,
+      submitter: () => Promise<string | null>,
+      beforeHandOver: () => Promise<void>,
+    ): Promise<Record<string, unknown>> => {
+      const params = await (deps.ledgerParameters ?? defaultLedgerParameters)(rt, check.account);
+      let settlement: ReturnType<typeof mergeForSettlement>;
+      try {
+        settlement = mergeForSettlement(makerTx, taker.tx as never, params);
+      } catch (e) {
+        if (e instanceof TakeRefusal) throw new PublicError(`take-${e.code}`, e.message);
+        throw e;
+      }
+      ctx.stage('merged', { blockUsage: settlement.cost.enforced?.blockUsage ?? '' });
+      const address = await submitter();
+      if (!address) throw new PublicError('not-available', 'the relay wallet has no submitter address');
+      await beforeHandOver();
+      const b = await submitSettlement({
+        batcherUrl: deps.batcherUrl,
+        merged: settlement.merged as unknown as { serialize(): Uint8Array },
+        address,
+        ...(deps.batcherTarget ? { target: deps.batcherTarget } : {}),
+        ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      }).catch((e: unknown) => {
+        deps.log.warn('the batcher could not be reached', { error: e });
+        throw new PublicError(
+          'exchange-unavailable',
+          "the exchange's settlement service could not be reached or did not answer in time. Refresh the book: if your take settled after all, your balances show it",
+        );
+      });
+      let txHash = b.transactionHash;
+      if (!b.ok || !txHash) {
+        deps.log.warn('the batcher refused a take', { status: b.httpStatus, error: b.error });
+        deps.onBatcherRefusal?.(b.httpStatus);
+        if (b.httpStatus === 429) deps.cooldown?.trip(b.retryAfterSeconds);
+        const judged = await attributeSettlementRefusal(deps, rt, check.account, p, startedAt, b.httpStatus, b.error);
+        if (judged instanceof PublicError) throw judged;
+        // R4-2: the take settled after all (the batcher failed after submitting it): a success.
+        txHash = judged.settled;
+        ctx.stage('settled', { tx: txHash, offerId: p.offerId, reconciled: 'chain' });
+      } else {
+        ctx.stage('settled', { tx: txHash, offerId: p.offerId });
+      }
+      const result: TakeResult = {
+        offerId: p.offerId,
+        txHash,
+        proveSeconds: seconds(taker.proveMs),
+        cost: {
+          blockUsage: settlement.cost.enforced!.blockUsage,
+          computeTimePs: settlement.cost.enforced!.computeTime,
+          readTimePs: settlement.cost.enforced!.readTime,
+          feesSpecks: settlement.cost.feesSpecks,
+        },
+        path: 'batcher',
+      };
+      return result as unknown as Record<string, unknown>;
+    };
+    const cp = deps.clientProving;
+    if (cp) {
+      // AA 00062 (I-62a v2): prove first. Nothing is held while the user's prover proves; the take is
+      // stale too when the maker's offer is no longer live by then.
+      return withReplayRelease(deps, check.digestHex, async () => {
+        const privateState = new MemoryPrivateStateProvider();
+        try {
+          const pf = await proveFirstProviders(cp, rt, ctx, {
+            action: 'take',
+            account: check.account,
+            payload: check.payload,
+            privateState,
+            alsoFresh: async () => {
+              const status = await offerStatus(p.offerId, {
+                kernelUrl: deps.kernelUrl,
+                ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+              });
+              return status === 'live' ? { ok: true } : { ok: false, reason: `the maker's offer is ${status}` };
+            },
+          });
+          const taker = await prove({
+            rt,
+            providers: pf.providers,
+            account: check.account,
+            offer,
+            circuitId: deps.arm.circuits.openSwap,
+          }).catch(proveError);
+          return await settle(
+            taker,
+            async () => (await cp.sponsorPublic()).unshieldedAddress,
+            () => pf.parked().assertFresh(),
+          );
+        } finally {
+          privateState.wipe();
+        }
+      });
+    }
     return withReplayRelease(deps, check.digestHex, () =>
       ctx.prove(() =>
         deps.sponsor.withWallet(async (w) => {
@@ -430,68 +613,15 @@ export function takeExecutor(deps: TradeDeps): JobExecutor {
               offer,
               circuitId: deps.arm.circuits.openSwap,
             }).catch(proveError);
-            const params = await (deps.ledgerParameters ?? defaultLedgerParameters)(rt, check.account);
-            let settlement: ReturnType<typeof mergeForSettlement>;
-            try {
-              settlement = mergeForSettlement(makerTx, taker.tx as never, params);
-            } catch (e) {
-              if (e instanceof TakeRefusal) throw new PublicError(`take-${e.code}`, e.message);
-              throw e;
-            }
-            ctx.stage('merged', { blockUsage: settlement.cost.enforced?.blockUsage ?? '' });
-            const address = (
-              w as { unshieldedKeystore?: { getBech32Address?(): { asString(): string } } }
-            ).unshieldedKeystore
-              ?.getBech32Address?.()
-              ?.asString();
-            if (!address) throw new PublicError('not-available', 'the relay wallet has no submitter address');
-            const b = await submitSettlement({
-              batcherUrl: deps.batcherUrl,
-              merged: settlement.merged as unknown as { serialize(): Uint8Array },
-              address,
-              ...(deps.batcherTarget ? { target: deps.batcherTarget } : {}),
-              ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-            }).catch((e: unknown) => {
-              deps.log.warn('the batcher could not be reached', { error: e });
-              throw new PublicError(
-                'exchange-unavailable',
-                "the exchange's settlement service could not be reached or did not answer in time. Refresh the book: if your take settled after all, your balances show it",
-              );
-            });
-            let txHash = b.transactionHash;
-            if (!b.ok || !txHash) {
-              deps.log.warn('the batcher refused a take', { status: b.httpStatus, error: b.error });
-              deps.onBatcherRefusal?.(b.httpStatus);
-              if (b.httpStatus === 429) deps.cooldown?.trip(b.retryAfterSeconds);
-              const judged = await attributeSettlementRefusal(
-                deps,
-                rt,
-                check.account,
-                p,
-                startedAt,
-                b.httpStatus,
-                b.error,
-              );
-              if (judged instanceof PublicError) throw judged;
-              // R4-2: the take settled after all (the batcher failed after submitting it): a success.
-              txHash = judged.settled;
-              ctx.stage('settled', { tx: txHash, offerId: p.offerId, reconciled: 'chain' });
-            } else {
-              ctx.stage('settled', { tx: txHash, offerId: p.offerId });
-            }
-            const result: TakeResult = {
-              offerId: p.offerId,
-              txHash,
-              proveSeconds: seconds(taker.proveMs),
-              cost: {
-                blockUsage: settlement.cost.enforced!.blockUsage,
-                computeTimePs: settlement.cost.enforced!.computeTime,
-                readTimePs: settlement.cost.enforced!.readTime,
-                feesSpecks: settlement.cost.feesSpecks,
-              },
-              path: 'batcher',
-            };
-            return result as unknown as Record<string, unknown>;
+            const address =
+              (w as { unshieldedKeystore?: { getBech32Address?(): { asString(): string } } }).unshieldedKeystore
+                ?.getBech32Address?.()
+                ?.asString() ?? null;
+            return await settle(
+              taker,
+              async () => address,
+              async () => undefined,
+            );
           } finally {
             privateState.wipe();
           }

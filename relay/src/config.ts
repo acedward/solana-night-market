@@ -71,10 +71,11 @@ export interface RelayConfig {
   /** The pinned verifier-key fingerprint of the key volume; the relay refuses to start on another. */
   keysFingerprint: string | null;
   /**
-   * AA 00062 (I-62a): client proving. `required` hands the four k≥18 account circuits' proofs to the
-   * page (the user's own prover) instead of the contract prover; `off` (the default) is today's relay.
-   * `timeoutSeconds` (CLIENT_PROOF_TIMEOUT_SECONDS, 60–840, default 300) bounds each hand-off; a make's
-   * or a take's signed deadline can make it shorter (./client-proving/desk.ts).
+   * AA 00062 (I-62a v2, "prove first"): client proving. `required` hands the four k≥18 account circuits'
+   * proofs to the page (the user's own prover) instead of the contract prover; `off` (the default) is
+   * today's relay. `timeoutSeconds` (CLIENT_PROOF_TIMEOUT_SECONDS, 60–3000, default 600) bounds how long a
+   * prepared call waits for its proof (holding nothing but its account's slot); a make's or a take's
+   * signed deadline, and the call's intent TTL, minus 60 s, can make it shorter (./client-proving/desk.ts).
    */
   clientProving: { mode: ClientProvingMode; timeoutSeconds: number };
   /** Refuse to start without a key volume (a deployment sets it; CI and UI development do not). */

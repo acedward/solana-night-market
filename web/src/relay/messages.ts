@@ -87,6 +87,8 @@ export function relayErrorText(e: {
       return proverProblemText('invalid');
     case 'client-proof-late':
       return proverProblemText('late');
+    case 'client-proof-stale':
+      return proverProblemText('stale');
     // AA 00047 P11.F (audit round 4, R4-1 / R4-3): refused up front, before anything runs.
     case 'prover-busy':
       return `The market's prover is busy right now, so your request could not start before the expiry you approved. Nothing was sent; try again in ${waitText(e.retryAfterSeconds, 'a minute')} and approve it once more.`;
@@ -172,6 +174,10 @@ export function jobErrorText(error: { code: string; message: string } | undefine
       return proverProblemText('late');
     case 'client-proof-invalid':
       return proverProblemText('invalid');
+    // AA 00062 (I-62a v2, "prove first"): the account moved between prepare and finalize. The page has
+    // already sent the same signed request again once on its own (passport/operations.ts `submitAndWait`).
+    case 'client-proof-stale':
+      return proverProblemText('stale');
     default:
       return sentence(error.message);
   }

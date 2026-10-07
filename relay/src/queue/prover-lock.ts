@@ -274,14 +274,6 @@ export class ProverLock {
     return this.holder === null ? 0 : 1;
   }
 
-  /** The job holding the lock (its id, action and signed deadline), or null (AA 00062: a client-proof
-   *  hand-off belongs to the holder, ../client-proving/desk.ts). */
-  current(): { id: string; action: string; deadline?: number } | null {
-    if (!this.holder) return null;
-    const { id, action, deadline } = this.holder;
-    return deadline !== undefined ? { id, action, deadline } : { id, action };
-  }
-
   get waiting(): number {
     let n = this.board.heads.size;
     for (const t of this.board.tails.values()) n += t.length;

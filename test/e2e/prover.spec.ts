@@ -13,6 +13,7 @@
 //   - a saved prover that passes: no popup; one that fails at action time: the popup with the reason;
 //   - no popup for opening an account, demo tokens, Bridge in or a key restore;
 //   - the prover fails mid-action (out of memory), the market refuses the proof, or it comes too late;
+//   - a stale call (I-62a v2, "prove first"): the same signed request is sent again once on its own;
 //   - the Content-Security-Policy: the prover sources work, and nothing else new is allowed.
 
 import { mkdirSync } from 'node:fs';
@@ -495,6 +496,49 @@ test.describe('when the customer’s prover or its proof fails', () => {
       'Your proof server returned an invalid proof, so the market refused it. Nothing was sent and no fee was spent.',
     );
     expect(relay.handOffs[0]).toMatchObject({ verdict: 'invalid' });
+  });
+
+  test('a stale call (I-62a v2): the page sends the same signed request again once; proved again, the offer is listed', async ({
+    page,
+  }) => {
+    const { phantom, relay } = await setup(page, { seeded: true });
+    relay.clientProving = 'required';
+    relay.clientProofStale = 1;
+    await seedProver(page, LOCAL);
+    const prover = new MockProver(LOCAL);
+    await prover.install(page);
+    await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+    await connectPhantom(page);
+    await expect(holding(page, 'twBTC')).toContainText('0.10');
+    await makeOffer(page);
+    await expect(page.getByTestId('trade-message')).toContainText('Your offer is listed on the market');
+    // Signed ONCE; the same body sent twice (a new ticket); the prover proved twice.
+    expect(phantom.requests).toHaveLength(1);
+    expect(relay.submitted.map((s) => s.action)).toEqual(['open-swap', 'open-swap']);
+    expect(relay.submitted[1]!.body).toEqual(relay.submitted[0]!.body);
+    expect(relay.handOffs.map((h) => h.verdict)).toEqual(['stale', 'checked']);
+    expect(prover.proofs).toHaveLength(2);
+    await expect(page.getByTestId('prover-popup')).toHaveCount(0);
+  });
+
+  test('stale twice: no third try; "your account changed while your proof server was proving", nothing spent', async ({
+    page,
+  }) => {
+    const { phantom, relay } = await setup(page, { seeded: true });
+    relay.clientProving = 'required';
+    relay.clientProofStale = 2;
+    await seedProver(page, LOCAL);
+    await new MockProver(LOCAL).install(page);
+    await page.goto(`/#trade?pair=${encodeURIComponent('twBTC/twUSDC')}`);
+    await connectPhantom(page);
+    await expect(holding(page, 'twBTC')).toContainText('0.10');
+    await makeOffer(page);
+    await expect(page.getByTestId('trade-message')).toContainText(
+      'Your account changed while your proof server was proving (a deposit or a trade landed), so that proof no longer fits it. Nothing was sent and no fee was spent',
+    );
+    expect(phantom.requests).toHaveLength(1);
+    expect(relay.submitted).toHaveLength(2);
+    expect(relay.handOffs.map((h) => h.verdict)).toEqual(['stale', 'stale']);
   });
 
   test('too slow for the deadline: late, and nothing is spent', async ({ page }) => {

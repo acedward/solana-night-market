@@ -35,7 +35,7 @@
 // with an approval's wanted nonce, its note filed (`plantWantedCoin`, R3-6), and a relay report that
 // leaves a spend or a leaf out (`omitFromReport`, R3-4; the page no longer reads that report).
 //
-// AA 00062 (plan I-62a): `clientProving = 'required'` makes the k>=18 actions (a make, a take, the two
+// AA 00062 (plan I-62a v2): `clientProving = 'required'` makes the k>=18 actions (a make, a take, the two
 // withdrawals, a change filing) wait for the CUSTOMER's proof: the job shows the hand-off (stage
 // `awaiting-client-proof`, the `clientProof` field), serves the key-less proof request on
 // `GET /v1/jobs/:id/client-proof` and accepts one proof on `POST` (or refuses it, `clientProofVerdict`).
@@ -133,7 +133,7 @@ export interface HandOff {
   fetched: boolean;
   /** The proof the page posted (base64), once accepted or refused. */
   proof: string | null;
-  verdict: 'checked' | 'invalid' | null;
+  verdict: 'checked' | 'invalid' | 'stale' | null;
 }
 
 /** AA 00062: the k>=18 actions and the circuit each hands to the customer's prover. */
@@ -248,6 +248,9 @@ export class MockRelay {
   clientProofTimeoutSeconds = 300;
   /** What the relay's check says of the next posted proof. */
   clientProofVerdict: 'ok' | 'invalid' = 'ok';
+  /** AA 00062 (I-62a v2, "prove first"): answer this many of the next posted proofs 409
+   *  `client-proof-stale` (the account moved while the customer's prover proved); the job fails with it. */
+  clientProofStale = 0;
   /** Every hand-off opened, in order. */
   readonly handOffs: HandOff[] = [];
   private nonces = new Set<string>();
@@ -968,6 +971,18 @@ export class MockRelay {
       if (!bytes.toString('latin1').startsWith('midnight:proof-versioned:'))
         return json(400, { error: { code: 'bad-request', message: 'not a proof' } });
       h.proof = body.proof!;
+      if (this.clientProofStale > 0) {
+        this.clientProofStale -= 1;
+        h.verdict = 'stale';
+        const stale = {
+          code: 'client-proof-stale',
+          message:
+            'your account changed while your proof server was proving (for example a deposit or a trade landed), so this proof no longer fits it. Nothing was sent and no fee was spent; send the same request again and your proof server proves it once more',
+        };
+        s.failed = stale;
+        s.done = true;
+        return json(409, { error: stale });
+      }
       if (this.clientProofVerdict === 'invalid') {
         h.verdict = 'invalid';
         s.failed = { code: 'client-proof-invalid', message: 'the client proof did not verify' };

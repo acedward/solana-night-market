@@ -62,13 +62,10 @@ import { freshWantNonce, offerInboxEntriesPortable, predictChangeCoin } from '@n
 import {
   JobFailedError,
   OperationError,
-  dropJob,
   gatedContext,
-  putJob,
+  submitAndWait,
   syncAccount,
-  updateJob,
   type OperationEnv,
-  waitWithProver,
 } from '../passport/operations.js';
 import { ACTION_CIRCUIT } from '../prover/constants.js';
 import { readCoins } from '../passport/records.js';
@@ -125,11 +122,8 @@ async function runJob(
   passportAuth: PassportAuth,
   context: Record<string, unknown>,
 ): Promise<JobView> {
-  const job = await env.relay.submit(action, { account, payload, passportAuth });
-  putJob(env, account, job, action, context);
-  env.onJob?.(job);
-  const done = await waitWithProver(env, job.requestId, (j) => updateJob(env, account, j));
-  dropJob(env, account, job.requestId);
+  // AA 00062 (I-62a v2): a stale call is sent again once on its own (`submitAndWait`).
+  const done = await submitAndWait(env, account, action, { payload, passportAuth }, context);
   if (done.state !== 'succeeded' || !done.result)
     throw new JobFailedError(
       done.error?.code ?? 'failed',

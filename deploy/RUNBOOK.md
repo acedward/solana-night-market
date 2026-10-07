@@ -97,6 +97,7 @@ Go through it before the market goes on a production server; each item names its
 15. [Several domains: one build, one relay](#15-several-domains-one-build-one-relay)
 16. [The browser reads the chain itself; the Content-Security-Policy](#16-the-browser-reads-the-chain-itself-the-content-security-policy)
 17. [Bridging and the Solana side (AA 00060)](#17-bridging-and-the-solana-side-aa-00060)
+18. [Client proving: the customer's own prover (AA 00062)](#18-client-proving-the-customers-own-prover-aa-00062)
 
 ## 1. What runs
 
@@ -1250,3 +1251,56 @@ For the operator:
 - The relay refuses to start (exit 78) when the bridge module or its ledger decoder does not load.
 - Offers cannot be cancelled: `cancel-offers` answers `403 offers-cannot-be-cancelled`, and
   `CANCELS_PER_ACCOUNT_PER_DAY` is unused.
+
+## 18. Client proving: the customer's own prover (AA 00062)
+
+`CLIENT_PROVING=required` moves the four k≥18 account circuits off the relay's contract prover:
+`open_swap_shielded_with_ed25519` (offers and takes), `withdraw_shielded_with_ed25519` (shielded
+withdrawals and Bridge out's first transaction), `withdraw_unshielded_with_ed25519` and
+`append_inbox_with_ed25519` (change filings). The customer's own prover proves them: the Night Market
+prover package, which the page asks for in a popup or under Local Data. Everything else stays proven by
+the relay: account openings, key restores, demo tokens, Bridge out's second transaction, and every DUST
+fee. The default, `off`, is today's relay.
+
+**Prove first.** For each of those actions:
+
+1. **Prepare.** The action's route runs every check it runs today. The job then builds the call with
+   the sponsor wallet's public keys only, captures its proof request (proving nothing), and waits.
+   While it waits it holds only its account's slot (one job per account). It holds **no prover lane and
+   no sponsor wallet**, so a customer who proves slowly, or never, delays nobody else.
+2. **The customer proves.** The page fetches the request (`GET /v1/jobs/:id/client-proof`), its prover
+   proves it, and the page posts the proof back (`POST /v1/jobs/:id/client-proof`).
+3. **Finalize.** The relay checks the proof with its pinned verifier, then checks that the account's
+   state (`round` and `auth_nonce`, one indexer read) has not changed since prepare. For a take it also
+   checks that the maker's offer is still live. It then takes the prover lane for a few seconds (the
+   call's two or three Zswap proofs), checks the account once more, and posts the offer, hands the take
+   to the batcher, or balances and submits the withdrawal or filing under the sponsor wallet.
+
+**Deadlines.** A prepared call waits at most `CLIENT_PROOF_TIMEOUT_SECONDS` (default 600, range
+60–3000), and never past a make's or a take's signed expiry minus 60 s, or its intent's TTL (one hour)
+minus 60 s. With less than 30 s left at prepare, the job fails `client-proof-late` at once. A request
+never fetched ends `client-proof-missing`; a proof that comes too late ends `client-proof-late`.
+
+**Stale calls.** A call reads its account's state, so it goes stale when the account changes while the
+customer proves: a deposit, demo tokens, a Bridge in delivery, a take of the account's own offer, or
+another approval. The relay then answers `409 client-proof-stale`. Nothing was sent, no DUST was spent,
+and it does not count against the customer. The page sends the same signed request again once, and the
+prover proves it once more. If the account's `auth_nonce` moved, the customer signs again. A stale call
+that slips past the check is refused by the node at the mempool (code 104, `ReadMismatch`). That costs
+nothing either, and the relay reports it as `client-proof-stale`, never as a DUST race.
+
+**DUST races.** When a submission meets a DUST race, the relay balances the call again with the same
+proof (up to three times, 10 s apart). The customer is never asked for a second proof.
+
+**What counts against the customer.** A missing, late or invalid proof counts against the requester's
+failure budget (section 9). A stale call never counts, and neither does a proof the relay could not
+check (`market-unavailable`).
+
+**Restarts.** Waiting calls live in memory only. A relay restart drops them. Both client-proof routes
+then answer `404 not-found`, saying that the relay restarted, that nothing was sent and that no fee
+was spent. The page tells the customer to send the action again.
+
+**The page's side.** The site's Content-Security-Policy must let the page reach the customer's prover
+(section 16: `http://localhost:* http://127.0.0.1:* https:` in `connect-src`). `/v1/config` advertises
+`clientProving` (the circuits, the key-set fingerprint, the proof-server version and the timeout), and
+`/health` shows `clientProving: {mode: "required"}`. In `off` mode neither carries the field.

@@ -5,8 +5,8 @@
 //   GET  /v1/auth/nonce                 a single-use nonce for a RelayAction authorisation
 //   POST /v1/actions/:action            THE ONLY state-changing route: every action is authorised
 //   GET  /v1/jobs/:requestId            resume a job by its request id
-//   GET  /v1/jobs/:requestId/client-proof   AA 00062 (I-62a): the open hand-off's proof request (required mode)
-//   POST /v1/jobs/:requestId/client-proof   AA 00062 (I-62a): the user's prover's proof for it (required mode)
+//   GET  /v1/jobs/:requestId/client-proof   AA 00062 (I-62a v2): the parked job's proof request (required mode)
+//   POST /v1/jobs/:requestId/client-proof   AA 00062 (I-62a v2): the user's prover's proof: finalize (required mode)
 //   GET  /v1/queue                      queue depth per lane
 //   GET  /v1/accounts/:account/state    public ledger reads (L-ACC)
 //   GET  /v1/accounts/:account/inbox    public inbox ciphertexts (L-ACC)
@@ -86,7 +86,7 @@ export interface AppDeps {
   /** One queued-or-running job per account (AA 00047 P10, R2-1: ./actions/account-gate.ts); default:
    *  a gate of `config.limits.jobsPerAccount`. */
   accountGate?: AccountGate;
-  /** AA 00062 (I-62a): the client-proof hand-offs, only with `CLIENT_PROVING=required`; absent (`off`):
+  /** AA 00062 (I-62a v2): the client-proof tickets, only with `CLIENT_PROVING=required`; absent (`off`):
    *  the two client-proof routes answer 404 `client-proving-off` and nothing new is published. */
   clientProofs?: Pick<ClientProofDesk, 'config' | 'serveRequest' | 'submit'>;
   /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop).
@@ -231,7 +231,7 @@ export function createApp(deps: AppDeps): Hono {
       : apiError(c, 404, 'not-found', 'no such job (it may have expired, or the relay restarted)');
   });
 
-  // ── AA 00062 (I-62a): the client-proof hand-off ────────────────────────────
+  // ── AA 00062 (I-62a v2, "prove first"): the client-proof ticket ─────────────
   //
   // Only the PAGE talks to the user's prover; these routes take bytes from the page and never a URL, and
   // nothing here makes a request anywhere (spec FR-003). The proof request carries the call's private
@@ -240,7 +240,9 @@ export function createApp(deps: AppDeps): Hono {
   //
   // In `off` mode no handler is registered: the path only answers 404 `client-proving-off`, whatever the
   // method, so the relay keeps exactly one state-changing route (relay/test/routes-auth.test.ts). In
-  // `required` mode the POST is the second one; it changes nothing but the job's own hand-off.
+  // `required` mode the POST is the second one: it finalizes the job's own ticket (the proof checked, the
+  // account found unchanged, then the parked job resumes) and changes nothing else. Tickets live in memory
+  // only, so after a restart both routes answer 404 `not-found` and say so.
   const CLIENT_PROOF_PATH = '/v1/jobs/:requestId/client-proof';
   const clientProofs = deps.clientProofs;
   if (!clientProofs) {
@@ -255,7 +257,12 @@ export function createApp(deps: AppDeps): Hono {
     });
   } else {
     const notAJob = (c: Context) =>
-      apiError(c, 404, 'not-found', 'no such job (it may have expired, or the relay restarted)');
+      apiError(
+        c,
+        404,
+        'not-found',
+        'no such job: the relay restarted (it keeps proof requests in memory only) or the job expired. Nothing was sent for this request and no fee was spent; send the action again',
+      );
 
     app.get(CLIENT_PROOF_PATH, (c) => {
       const refused = limited(readLimiter, clientAddress(c), c);

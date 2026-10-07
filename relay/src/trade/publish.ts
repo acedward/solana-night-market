@@ -56,6 +56,15 @@ export async function waitOfferStatus(
   }
 }
 
+/** The offer's status on the exchange now (one read; throws when the exchange cannot be read). AA 00062:
+ *  a prove-first take is stale when its maker's offer is no longer `live`. */
+export async function offerStatus(
+  offerId: string,
+  o: { kernelUrl: string; fetchImpl?: typeof fetch },
+): Promise<KernelOfferStatus> {
+  return client(o).offerStatus(offerId);
+}
+
 /** The raw bytes of a live offer on the exchange, and its status; null when the kernel has none. */
 export async function fetchOfferBytes(
   offerId: string,

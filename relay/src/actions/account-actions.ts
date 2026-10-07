@@ -5,6 +5,14 @@
 // keeps the call's private state (the coin a spend consumes) in a per-job in-memory store that is
 // wiped when the job ends, and returns only public data (addresses, transaction ids, the change
 // coin the browser must keep). Nothing about the customer is written anywhere (Q5).
+//
+// AA 00062 (`CLIENT_PROVING=required`, I-62a v2 "prove first"): withdraw (also Bridge out's first
+// transaction and the third-party path), withdraw-unshielded and append-inbox run on their ACCOUNT's lane
+// instead. Each builds its call with the sponsor's PUBLIC keys only, parks while the user's prover proves
+// it (holding no prover lane and no sponsor wallet), then finalizes it under the prover lane and balances
+// and submits it under the sponsor wallet (`sponsoredProveFirst`); a DUST race re-balances with the SAME
+// proof, and a stale call (node code 104) ends `client-proof-stale`, never retried. Passport's
+// `submitWithDustRetry` (`custody.*WithAuth`) is not used for these calls then.
 
 import {
   RegisterPayloadSchema,
@@ -26,6 +34,7 @@ import type { BridgeRegistry } from '@nightmarket/core/bridge';
 import { landingOfWithdrawal, type LandingEntitlements } from '../bridge/out-actions.js';
 import type { AppendEntitlements } from './entitlements.js';
 import type { Logger } from '../log.js';
+import { DUST_RETRIES, DUST_RETRY_DELAY_MS, isDustRace, type ClientProving } from '../client-proving/prove-first.js';
 import type { DeviceArm, GatedAction } from '../passport/arm.js';
 import { MemoryPrivateStateProvider } from '../passport/private-state.js';
 import type { PassportRuntime } from '../passport/runtime.js';
@@ -57,7 +66,20 @@ export interface AccountActionDeps {
    *  registry bridges) returns a single-use landing entitlement for its second transaction. Absent: no
    *  bridging (such a withdrawal is refused). */
   landing?: { entitlements: LandingEntitlements; bridges: BridgeRegistry };
+  /** AA 00062 (`CLIENT_PROVING=required`, I-62a v2): prove first for the k≥18 calls. Absent (`off`): the
+   *  relay proves them, as before. */
+  clientProving?: ClientProving;
+  /** For tests: midnight-js's `createUnprovenCallTx`. */
+  buildCall?: BuildCall;
+  /** For tests: the pause before a DUST-race re-balance (default 10 s). */
+  dustRetryDelayMs?: number;
 }
+
+/** midnight-js's `createUnprovenCallTx(providers, options)`, as prove first uses it. */
+export type BuildCall = (
+  providers: unknown,
+  options: Record<string, unknown>,
+) => Promise<{ private: { unprovenTx: unknown; result?: unknown } }>;
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
 const unhex = (h: string) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ''), 'hex'));
@@ -236,6 +258,93 @@ async function withdrawToThirdParty(
   return { txId: String(finalized?.public?.txId ?? ''), change: changeOf(inner) ?? changeOf(finalized) };
 }
 
+/**
+ * AA 00062 (I-62a v2, "prove first"): a sponsored k≥18 call. Prepare: build it with the sponsor's PUBLIC
+ * keys only, capture its proof request and park until the user's proof is in, checked and fresh (holding
+ * only the account's one-job slot). Finalize: inject the proof under the prover lane (the Zswap builtins),
+ * check the account once more, then balance, submit and wait for the transaction under the sponsor wallet.
+ * A DUST race re-runs finalize and the balance with the SAME proof (no new proof), holding neither the lane
+ * nor the wallet while it waits; a stale call (node code 104) and a refused proof (115/179) end the job
+ * with their codes and are never retried.
+ */
+async function sponsoredProveFirst(
+  deps: AccountActionDeps,
+  cp: ClientProving,
+  rt: PassportRuntime,
+  ctx: JobContext,
+  o: {
+    action: 'withdraw' | 'withdraw-unshielded' | 'append-inbox';
+    account: string;
+    circuitId: string;
+    args: unknown[];
+    /** The call's witness store (the coin a shielded withdrawal spends). */
+    coinStore: unknown;
+    /** A third-party recipient's coin key → encryption key (`additionalCoinEncPublicKeyMappings`). */
+    mappings?: Map<string, string>;
+  },
+): Promise<{ txId: string; result: unknown }> {
+  const privateState = new MemoryPrivateStateProvider();
+  try {
+    const keys = await cp.sponsorPublic();
+    const prep = rt.keysOnlyProviders(keys, privateState);
+    const custody = (await rt.client.account.CustodyAccount.connect(
+      prep,
+      rt.compiledAccount(),
+      o.account,
+      o.coinStore,
+    )) as { privateStateId: string };
+    // The baseline BEFORE the build: a state that moves in between makes the check fail safe (stale).
+    const baseline = await cp.baseline(o.account);
+    const build: BuildCall =
+      deps.buildCall ??
+      ((await import('@midnight-ntwrk/midnight-js-contracts')).createUnprovenCallTx as unknown as BuildCall);
+    const built = await build(prep, {
+      compiledContract: rt.compiledAccount(),
+      contractAddress: o.account,
+      circuitId: o.circuitId,
+      args: o.args,
+      privateStateId: custody.privateStateId,
+      ...(o.mappings ? { additionalCoinEncPublicKeyMappings: o.mappings } : {}),
+    });
+    const parked = await cp.park({
+      ctx,
+      action: o.action,
+      account: o.account,
+      baseline,
+      unprovenTx: built.private.unprovenTx,
+    });
+    for (let attempt = 0; ; attempt++) {
+      const proven = await parked.inject();
+      await parked.assertFresh();
+      try {
+        const txId = await deps.sponsor.withWallet(async (w) => {
+          const providers = await rt.providers(w as SponsorWalletHandle, privateState, {
+            onSubmitError: (e) => parked.submissionRefused(e),
+          });
+          const balanced = await providers.walletProvider.balanceTx(proven);
+          const id = await providers.walletProvider.submitTx(balanced);
+          const data = await (
+            providers.publicDataProvider as {
+              watchForTxData(id: string): Promise<{ status: string; txId?: string }>;
+            }
+          ).watchForTxData(id);
+          if (data.status !== 'SucceedEntirely') throw new Error(`the ${o.circuitId} transaction ended ${data.status}`);
+          return String(data.txId ?? id);
+        });
+        return { txId, result: built.private.result };
+      } catch (e) {
+        if (!isDustRace(e) || attempt >= DUST_RETRIES) throw e;
+        ctx.log.info('submission refused (a DUST race): balancing again with the same proof', {
+          attempt: attempt + 1,
+        });
+        await new Promise((r) => setTimeout(r, deps.dustRetryDelayMs ?? DUST_RETRY_DELAY_MS));
+      }
+    }
+  } finally {
+    privateState.wipe();
+  }
+}
+
 /** The arm's `withdraw_shielded`: one coin (the browser's choice) pays `amount` to a shielded
  *  wallet; the change comes back as the circuit's result (it has no inbox entry: Q13). */
 export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
@@ -276,6 +385,65 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
         ctx.stage('spend-check-skipped');
       }
     }
+    const coin = {
+      nonce: unhex(p.coin.nonce),
+      color: unhex(p.coin.color),
+      value: BigInt(p.coin.value),
+      mtIndex: BigInt(p.coin.mtIndex),
+    };
+    const args = [{ bytes: unhex(p.recipient) }, unhex(p.color), BigInt(p.amount), ...deps.arm.authArgs(check.auth)];
+    /** The result the browser gets: the change it keeps, and the entitlements the market issues for it. */
+    const resultOf = (txId: string, change: { nonce: Uint8Array; color: Uint8Array; value: bigint } | null) => {
+      const result: WithdrawResult = {
+        txId,
+        change: change
+          ? { nonce: hex(change.nonce), color: hex(change.color), value: change.value.toString(10) }
+          : null,
+        // The change has no inbox entry: the market will pay for filing ONE (F-B3).
+        ...(change ? { changeEntitlement: deps.entitlements.issue(check.account, `withdraw:${txId}`) } : {}),
+        // AA 00060 P6.3: the landing coin's ONE sponsored second transaction (lock or return).
+        ...(landing
+          ? (() => {
+              const l = landingOfWithdrawal({
+                recipient: p.recipient,
+                color: p.color,
+                amount: p.amount,
+                coin: p.coin,
+                deviceKey: check.signer,
+              });
+              return { landingEntitlement: landing.entitlements.issue(check.account, l.binding, l.commitment) };
+            })()
+          : {}),
+      };
+      return result as unknown as Record<string, unknown>;
+    };
+    // AA 00062 (I-62a v2): prove first: the user's prover proves the call while the job holds nothing.
+    const cp = deps.clientProving;
+    if (cp) {
+      const out = await runGated(deps, check.digestHex, () =>
+        sponsoredProveFirst(deps, cp, rt, ctx, {
+          action: 'withdraw',
+          account: check.account,
+          circuitId: deps.arm.circuits.withdrawShielded,
+          args,
+          coinStore: rt.client.witnesses.withCoin(rt.client.witnesses.emptyCoinStore(), coin),
+          ...(p.recipientEncryptionKey
+            ? {
+                mappings: new Map([
+                  [
+                    p.recipient.replace(/^0x/, '').toLowerCase(),
+                    p.recipientEncryptionKey.replace(/^0x/, '').toLowerCase(),
+                  ],
+                ]),
+              }
+            : {}),
+        }),
+      );
+      ctx.stage('submitted', { tx: out.txId });
+      const res = out.result as { is_some?: boolean; value?: unknown } | undefined;
+      const change = res && res.is_some ? (res.value as { nonce: Uint8Array; color: Uint8Array; value: bigint }) : null;
+      return resultOf(out.txId, change);
+    }
     return runGated(deps, check.digestHex, () =>
       ctx.prove(() =>
         deps.sponsor.withWallet(async (w) => {
@@ -283,12 +451,6 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
           try {
             const providers = await rt.providers(w as SponsorWalletHandle, privateState);
             const { account: accountMod, witnesses } = rt.client;
-            const coin = {
-              nonce: unhex(p.coin.nonce),
-              color: unhex(p.coin.color),
-              value: BigInt(p.coin.value),
-              mtIndex: BigInt(p.coin.mtIndex),
-            };
             const custody = await accountMod.CustodyAccount.connect(
               providers,
               rt.compiledAccount(),
@@ -303,7 +465,7 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
                   deps.arm.circuits.withdrawShielded,
                   p.recipient,
                   p.recipientEncryptionKey,
-                  [{ bytes: unhex(p.recipient) }, unhex(p.color), BigInt(p.amount), ...deps.arm.authArgs(check.auth)],
+                  args,
                 )
               : await custody.withdrawShieldedWithAuth(
                   unhex(p.recipient),
@@ -313,30 +475,7 @@ export function withdrawExecutor(deps: AccountActionDeps): JobExecutor {
                 );
             ctx.stage('submitted', { tx: String(out.txId) });
             const change = out.change as { nonce: Uint8Array; color: Uint8Array; value: bigint } | null;
-            const result: WithdrawResult = {
-              txId: String(out.txId),
-              change: change
-                ? { nonce: hex(change.nonce), color: hex(change.color), value: change.value.toString(10) }
-                : null,
-              // The change has no inbox entry: the market will pay for filing ONE (F-B3).
-              ...(change
-                ? { changeEntitlement: deps.entitlements.issue(check.account, `withdraw:${String(out.txId)}`) }
-                : {}),
-              // AA 00060 P6.3: the landing coin's ONE sponsored second transaction (lock or return).
-              ...(landing
-                ? (() => {
-                    const l = landingOfWithdrawal({
-                      recipient: p.recipient,
-                      color: p.color,
-                      amount: p.amount,
-                      coin: p.coin,
-                      deviceKey: check.signer,
-                    });
-                    return { landingEntitlement: landing.entitlements.issue(check.account, l.binding, l.commitment) };
-                  })()
-                : {}),
-            };
-            return result as unknown as Record<string, unknown>;
+            return resultOf(String(out.txId), change);
           } finally {
             privateState.wipe();
           }
@@ -352,6 +491,22 @@ export function withdrawUnshieldedExecutor(deps: AccountActionDeps): JobExecutor
   return async (raw, ctx) => {
     const { rt, check } = await recheck(deps, 'withdraw-unshielded', raw, ctx);
     const p = check.payload;
+    // AA 00062 (I-62a v2): prove first.
+    const cp = deps.clientProving;
+    if (cp) {
+      const out = await runGated(deps, check.digestHex, () =>
+        sponsoredProveFirst(deps, cp, rt, ctx, {
+          action: 'withdraw-unshielded',
+          account: check.account,
+          circuitId: deps.arm.circuits.withdrawUnshielded,
+          args: [unhex(p.color), BigInt(p.amount), { bytes: unhex(p.recipient) }, ...deps.arm.authArgs(check.auth)],
+          coinStore: rt.client.witnesses.emptyCoinStore(),
+        }),
+      );
+      ctx.stage('submitted', { tx: out.txId });
+      const result: WithdrawUnshieldedResult = { txId: out.txId };
+      return result as unknown as Record<string, unknown>;
+    }
     return runGated(deps, check.digestHex, () =>
       ctx.prove(() =>
         deps.sponsor.withWallet(async (w) => {
@@ -406,6 +561,22 @@ async function appendInbox(deps: AccountActionDeps, raw: unknown, ctx: JobContex
   const p = check.payload;
   const ent = deps.entitlements.verify(p.entitlement, check.account);
   if (!ent.ok) throw new PublicError('no-entitlement', ent.reason);
+  // AA 00062 (I-62a v2): prove first.
+  const cp = deps.clientProving;
+  if (cp) {
+    const out = await runGated(deps, check.digestHex, () =>
+      sponsoredProveFirst(deps, cp, rt, ctx, {
+        action: 'append-inbox',
+        account: check.account,
+        circuitId: deps.arm.circuits.appendInbox,
+        args: [unhex(p.entry), ...deps.arm.authArgs(check.auth)],
+        coinStore: rt.client.witnesses.emptyCoinStore(),
+      }),
+    );
+    ctx.stage('submitted', { tx: out.txId });
+    const result: AppendInboxResult = { txId: out.txId };
+    return result as unknown as Record<string, unknown>;
+  }
   return runGated(deps, check.digestHex, () =>
     ctx.prove(() =>
       deps.sponsor.withWallet(async (w) => {

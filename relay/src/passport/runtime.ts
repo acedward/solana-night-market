@@ -14,7 +14,6 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import type { Logger } from '../log.js';
-import type { ClientProofHandOff } from '../prover/proving-provider.js';
 import { MemoryPrivateStateProvider } from './private-state.js';
 import { walletProviderFor, type RelayWalletProvider, type SponsorWalletHandle } from './wallet-provider.js';
 
@@ -36,10 +35,10 @@ export interface PassportRuntimeOptions {
   /** A balanced transaction's time to live, ms (the node's fee window is short). */
   txTtlMs?: number;
   log: Logger;
-  /** AA 00062 (`CLIENT_PROVING=required`): the four k≥18 circuits are proven by the client
-   *  (../client-proving/desk.ts), and a submission the network refuses for the client's proof is told to
-   *  it (`submissionRefused`: the error to throw instead). Absent: the relay proves everything. */
-  clientProofs?: ClientProofHandOff & { submissionRefused(error: unknown): unknown };
+  /** AA 00062 (`CLIENT_PROVING=required`, I-62a v2): the four k≥18 circuits the user's prover proves; the
+   *  relay's proof provider refuses them (../client-proving/prove-first.ts captures and finalizes them).
+   *  Absent: the relay proves everything. */
+  clientCircuits?: ReadonlySet<string>;
 }
 
 const VENDOR = '../../../vendor/passport/contract';
@@ -130,7 +129,7 @@ export class PassportRuntime {
       proofProvider: await relayProofProvider(options.contractProofServerUrl, managedPath, {
         timeout: options.proofTimeoutMs ?? 900_000,
         log: options.log,
-        ...(options.clientProofs ? { clientProofs: options.clientProofs } : {}),
+        ...(options.clientCircuits ? { clientCircuits: options.clientCircuits } : {}),
       }),
     };
     options.log.info('passport runtime loaded', { circuits: binding.circuits, network: options.networkId });
@@ -164,18 +163,46 @@ export class PassportRuntime {
   }
 
   /** Providers for one job: shared read and prove paths, the sponsor wallet, and a private
-   *  state that lives only as long as the job. */
+   *  state that lives only as long as the job. AA 00062: `onSubmitError` turns a refused submission of
+   *  a client-proven call into its job's error (../client-proving/desk.ts `submissionRefused`). */
   async providers(
     wallet: SponsorWalletHandle,
     privateState = new MemoryPrivateStateProvider(),
+    opts: { onSubmitError?: (error: unknown) => unknown } = {},
   ): Promise<PassportProviders & { walletProvider: RelayWalletProvider }> {
-    const clientProofs = this.options.clientProofs;
     const walletProvider = walletProviderFor(wallet, {
       txTtlMs: this.options.txTtlMs ?? 60_000,
       log: this.options.log,
-      ...(clientProofs ? { onSubmitError: (e: unknown) => clientProofs.submissionRefused(e) } : {}),
+      ...(opts.onSubmitError ? { onSubmitError: opts.onSubmitError } : {}),
     });
     await walletProvider.ready;
+    return {
+      privateStateProvider: privateState,
+      ...this.shared,
+      walletProvider,
+      midnightProvider: walletProvider,
+    };
+  }
+
+  /**
+   * AA 00062 (I-62a v2, prepare): providers that BUILD a call with the sponsor wallet's PUBLIC keys only,
+   * holding no wallet. Balancing or submitting through them throws: a prepared call is balanced and
+   * submitted at finalize, under `withWallet`.
+   */
+  keysOnlyProviders(
+    keys: { coinPublicKey: string; encryptionPublicKey: string },
+    privateState = new MemoryPrivateStateProvider(),
+  ): PassportProviders & { walletProvider: RelayWalletProvider } {
+    const refuse = (): never => {
+      throw new Error('a prepared call is balanced and submitted at finalize, under the sponsor wallet');
+    };
+    const walletProvider: RelayWalletProvider = {
+      submitted: [],
+      getCoinPublicKey: () => keys.coinPublicKey,
+      getEncryptionPublicKey: () => keys.encryptionPublicKey,
+      balanceTx: async () => refuse(),
+      submitTx: async () => refuse(),
+    };
     return {
       privateStateProvider: privateState,
       ...this.shared,
@@ -217,6 +244,8 @@ export class PassportRuntime {
 
 /** The fields of the account's ledger the relay reads. */
 export interface AccountLedger {
+  /** Bumped by every state-changing call (contract INV-7): a prepared call reads it (AA 00062 staleness). */
+  readonly round: bigint;
   readonly booted: boolean;
   readonly device_count: bigint;
   readonly device_epoch: bigint;

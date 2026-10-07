@@ -4,9 +4,10 @@
 //                    client proving for that circuit, the saved prover is tested again (a pass of the
 //                    last minute is reused); without a passing one the popup opens, and the action
 //                    goes on only after its Continue (closing it stops the action, nothing signed).
-//   handOff(job)     while the market waits for the proof (I-62a): fetch the proof request, prove it
-//                    on the customer's prover (I-62b), post the proof back. A prover that fails while
-//                    there is time left reopens the popup, so the customer can fix it and go on.
+//   handOff(job)     while the market waits for the proof (I-62a v2: the job is parked, holding nothing):
+//                    fetch the proof request, prove it on the customer's prover (I-62b), post the proof
+//                    back. A prover that fails while there is time left reopens the popup, so the
+//                    customer can fix it and go on.
 //   test(url)        the Test (FR-010): reachable, the proof-server version, the key set and the
 //                    circuits, each in plain words; the result is kept with the URL (FR-012).
 //
@@ -335,9 +336,16 @@ export class ClientProver implements ClientProverHooks {
           if (e instanceof RelayError) {
             if (e.code === 'client-proof-invalid') throw new ProverError('invalid', proverProblemText('invalid'));
             if (e.code === 'client-proof-late') throw new ProverError('late', proverProblemText('late'));
-            // Another tab, or an older attempt: the market has what it needs or moved on.
+            // Another tab, or an older attempt: the market has what it needs or moved on. AA 00062 (I-62a
+            // v2): a stale call (the account moved while the prover proved) ends the job `client-proof-stale`;
+            // the operation sends the same signed request again once (passport/operations.ts `submitAndWait`).
             if (
-              ['client-proof-wrong-id', 'client-proof-already-received', 'not-awaiting-client-proof'].includes(e.code)
+              [
+                'client-proof-wrong-id',
+                'client-proof-already-received',
+                'not-awaiting-client-proof',
+                'client-proof-stale',
+              ].includes(e.code)
             )
               return;
           }

@@ -5,7 +5,11 @@
 //   - prover:  one job at a time across the relay. Every sponsor-paid call (register, withdraw,
 //              append-inbox, take, cancel-offers, restore-enc-key, demo-tokens) holds it for its
 //              whole run: the proof server proves one circuit at a time (a k=18 proof needs about
-//              8 GB), and the one sponsor wallet balances one transaction at a time.
+//              8 GB), and the one sponsor wallet balances one transaction at a time. AA 00062
+//              (`CLIENT_PROVING=required`, I-62a v2 "prove first"): the k≥18 actions (take, withdraw,
+//              withdraw-unshielded, append-inbox; open-swap already) run on their ACCOUNT's lane instead,
+//              park while the user's prover proves (holding nothing else), and take the prover lane
+//              through ctx.prove() only to finalize (../client-proving/prove-first.ts).
 //   - account: one job at a time PER ACCOUNT, for long jobs that must not overlap on one account;
 //   - relay:   one job at a time across the WHOLE relay, for long jobs that share one resource.
 // A job on the account or relay lane holds it for its whole run and takes the prover lane only
@@ -99,15 +103,15 @@ interface JobRecord {
   settled: Promise<void>;
 }
 
-/** AA 00062 (I-62a): the client-proof hand-offs (../client-proving/desk.ts), when the relay runs with
+/** AA 00062 (I-62a v2): the client-proof tickets (../client-proving/desk.ts), when the relay runs with
  *  `CLIENT_PROVING=required`. */
 export interface ClientProofHooks {
-  /** The job view's `clientProof` while a hand-off is open. */
+  /** The job view's `clientProof` while its ticket is open. */
   view(requestId: string): ClientProofField | undefined;
   /** The job's terminal client-proof failure: it becomes the job's error (it may surface through the
    *  ledger and midnight-js as another error). */
   failureOf(requestId: string): PublicError | undefined;
-  /** The job ended: an open hand-off is abandoned and its request dropped. */
+  /** The job ended: an open ticket is abandoned and its request dropped. */
   jobEnded(requestId: string): void;
 }
 
@@ -198,24 +202,12 @@ export class JobQueue {
     return this.view(rec);
   }
 
-  /** AA 00062: attach the client-proof hand-offs (`CLIENT_PROVING=required`; main.ts). */
+  /** AA 00062: attach the client-proof tickets (`CLIENT_PROVING=required`; main.ts). */
   useClientProofs(hooks: ClientProofHooks): void {
     this.clientProofs = hooks;
   }
 
-  /** The job holding the prover lane now (its request id, action and signed deadline), or null. Every
-   *  proof runs inside a prover-lane hold, so a client-proof hand-off belongs to it (AA 00062). */
-  proverHolder(): { requestId: string; action: JobActionName; signedDeadline?: number } | null {
-    const h = this.prover.current();
-    if (!h) return null;
-    const rec = this.jobs.get(h.id);
-    if (!rec || rec.state !== 'running') return null;
-    return h.deadline !== undefined
-      ? { requestId: h.id, action: rec.action, signedDeadline: h.deadline }
-      : { requestId: h.id, action: rec.action };
-  }
-
-  /** Record a stage on a RUNNING job from outside its executor (the client-proof hand-off); a no-op for
+  /** Record a stage on a RUNNING job from outside its executor (the client-proof ticket); a no-op for
    *  any other job. */
   recordStage(requestId: string, name: string, detail?: Record<string, string>): void {
     const rec = this.jobs.get(requestId);
@@ -320,8 +312,8 @@ export class JobQueue {
     let holdsProver = rec.lane === 'prover';
     rec.state = 'running';
     this.stage(rec, 'running');
-    // AA 00062: a failed client-proof hand-off is the job's error, whatever error it surfaced as (the
-    // ledger's WASM and midnight-js wrap the hand-off's rejection).
+    // AA 00062: a failed client-proof ticket is the job's error, whatever error it surfaced as (the
+    // ledger's WASM, midnight-js and Passport's offer builder may wrap it).
     const clientProofFailure = (e: unknown): unknown => this.clientProofs?.failureOf(rec.requestId) ?? e;
     const ctx: JobContext = {
       requestId: rec.requestId,

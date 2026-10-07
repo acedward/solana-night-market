@@ -33,6 +33,8 @@ export type ProverProblemCode =
   | 'late'
   /** The market checked the proof and refused it. */
   | 'invalid'
+  /** AA 00062 (I-62a v2): the account changed while the prover proved (a deposit or a trade landed). */
+  | 'stale'
   /** The customer closed the prover window. */
   | 'cancelled';
 
@@ -84,6 +86,8 @@ export function proverProblemText(
       return 'Your prover did not finish before this action’s deadline, so the market stopped it. Nothing was sent and no fee was spent. Try again; a faster computer or an online proof server helps.';
     case 'invalid':
       return 'Your proof server returned an invalid proof, so the market refused it. Nothing was sent and no fee was spent.';
+    case 'stale':
+      return 'Your account changed while your proof server was proving (a deposit or a trade landed), so that proof no longer fits it. Nothing was sent and no fee was spent: send it again, and your proof server proves it once more.';
     case 'cancelled':
       return 'You closed the proof-server window, so nothing was signed or sent.';
   }

@@ -50,11 +50,23 @@ export const COUNTERPARTY_FAILURES: ReadonlySet<string> = new Set([
   // AA 00060 P10.3 C9 (F-A6): a bridge-out made stale by ANOTHER customer's lock on the same bridge, or
   // by a chain too slow to show the lock in time, is not the requester's doing.
   'bridge-out-stale',
+  // AA 00062 (I-62a v2): a prove-first call made stale while the user proved (a deposit, a take of the
+  // account's own offer, the maker's offer gone): never charged; a take's repeats are bounded by the
+  // unsettled-take cap like the other counterparty outcomes.
+  'client-proof-stale',
 ]);
 
 /** Refusals before any proof that still count against the requester (AA 00047 P11.F2, R4b-1): requests
- *  no honest page sends. */
-export const PRE_PROOF_REQUESTER_FAULTS: ReadonlySet<string> = new Set(['want-reused']);
+ *  no honest page sends. AA 00062 (I-62a v2, "prove first"): a client proof that never came, came late or
+ *  was invalid ends its job BEFORE the relay's prover is used (the job was parked holding nothing), and is
+ *  the requester's all the same, as it was in I-62a v1. A stale call (`client-proof-stale`) is not: another
+ *  party moved the account. */
+export const PRE_PROOF_REQUESTER_FAULTS: ReadonlySet<string> = new Set([
+  'want-reused',
+  'client-proof-missing',
+  'client-proof-late',
+  'client-proof-invalid',
+]);
 
 /** The actions the budget never refuses (AA 00047 P10, R2-2): taking funds out and ending approvals. */
 export const BUDGET_EXEMPT_ACTIONS: ReadonlySet<RelayActionName> = new Set<RelayActionName>([

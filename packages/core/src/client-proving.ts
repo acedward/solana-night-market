@@ -1,19 +1,24 @@
-// Client proving (AA 00062, interface I-62a): the relay hands the page the proof request of ONE k≥18
-// account call, the page has the user's own prover (the "Night Market prover" package, I-62b) prove
-// it, and posts the proof back. The relay checks it, then finishes the transaction as it does today.
+// Client proving (AA 00062, interface I-62a v2, "prove first"): the relay hands the page the proof request
+// of ONE k≥18 account call, the page has the user's own prover (the "Night Market prover" package, I-62b)
+// prove it, and posts the proof back. The relay checks it, then finishes the transaction as it does today.
 //
 // The relay's mode is `CLIENT_PROVING=off|required` (default `off`). In `off` nothing here appears on
 // the wire: the two client-proof routes answer 404 `client-proving-off`, a job view never carries
 // `clientProof`, and `/v1/config` and `/health` carry no `clientProving` (a missing one means `off`,
 // as it does for an older relay).
 //
-// The hand-off, as a job sees it:
+// Prove first (owner, questions Q4 → D): the action's route PREPARES the call (built and captured, nothing
+// proven) and the job PARKS with a ticket, holding only its account's one-job slot (no prover lane, no
+// sponsor wallet) while the user proves. The proof posted back FINALIZES it: checked, then the account's
+// state is checked unchanged (`client-proof-stale` otherwise), then the relay finishes the call.
+//
+// The ticket, as a job sees it:
 //   - `state` stays `running`; the stages `awaiting-client-proof` {circuit, proofId, attempt},
 //     `client-proof-fetched` {proofId}, `client-proof-received` {proofId}, `client-proof-checked`
 //     {proofId} come in order, then the action's own stages;
-//   - `clientProof` {proofId, circuit, deadline, attempt, fetched} is present exactly while a hand-off
+//   - `clientProof` {proofId, circuit, deadline, attempt, fetched} is present exactly while the ticket
 //     is open (waiting for its one proof);
-//   - a call that Passport rebuilds after a DUST race opens a NEW hand-off (attempt + 1, at most 4).
+//   - one ticket per job (`attempt` is always 1): a DUST race at finalize re-balances with the same proof.
 //
 // Encodings: bytes as standard base64 with padding (RFC 4648 §4), times as Unix seconds, ids as 32
 // lowercase hex characters.
@@ -48,21 +53,29 @@ export const CLIENT_PROOF_MAX_BYTES = 64 * 1024;
 /** The largest `POST /v1/jobs/:requestId/client-proof` body. */
 export const CLIENT_PROOF_POST_MAX_BYTES = 128 * 1024;
 
-/** How long a hand-off waits by default, and the range an operator may set (always below the relay's
- *  900 s proof timeout). */
-export const CLIENT_PROOF_TIMEOUT_DEFAULT_SECONDS = 300;
+/** How long a ticket waits for its proof by default, and the range an operator may set. Nothing is held
+ *  while the user proves (I-62a v2), so it may be long; the call's intent lives one hour. */
+export const CLIENT_PROOF_TIMEOUT_DEFAULT_SECONDS = 600;
 export const CLIENT_PROOF_TIMEOUT_MIN_SECONDS = 60;
-export const CLIENT_PROOF_TIMEOUT_MAX_SECONDS = 840;
-/** The time a make or a take keeps after its proof, before its signed deadline: to merge, settle or list. */
+export const CLIENT_PROOF_TIMEOUT_MAX_SECONDS = 3000;
+/** The time a call keeps after its proof, before its signed deadline (a make, a take) and its intent's
+ *  TTL: to finalize, merge, settle, list or submit. */
 export const CLIENT_PROOF_SETTLE_MARGIN_SECONDS = 60;
-/** A hand-off with less than this left at opening fails `client-proof-late` at once. */
+/** A ticket with less than this left at prepare fails `client-proof-late` at once. */
 export const CLIENT_PROOF_MIN_WINDOW_SECONDS = 30;
-/** Hand-offs one job may open: the first proof, and up to three rebuilds after a DUST race. */
-export const CLIENT_PROOF_MAX_ATTEMPTS = 4;
+/** Tickets one job may open (I-62a v2): exactly one. A DUST race at finalize re-balances with the same
+ *  proof; a stale call is a new job (the page sends the same signed request again). */
+export const CLIENT_PROOF_MAX_ATTEMPTS = 1;
 
 /** The job errors of client proving: nothing was submitted, no fee was proven, no DUST was spent and
- *  no offer was posted. */
-export const CLIENT_PROOF_JOB_ERRORS = ['client-proof-missing', 'client-proof-late', 'client-proof-invalid'] as const;
+ *  no offer was posted. `client-proof-stale` (I-62a v2): the account changed between prepare and finalize
+ *  (or a take's maker offer is gone); the page may send the same signed request again. */
+export const CLIENT_PROOF_JOB_ERRORS = [
+  'client-proof-missing',
+  'client-proof-late',
+  'client-proof-invalid',
+  'client-proof-stale',
+] as const;
 export type ClientProofJobError = (typeof CLIENT_PROOF_JOB_ERRORS)[number];
 
 /** The route errors of `GET`/`POST /v1/jobs/:requestId/client-proof` (beside `bad-request`, `not-found`). */
@@ -73,6 +86,7 @@ export const CLIENT_PROOF_ROUTE_ERRORS = [
   'client-proof-already-received',
   'client-proof-late',
   'client-proof-invalid',
+  'client-proof-stale',
 ] as const;
 
 /** The job stages of a hand-off, in order. */
@@ -89,13 +103,13 @@ const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
 export const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const base64 = z.string().regex(BASE64_PATTERN);
 
-/** The job view's `clientProof`: present exactly while a hand-off is open. */
+/** The job view's `clientProof`: present exactly while the job's ticket is open. */
 export const ClientProofFieldSchema = z.object({
   proofId: hex32,
   circuit: z.enum(CLIENT_PROVEN_CIRCUITS),
   /** Unix seconds: the proof must arrive before it. */
   deadline: z.number().int(),
-  /** 1-based within the job. */
+  /** 1-based within the job (I-62a v2: always 1). */
   attempt: z.number().int().min(1).max(CLIENT_PROOF_MAX_ATTEMPTS),
   /** Whether the page has fetched the proof request. */
   fetched: z.boolean(),
@@ -139,7 +153,7 @@ export const ClientProvingConfigSchema = z.discriminatedUnion('mode', [
     circuits: z.array(z.enum(CLIENT_PROVEN_CIRCUITS)),
     keySet: hex64,
     proofServer: z.string().min(1),
-    /** How long a hand-off waits at most (the action's own deadline can make it shorter). */
+    /** How long a ticket waits at most (the action's own deadline can make it shorter). */
     timeoutSeconds: z.number().int(),
   }),
 ]);

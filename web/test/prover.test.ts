@@ -10,6 +10,8 @@ import type { JobView } from '@nightmarket/core';
 import { ACTIVITY_TITLE, ActivityStore, stageWords } from '../src/activity/activity.js';
 import { makeOffer, takeOffer } from '../src/trade/operations.js';
 import {
+  findJobs,
+  submitAndWait,
   waitWithProver,
   withdrawToWallet,
   withdrawUnshieldedToWallet,
@@ -46,7 +48,7 @@ import {
 import { PROVER_SETTING_KEY, ProverSettings, type ProverSetting } from '../src/prover/settings.js';
 import { checkProverUrl } from '../src/prover/url.js';
 import { RelayClient, RelayError } from '../src/relay/client.js';
-import { jobErrorText } from '../src/relay/messages.js';
+import { jobErrorText, relayErrorText } from '../src/relay/messages.js';
 import { LocalStore } from '../src/store/store.js';
 import { formatShieldedAddress, formatUnshieldedAddress } from '@nightmarket/core';
 
@@ -606,6 +608,16 @@ describe('the hand-off (P4.3, I-62a + I-62b)', () => {
     expect((err as ProverError).message).toMatch(/the market sends nothing and spends no fee/);
   });
 
+  it('a stale call (409 client-proof-stale): the hand-off ends quietly, the operation sends again', async () => {
+    const relay = fakeRelay();
+    relay.request = handOffRequest();
+    relay.postError = new RelayError(409, 'client-proof-stale', 'your account changed');
+    const x = engine({ relay, saved: saved(), handler: proving() });
+    await expect(x.e.handOff(relay as never, JOB)).resolves.toBeUndefined();
+    expect(relay.postClientProof).toHaveBeenCalledTimes(1);
+    expect(x.popups).toEqual([]);
+  });
+
   it('the market refuses the proof (422) or says it is late (410); an older attempt is ignored', async () => {
     for (const [code, expected] of [
       ['client-proof-invalid', 'invalid'],
@@ -646,11 +658,11 @@ describe('RelayClient: the hand-off while a job is followed', () => {
     fetched: false,
   });
 
-  it('answers each new hand-off once (a rebuilt call opens another), then follows the job to its end', async () => {
+  it('answers each new proof id once, then follows the job to its end', async () => {
     const jobs = [
       view({ clientProof: cp('aa'.repeat(16)) }),
       view({ clientProof: cp('aa'.repeat(16)), stage: 'client-proof-fetched' }),
-      view({ clientProof: cp('bb'.repeat(16), 2) }),
+      view({ clientProof: cp('bb'.repeat(16)) }),
       view({ state: 'succeeded', stage: 'succeeded', result: { txId: 'f'.repeat(64) } }),
     ];
     const fetchImpl = (async () => reply(200, { job: jobs.shift() ?? jobs.at(-1) })) as unknown as typeof fetch;
@@ -788,6 +800,112 @@ describe('the k>=18 operations ask for the prover BEFORE anything is signed or s
     // Nothing was signed, and neither the market nor the chain was asked anything (the proxies throw).
     expect(g.calls).toEqual([]);
     expect(localStorage.length).toBe(0);
+  });
+});
+
+describe('a stale call (I-62a v2, "prove first"): the page sends the same signed request again once', () => {
+  const ACC = '5a'.repeat(32);
+  const job = (id: string, over: Partial<JobView> = {}): JobView =>
+    ({
+      requestId: id,
+      action: 'withdraw',
+      lane: 'account',
+      state: 'running',
+      stage: 'awaiting-client-proof',
+      stages: [],
+      createdAt: 1,
+      updatedAt: 1,
+      expiresAt: 9,
+      ...over,
+    }) as JobView;
+  const stale = { code: 'client-proof-stale', message: 'your account changed while your proof server was proving' };
+  function staleEnv(outcomes: Array<Partial<JobView>>) {
+    const submitted: Array<{ action: string; request: unknown }> = [];
+    const relay = {
+      submit: vi.fn(async (action: string, request: unknown) => {
+        submitted.push({ action, request });
+        return job(String(submitted.length).padStart(32, '0'));
+      }),
+      waitForJob: vi.fn(async (id: string) => job(id, outcomes.shift() ?? { state: 'succeeded', stage: 'succeeded' })),
+    };
+    const env = {
+      relay: relay as never,
+      store: new LocalStore(localStorage),
+      scope: ME,
+      prover: { ensure: async () => {}, handOff: async () => {} },
+    } as unknown as OperationEnv;
+    return { env, relay, submitted };
+  }
+  const request = {
+    payload: { amount: '5', authNonce: '2' },
+    passportAuth: { owner: 'o', signature: 's', useCounter: '0' },
+  };
+
+  it('stale once: the SAME body again (a new ticket, one more proof), then it lands', async () => {
+    const x = staleEnv([{ state: 'failed', stage: 'failed', error: stale }]);
+    const done = await submitAndWait(x.env, ACC, 'withdraw', request as never, {});
+    expect(done.state).toBe('succeeded');
+    expect(x.submitted).toHaveLength(2);
+    expect(x.submitted[1]).toEqual(x.submitted[0]);
+    expect(x.submitted[0]!.request).toEqual({ account: ACC, ...request });
+    expect(findJobs(x.env, ACC)).toEqual([]); // both jobs' records dropped
+  });
+
+  it('stale twice: no third try; the customer reads that nothing was sent', async () => {
+    const x = staleEnv([
+      { state: 'failed', stage: 'failed', error: stale },
+      { state: 'failed', stage: 'failed', error: stale },
+    ]);
+    const done = await submitAndWait(x.env, ACC, 'open-swap', request as never, {});
+    expect(x.submitted).toHaveLength(2);
+    expect(done.error?.code).toBe('client-proof-stale');
+    expect(jobErrorText(done.error, '')).toMatch(/Your account changed while your proof server was proving/);
+    expect(jobErrorText(done.error, '')).toMatch(/Nothing was sent and no fee was spent/);
+  });
+
+  it('another failure is never re-sent; nor is a request with a RelayAction envelope (its nonce is spent)', async () => {
+    const other = staleEnv([
+      { state: 'failed', stage: 'failed', error: { code: 'client-proof-invalid', message: 'x' } },
+    ]);
+    expect((await submitAndWait(other.env, ACC, 'take', request as never, {})).error?.code).toBe(
+      'client-proof-invalid',
+    );
+    expect(other.submitted).toHaveLength(1);
+    const env = staleEnv([{ state: 'failed', stage: 'failed', error: stale }]);
+    const withEnvelope = { ...request, auth: { message: {}, signature: 'f'.repeat(128) } };
+    expect((await submitAndWait(env.env, ACC, 'withdraw', withEnvelope as never, {})).error?.code).toBe(
+      'client-proof-stale',
+    );
+    expect(env.submitted).toHaveLength(1);
+  });
+
+  it('the market restarted while it waited for the proof: said plainly (nothing was sent)', async () => {
+    const answers = [
+      reply(200, {
+        job: job('01'.repeat(16), {
+          clientProof: {
+            proofId: 'aa'.repeat(16),
+            circuit: 'withdraw_shielded_with_ed25519',
+            deadline: 9,
+            attempt: 1,
+            fetched: false,
+          },
+        } as never),
+      }),
+      reply(404, { error: { code: 'not-found', message: 'no such job: the relay restarted' } }),
+    ];
+    const relay = new RelayClient('http://relay.test', (async () => answers.shift()!) as unknown as typeof fetch);
+    const err = await relay
+      .waitForJob('01'.repeat(16), () => undefined, { intervalMs: 1, clientProof: async () => {} })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RelayError);
+    expect((err as RelayError).code).toBe('job-lost');
+    expect((err as RelayError).message).toMatch(/restarted .* while it waited for your proof server/);
+    expect((err as RelayError).message).toMatch(/Nothing was sent and no fee was spent/);
+  });
+
+  it('a stale refusal of the POST is worded too', () => {
+    expect(relayErrorText(new RelayError(409, 'client-proof-stale', 'x'))).toMatch(/Your account changed/);
   });
 });
 

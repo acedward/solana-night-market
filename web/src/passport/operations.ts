@@ -55,6 +55,7 @@ import {
   type JobView,
   type PassportAuth,
   type RegisterResult,
+  type RelayActionName,
   type RestoreEncKeyPayload,
   type RestoreEncKeyResult,
   type SignedRelayAction,
@@ -155,6 +156,33 @@ export function waitWithProver(
     onUpdate,
     prover ? { clientProof: (job) => prover.handOff(env.relay, job) } : {},
   );
+}
+
+/**
+ * AA 00062 (I-62a v2 "prove first"; spec edge case "a stale call"): queue a k>=18 action and wait for it,
+ * answering its client-proof ticket. When the market answers `client-proof-stale` (the account moved while
+ * the customer's prover proved: a deposit or a trade landed), nothing was sent and no fee was spent, and
+ * the SAME signed request is sent again ONCE on its own: the market prepares it again and the prover proves
+ * it once more. A request that carries a RelayAction envelope is not sent again (its nonce is spent): the
+ * customer reads the stale message instead.
+ */
+export async function submitAndWait(
+  env: OperationEnv,
+  account: string,
+  action: JobAction,
+  request: { payload: Record<string, unknown>; passportAuth: PassportAuth; auth?: SignedRelayAction },
+  context: Record<string, unknown>,
+): Promise<JobView> {
+  for (let attempt = 0; ; attempt++) {
+    const job = await env.relay.submit(action as RelayActionName, { account, ...request });
+    putJob(env, account, job, action, context);
+    env.onJob?.(job);
+    const done = await waitWithProver(env, job.requestId, (j) => updateJob(env, account, j));
+    dropJob(env, account, job.requestId);
+    const resend =
+      attempt === 0 && !request.auth && done.state === 'failed' && done.error?.code === 'client-proof-stale';
+    if (!resend) return done;
+  }
 }
 
 /** Sign a RelayAction envelope with the wallet: its signature, 128 lowercase hex. */
@@ -587,16 +615,13 @@ async function submitGated(
   if (!RELAY_ACTIONS.includes(action)) throw new OperationError('unknown action');
   const body = payload as unknown as Record<string, unknown>;
   const auth = opts.envelope && action === 'withdraw' ? await relayEnvelope(env, action, account, body) : undefined;
-  const job = await env.relay.submit(action, {
+  const done = await submitAndWait(
+    env,
     account,
-    payload: body,
-    passportAuth,
-    ...(auth ? { auth } : {}),
-  });
-  putJob(env, account, job, action, context);
-  env.onJob?.(job);
-  const done = await waitWithProver(env, job.requestId, (j) => updateJob(env, account, j));
-  dropJob(env, account, job.requestId);
+    action,
+    { payload: body, passportAuth, ...(auth ? { auth } : {}) },
+    context,
+  );
   if (done.state !== 'succeeded')
     throw new JobFailedError(
       done.error?.code ?? 'failed',

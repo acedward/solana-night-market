@@ -108,7 +108,10 @@ test.describe('Local Data: "Proof server (optional)"', () => {
     await expect(page.getByTestId('prover-market-mode')).toHaveAttribute('data-mode', 'required');
     await expect(page.getByTestId('prover-none')).toBeVisible();
     await expect(page.getByTestId('prover-command')).toHaveText(
-      'docker run --rm -p 127.0.0.1:6300:6300 --memory 12g ghcr.io/midnight-experiments/solana-proof-server:<pending>',
+      'docker run --rm -p 127.0.0.1:6300:6300 --memory 12g ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9',
+    );
+    await expect(page.getByTestId('prover-command-hint')).toContainText(
+      'The first start downloads the package, about 0.65 GB (about 2.7 GB on disk once unpacked).',
     );
     await expect(page.getByTestId('prover-url')).toHaveValue(LOCAL);
 
@@ -264,6 +267,11 @@ test.describe('the popup, and the proof on the customer’s prover', () => {
       'This is a tech demo; on a real network this will be provided.',
     );
     await expect(page.getByTestId('prover-popup-command')).toContainText('-p 127.0.0.1:6300:6300 --memory 12g');
+    await expect(page.getByTestId('prover-popup-command')).toContainText(
+      'solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9',
+    );
+    await expect(page.getByTestId('prover-popup-command-hint')).toContainText('about 0.65 GB');
+    await expect(page.getByTestId('prover-popup-command-hint')).not.toContainText('2.6 GB');
     await expect(page.getByTestId('prover-popup-url')).toHaveValue(LOCAL);
     await expect(page.getByTestId('prover-popup-action')).toHaveAttribute(
       'data-circuit',

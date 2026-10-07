@@ -82,7 +82,10 @@ Market prover package (`docker run … ghcr.io/midnight-experiments/solana-proof
 - **The Content-Security-Policy** needs `http://localhost:* http://127.0.0.1:* https:` in
   `connect-src` (`deploy/RUNBOOK.md` section 16).
 
-The package's image reference is the one constant `PROVER_IMAGE` in `src/prover/constants.ts`.
+The package's image reference is the one constant `PROVER_IMAGE` in `src/prover/constants.ts`:
+`ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9`
+(amd64 and arm64; public, pulled without a login). The first start downloads about 0.65 GB (about 2.7 GB
+on disk once unpacked).
 
 ## The Solana wallet (AA 00047 lane B2)
 

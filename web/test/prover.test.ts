@@ -32,7 +32,9 @@ import {
   DEFAULT_PROVER_URL,
   PINNED_KEY_SET,
   PROVER_COMMAND,
+  PROVER_DOWNLOAD_GB,
   PROVER_IMAGE,
+  PROVER_UNPACKED_GB,
   type ClientCircuit,
 } from '../src/prover/constants.js';
 import { clientProvingOf, type ClientProofRequest, type HandOffJobView } from '../src/prover/i62a.js';
@@ -935,8 +937,16 @@ describe('the words', () => {
     a.clientProof(null);
     expect(a.peek()!.clientProof).toBeNull();
   });
-  it('the command is the ONE image constant (P6.3 pins it), with the port on loopback and a memory hint', () => {
-    expect(PROVER_IMAGE).toBe('ghcr.io/midnight-experiments/solana-proof-server:<pending>');
+  it('the command is the ONE image constant, pinned by digest (P6.3), with the port on loopback and a memory hint', () => {
+    expect(PROVER_IMAGE).toBe(
+      'ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9',
+    );
+    expect(PROVER_IMAGE).toMatch(
+      /^ghcr\.io\/midnight-experiments\/solana-proof-server:[0-9.]+-21493588@sha256:[0-9a-f]{64}$/,
+    );
+    expect(PROVER_IMAGE).not.toContain('<pending>');
+    expect(PROVER_DOWNLOAD_GB).toBe(0.65);
+    expect(PROVER_UNPACKED_GB).toBe(2.7);
     expect(PROVER_COMMAND).toBe(`docker run --rm -p 127.0.0.1:6300:6300 --memory 12g ${PROVER_IMAGE}`);
     expect(DEFAULT_PROVER_URL).toBe(LOCAL);
   });

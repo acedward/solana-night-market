@@ -28,8 +28,14 @@ export const ACTION_CIRCUIT = {
 export const PINNED_PROOF_SERVER = '9.0.0-rc.8';
 export const PINNED_KEY_SET = '21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e';
 
-/** The package's image. **Plan P6.3 replaces `<pending>` with the published digest, here only.** */
-export const PROVER_IMAGE = 'ghcr.io/midnight-experiments/solana-proof-server:<pending>';
+/** The package's image (spec FR-007), pinned by its tag AND its index digest (amd64 + arm64), so the
+ *  command always runs the same bytes: package 0.1.0 with the key set 21493588…, published by
+ *  midnight-experiments/solana-proof-server's CI from tag v0.1.0 (plan P6.1). Change it here only. */
+export const PROVER_IMAGE =
+  'ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9';
+/** What the first start downloads (plan P2: 0.645 GB amd64, 0.649 GB arm64 compressed; 2.68 GB unpacked). */
+export const PROVER_DOWNLOAD_GB = 0.65;
+export const PROVER_UNPACKED_GB = 2.7;
 
 /** The default URL: the package published on this machine's loopback (I-62b). */
 export const DEFAULT_PROVER_URL = 'http://localhost:6300';

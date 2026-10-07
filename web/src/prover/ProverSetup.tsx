@@ -6,7 +6,7 @@ import { useId, useState } from 'react';
 
 import { Button, CopyField, Field, Icon, Notice, Spinner, TextInput } from '../design/index.js';
 import type { ClientProver, ProverExpectation, TestOutcome } from './client-prover.js';
-import { PROVER_COMMAND, type ClientCircuit } from './constants.js';
+import { PROVER_COMMAND, PROVER_DOWNLOAD_GB, PROVER_UNPACKED_GB, type ClientCircuit } from './constants.js';
 import { PRIVACY_CONFIRM, PRIVACY_WARNING, checkProverUrl, proverUrlProblem } from './url.js';
 
 export interface ProverSetupProps {
@@ -66,9 +66,10 @@ export function ProverSetup({
       <div>
         <p className="field-label">Start the Night Market prover package on this computer</p>
         <CopyField value={PROVER_COMMAND} data-testid={`${p}-command`} />
-        <p className="field-hint">
+        <p className="field-hint" data-testid={`${p}-command-hint`}>
           It needs Docker with about 12 GB of memory (on a Mac, raise Docker Desktop&apos;s memory limit). The first
-          start downloads the package, about 2.6 GB.
+          start downloads the package, about {PROVER_DOWNLOAD_GB} GB (about {PROVER_UNPACKED_GB} GB on disk once
+          unpacked).
         </p>
       </div>
       <Field

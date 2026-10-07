@@ -5,6 +5,8 @@
 
 import { WHOLE_COIN_EXIT, WITHDRAWS_DAILY_CAP_CODE } from '@nightmarket/core';
 
+import { proverProblemText } from '../prover/messages.js';
+
 /** "the market is low …" → "The market is low ….": the relay's messages start lower-case. */
 export function sentence(text: string): string {
   const t = text.trim();
@@ -80,6 +82,13 @@ export function relayErrorText(e: {
       return `Several of your takes in the last 24 hours could not be settled by the exchange, so the market is pausing new takes from your account. Try again in ${waitText(e.retryAfterSeconds, 'a day')}; your other actions still work, and nothing was sent.`;
     case 'coin-spent':
       return COIN_SPENT;
+    // AA 00062 (I-62a): the market's answers to a proof from the customer's prover.
+    case 'client-proof-invalid':
+      return proverProblemText('invalid');
+    case 'client-proof-late':
+      return proverProblemText('late');
+    case 'client-proof-stale':
+      return proverProblemText('stale');
     // AA 00047 P11.F (audit round 4, R4-1 / R4-3): refused up front, before anything runs.
     case 'prover-busy':
       return `The market's prover is busy right now, so your request could not start before the expiry you approved. Nothing was sent; try again in ${waitText(e.retryAfterSeconds, 'a minute')} and approve it once more.`;
@@ -157,6 +166,18 @@ export function jobErrorText(error: { code: string; message: string } | undefine
       return 'One of your own offers was taken at the same moment, so this take could no longer settle. It does not count against you: refresh your balances and take again.';
     case 'demo-tokens-settling':
       return 'An earlier delivery of your demo tokens may still land on Midnight, so the market is not minting them again yet. Refresh in a few minutes; it does not count against you.';
+    // AA 00062 (I-62a "Job errors"): the customer's own prover. Nothing was submitted, no fee was
+    // proven and no DUST was spent for any of them.
+    case 'client-proof-missing':
+      return 'The market waited for your proof server, but this page never asked it for the proof (it was closed, or lost its connection). Nothing was sent and no fee was spent: try again with this page open.';
+    case 'client-proof-late':
+      return proverProblemText('late');
+    case 'client-proof-invalid':
+      return proverProblemText('invalid');
+    // AA 00062 (I-62a v2, "prove first"): the account moved between prepare and finalize. The page has
+    // already sent the same signed request again once on its own (passport/operations.ts `submitAndWait`).
+    case 'client-proof-stale':
+      return proverProblemText('stale');
     default:
       return sentence(error.message);
   }

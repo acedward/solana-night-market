@@ -112,7 +112,7 @@ export class ProverLock {
   private readonly defaultHoldMs: number;
   private readonly holdFloorMs: number;
   private readonly maxKeys: number;
-  private holder: { id: string; key: string; action: string; since: number } | null = null;
+  private holder: { id: string; key: string; action: string; since: number; deadline?: number } | null = null;
   private readonly board: Board = {
     heads: new Map(),
     tails: new Map(),
@@ -161,7 +161,13 @@ export class ProverLock {
 
   private start(w: Waiter): void {
     const now = this.nowMs();
-    this.holder = { id: w.id, key: w.key, action: w.action, since: now };
+    this.holder = {
+      id: w.id,
+      key: w.key,
+      action: w.action,
+      since: now,
+      ...(w.deadline !== undefined ? { deadline: w.deadline } : {}),
+    };
     this.noteGrant(w.key, now);
     w.grant();
   }

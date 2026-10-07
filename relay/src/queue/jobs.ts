@@ -5,7 +5,11 @@
 //   - prover:  one job at a time across the relay. Every sponsor-paid call (register, withdraw,
 //              append-inbox, take, cancel-offers, restore-enc-key, demo-tokens) holds it for its
 //              whole run: the proof server proves one circuit at a time (a k=18 proof needs about
-//              8 GB), and the one sponsor wallet balances one transaction at a time.
+//              8 GB), and the one sponsor wallet balances one transaction at a time. AA 00062
+//              (`CLIENT_PROVING=required`, I-62a v2 "prove first"): the k≥18 actions (take, withdraw,
+//              withdraw-unshielded, append-inbox; open-swap already) run on their ACCOUNT's lane instead,
+//              park while the user's prover proves (holding nothing else), and take the prover lane
+//              through ctx.prove() only to finalize (../client-proving/prove-first.ts).
 //   - account: one job at a time PER ACCOUNT, for long jobs that must not overlap on one account;
 //   - relay:   one job at a time across the WHOLE relay, for long jobs that share one resource.
 // A job on the account or relay lane holds it for its whole run and takes the prover lane only
@@ -32,7 +36,7 @@
 
 import { randomBytes } from 'node:crypto';
 
-import type { JobActionName, JobLane, JobStage, JobState, JobView } from '@nightmarket/core';
+import type { ClientProofField, JobActionName, JobLane, JobStage, JobState, JobView } from '@nightmarket/core';
 
 import type { Logger } from '../log.js';
 import { FifoLock } from './fifo-lock.js';
@@ -99,6 +103,18 @@ interface JobRecord {
   settled: Promise<void>;
 }
 
+/** AA 00062 (I-62a v2): the client-proof tickets (../client-proving/desk.ts), when the relay runs with
+ *  `CLIENT_PROVING=required`. */
+export interface ClientProofHooks {
+  /** The job view's `clientProof` while its ticket is open. */
+  view(requestId: string): ClientProofField | undefined;
+  /** The job's terminal client-proof failure: it becomes the job's error (it may surface through the
+   *  ledger and midnight-js as another error). */
+  failureOf(requestId: string): PublicError | undefined;
+  /** The job ended: an open ticket is abandoned and its request dropped. */
+  jobEnded(requestId: string): void;
+}
+
 export interface QueueStats {
   jobs: number;
   lanes: Record<JobLane, { running: number; waiting: number }>;
@@ -121,6 +137,7 @@ export class JobQueue {
   private readonly relayLane = new FifoLock();
   private readonly accounts = new Map<string, FifoLock>();
   private readonly now: () => number;
+  private clientProofs: ClientProofHooks | null = null;
 
   constructor(private readonly options: JobQueueOptions) {
     const nowMs = options.nowMs ?? (options.now ? () => options.now!() * 1000 : Date.now);
@@ -183,6 +200,18 @@ export class JobQueue {
     this.jobs.set(requestId, rec);
     void this.run(rec).finally(settle);
     return this.view(rec);
+  }
+
+  /** AA 00062: attach the client-proof tickets (`CLIENT_PROVING=required`; main.ts). */
+  useClientProofs(hooks: ClientProofHooks): void {
+    this.clientProofs = hooks;
+  }
+
+  /** Record a stage on a RUNNING job from outside its executor (the client-proof ticket); a no-op for
+   *  any other job. */
+  recordStage(requestId: string, name: string, detail?: Record<string, string>): void {
+    const rec = this.jobs.get(requestId);
+    if (rec && rec.state === 'running') this.stage(rec, name, detail);
   }
 
   get(requestId: string): JobView | undefined {
@@ -283,12 +312,22 @@ export class JobQueue {
     let holdsProver = rec.lane === 'prover';
     rec.state = 'running';
     this.stage(rec, 'running');
+    // AA 00062: a failed client-proof ticket is the job's error, whatever error it surfaced as (the
+    // ledger's WASM, midnight-js and Passport's offer builder may wrap it).
+    const clientProofFailure = (e: unknown): unknown => this.clientProofs?.failureOf(rec.requestId) ?? e;
     const ctx: JobContext = {
       requestId: rec.requestId,
       log,
       stage: (name, detail) => this.stage(rec, name, detail),
       prove: async <T>(fn: () => Promise<T>): Promise<T> => {
-        if (holdsProver) return fn();
+        if (holdsProver) {
+          if (!this.clientProofs) return fn();
+          try {
+            return await fn();
+          } catch (e) {
+            throw clientProofFailure(e);
+          }
+        }
         this.stage(rec, 'waiting-for-prover');
         rec.waitingForProver = true;
         const release = await this.prover.acquire(ticket);
@@ -297,6 +336,8 @@ export class JobQueue {
         try {
           this.stage(rec, 'proving');
           return await fn();
+        } catch (e) {
+          throw clientProofFailure(e);
         } finally {
           holdsProver = false;
           release();
@@ -310,7 +351,8 @@ export class JobQueue {
       rec.state = 'succeeded';
       this.stage(rec, 'succeeded');
       log.info('job succeeded');
-    } catch (e) {
+    } catch (caught) {
+      const e = clientProofFailure(caught);
       rec.state = 'failed';
       rec.error =
         e instanceof PublicError
@@ -319,6 +361,7 @@ export class JobQueue {
       this.stage(rec, 'failed');
       log.warn('job failed', { error: e });
     } finally {
+      this.clientProofs?.jobEnded(rec.requestId);
       rec.payload = undefined;
       rec.executor = null;
       rec.expiresAt = this.now() + this.options.ttlSeconds;
@@ -337,6 +380,7 @@ export class JobQueue {
           ? this.prover.position(rec.requestId)
           : undefined;
     const last = rec.stages[rec.stages.length - 1];
+    const clientProof = rec.state === 'running' ? this.clientProofs?.view(rec.requestId) : undefined;
     return {
       requestId: rec.requestId,
       action: rec.action,
@@ -350,6 +394,7 @@ export class JobQueue {
       expiresAt: rec.expiresAt,
       ...(rec.result ? { result: { ...rec.result } } : {}),
       ...(rec.error ? { error: { ...rec.error } } : {}),
+      ...(clientProof ? { clientProof } : {}),
     };
   }
 }

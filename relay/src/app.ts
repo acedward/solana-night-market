@@ -5,6 +5,8 @@
 //   GET  /v1/auth/nonce                 a single-use nonce for a RelayAction authorisation
 //   POST /v1/actions/:action            THE ONLY state-changing route: every action is authorised
 //   GET  /v1/jobs/:requestId            resume a job by its request id
+//   GET  /v1/jobs/:requestId/client-proof   AA 00062 (I-62a v2): the parked job's proof request (required mode)
+//   POST /v1/jobs/:requestId/client-proof   AA 00062 (I-62a v2): the user's prover's proof: finalize (required mode)
 //   GET  /v1/queue                      queue depth per lane
 //   GET  /v1/accounts/:account/state    public ledger reads (L-ACC)
 //   GET  /v1/accounts/:account/inbox    public inbox ciphertexts (L-ACC)
@@ -21,6 +23,8 @@ import { cors } from 'hono/cors';
 import {
   API_PATHS,
   ActionRequestSchema,
+  CLIENT_PROOF_POST_MAX_BYTES,
+  ClientProofSubmissionSchema,
   RELAY_ACTIONS,
   type ActionRequest,
   type DemoTokensInfo,
@@ -46,6 +50,7 @@ import {
 import type { NonceStore } from './auth/nonces.js';
 import { verifyRelayActionRequest, type VerifyOutcome } from './auth/verifiers.js';
 import { AccountHistoryTooLongError } from './chain/indexer.js';
+import type { ClientProofDesk } from './client-proving/desk.js';
 import { ChainReadNotImplementedError, type ChainReader } from './chain/reader.js';
 import { clientKey } from './client-key.js';
 import type { RelayConfig } from './config.js';
@@ -81,13 +86,16 @@ export interface AppDeps {
   /** One queued-or-running job per account (AA 00047 P10, R2-1: ./actions/account-gate.ts); default:
    *  a gate of `config.limits.jobsPerAccount`. */
   accountGate?: AccountGate;
+  /** AA 00062 (I-62a v2): the client-proof tickets, only with `CLIENT_PROVING=required`; absent (`off`):
+   *  the two client-proof routes answer 404 `client-proving-off` and nothing new is published. */
+  clientProofs?: Pick<ClientProofDesk, 'config' | 'serveRequest' | 'submit'>;
   /** The caller's address for rate limiting (default: the socket's, or X-Forwarded-For's last hop).
    *  Every per-client cap keys it by `clientKey` (an IPv6 client by its /64: AA 00047 P10, R2-1/R2-8). */
   clientAddress?: (c: Context) => string;
   now?: () => number;
 }
 
-type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 501 | 503;
+type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 410 | 413 | 422 | 429 | 500 | 501 | 503;
 
 const apiError = (c: Context, status: ErrorStatus, code: string, message: string, detail?: string) =>
   c.json({ error: { code, message, ...(detail ? { detail } : {}) } }, status);
@@ -184,6 +192,8 @@ export function createApp(deps: AppDeps): Hono {
       },
       withdrawRecipientEnvelope: config.withdrawRecipientEnvelope,
       tokensDigest: digest,
+      // AA 00062 (I-62a): only in `required` mode; absent means `off`, as from an older relay.
+      ...(deps.clientProofs ? { clientProving: deps.clientProofs.config() } : {}),
     };
     return c.json(body);
   });
@@ -220,6 +230,85 @@ export function createApp(deps: AppDeps): Hono {
       ? c.json({ job })
       : apiError(c, 404, 'not-found', 'no such job (it may have expired, or the relay restarted)');
   });
+
+  // ── AA 00062 (I-62a v2, "prove first"): the client-proof ticket ─────────────
+  //
+  // Only the PAGE talks to the user's prover; these routes take bytes from the page and never a URL, and
+  // nothing here makes a request anywhere (spec FR-003). The proof request carries the call's private
+  // inputs: it is served `no-store` and never logged (request and response bodies are never logged). A
+  // job's request id (and, to post, the hand-off's proof id) is the capability, as for GET /v1/jobs/:id.
+  //
+  // In `off` mode no handler is registered: the path only answers 404 `client-proving-off`, whatever the
+  // method, so the relay keeps exactly one state-changing route (relay/test/routes-auth.test.ts). In
+  // `required` mode the POST is the second one: it finalizes the job's own ticket (the proof checked, the
+  // account found unchanged, then the parked job resumes) and changes nothing else. Tickets live in memory
+  // only, so after a restart both routes answer 404 `not-found` and say so.
+  const CLIENT_PROOF_PATH = '/v1/jobs/:requestId/client-proof';
+  const clientProofs = deps.clientProofs;
+  if (!clientProofs) {
+    app.all(CLIENT_PROOF_PATH, (c) => {
+      c.header('Cache-Control', 'no-store');
+      return apiError(
+        c,
+        404,
+        'client-proving-off',
+        'this market proves every action itself (client proving is off): there is no client proof to fetch or send',
+      );
+    });
+  } else {
+    const notAJob = (c: Context) =>
+      apiError(
+        c,
+        404,
+        'not-found',
+        'no such job: the relay restarted (it keeps proof requests in memory only) or the job expired. Nothing was sent for this request and no fee was spent; send the action again',
+      );
+
+    app.get(CLIENT_PROOF_PATH, (c) => {
+      const refused = limited(readLimiter, clientAddress(c), c);
+      if (refused) return refused;
+      c.header('Cache-Control', 'no-store');
+      const id = c.req.param('requestId');
+      if (!/^[0-9a-f]{32}$/.test(id)) return apiError(c, 400, 'bad-request', 'not a request id');
+      if (!deps.queue.get(id)) return notAJob(c);
+      const out = clientProofs.serveRequest(id);
+      if (!out.ok) return apiError(c, 409, out.code, 'this job is not waiting for a client proof right now');
+      return c.json(out.body);
+    });
+
+    app.post(
+      CLIENT_PROOF_PATH,
+      async (c, next) => {
+        const refused = limited(actionLimiter, clientAddress(c), c);
+        if (refused) return refused;
+        c.header('Cache-Control', 'no-store');
+        await next();
+      },
+      bodyLimit({
+        maxSize: CLIENT_PROOF_POST_MAX_BYTES,
+        onError: (c) => apiError(c, 413, 'payload-too-large', 'the request body is too large'),
+      }),
+      async (c) => {
+        const id = c.req.param('requestId');
+        if (!/^[0-9a-f]{32}$/.test(id)) return apiError(c, 400, 'bad-request', 'not a request id');
+        const type = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
+        if (type !== 'application/json') return apiError(c, 400, 'bad-request', 'the body must be application/json');
+        let body: unknown;
+        try {
+          body = await c.req.json();
+        } catch {
+          return apiError(c, 400, 'bad-request', 'the body must be JSON');
+        }
+        const parsed = ClientProofSubmissionSchema.safeParse(body);
+        if (!parsed.success)
+          return apiError(c, 400, 'bad-request', 'the body must be exactly {proofId, proof} (proof in base64)');
+        if (!deps.queue.get(id)) return notAJob(c);
+        const out = await clientProofs.submit(id, parsed.data);
+        if (!out.ok) return apiError(c, out.status, out.code, out.message);
+        return c.json({ job: out.job });
+      },
+    );
+  }
 
   app.get(API_PATHS.demoTokens, (c) => {
     const refused = limited(readLimiter, clientAddress(c), c);

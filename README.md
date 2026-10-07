@@ -24,7 +24,8 @@ A customer with only a Solana wallet (Phantom or Nightly) can:
    the note "You can't take your own offer." and no action. Offers cannot be cancelled: each one
    ends at the expiry you approved (one hour), or sooner when your account approves anything else.
 5. **Keep data in the browser.** Everything the market stores about a customer stays in the
-   browser. A Local data tab shows it and offers Export, Import and Clear all.
+   browser. A Local Data tab shows it and offers Export, Import and Clear all, and an optional proof server
+   (AA 00062: the customer's own prover, kept in this browser only).
 6. **Bridge tokens between Solana and Midnight** (AA 00060, when the site is configured for it). The
    Portfolio shows each token's total and is a list of five actions, each opening its own page:
    1. **Send tokens to a Midnight wallet** (a withdrawal);
@@ -112,7 +113,7 @@ stay in the flows they apply to.
   or sooner when your account approves anything else (a take, a withdrawal, a Bridge out, saving a
   change or restoring your key; the page asks first). A future Offer Files feature will provide
   cancellation for every client. (AA 00060 FR-028; this replaces 00047's "Cancel offer".)
-- All of a customer's data is in their browser; Export is the only backup. Export on Your data
+- All of a customer's data is in their browser; Export is the only backup. Export on Local Data
   after every change: clearing the browser without an export loses the key that finds the
   account's coins.
 - Ledger-backed Phantom accounts are refused (they sign a wrapped message).

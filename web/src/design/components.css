@@ -2838,7 +2838,7 @@ select.input option {
   gap: 10px;
 }
 
-/* ── Your data ─────────────────────────────────────────────────────── */
+/* ── Local Data ─────────────────────────────────────────────────────── */
 .ns-line {
   font-size: var(--text-sm);
   color: var(--muted);
@@ -2885,6 +2885,101 @@ select.input option {
   font-size: var(--text-md);
   max-width: 62ch;
   margin-top: 10px;
+}
+
+/* ── AA 00062: the proof server (Local Data's section, the popup) ───── */
+.prover-dialog .dialog-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.prover-dialog .dialog-title svg {
+  width: 26px;
+  height: 26px;
+  color: var(--violet-ink);
+  flex: none;
+}
+.prover-dialog .dialog-body > p + p {
+  margin-top: var(--space-2);
+}
+.prover-dialog .dialog-body > .notice,
+.prover-dialog .prover-form {
+  margin-top: var(--space-4);
+}
+.prover-form {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.prover-form .field-label {
+  display: block;
+  margin-bottom: 6px;
+}
+.prover-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+.prover-pass,
+.prover-fail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.prover-pass {
+  color: var(--buy);
+}
+.prover-fail {
+  color: var(--sell);
+}
+.prover-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-md);
+  color: var(--slate);
+}
+.prover-checks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.prover-checks li > svg {
+  flex: none;
+  margin-top: 3px;
+}
+.prover-checks li[data-ok='true'] > svg {
+  color: var(--buy);
+}
+.prover-checks li[data-ok='false'] {
+  color: var(--ink);
+}
+.prover-checks li[data-ok='false'] > svg {
+  color: var(--sell);
+}
+.prover-saved {
+  margin: var(--space-3) 0 var(--space-4);
+  overflow-wrap: anywhere;
+}
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: var(--space-3);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+.check-row input {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 2px 0 0;
+  accent-color: var(--violet);
 }
 
 /* ── footer ────────────────────────────────────────────────────────── */

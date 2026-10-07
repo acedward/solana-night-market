@@ -18,6 +18,8 @@ export default defineConfig([
     'packages/core/src/passport/vendor/offer-codec.ts',
     // AA 00060 P6.2: the vendored bridge contract (compiled output, byte for byte).
     'web/src/bridge/vendor/**',
+    // AA 00062 P3.5: the client-proof verifier's generated module (relay/verifier/build.sh, pinned by SHA-256).
+    'relay/src/client-proving/verifier-wasm/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

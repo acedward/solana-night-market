@@ -21,6 +21,13 @@
 // mismatch that proof falls back to the ledger building the body, as before), and the request
 // carries a Content-Length, so the proof server sees the same request as before.
 //
+// AA 00062 (I-62a v2, `CLIENT_PROVING=required`, "prove first"): with `clientCircuits`, a key location of
+// one of the four k≥18 account circuits is NEVER sent to the proof server: `prove` refuses it (fails
+// closed). Those calls are captured at prepare and their user's proof injected at finalize by
+// ../client-proving/prove-first.ts, which drives this provider's `check` and its builtin proofs only.
+// `check` (the ZKIR only) and every other proof (the Zswap proofs, the other circuits) go to the proof
+// server as before.
+//
 // Everything else is midnight-js's: a key location's embedded verifier-key hash picks the bundle
 // (ZKConfigRegistry's rule); the verifier key and ZKIR come from its NodeZkConfigProvider,
 // integrity-checked; the prover key is checked against the same compiler manifest, fail-closed
@@ -100,6 +107,11 @@ export interface ProvingLedger {
   parseCheckResult(result: Uint8Array): (bigint | undefined)[];
 }
 
+/** AA 00062 (I-62a v2): a k≥18 circuit reached the relay's own prover in `CLIENT_PROVING=required` mode. */
+export class ClientCircuitRefusedError extends Error {
+  override name = 'ClientCircuitRefusedError';
+}
+
 export interface RelayProofProviderOptions {
   /** Per-request timeout, ms (default 300 s, midnight-js's). */
   timeout?: number;
@@ -109,6 +121,9 @@ export interface RelayProofProviderOptions {
   /** How much of a prover key is read at once (default KEY_CHUNK_BYTES). */
   keyChunkBytes?: number;
   ledger?: ProvingLedger;
+  /** AA 00062 (`CLIENT_PROVING=required`): the circuits the user's prover proves; `prove` refuses them.
+   *  Absent: the relay proves everything. */
+  clientCircuits?: ReadonlySet<string>;
 }
 
 /** A /prove body: in memory (a builtin, or the ledger-built fallback) or streamed from the key file. */
@@ -435,6 +450,13 @@ export async function relayProofProvider(
     },
 
     async prove(serializedPreimage, keyLocation, overwriteBindingInput) {
+      // AA 00062: a k≥18 circuit in `required` mode is proven by the client, never by the proof server.
+      const circuit = options.clientCircuits ? parseContractKeyLocation(keyLocation)?.circuitId : undefined;
+      if (circuit !== undefined && options.clientCircuits!.has(circuit)) {
+        throw new ClientCircuitRefusedError(
+          `${circuit} is proven by the user's prover in CLIENT_PROVING=required mode; the relay never proves it`,
+        );
+      }
       return post(proveUrl, await proveRequest(serializedPreimage, keyLocation, overwriteBindingInput), timeoutMs);
     },
 

@@ -164,3 +164,16 @@ regexes = [
   '''^2L8uz9gR948WPW6zHG46x63bpuUchLuv7HjETZA59Mqp$''',
   '''^21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e$''',
 ]
+
+# AA 00062 P4: the key-set fingerprint the page pins (`PINNED_KEY_SET`, the SHA-256 over the account's
+# PUBLIC verifier keys, the same value as RELAY_KEYS_FINGERPRINT above), and the client-proving mock
+# relay's copy (`KEY_SET`). Allowlisted by its EXACT value, in those files (and the built bundle) only.
+[[rules.allowlists]]
+condition = "AND"
+paths = [
+  '''(^|/)web/src/prover/constants\.ts$''',
+  '''(^|/)test/e2e/mock-relay\.ts$''',
+  '''(^|/)web/dist/assets/[^/]+\.js(\.map)?$''',
+]
+regexTarget = "secret"
+regexes = ['''^21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e$''']

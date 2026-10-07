@@ -215,6 +215,24 @@ Exit 78 also covers the demo-token claims store:
   - `EROFS`: `ProtectSystem=strict` without `/var/lib/nightmarket` in `ReadWritePaths`.
   - `ENOSPC`: the disk is full.
 
+**Client proving** (AA 00062, `deploy/RUNBOOK.md` section 18) is two lines in `native.env` (or
+`relay.env`):
+
+```ini
+CLIENT_PROVING=required
+CLIENT_PROOF_TIMEOUT_SECONDS=600
+```
+
+Nothing else changes on the host. The relay's proof verifier is a file in the checkout
+(`relay/src/client-proving/verifier-wasm/client_proof_verifier_bg.wasm`, sha256 pinned in the code), and it
+reads the four circuits' `.verifier` and `.bzkir` from the key set the key unit already writes, so
+`ProtectSystem=strict` and `ReadWritePaths` stay as they are. **Both proof server units are unchanged**:
+the contract prover still proves key restores (k=17), the small circuits and each action's Zswap proofs,
+so keep its `MemoryMax=14G` and the restart timer; the DUST prover still proves every fee. A call waiting
+for a customer's proof keeps its account's lane `running` in `/health`, so the restart timer waits for it
+(at most `CLIENT_PROOF_TIMEOUT_SECONDS`). The customers run the package themselves:
+`docker run --rm -p 127.0.0.1:6300:6300 --memory 12g ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9`.
+
 ## 6. The web
 
 The web build compiles the account's JavaScript with BOTH compilers (the script fetches and checks
@@ -225,11 +243,12 @@ the **Content-Security-Policy**, which the Docker web image writes from `WEB_CON
 and a native nginx must carry itself (`deploy/RUNBOOK.md` section 16). Its `connect-src` names the
 public indexer with BOTH its `https://` and its `wss://` origin (since AA 00047 P11 the page reads an
 account's history past 500 actions over the indexer's WebSocket), and `script-src` allows
-`'wasm-unsafe-eval'` (the contract runtime and ledger-v9 run as WebAssembly in the page). The tested
-value for stagenet with the same-origin `/relay`:
+`'wasm-unsafe-eval'` (the contract runtime and ledger-v9 run as WebAssembly in the page). Since AA 00062
+it also allows the customer's own proof server (`http://localhost:* http://127.0.0.1:* https:`). The
+tested value for stagenet with the same-origin `/relay`:
 
 ```nginx
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
 ```
 
 A relay on another origin and an indexer moved by `config.json` must be added to `connect-src` (the

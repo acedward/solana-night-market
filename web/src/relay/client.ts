@@ -26,6 +26,15 @@ import {
   type ZswapActivity,
 } from '@nightmarket/core';
 
+import {
+  ClientProofRequestSchema,
+  HandOffJobViewSchema,
+  clientProofPath,
+  clientProvingOf,
+  type ClientProofRequest,
+  type ClientProvingConfig,
+  type HandOffJobView,
+} from '../prover/i62a.js';
 import { relayErrorText } from './messages.js';
 
 /** A refusal or failure of the relay. `message` is the customer's sentence (./messages.ts);
@@ -87,33 +96,93 @@ export class RelayClient {
     return JobViewSchema.parse(body.job);
   }
 
-  /** The job, or null when the relay no longer knows it (expired, or restarted). */
-  async job(requestId: string): Promise<JobView | null> {
+  /** The job, or null when the relay no longer knows it (expired, or restarted). AA 00062: with the
+   *  I-62a `clientProof` field while the relay waits for the customer's prover. */
+  async job(requestId: string): Promise<HandOffJobView | null> {
     try {
       const body = (await this.call(API_PATHS.job(requestId))) as { job?: unknown };
-      return JobViewSchema.parse(body.job);
+      return HandOffJobViewSchema.parse(body.job);
     } catch (e) {
       if (e instanceof RelayError && e.status === 404) return null;
       throw e;
     }
   }
 
-  /** Poll a job until it finishes; `onUpdate` sees every state. */
+  /**
+   * Poll a job until it finishes; `onUpdate` sees every state. AA 00062 (I-62a): while the job holds
+   * an open hand-off the page has not answered yet (`clientProof`, a new `proofId`), `clientProof`
+   * runs it (the customer's prover, then the proof back to the market) before polling goes on. Each
+   * new `proofId` is answered once (I-62a v2: a job has one). Without `clientProof` the job is only
+   * followed (the market then stops it at the ticket's deadline).
+   */
   async waitForJob(
     requestId: string,
     onUpdate: (job: JobView) => void,
-    opts: { intervalMs?: number; signal?: AbortSignal } = {},
+    opts: {
+      intervalMs?: number;
+      signal?: AbortSignal;
+      clientProof?: (job: HandOffJobView) => Promise<unknown>;
+    } = {},
   ): Promise<JobView> {
     const interval = opts.intervalMs ?? 2_000;
+    const answered = new Set<string>();
     for (;;) {
       if (opts.signal?.aborted) throw new RelayError(0, 'aborted', 'stopped waiting');
       const job = await this.job(requestId);
-      if (!job)
-        throw new RelayError(404, 'job-lost', 'The market no longer knows this request (it expired or restarted).');
+      if (!job) {
+        // AA 00062 (I-62a v2): a job that waited for the customer's proof had sent nothing yet; the market
+        // keeps those in memory only, so a restart drops them.
+        throw new RelayError(
+          404,
+          'job-lost',
+          answered.size > 0
+            ? "The market restarted (or the request expired) while it waited for your proof server's proof. Nothing was sent and no fee was spent: send it again."
+            : 'The market no longer knows this request (it expired or restarted).',
+        );
+      }
       onUpdate(job);
       if (job.state === 'succeeded' || job.state === 'failed') return job;
+      const handOff = job.clientProof;
+      if (opts.clientProof && handOff && !answered.has(handOff.proofId)) {
+        answered.add(handOff.proofId);
+        await opts.clientProof(job);
+        continue; // read the job again at once: the market has moved on
+      }
       await new Promise((r) => setTimeout(r, interval));
     }
+  }
+
+  // ── AA 00062: the client-proof hand-off (I-62a) ───────────────────────────
+
+  /** What the relay says about client proving (`GET /v1/config` `clientProving`; absent: off).
+   *  Throws when the relay cannot be read. */
+  async clientProving(): Promise<ClientProvingConfig> {
+    return clientProvingOf(await this.call(API_PATHS.config));
+  }
+
+  /** The open hand-off's proof request (`GET /v1/jobs/:id/client-proof`), or null when the job has
+   *  none open any more (409 `not-awaiting-client-proof`) or the relay proves everything itself
+   *  (404 `client-proving-off`). The request carries the call's private inputs: it is never logged
+   *  or stored, and dropped once the proof is sent. */
+  async clientProofRequest(requestId: string): Promise<ClientProofRequest | null> {
+    try {
+      return ClientProofRequestSchema.parse(await this.call(clientProofPath(requestId)));
+    } catch (e) {
+      if (e instanceof RelayError && (e.code === 'not-awaiting-client-proof' || e.code === 'client-proving-off'))
+        return null;
+      throw e;
+    }
+  }
+
+  /** Send the customer's proof back (`POST /v1/jobs/:id/client-proof`): the job, at stage
+   *  `client-proof-checked`. Refusals throw a `RelayError` with the relay's code. */
+  async postClientProof(requestId: string, body: { proofId: string; proof: string }): Promise<HandOffJobView> {
+    const answer = (await this.call(clientProofPath(requestId), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ proofId: body.proofId, proof: body.proof }),
+    })) as { job?: unknown };
+    return HandOffJobViewSchema.parse(answer.job);
   }
 
   /** The market's health (FR-013): what is paused and why (plan P4-A error states). A down relay

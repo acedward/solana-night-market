@@ -258,7 +258,9 @@ test('the signing panel lists what the contract enforces: base units and full to
 });
 
 // deploy/RUNBOOK.md §16: the tested Content-Security-Policy, with this test's origins in place of the
-// stagenet ones (the relay is cross-origin here; in a deployment it is the same-origin /relay).
+// stagenet ones (the relay is cross-origin here; in a deployment it is the same-origin /relay), and the
+// customer's own proof server that AA 00062 adds (spec FR-013; its tests are in ./prover.spec.ts).
+const PROVER_SOURCES = ['http://localhost:*', 'http://127.0.0.1:*', 'https:'];
 const CSP = (connect: string[]) =>
   [
     "default-src 'self'",
@@ -266,7 +268,7 @@ const CSP = (connect: string[]) =>
     "style-src 'self'",
     "img-src 'self' data:",
     "font-src 'self'",
-    `connect-src 'self' ${connect.join(' ')}`,
+    `connect-src 'self' ${[...connect, ...PROVER_SOURCES].join(' ')}`,
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",

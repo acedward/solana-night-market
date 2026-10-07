@@ -25,6 +25,8 @@ import {
   type ActivityStore,
 } from '../activity/activity.js';
 import { Button, Dialog, Icon, ProgressBar, Spinner, Stepper } from '../design/index.js';
+import { PROVER_MEMORY_GB } from '../prover/constants.js';
+import { progressWords } from '../prover/client-prover.js';
 import type { SignFacts } from './sign-facts.js';
 import type { SignPromptKind, SignPromptStore, TransactionFacts } from './sign-prompt.js';
 import { useWallet } from './WalletContext.js';
@@ -242,7 +244,10 @@ export function SigningPrompt({
       ? Math.min(0.95, elapsed / OFFER_PREPARE_SECONDS)
       : undefined
     : Math.min(0.95, elapsed / (EXPECTED_SECONDS[job?.action ?? act.kind] ?? 60));
-  const stage = job ? stageWords(job.stage, job.action) : 'Sending to the market';
+  // AA 00062 P4.3: while the customer's own prover works, the line says so, with ITS elapsed time.
+  const cp = act.clientProof;
+  const stage = cp ? progressWords(cp) : job ? stageWords(job.stage, job.action) : 'Sending to the market';
+  const shownElapsed = cp ? Math.max(0, (now - cp.startedAt) / 1000) : elapsed;
   const queued = job?.state === 'queued' && job.position !== undefined ? ` · position ${job.position} in line` : '';
   return (
     <Dialog
@@ -265,12 +270,16 @@ export function SigningPrompt({
       <Stepper steps={steps} current={step} label={act.title} />
       <div className="progress-block" data-end={flow!.end}>
         <p className="progress-line">
-          <strong data-testid="activity-stage" data-stage={job?.stage ?? 'sending'} aria-live="polite">
+          <strong
+            data-testid="activity-stage"
+            data-stage={cp ? `client-proof-${cp.state}` : (job?.stage ?? 'sending')}
+            aria-live="polite"
+          >
             {stage}
             {queued}
           </strong>
           <span className="progress-time" data-testid="activity-elapsed">
-            {clock(elapsed)}
+            {clock(shownElapsed)}
           </span>
         </p>
         <ProgressBar
@@ -278,9 +287,18 @@ export function SigningPrompt({
           label={listing && step > 1 ? 'Listing your offer' : act.title}
           data-testid="activity-bar"
         />
-        <p className="progress-note" data-testid="activity-note">
-          {flow!.note}
-        </p>
+        {cp ? (
+          // AA 00062: the proof is the customer's prover's, not the market's (the flow's note says the latter).
+          <p className="progress-note" data-testid="activity-client-proof" data-state={cp.state}>
+            Signed. Your proof server at <span className="mono break">{cp.url}</span> is creating this action&apos;s
+            zero-knowledge proof; it needs about {PROVER_MEMORY_GB} GB of memory. Keep this page open until it is done:
+            the market then finishes the action and pays its fees.
+          </p>
+        ) : (
+          <p className="progress-note" data-testid="activity-note">
+            {flow!.note}
+          </p>
+        )}
       </div>
     </Dialog>
   );

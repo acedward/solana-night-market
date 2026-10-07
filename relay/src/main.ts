@@ -3,7 +3,9 @@
 // plan P4-A), open the sponsor wallet (under the funding lock when one is configured), wire the
 // Ed25519 arm and the Solana envelope scheme when the key volume is loaded (lane B3:
 // ./passport/arm.ts `wiredArm`), the demo-token endpoint when it is enabled, the test SPL faucet when its keys
-// are configured (AA 00060 P13), and serve.
+// are configured (AA 00060 P13), client proving when it is `required` (AA 00062, I-62a v2 "prove first":
+// the k≥18 account proofs are made by the user's own prover while the job holds nothing, and the relay
+// refuses to start without a real proof verifier), and serve.
 
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,6 +25,7 @@ import {
   withRegistrationCaps,
   withBridgeOut,
   withSplFaucet,
+  withClientProving,
   withTrade,
 } from './actions/catalogue.js';
 import { AppendEntitlements, entitlementKey } from './actions/entitlements.js';
@@ -40,6 +43,16 @@ import {
   type ContractBalances,
 } from './chain/reader.js';
 import { ConfigError, loadConfig } from './config.js';
+import { ClientProofDesk } from './client-proving/desk.js';
+import { ClientProving, ProveFirst } from './client-proving/prove-first.js';
+import type { RelayProofProvider } from './prover/proving-provider.js';
+import {
+  builtInClientProofVerifier,
+  ClientProofVerifierLoadError,
+  clientProvingStartProblem,
+  NO_CLIENT_PROOF_VERIFIER,
+  type ClientProofVerifier,
+} from './client-proving/verifier.js';
 import { demoTokens, demoTokensInfo } from './demo/action.js';
 import { ClaimsStoreError, DemoTokenClaims } from './demo/claims.js';
 import { DemoFaucets } from './demo/faucet.js';
@@ -86,6 +99,23 @@ async function main(): Promise<void> {
   redactor.addSecret(config.splFaucet?.rpcUrl);
   const log = createLogger({ level: config.logLevel, redactor }, { service: 'relay', network: config.network.name });
 
+  // AA 00062 (I-62a): CLIENT_PROVING=required needs the REAL client-proof verifier (questions Q3 → A, plan
+  // P3.5): the pinned verifier-only WASM, its SHA-256 checked before it is compiled. If it does not load,
+  // refuse to start rather than accept unchecked proofs; there is never a permissive fallback.
+  let clientVerifier: ClientProofVerifier | null = null;
+  if (config.clientProving.mode === 'required') {
+    try {
+      clientVerifier = await builtInClientProofVerifier({
+        managedPath: config.managedPath,
+        log: log.child({ component: 'client-proof-verifier' }),
+      });
+    } catch (e) {
+      const why = e instanceof ClientProofVerifierLoadError ? e.message : String(e);
+      log.error(`${NO_CLIENT_PROOF_VERIFIER}: ${why}; refusing to start`);
+      process.exit(78);
+    }
+  }
+
   // The key volume (plan P4-A): every circuit the relay proves must have its prover key, verifier
   // key and ZKIR, and a pinned fingerprint must match. When a volume is configured and any of that
   // fails, the relay does not start: a missing key would otherwise surface only in a customer's job.
@@ -130,6 +160,17 @@ async function main(): Promise<void> {
     log.warn('no key volume (MIDNIGHT_MANAGED_PATH): account and trade actions are unavailable');
   }
 
+  // AA 00062: a client proof is checked against the key volume's pinned verifier keys, and the page is
+  // told the key set its prover must hold.
+  const clientProblem = clientProvingStartProblem(config.clientProving.mode, clientVerifier, {
+    loaded: !!config.managedPath && keyCheck.present,
+    fingerprint: keyCheck.fingerprint,
+  });
+  if (clientProblem) {
+    log.error(`${clientProblem}; refusing to start`);
+    process.exit(78);
+  }
+
   let sponsor: SponsorSession = new DisabledSponsorSession();
   if (config.sponsor.enabled && secrets.sponsorSeedHex) {
     sponsor = new FacadeSponsorSession(
@@ -157,6 +198,37 @@ async function main(): Promise<void> {
     }
   }
 
+  // AA 00047 P11.F (audit round 4 R4-1): the prover lane serves takes, then makes, then the rest, the
+  // least recent users first, and estimates when a take would start (./queue/prover-lock.ts).
+  const queue = new JobQueue({
+    ttlSeconds: config.limits.jobTtlSeconds,
+    maxJobs: config.limits.maxJobs,
+    log: log.child({ component: 'queue' }),
+    prover: config.proverLane,
+  });
+  // AA 00062 (I-62a v2): the client-proof tickets, in `required` mode only (the verifier and the key volume
+  // were checked above). A k≥18 action's job parks on its ticket while the user proves
+  // (./client-proving/desk.ts).
+  const clientProofs =
+    config.clientProving.mode === 'required' && clientVerifier && keyCheck.fingerprint
+      ? new ClientProofDesk({
+          jobs: queue,
+          verifier: clientVerifier,
+          timeoutSeconds: config.clientProving.timeoutSeconds,
+          keySet: keyCheck.fingerprint,
+          proofServer: config.contractProofServerVersion,
+          log: log.child({ component: 'client-proofs' }),
+        })
+      : null;
+  if (clientProofs) {
+    queue.useClientProofs(clientProofs);
+    log.info('client proving required', {
+      circuits: [...clientProofs.circuits].join(','),
+      timeoutSeconds: config.clientProving.timeoutSeconds,
+      verifier: clientVerifier!.name,
+    });
+  }
+
   // The Passport runtime: the pinned client bound to the key volume's compiled contracts. Without
   // a key volume the relay still serves /health and /v1/config, and the account actions say they
   // are not available.
@@ -170,6 +242,8 @@ async function main(): Promise<void> {
         indexerWsUrl: config.network.midnight.indexerWsUrl,
         contractProofServerUrl: config.contractProofServerUrl,
         log: log.child({ component: 'passport' }),
+        // In `required` the relay's own prover refuses the k≥18 circuits (fail closed).
+        ...(clientProofs ? { clientCircuits: clientProofs.circuits } : {}),
       });
     } catch (e) {
       if (e instanceof PassportRuntimeError) {
@@ -180,6 +254,25 @@ async function main(): Promise<void> {
       log.error('the Passport runtime could not be loaded; account actions are unavailable', { error: e });
     }
   }
+  // AA 00062 (I-62a v2, "prove first"): the executors' side of the tickets: capture at prepare, the user's
+  // proof injected at finalize, the sponsor's PUBLIC keys cached so a prepared call holds no wallet.
+  const clientProving =
+    clientProofs && runtime
+      ? new ClientProving({
+          desk: clientProofs,
+          proveFirst: new ProveFirst({
+            proofProvider: runtime.proofProvider as RelayProofProvider,
+            circuits: clientProofs.circuits,
+            log: log.child({ component: 'prove-first' }),
+          }),
+          sponsor,
+          readState: async (account) => {
+            const l = await runtime!.ledgerState(account);
+            return l ? { round: l.round, auth_nonce: l.auth_nonce } : null;
+          },
+          log: log.child({ component: 'client-proofs' }),
+        })
+      : undefined;
   // AA 00060 P4.2 (spec FR-014): with a journey registry, each bridge's deployed `lockForSolana` verifier
   // key must be the key volume's, or Bridge out would be proven with keys the contract refuses.
   if (config.bridges) {
@@ -367,14 +460,6 @@ async function main(): Promise<void> {
     isListedColour: (colour) => config.tokens.byColour(colour) !== undefined,
   });
   const accountGate = new AccountGate(config.limits.jobsPerAccount);
-  // AA 00047 P11.F (audit round 4 R4-1): the prover lane serves takes, then makes, then the rest, the
-  // least recent users first, and estimates when a take would start (./queue/prover-lock.ts).
-  const queue = new JobQueue({
-    ttlSeconds: config.limits.jobTtlSeconds,
-    maxJobs: config.limits.maxJobs,
-    log: log.child({ component: 'queue' }),
-    prover: config.proverLane,
-  });
   let batcherRefusal: { httpStatus: number; at: number } | null = null;
   const health = healthCollector({
     network: config.network.name,
@@ -394,6 +479,7 @@ async function main(): Promise<void> {
     }),
     cacheSeconds: config.healthCacheSeconds,
     batcherRefusal: () => batcherRefusal,
+    ...(clientProofs ? { clientProving: { mode: 'required' as const } } : {}),
   });
   let catalogue = wired
     ? withTrade(
@@ -407,6 +493,7 @@ async function main(): Promise<void> {
           replay,
           entitlements,
           ...(landing ? { landing } : {}),
+          ...(clientProving ? { clientProving } : {}),
           log: log.child({ component: 'accounts' }),
           // AA 00047 P11 (R3-7): a coin is checked unspent before a proof is spent on it.
           ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
@@ -424,6 +511,7 @@ async function main(): Promise<void> {
           cooldown: new BatcherCooldown(config.batcherBusyCooldownSeconds),
           log: log.child({ component: 'trade' }),
           ...(chain instanceof IndexerChainReader ? { coins: chain } : {}),
+          ...(clientProving ? { clientProving } : {}),
           onBatcherRefusal: (httpStatus) => {
             batcherRefusal = { httpStatus, at: Math.floor(Date.now() / 1000) };
           },
@@ -461,6 +549,8 @@ async function main(): Promise<void> {
   }
   catalogue = withRegistrationCaps(catalogue, registrationCaps);
   catalogue = withAccountCaps(catalogue, accountCaps);
+  // AA 00062 (I-62a v2): every k≥18 action on its account's lane (a parked job holds only that slot).
+  if (clientProving) catalogue = withClientProving(catalogue);
   // AA 00060 P6.3: Bridge out's second transaction and the entitlement re-issue.
   if (landing && wired && runtime && config.managedPath) {
     const rt = runtime;
@@ -550,6 +640,7 @@ async function main(): Promise<void> {
     chain,
     ...(wired ? { scheme: wired.scheme, passportCall: passportCallAuthoriser(() => runtime, wired.arm, replay) } : {}),
     ...(faucetForApp ? { splFaucet: (w?: string) => faucetForApp.info(w) } : {}),
+    ...(clientProofs ? { clientProofs } : {}),
     demoTokens: demoTokensInfo({
       claims: claims ?? new DemoTokenClaims({ file: null, dailyCap: config.demoTokens.dailyCap }),
       pack: demoPack,

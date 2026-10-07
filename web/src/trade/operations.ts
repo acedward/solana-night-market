@@ -62,13 +62,12 @@ import { freshWantNonce, offerInboxEntriesPortable, predictChangeCoin } from '@n
 import {
   JobFailedError,
   OperationError,
-  dropJob,
   gatedContext,
-  putJob,
+  submitAndWait,
   syncAccount,
-  updateJob,
   type OperationEnv,
 } from '../passport/operations.js';
+import { ACTION_CIRCUIT } from '../prover/constants.js';
 import { readCoins } from '../passport/records.js';
 import { jobErrorText } from '../relay/messages.js';
 import { liveOffer, putTrade, readTrades, tradeSummary, type TradeRecord } from './records.js';
@@ -123,11 +122,8 @@ async function runJob(
   passportAuth: PassportAuth,
   context: Record<string, unknown>,
 ): Promise<JobView> {
-  const job = await env.relay.submit(action, { account, payload, passportAuth });
-  putJob(env, account, job, action, context);
-  env.onJob?.(job);
-  const done = await env.relay.waitForJob(job.requestId, (j) => updateJob(env, account, j));
-  dropJob(env, account, job.requestId);
+  // AA 00062 (I-62a v2): a stale call is sent again once on its own (`submitAndWait`).
+  const done = await submitAndWait(env, account, action, { payload, passportAuth }, context);
   if (done.state !== 'succeeded' || !done.result)
     throw new JobFailedError(
       done.error?.code ?? 'failed',
@@ -152,8 +148,11 @@ export async function makeOffer(
   const live = liveOffer(readTrades(env.store, env.scope, account), now);
   const guard = guardSignedAction('open-swap', live, now);
   if (guard.kind === 'refuse') throw new OperationError(guard.message);
+  // AA 00062 (FR-009): a prover that passes, before anything is signed and before the signed expiry
+  // starts to run.
+  await env.prover?.ensure(ACTION_CIRCUIT['open-swap']);
   const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
-  const validUntil = signedValidUntil('make', now);
+  const validUntil = signedValidUntil('make', Date.now());
   const { payload, passportAuth, coin } = await buildCall(env, account, 'open-swap', legs, giveToken, validUntil);
   const summary = tradeSummary(legs.side, legs.baseRaw, pair.base, legs.effectivePrice, pair.quote);
   const done = await runJob(env, account, 'open-swap', payload as never, passportAuth, { summary });
@@ -196,6 +195,8 @@ export async function takeOffer(
   entry: Pick<BookEntry, 'offerId' | 'side' | 'baseRaw' | 'quoteRaw'>,
   pair: MarketPair,
 ): Promise<TradeRecord> {
+  // AA 00062 (FR-009): before anything is signed, and before the take's 600 s start to run.
+  await env.prover?.ensure(ACTION_CIRCUIT.take);
   const legs = takeLegs(entry, pair.base, pair.quote);
   const giveToken = legs.side === 'sell' ? pair.base : pair.quote;
   const validUntil = signedValidUntil('take', Date.now());

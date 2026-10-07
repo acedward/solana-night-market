@@ -12,7 +12,8 @@
 //
 // Lanes: every action proves on the one prover lane. `open-swap` runs on its ACCOUNT's lane and takes
 // the prover only while it proves (AA 00047 P10, R2-1): the exchange's listing wait (up to 90 s) no
-// longer holds the prover.
+// longer holds the prover. AA 00062 (`CLIENT_PROVING=required`, I-62a v2): `withClientProving` moves every
+// k≥18 action there too, so a job waiting for its user's proof holds only its account's slot.
 
 import { z } from 'zod';
 
@@ -227,6 +228,25 @@ export function accountCatalogue(deps: AccountActionDeps): Map<RelayActionName, 
     admit: async ({ account, payload }) => deps.entitlements.admit(payload.entitlement, account),
     executor: appendInboxExecutor(deps),
   });
+  return map;
+}
+
+/** AA 00062 (I-62a v2): the actions whose k≥18 call the user's prover proves in `required` mode. */
+export const CLIENT_PROVEN_ACTIONS: readonly RelayActionName[] = [
+  'open-swap',
+  'take',
+  'withdraw',
+  'withdraw-unshielded',
+  'append-inbox',
+];
+
+/**
+ * The catalogue in `CLIENT_PROVING=required` mode (AA 00062, I-62a v2 "prove first"): every action with a
+ * k≥18 call runs on its ACCOUNT's lane, so while the user's prover proves it the job holds only its
+ * account's one-job slot (no prover lane, no sponsor wallet); it takes the prover lane only to finalize.
+ */
+export function withClientProving(map: Map<RelayActionName, ActionDefinition>): Map<RelayActionName, ActionDefinition> {
+  for (const action of CLIENT_PROVEN_ACTIONS) map.set(action, { ...map.get(action)!, lane: 'account' });
   return map;
 }
 

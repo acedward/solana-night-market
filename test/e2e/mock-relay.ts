@@ -34,6 +34,12 @@
 // Midnight indexer does and the page decodes it for real. Round 3's attacks: a real coin deposited
 // with an approval's wanted nonce, its note filed (`plantWantedCoin`, R3-6), and a relay report that
 // leaves a spend or a leaf out (`omitFromReport`, R3-4; the page no longer reads that report).
+//
+// AA 00062 (plan I-62a v2): `clientProving = 'required'` makes the k>=18 actions (a make, a take, the two
+// withdrawals, a change filing) wait for the CUSTOMER's proof: the job shows the hand-off (stage
+// `awaiting-client-proof`, the `clientProof` field), serves the key-less proof request on
+// `GET /v1/jobs/:id/client-proof` and accepts one proof on `POST` (or refuses it, `clientProofVerdict`).
+// Every hand-off is kept in `handOffs`, so a test can check what the customer's prover was given.
 
 import { randomBytes } from 'node:crypto';
 
@@ -110,6 +116,47 @@ interface Submitted {
   stages: string[];
   /** Held at "proving" (or the stages given to `at`) until released (`holdNextJob`). */
   held?: Held;
+  /** AA 00062: the job's client-proof hand-off (I-62a), once opened. */
+  handOff?: HandOff;
+}
+
+/** AA 00062: one hand-off of a job to the customer's prover (I-62a). */
+export interface HandOff {
+  job: string;
+  proofId: string;
+  circuit: string;
+  /** The key-less proof request, standard base64, and where its key material goes. */
+  proofRequest: string;
+  keyMaterialOffset: number;
+  /** Unix seconds. */
+  deadline: number;
+  fetched: boolean;
+  /** The proof the page posted (base64), once accepted or refused. */
+  proof: string | null;
+  verdict: 'checked' | 'invalid' | 'stale' | null;
+}
+
+/** AA 00062: the k>=18 actions and the circuit each hands to the customer's prover. */
+export const CLIENT_CIRCUIT_OF: Record<string, string> = {
+  'open-swap': 'open_swap_shielded_with_ed25519',
+  take: 'open_swap_shielded_with_ed25519',
+  withdraw: 'withdraw_shielded_with_ed25519',
+  'withdraw-unshielded': 'withdraw_unshielded_with_ed25519',
+  'append-inbox': 'append_inbox_with_ed25519',
+};
+export const KEY_SET = '21493588f30536e0f409dcf79deea54878f0c2cf6fee601a2359e54a776d5c5e';
+export const PROOF_SERVER = '9.0.0-rc.8';
+const PREIMAGE_TAG = 'midnight:(proof-preimage-versioned,option(proving-data),option(fr-bls)):';
+
+/** A key-less proof request shaped like the ledger's (I-62a): tag, a fake preimage, None, the binding input. */
+export function fakeProofRequest(circuit: string): { proofRequest: string; keyMaterialOffset: number } {
+  const head = Buffer.concat([
+    Buffer.from(PREIMAGE_TAG, 'ascii'),
+    Buffer.from(`contract:${ACCOUNT}/${circuit}?vk=${'ab'.repeat(32)}`, 'ascii'),
+    randomBytes(64),
+  ]);
+  const body = Buffer.concat([head, Buffer.from([0x00, 0x01]), randomBytes(32)]);
+  return { proofRequest: body.toString('base64'), keyMaterialOffset: head.length };
 }
 
 interface Held {
@@ -195,6 +242,17 @@ export class MockRelay {
   /** Render with another token list than the browser (a symbol the relay does not share): every
    *  account call's rebuilt message then differs, and the check must refuse it (questions Q12). */
   mismatchedTokens = false;
+  /** AA 00062 (I-62a): `/v1/config` `clientProving` (null: an older relay, no field). */
+  clientProving: null | 'off' | 'required' = null;
+  /** I-62a `CLIENT_PROOF_TIMEOUT_SECONDS` (the hand-off's deadline from its opening). */
+  clientProofTimeoutSeconds = 300;
+  /** What the relay's check says of the next posted proof. */
+  clientProofVerdict: 'ok' | 'invalid' = 'ok';
+  /** AA 00062 (I-62a v2, "prove first"): answer this many of the next posted proofs 409
+   *  `client-proof-stale` (the account moved while the customer's prover proved); the job fails with it. */
+  clientProofStale = 0;
+  /** Every hand-off opened, in order. */
+  readonly handOffs: HandOff[] = [];
   private nonces = new Set<string>();
   private tx = 0;
   private nextHeld: Held | null = null;
@@ -655,6 +713,53 @@ export class MockRelay {
     }
   }
 
+  /** AA 00062: open a job's hand-off (I-62a). */
+  private openHandOff(job: string, action: string): HandOff {
+    const circuit = CLIENT_CIRCUIT_OF[action]!;
+    const h: HandOff = {
+      job,
+      proofId: randomBytes(16).toString('hex'),
+      circuit,
+      ...fakeProofRequest(circuit),
+      deadline: Math.floor(Date.now() / 1000) + this.clientProofTimeoutSeconds,
+      fetched: false,
+      proof: null,
+      verdict: null,
+    };
+    this.handOffs.push(h);
+    return h;
+  }
+
+  /** AA 00062: the job while its hand-off is open (`clientProof`), or just after the proof was checked. */
+  private handOffView(id: string, s: Submitted, stage: string) {
+    const h = s.handOff!;
+    const stages = ['queued', 'running', 'awaiting-client-proof'];
+    if (h.fetched) stages.push('client-proof-fetched');
+    if (stage === 'client-proof-checked') stages.push('client-proof-received', 'client-proof-checked');
+    return {
+      requestId: id,
+      action: s.action,
+      lane: 'prover',
+      createdAt: 1,
+      updatedAt: 1,
+      expiresAt: 9_999_999_999,
+      state: 'running',
+      stage,
+      stages: stages.map((x) => ({ stage: x, at: 1 })),
+      ...(stage === 'client-proof-checked'
+        ? {}
+        : {
+            clientProof: {
+              proofId: h.proofId,
+              circuit: h.circuit,
+              deadline: h.deadline,
+              attempt: 1,
+              fetched: h.fetched,
+            },
+          }),
+    };
+  }
+
   private view(id: string, s: Submitted) {
     const base = {
       requestId: id,
@@ -710,6 +815,19 @@ export class MockRelay {
         relayVersion: 'e2e',
         limits: { authMaxTtlSeconds: 600, jobTtlSeconds: 3600 },
         ...(this.tokensDigest ? { tokensDigest: this.tokensDigest } : {}),
+        ...(this.clientProving === 'required'
+          ? {
+              clientProving: {
+                mode: 'required',
+                circuits: [...new Set(Object.values(CLIENT_CIRCUIT_OF))].sort(),
+                keySet: KEY_SET,
+                proofServer: PROOF_SERVER,
+                timeoutSeconds: this.clientProofTimeoutSeconds,
+              },
+            }
+          : this.clientProving === 'off'
+            ? { clientProving: { mode: 'off' } }
+            : {}),
       });
     if (path === '/v1/auth/nonce') {
       const nonce = `0x${randomBytes(32).toString('hex')}`;
@@ -813,10 +931,90 @@ export class MockRelay {
       const id = String(this.submitted.length).padStart(32, '0');
       return json(202, { job: this.view(id, this.submitted.at(-1)!) });
     }
+    // AA 00062 (I-62a): the hand-off routes.
+    const handOffJob = /^\/v1\/jobs\/([0-9a-f]{32})\/client-proof$/.exec(path)?.[1];
+    if (handOffJob) {
+      if (this.clientProving !== 'required')
+        return json(404, { error: { code: 'client-proving-off', message: 'this relay proves everything itself' } });
+      const s = this.submitted[Number(handOffJob) - 1];
+      if (!s) return json(404, { error: { code: 'not-found', message: 'no such job' } });
+      const h = s.handOff;
+      if (!h || h.verdict !== null || s.done)
+        return json(409, { error: { code: 'not-awaiting-client-proof', message: 'no hand-off is open' } });
+      if (req.method() === 'GET') {
+        h.fetched = true;
+        return route.fulfill({
+          status: 200,
+          headers: { ...CORS, 'cache-control': 'no-store' },
+          contentType: 'application/json',
+          body: JSON.stringify({
+            proofId: h.proofId,
+            circuit: h.circuit,
+            proofRequest: h.proofRequest,
+            keyMaterialOffset: h.keyMaterialOffset,
+            deadline: h.deadline,
+            attempt: 1,
+            keySet: KEY_SET,
+            proofServer: PROOF_SERVER,
+          }),
+        });
+      }
+      const body = JSON.parse(req.postData() ?? '{}') as { proofId?: string; proof?: string };
+      if (body.proofId !== h.proofId)
+        return json(409, { error: { code: 'client-proof-wrong-id', message: 'not the open hand-off' } });
+      if (Math.floor(Date.now() / 1000) > h.deadline) {
+        s.failed = { code: 'client-proof-late', message: 'the client proof came after its deadline' };
+        s.done = true;
+        return json(410, { error: { code: 'client-proof-late', message: 'too late' } });
+      }
+      const bytes = Buffer.from(body.proof ?? '', 'base64');
+      if (!bytes.toString('latin1').startsWith('midnight:proof-versioned:'))
+        return json(400, { error: { code: 'bad-request', message: 'not a proof' } });
+      h.proof = body.proof!;
+      if (this.clientProofStale > 0) {
+        this.clientProofStale -= 1;
+        h.verdict = 'stale';
+        const stale = {
+          code: 'client-proof-stale',
+          message:
+            'your account changed while your proof server was proving (for example a deposit or a trade landed), so this proof no longer fits it. Nothing was sent and no fee was spent; send the same request again and your proof server proves it once more',
+        };
+        s.failed = stale;
+        s.done = true;
+        return json(409, { error: stale });
+      }
+      if (this.clientProofVerdict === 'invalid') {
+        h.verdict = 'invalid';
+        s.failed = { code: 'client-proof-invalid', message: 'the client proof did not verify' };
+        s.done = true;
+        return json(422, { error: { code: 'client-proof-invalid', message: 'the client proof did not verify' } });
+      }
+      h.verdict = 'checked';
+      return json(200, { job: this.handOffView(handOffJob, s, 'client-proof-checked') });
+    }
     const job = /^\/v1\/jobs\/([0-9a-f]{32})$/.exec(path)?.[1];
     if (job) {
       const s = this.submitted[Number(job) - 1];
       if (!s) return json(404, { error: { code: 'not-found', message: 'no such job' } });
+      // AA 00062: a k>=18 job waits for the customer's proof (I-62a) before it runs.
+      if (
+        this.clientProving === 'required' &&
+        CLIENT_CIRCUIT_OF[s.action] &&
+        !s.done &&
+        s.handOff?.verdict !== 'checked'
+      ) {
+        s.handOff ??= this.openHandOff(job, s.action);
+        if (Math.floor(Date.now() / 1000) > s.handOff.deadline) {
+          s.failed = s.handOff.fetched
+            ? { code: 'client-proof-late', message: 'the client proof did not come before its deadline' }
+            : { code: 'client-proof-missing', message: 'the page never fetched the proof request' };
+          s.done = true;
+          return json(200, { job: this.view(job, s) });
+        }
+        return json(200, {
+          job: this.handOffView(job, s, s.handOff.fetched ? 'client-proof-fetched' : 'awaiting-client-proof'),
+        });
+      }
       if (!s.done && !(s.held && !s.held.released)) {
         await this.complete(s);
         s.done = true;

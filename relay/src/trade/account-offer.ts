@@ -23,6 +23,7 @@
 import { encodeOffer, offerIdOf } from '@nightmarket/core';
 
 import type { PassportProviders, PassportRuntime } from '../passport/runtime.js';
+import { PublicError } from '../queue/jobs.js';
 import { steeringParameters, withPartitionParameters } from './partition.js';
 import { describeTx, imbalancesBySegment, type TxStructure } from './tx-structure.js';
 
@@ -180,6 +181,9 @@ export async function proveGuaranteedOffer(o: {
       authArgs: o.offer.authArgs,
     });
   } catch (e) {
+    // AA 00062: a prove-first call's own outcome (a missing, late, invalid or stale client proof) is the
+    // job's error as it is, whatever its words.
+    if (e instanceof PublicError) throw e;
     const m = e instanceof Error ? e.message : String(e);
     if (/segment|imbalance|artefact|DUST/i.test(m)) throw new AccountOfferError(m, 'placement');
     throw e;

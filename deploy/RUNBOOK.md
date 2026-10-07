@@ -71,6 +71,10 @@ Go through it before the market goes on a production server; each item names its
   minutes old (section 7).
 - [ ] **After the first start**: `/health` is `ok`; watch the contract prover's memory
   (`docker stats`) for the first days, and restart it more often if it climbs past 12 GiB.
+- [ ] **Client proving, only if you require it** (18): `CLIENT_PROVING=required`, the CSP with
+  `http://localhost:* http://127.0.0.1:* https:` in `connect-src` (16), and after the start
+  `clientProving: {mode: "required"}` in `/health`. Then make an offer from a real browser with the
+  package running: the popup, a passing Test, the offer listed. Watch `dustInFlightSpecks` (18.6).
 - [ ] **Bridging, only if you bridge** (17): the journey registry generated once for the site and the
   relay (`scripts/bridge-tokens.ts`), `BRIDGE_REGISTRY_FILE` and `RELAY_DATA_DIR` on the relay, the
   bridge bundle in the key volume (keep `RELAY_KEYS_FINGERPRINT` as shipped: the bundle does not
@@ -97,6 +101,7 @@ Go through it before the market goes on a production server; each item names its
 15. [Several domains: one build, one relay](#15-several-domains-one-build-one-relay)
 16. [The browser reads the chain itself; the Content-Security-Policy](#16-the-browser-reads-the-chain-itself-the-content-security-policy)
 17. [Bridging and the Solana side (AA 00060)](#17-bridging-and-the-solana-side-aa-00060)
+18. [Client proving: the customer's own prover (AA 00062)](#18-client-proving-the-customers-own-prover-aa-00062)
 
 ## 1. What runs
 
@@ -149,6 +154,14 @@ kills fails its job as `market-unavailable` (never charged to the customer, who 
 retry), and Docker restarts the prover. So: **14g, plus a periodic restart when no proof runs**
 (section 12.1). A busy production relay should watch the prover's memory (`docker stats`) for its
 first days and restart more often if it climbs past 12 GiB.
+
+**With client proving `required`** (section 18), the k=18 rows above no longer apply: offers, takes,
+withdrawals, change filings and Bridge out's first transaction are proven on the customer's machine. The
+contract prover still proves the **k=17 key restore** (AA 00062 P5: rc.8 peaked at **6.4–6.5 GiB**, during
+key restores with a bridge's delivery on the same rc.8) and the bridges' mints (about 4 GiB each), and its
+memory still grows across proofs. So keep that headroom: keep `CONTRACT_PROOF_SERVER_MEM_LIMIT` and the
+periodic restart, and on a host with 8 GB of RAM keep swap (the stagenet production server runs 8 GB plus
+24 GB of swap). The relay, its proof verifier loaded, stayed under 0.5 GiB in that run.
 
 **Disk**: about 20 GB free before the first start. The key volume is 2.2 GB; a full compile needs
 about 12 GB more while it runs (an import of a set built elsewhere, section 5.4, about 2.3 GB).
@@ -607,7 +620,8 @@ unhealthy only when `/health` answers 503.
 | `status` | `ok`; `degraded` (something needs attention; the market works for what it can); `down` (a proof server unreachable, the sponsor wallet in error, or a key set other than the pinned one). | Alert on `down` at once; on `degraded` for more than 10 minutes. |
 | `sponsor.state`, `synced` | The wallet's state; spending needs `synced`. | `syncing` for a few minutes after a start is normal. `error`: restart the relay, check the node and indexer. |
 | `sponsor.dustSpecks`, `dustLow` | DUST in specks (10^15 per DUST): the settled balance, see below. Below the low level, `dustLow` is `true` and new actions are refused. | Section 4. |
-| `sponsor.dustInFlightSpecks` | The part of `dustSpecks` held by the sponsor's transactions in flight: `"0"` when idle. | Nothing: it returns to `"0"` when the transactions land. If it stays above 0 for more than an hour, a transaction never landed; the lock ends after the ledger's 3-hour grace period. |
+| `sponsor.dustInFlightSpecks` | The part of `dustSpecks` held by the sponsor's transactions in flight: `"0"` when idle. | Nothing: it returns to `"0"` when the transactions land. If it stays above 0 for more than an hour while every lane is idle, a transaction never landed (for example one the node refused, section 18.6); the lock ends after the ledger's 3-hour grace period. |
+| `clientProving.mode` | Present only with `CLIENT_PROVING=required` (section 18): `"required"`. | Absent means `off`. |
 | `proofServer.reachable`, `version` | The CONTRACT prover: must be `9.0.0-rc.8` (`CONTRACT_PROOF_SERVER_EXPECTED_VERSION`). | Unreachable: `docker compose logs proof-server-contracts` (an out-of-memory kill shows as a restart). |
 | `dustProofServer.reachable`, `version` | The DUST prover: must be `9.0.0-rc.6`. | As above for `proof-server-dust`. |
 | `proofServer.keys.fingerprint`, `pinned`, `matchesPin`, `complete`, `problems` | The key set's identity (the account and faucet keys only; not the bridge bundle) and completeness. | Always pinned and complete on a running relay (it refuses to start otherwise). |
@@ -1090,16 +1104,23 @@ indexer, or the page cannot check any account (it then says so and signs nothing
 P11.B, the indexer's WebSocket endpoint (`wss://…`): a browser does not let an `https://` source
 cover a `wss://` connection (checked in Chromium), and without it an account with more than 500
 actions cannot be read in full (the page then says "could not read your account's whole history" and
-counts only what it could confirm). The value below is tested (`test/e2e/chain.spec.ts` and
-`test/e2e/zswap-decode.spec.ts`, with the tests' own origins in place of these):
+counts only what it could confirm). AA 00062 (spec FR-013, owner Q2 "any URL is OK"): it also allows
+the customer's own proof server, `http://localhost:*` and `http://127.0.0.1:*` (the package on their
+computer) and `https:` (an online proof server at any https URL); only the page calls it, never the
+relay. The value below is tested (`test/e2e/chain.spec.ts`, `test/e2e/zswap-decode.spec.ts` and
+`test/e2e/prover.spec.ts`, with the tests' own origins in place of these; `web/test/csp-docs.test.ts`
+checks that this file, `.env.example` and `SYSTEMD.md` carry the same value):
 
 ```
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://indexer.stagenet.shielded.tools wss://indexer.stagenet.shielded.tools https://stagenet.api-zswap.zkdojo.com http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
 ```
 
 `'wasm-unsafe-eval'` is for WebAssembly: the contract runtime's (the arm's message builder and the
 account decoder) and ledger-v9's (the history decoder, AA 00047 P11.B; no new directive was needed
-for it). The relay is the same-origin `/relay` here; a relay on another origin (`WEB_RELAY_URL`) and an
+for it). `https:` lets the page reach any https origin (the indexer's and the kernel's among them, still
+listed), but not a `wss:` one: the indexer's WebSocket stays listed. A policy without the three proof-server
+sources still works for every action the market proves itself; only the customer's own proof server is
+then refused (the page says the site's security policy blocks it). The relay is the same-origin `/relay` here; a relay on another origin (`WEB_RELAY_URL`) and an
 indexer set in `config.json` must be added to `connect-src` (the indexer with both its `https:` and
 its `wss:` endpoint; a `config.json` that moves only `indexerUrl` gets the WebSocket at the same host
 and path plus `/ws`).
@@ -1243,3 +1264,179 @@ For the operator:
 - The relay refuses to start (exit 78) when the bridge module or its ledger decoder does not load.
 - Offers cannot be cancelled: `cancel-offers` answers `403 offers-cannot-be-cancelled`, and
   `CANCELS_PER_ACCOUNT_PER_DAY` is unused.
+
+## 18. Client proving: the customer's own prover (AA 00062)
+
+`CLIENT_PROVING=required` moves the four k≥18 account circuits off the relay's contract prover:
+`open_swap_shielded_with_ed25519` (offers and takes), `withdraw_shielded_with_ed25519` (shielded
+withdrawals and Bridge out's first transaction), `withdraw_unshielded_with_ed25519` and
+`append_inbox_with_ed25519` (change filings). The customer's own prover proves them: the Night Market
+prover package, which the page asks for in a popup or under Local Data. Everything else stays proven by
+the relay: account openings, key restores, demo tokens, Bridge out's second transaction, and every DUST
+fee. The default, `off`, is today's relay.
+
+**Prove first.** For each of those actions:
+
+1. **Prepare.** The action's route runs every check it runs today. The job then builds the call with
+   the sponsor wallet's public keys only, captures its proof request (proving nothing), and waits.
+   While it waits it holds only its account's slot (one job per account). It holds **no prover lane and
+   no sponsor wallet**, so a customer who proves slowly, or never, delays nobody else.
+2. **The customer proves.** The page fetches the request (`GET /v1/jobs/:id/client-proof`), its prover
+   proves it, and the page posts the proof back (`POST /v1/jobs/:id/client-proof`).
+3. **Finalize.** The relay checks the proof with its pinned verifier, then checks that the account's
+   state (`round` and `auth_nonce`, one indexer read) has not changed since prepare. For a take it also
+   checks that the maker's offer is still live. It then takes the prover lane for a few seconds (the
+   call's two or three Zswap proofs), checks the account once more, and posts the offer, hands the take
+   to the batcher, or balances and submits the withdrawal or filing under the sponsor wallet.
+
+**Deadlines.** A prepared call waits at most `CLIENT_PROOF_TIMEOUT_SECONDS` (default 600, range
+60–3000), and never past a make's or a take's signed expiry minus 60 s, or its intent's TTL (one hour)
+minus 60 s. With less than 30 s left at prepare, the job fails `client-proof-late` at once. A request
+never fetched ends `client-proof-missing`; a proof that comes too late ends `client-proof-late`.
+
+**Stale calls.** A call reads its account's state, so it goes stale when the account changes while the
+customer proves: a deposit, demo tokens, a Bridge in delivery, a take of the account's own offer, or
+another approval. The relay then answers `409 client-proof-stale`. Nothing was sent, no DUST was spent,
+and it does not count against the customer. The page sends the same signed request again once, and the
+prover proves it once more. If the account's `auth_nonce` moved, the customer signs again. A stale call
+that slips past the check is refused by the node at the mempool (code 104, `ReadMismatch`). That costs
+nothing either, and the relay reports it as `client-proof-stale`, never as a DUST race.
+
+**DUST races.** When a submission meets a DUST race, the relay balances the call again with the same
+proof (up to three times, 10 s apart). The customer is never asked for a second proof.
+
+**What counts against the customer.** A missing, late or invalid proof counts against the requester's
+failure budget (section 9). A stale call never counts, and neither does a proof the relay could not
+check (`market-unavailable`).
+
+**Restarts.** Waiting calls live in memory only. A relay restart drops them. Both client-proof routes
+then answer `404 not-found`, saying that the relay restarted, that nothing was sent and that no fee
+was spent. The page tells the customer to send the action again.
+
+**The page's side.** The site's Content-Security-Policy must let the page reach the customer's prover
+(section 16: `http://localhost:* http://127.0.0.1:* https:` in `connect-src`). `/v1/config` advertises
+`clientProving` (the circuits, the key-set fingerprint, the proof-server version and the timeout), and
+`/health` shows `clientProving: {mode: "required"}`. In `off` mode neither carries the field.
+
+### 18.1 Turn it on
+
+1. **The relay's checkout** must be a commit with client proving (AA 00062). The relay's proof verifier ships
+   in the repository as a pinned WebAssembly module,
+   `relay/src/client-proving/verifier-wasm/client_proof_verifier_bg.wasm` (8,031,787 bytes, sha256
+   `600e74044a3a9824af4cd809f999c5e1aee9c7ac11673dc2e896d835b396baf3`; its source and reproducible build are
+   `relay/verifier/`). The relay checks that hash before it loads the module. Nothing is downloaded or built
+   on the server.
+2. **The key volume stays as it is.** The verifier reads each circuit's `keys/<circuit>.verifier` and
+   `zkir/<circuit>.bzkir` from the account bundle, which the key job already writes (a build or an import,
+   section 5). `RELAY_KEYS_FINGERPRINT` does not change.
+3. **Set** `CLIENT_PROVING=required` in the relay's settings, and `CLIENT_PROOF_TIMEOUT_SECONDS` if 600 s
+   does not suit you (60–3000).
+4. **The site's Content-Security-Policy** must allow the customer's prover (section 16): set the tested
+   value, or add `http://localhost:* http://127.0.0.1:* https:` to your own `connect-src`. Without them the
+   page tells the customer that the site's security policy blocks their prover, and nothing else works
+   for the k≥18 actions.
+5. **Restart the relay** (`docker compose -f deploy/compose.yml up -d relay`; native: `systemctl restart
+   nightmarket-relay`). The two proof servers, the key job and the web service are unchanged. A rebuilt web
+   is needed only when the web image comes from an older commit.
+6. **Check.** The relay's log shows `client-proof verifier loaded` (with the sha256) and then
+   `client proving required` with the four circuits and the timeout. `/health` shows
+   `clientProving: {mode: "required"}`. `/v1/config` `clientProving` shows `mode` `required`, the four
+   circuits, `keySet` (the pinned fingerprint), `proofServer` `9.0.0-rc.8` and `timeoutSeconds`.
+
+**When the relay refuses to start** (exit 78, so systemd and compose do not restart it in a loop):
+- `NO_CLIENT_PROOF_VERIFIER: …`: the verifier module is missing, its SHA-256 differs from the pinned one,
+  or it does not load. Check out the release commit again; never replace the file by hand.
+- `CLIENT_PROVING=required needs the key volume (MIDNIGHT_MANAGED_PATH) …`: `required` checks every proof
+  against the key volume's pinned verifier keys. Run the key job (section 5).
+- `CLIENT_PROVING must be one of off, required`, or a timeout outside 60–3000: a typo in the settings.
+
+**Turn it off** by setting `CLIENT_PROVING=off` (or removing it) and restarting the relay. The relay then
+proves the k≥18 circuits itself again, with the memory section 2 lists, and the page never shows the
+popup. The CSP's extra sources do no harm.
+
+### 18.2 The customer's prover: the package
+
+The package is ONE public Docker image, **`ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9`**
+(amd64 and arm64). Its source is
+[midnight-experiments/solana-proof-server](https://github.com/midnight-experiments/solana-proof-server)
+(Apache-2.0), whose CI built and pushed it from tag `v0.1.0`. It holds:
+- the official proof server `midnightntwrk/proof-server:9.0.0-rc.8` (pinned by digest);
+- the four circuits' prover keys, verifier keys and ZKIR from the key set `21493588…` (the repo's release
+  `keys-21493588`, checked by SHA-256 and by the fingerprint at build time and again at every start);
+- a small front that the page talks to (`GET /version`, `POST /prove-circuit`). It proves one request at a
+  time (a second gets 429 `busy`), restarts the proof server after every proof so its memory goes back
+  down, and never logs a request or a proof.
+
+The page shows the command, with a copy button, in its popup and under **Local Data → Proof server**:
+
+```sh
+docker run --rm -p 127.0.0.1:6300:6300 --memory 12g ghcr.io/midnight-experiments/solana-proof-server:0.1.0-21493588@sha256:952555ca9d057883c161033245587ca37301f2b8e3da4559ec51774be90c10d9
+```
+
+`-p 127.0.0.1:6300:6300` publishes it on the customer's own loopback only. The first start downloads about
+**0.65 GB** (about 2.7 GB on disk). A proof needs about **8 GB of memory** (7.5–7.7 GiB measured), so the
+command caps it at 12 GB: on a Mac or Windows, Docker Desktop's own memory limit must be at least that.
+One proof takes about 25–40 s on a recent laptop (AA 00062 P5: median 28.6 s on 12 cores). Customers
+then enter `http://localhost:6300`, press **Test** (it checks the proof-server version, the key set and
+the circuits against `/v1/config`), and **Continue**.
+
+A newer key set or proof server means a new image: the page's Test then fails with "Update the package"
+and the new command. Re-pin `PROVER_IMAGE` (`web/src/prover/constants.ts`) in the same release that moves
+the pins.
+
+### 18.3 Browsers
+
+The page is https, and the package is `http://localhost`. What each browser does:
+
+| Browser | What the customer sees |
+|---|---|
+| Chrome (142 and newer), Edge | A one-time prompt asking to let the site reach apps on this device. Allow it. If it was blocked, the page says so; re-allow it in the site's settings. |
+| Firefox (153 and newer) | The same kind of prompt ("Device apps and services"). Allow it. |
+| Brave | Blocked until the customer allows it by hand: `brave://settings/content/localhostAccess`. The page names that setting. |
+| Safari (every version) | Blocked: Safari never lets an https page call `http://localhost`. Use Chrome or Firefox, or an online prover (`https://`). The page says so. |
+| Phones and tablets | No local Docker: an online prover only. |
+
+The page checks the browser's permission before it calls the prover, so a refusal gets its own
+message instead of a generic "did not answer".
+
+### 18.4 Online provers and privacy
+
+A customer may enter an online prover instead: any `https://` URL (an `http://` URL is refused unless it is
+`localhost` or `127.0.0.1`). The page then warns that **the prover sees the transaction's private details**
+(the coins and the amounts) and asks for a confirmation before the first Test. The proof
+request carries exactly what the call proves; the relay never sends it anywhere itself, and **only the
+page calls the prover URL** (the relay never fetches a customer's URL).
+
+To run an online prover for your own customers, put the same image behind a TLS proxy (the front listens
+on port 6300 inside the container and answers CORS for any origin). It has **no authentication** and
+proves one request at a time: restrict who can reach it if it should serve only some people, and give it
+the same 12 GB. The setting is per browser and never leaves it (it is not part of an Export).
+
+### 18.5 Sizing with client proving
+
+With `required`, the contract prover proves no k≥18 circuit. It still proves the k=17 key restore, the
+small circuits (account openings, demo-token mints, Bridge out's second transaction), each action's two
+or three Zswap proofs at finalize, and (on a host that shares it) the bridges' deliveries. Section 2 has
+the numbers. Every k≥18 action holds the prover lane only for its finalize (seconds), so the queue in
+section 9 moves much faster than with server proofs.
+
+### 18.6 A refused sponsored submission can lock a DUST output (questions Q9)
+
+When the node refuses a sponsored transaction after the relay balanced it (for example a call that went
+stale at the last moment, code 104, or an intent that expired), the sponsor's DUST output that paid the
+fee can stay **locked for up to the ledger's grace period, 3 hours**. Nothing is spent on chain. It was
+seen on a local stack (AA 00062 P5) when the submission came long after the balance; the same can happen
+to a server-proven action. AA issue 00063 (the owner's workspace) tracks a fix.
+
+- **The sign:** `/health` `sponsor.dustInFlightSpecks` stays above `"0"` while every entry under
+  `queue.lanes` shows `running` 0, and the log line `sponsor DUST outputs locked by transactions in flight`
+  never comes back down.
+- **The effect:** fewer DUST outputs to pay with. A few at once can stall sponsored actions ("timed out
+  waiting for enough DUST for the fee").
+- **The remedy:** wait out the 3 hours, or restart the relay while it is idle: the sponsor wallet re-syncs
+  from the chain, which has no record of the refused spend. That a restart frees the output is expected
+  but not yet verified. A restart also drops calls waiting for a client proof (the page tells their
+  customers to send again).
+- **Prevention:** a lock takes a whole DUST output, so size the sponsor with spare NIGHT-backed outputs
+  (several NIGHT coins registered, section 4.4) rather than one, so one locked output does not stop the
+  market.

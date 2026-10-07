@@ -1,0 +1,5 @@
+# The pinned toolchain of the client-proof verifier's reproducible build (./build.sh).
+[toolchain]
+channel = "1.95.0"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

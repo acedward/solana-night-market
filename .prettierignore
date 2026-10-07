@@ -25,3 +25,5 @@ test/fixtures/00059-account-registration-vectors.json
 web/src/bridge/vendor/bridge/
 # AA 00060 P10.3 C13: a live bridge-node answer, copied byte for byte (00058-live-transfer-s2m-1.PROVENANCE.md); never reformat
 test/fixtures/00058-live-transfer-s2m-1.json
+# AA 00062 P3.5: the client-proof verifier's generated module (relay/verifier/build.sh, pinned by SHA-256); never reformat
+relay/src/client-proving/verifier-wasm/

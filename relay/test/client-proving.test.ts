@@ -1,7 +1,8 @@
 // AA 00062 P3 (L-RELAY): the relay's client-proving mode, `CLIENT_PROVING=off|required` (plan I-62a).
 //
-//   - the mode is validated at start and `off` is the default; `required` refuses to start without a
-//     REAL client-proof verifier (questions Q3: none is built in yet, and never a permissive one);
+//   - the mode is validated at start and `off` is the default; `required` needs the REAL client-proof
+//     verifier (questions Q3 → A, P3.5: the pinned WASM, ./client-proof-verifier.test.ts) and the key
+//     volume, and never a permissive one;
 //   - in `required` the four k≥18 circuits are never sent to the relay's prover: the ledger's own
 //     key-less body is handed to the page instead (checked byte for byte against the P1.2 golden
 //     vectors), while `check`, the other circuits and the builtins go to the proof server as before;
@@ -41,6 +42,7 @@ import { guarded } from '../src/app.js';
 import { ClientProofDesk, isProofRefusal } from '../src/client-proving/desk.js';
 import {
   builtInClientProofVerifier,
+  CLIENT_PROOF_VERIFIER_WASM_SHA256,
   clientProvingStartProblem,
   NO_CLIENT_PROOF_VERIFIER,
   type ClientProofVerdict,
@@ -113,16 +115,16 @@ const GOLDEN_PROOF = () => fixture('open_swap_shielded_with_ed25519.maker.proof.
 const SERVER_CIRCUIT = 'rotate_enc_key_with_ed25519';
 
 /** `<root>/account/{keys,zkir,compiler}` with every file in the compiler manifest. Each circuit has a
- *  small stand-in prover key and ZKIR (a client-proven one's prover key must never be read). */
+ *  small stand-in prover key (a client-proven one's must never be read); the two golden circuits have
+ *  their real ZKIR, the server-proven one a stand-in. */
 function makeVolume(root: string): { serverLocation: string } {
   const dir = join(root, 'account');
   for (const d of ['keys', 'zkir', 'compiler']) mkdirSync(join(dir, d), { recursive: true });
   const keys: Record<string, unknown> = { type: 'directory' };
   const zkir: Record<string, unknown> = { type: 'directory' };
   const file = (b: Uint8Array) => ({ type: 'file', size: b.length, hash: sha256(b) });
-  const add = (circuit: string, vk: Uint8Array) => {
+  const add = (circuit: string, vk: Uint8Array, ir: Uint8Array = randomBytes(512)) => {
     const pk = randomBytes(4096);
-    const ir = randomBytes(512);
     writeFileSync(join(dir, 'keys', `${circuit}.verifier`), vk);
     writeFileSync(join(dir, 'keys', `${circuit}.prover`), pk);
     writeFileSync(join(dir, 'zkir', `${circuit}.bzkir`), ir);
@@ -130,8 +132,10 @@ function makeVolume(root: string): { serverLocation: string } {
     keys[`${circuit}.prover`] = file(pk);
     zkir[`${circuit}.bzkir`] = file(ir);
   };
-  add('open_swap_shielded_with_ed25519', fixture('open_swap_shielded_with_ed25519.verifier'));
-  add('withdraw_shielded_with_ed25519', fixture('withdraw_shielded_with_ed25519.verifier'));
+  // The real public verifier keys and ZKIR of the two golden circuits (the real verifier reads the ZKIR).
+  for (const c of ['open_swap_shielded_with_ed25519', 'withdraw_shielded_with_ed25519']) {
+    add(c, fixture(`${c}.verifier`), fixture(`${c}.bzkir`));
+  }
   const serverVk = randomBytes(2000);
   add(SERVER_CIRCUIT, serverVk);
   writeFileSync(
@@ -194,14 +198,13 @@ describe('CLIENT_PROVING (P3.1)', () => {
     expect(testConfig({ CLIENT_PROOF_TIMEOUT_SECONDS: '840' }).clientProving.timeoutSeconds).toBe(840);
   });
 
-  it('has no built-in verifier until questions Q3 is answered, so `required` may not start', () => {
-    expect(builtInClientProofVerifier()).toBeNull();
+  it('`required` may start only with a verifier and the key volume; `off` needs neither', () => {
     const volume = { loaded: true, fingerprint: KEY_SET };
     expect(clientProvingStartProblem('off', null, volume)).toBeNull();
     expect(clientProvingStartProblem('off', null, { loaded: false, fingerprint: null })).toBeNull();
     expect(clientProvingStartProblem('required', null, volume)).toBe(NO_CLIENT_PROOF_VERIFIER);
-    expect(NO_CLIENT_PROOF_VERIFIER).toMatch(/questions Q3/);
-    // With a real verifier (here a double), `required` still needs the key volume.
+    expect(NO_CLIENT_PROOF_VERIFIER).toMatch(/needs the built-in client-proof verifier/);
+    // With a verifier (here a double), `required` still needs the key volume.
     const verifier: ClientProofVerifier = { name: 'double', verify: async () => ({ ok: false, reason: 'x' }) };
     expect(clientProvingStartProblem('required', verifier, { loaded: false, fingerprint: null })).toMatch(
       /needs the key volume/,
@@ -209,15 +212,16 @@ describe('CLIENT_PROVING (P3.1)', () => {
     expect(clientProvingStartProblem('required', verifier, volume)).toBeNull();
   });
 
-  it('nothing in the configuration can enable a verifier: only the built-in one (none yet) or a test double', () => {
+  it('nothing in the configuration can enable a verifier: only the pinned built-in one, or a test double', () => {
     expect(Object.keys(testConfig({ CLIENT_PROVING: 'required' }).clientProving).sort()).toEqual([
       'mode',
       'timeoutSeconds',
     ]);
-    expect(readFileSync(join(SRC, 'client-proving', 'verifier.ts'), 'utf8')).toMatch(
-      /export function builtInClientProofVerifier\(\): ClientProofVerifier \| null \{\s*return null;\s*\}/,
-    );
     expect(readFileSync(join(SRC, 'config.ts'), 'utf8')).not.toMatch(/VERIFIER/);
+    // main.ts builds the verifier from the key volume's path only; the module's path is never configured.
+    const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
+    expect(main).toMatch(/builtInClientProofVerifier\(\{\s*managedPath: config\.managedPath,\s*log:/);
+    expect(main).not.toMatch(/wasmPath/);
   });
 });
 
@@ -323,20 +327,24 @@ function nodeRejection(code: number): Error {
   return Object.assign(new Error('Transaction submission error'), { name: 'SubmissionError', cause: client });
 }
 
-/** A queue, a desk with a test-double verifier and a hand-driven clock, the routes, and the proving
- *  provider over a volume with the golden vectors' keys. */
-async function rig(over: { verdict?: () => Promise<ClientProofVerdict>; timeoutSeconds?: number } = {}) {
+/** A queue, a desk with a test-double verifier (or, with `real`, the built-in pinned WASM verifier over
+ *  the volume) and a hand-driven clock, the routes, and the proving provider over a volume with the
+ *  golden vectors' keys. */
+async function rig(
+  over: { verdict?: () => Promise<ClientProofVerdict>; timeoutSeconds?: number; real?: boolean } = {},
+) {
   const root = tempRoot();
   makeVolume(root);
   let now = 1_800_000_000;
   const timers: { at: number; fn: () => void; live: boolean }[] = [];
   const queue = new JobQueue({ ttlSeconds: 3600, maxJobs: 100, log: silentLog(), now: () => now });
+  const real = over.real ? await builtInClientProofVerifier({ managedPath: root }) : null;
   const verify = vi.fn<(input: ClientProofVerifierInput) => Promise<ClientProofVerdict>>(
-    over.verdict ? () => over.verdict!() : async () => ({ ok: true }),
+    real ? (input) => real.verify(input) : over.verdict ? () => over.verdict!() : async () => ({ ok: true }),
   );
   const desk = new ClientProofDesk({
     jobs: queue,
-    verifier: { name: 'test-double', verify },
+    verifier: { name: real ? real.name : 'test-double', verify },
     timeoutSeconds: over.timeoutSeconds ?? 300,
     keySet: KEY_SET,
     proofServer: '9.0.0-rc.8',
@@ -916,6 +924,84 @@ describe('the client-proof routes', () => {
   });
 });
 
+// ── P3.5: the hand-off with the built-in verifier (the pinned WASM) ─────────────
+
+describe('the hand-off with the built-in verifier (P3.5, questions Q3 → A)', () => {
+  const MAKE = () => fixture('open_swap_shielded_with_ed25519.maker.proof.bin');
+  const WITHDRAWAL = () => fixture('withdraw_shielded_with_ed25519.proof.bin');
+
+  it('a node-accepted golden proof is checked and the action completes with exactly those bytes', async () => {
+    const r = await rig({ real: true });
+    const { executor, submitted } = sponsoredExecutor(r, WITHDRAW(), []);
+    const job = r.queue.submit({ action: 'withdraw', lane: 'prover', account: ACCOUNT, payload: {}, executor })!;
+    const open = await r.awaitHandOff(job.requestId);
+    await r.getRequest(job.requestId);
+    const posted = await r.postProof(job.requestId, {
+      proofId: open.proofId,
+      proof: Buffer.from(WITHDRAWAL()).toString('base64'),
+    });
+    expect(posted.status).toBe(200);
+    expect(((await posted.json()) as { job: JobView }).job.stage).toBe('client-proof-checked');
+    expect(await r.verify.mock.results[0]!.value).toEqual({ ok: true });
+    const done = await r.queue.settled(job.requestId);
+    expect(done?.state).toBe('succeeded');
+    expect(submitted.map(sha256)).toEqual([sha256(WITHDRAWAL())]);
+    expect(r.server.calls).toEqual([]);
+  });
+
+  it('a make: the maker golden proof is checked', async () => {
+    const r = await rig({ real: true });
+    const { executor } = sponsoredExecutor(r, MAKER(), []);
+    const job = r.queue.submit({ action: 'withdraw', lane: 'prover', account: ACCOUNT, payload: {}, executor })!;
+    const open = await r.awaitHandOff(job.requestId);
+    const posted = await r.postProof(job.requestId, {
+      proofId: open.proofId,
+      proof: Buffer.from(MAKE()).toString('base64'),
+    });
+    expect(posted.status).toBe(200);
+    expect((await r.queue.settled(job.requestId))?.state).toBe('succeeded');
+  });
+
+  for (const [what, bad] of [
+    [
+      'a flipped byte',
+      () => {
+        const p = WITHDRAWAL();
+        p[4000] ^= 0x01;
+        return p;
+      },
+    ],
+    ['another circuit’s valid proof (a make’s, for a withdrawal)', MAKE],
+  ] as [string, () => Uint8Array][]) {
+    it(`${what}: client-proof-invalid, charged to the requester, nothing submitted`, async () => {
+      const r = await rig({ real: true });
+      const { executor, submitted } = sponsoredExecutor(r, WITHDRAW(), []);
+      const failures = new FailureBudget({ perOwner: 5, perAccount: 5 });
+      const job = r.queue.submit({
+        action: 'withdraw',
+        lane: 'prover',
+        account: ACCOUNT,
+        payload: {},
+        executor: guarded(executor, { action: 'withdraw', owner: 'aa'.repeat(32), account: ACCOUNT, failures }),
+      })!;
+      const open = await r.awaitHandOff(job.requestId);
+      const res = await r.postProof(job.requestId, {
+        proofId: open.proofId,
+        proof: Buffer.from(bad()).toString('base64'),
+      });
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('client-proof-invalid');
+      const verdict = (await r.verify.mock.results[0]!.value) as ClientProofVerdict;
+      expect(verdict.ok).toBe(false);
+      const done = await r.queue.settled(job.requestId);
+      expect(done?.error?.code).toBe('client-proof-invalid');
+      expect(submitted).toEqual([]);
+      expect(r.server.calls).toEqual([]);
+      expect(failures.failures('aa'.repeat(32))).toBe(1);
+    });
+  }
+});
+
 // ── P3.3: the relay never fetches a user-supplied URL ──────────────────────────
 
 describe('no user URL is ever fetched (P3.3, spec FR-003)', () => {
@@ -945,12 +1031,22 @@ describe('no user URL is ever fetched (P3.3, spec FR-003)', () => {
 
   it('the client-proving code makes no network request and reads no URL from its input', () => {
     const dir = join(SRC, 'client-proving');
-    for (const f of readdirSync(dir)) {
+    const sources = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+    expect(sources).toEqual(expect.arrayContaining(['desk.ts', 'verifier.ts']));
+    for (const f of sources) {
       const s = readFileSync(join(dir, f), 'utf8');
       expect(s, f).not.toMatch(
         /\bfetch\s*\(|from ['"]node:(?:http|https|net|tls|dgram)['"]|new\s+WebSocket|new\s+URL\s*\(/,
       );
     }
+    // P3.5: the only other thing there is the pinned verifier's generated module (./verifier-wasm/). Its
+    // glue's one `fetch(` is the URL initialiser the relay never calls: verifier.ts instantiates the
+    // module from the bytes it read and checked (`initSync`); the module itself imports no network API
+    // (./client-proof-verifier.test.ts).
+    expect(readdirSync(dir).filter((f) => !f.endsWith('.ts'))).toEqual(['verifier-wasm']);
+    const verifier = readFileSync(join(dir, 'verifier.ts'), 'utf8');
+    expect(verifier).toMatch(/glue\.initSync\(\{ module \}\)/);
+    expect(verifier).not.toMatch(/__wbg_init|\.default\(|import \w+ from '\.\/verifier-wasm/);
     // The routes take exactly {proofId, proof}: the schema is strict.
     const app = readFileSync(join(SRC, 'app.ts'), 'utf8');
     const section = app.slice(
@@ -1013,11 +1109,13 @@ function startRelay(env: Record<string, string>): Promise<{ code: number | null;
 }
 
 describe('the relay at start-up with CLIENT_PROVING (Bun)', () => {
-  it('refuses to start in required mode (exit 78) while it has no client-proof verifier, saying why', async () => {
+  it('in required mode loads the pinned verifier under Bun, then refuses to start (exit 78) without a key volume', async () => {
     const r = await startRelay({ CLIENT_PROVING: 'required' });
     expect(r.code).toBe(78);
-    expect(r.out).toContain('CLIENT_PROVING=required needs a client-proof verifier');
-    expect(r.out).toContain('questions Q3');
+    // The verifier loaded: its SHA-256 was the pin (P3.5); what is missing is the key volume.
+    expect(r.out).toContain('client-proof verifier loaded');
+    expect(r.out).toContain(CLIENT_PROOF_VERIFIER_WASM_SHA256);
+    expect(r.out).toContain('CLIENT_PROVING=required needs the key volume');
     expect(r.out).toContain('refusing to start');
   }, 90_000);
 

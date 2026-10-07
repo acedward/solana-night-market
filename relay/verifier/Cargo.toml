@@ -1,0 +1,65 @@
+# Night Market's client-proof verifier (AA 00062 task P3.5; questions Q3, option A).
+#
+# A verifier-only WebAssembly module: it checks ONE client proof of a k>=18 account call against the
+# relay's PINNED verifier key, with the ledger's own verification code (midnight-ledger tag
+# `ledger-9.1.0.0-rc.3`, the node's ledger, with its `proof-verifying` feature ON) and the circuit's
+# ZKIR evaluator (midnight-zkir tag `zkir-3.1.0-rc.1`, the one proof server 9.0.0-rc.8 proves with).
+# Built by ./build.sh (pinned toolchain, Cargo.lock); the relay loads the committed
+# relay/src/client-proving/verifier-wasm/ and checks its SHA-256 at start.
+
+[package]
+name = "nightmarket-client-proof-verifier"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Checks a client's proof of one Night Market account call against the pinned verifier key."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# midnight-ledger at the node's ledger tag. The ledger crate keeps its DEFAULT features, so
+# `proof-verifying` is ON: its `ProofKind::proof_verify` really verifies (the published
+# @midnightntwrk/ledger-v9 WASM is built without it, research R3).
+ledger = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-ledger-v9" }
+transient-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-transient-crypto" }
+serialize = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-serialize" }
+base-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-base-crypto" }
+coin-structure = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-coin-structure" }
+onchain-runtime = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-onchain-runtime" }
+storage = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3", package = "midnight-storage" }
+# The ZKIR 3.1 evaluator (the account's circuits are ZKIR 3.1, compactc 0.35.0). Only its `check`
+# is used: which of the circuit's guarded impacts were skipped (`pi_skips`), the zeros the ledger's
+# transcript carries as `noop`s in the call's public inputs.
+zkir-v3 = { git = "https://github.com/midnightntwrk/midnight-zkir", tag = "zkir-3.1.0-rc.1", package = "midnight-zkir" }
+
+lazy_static = "^1.5.0"
+sha2 = "^0.11.0"
+hex = "^0.4.3"
+wasm-bindgen = "=0.2.104"
+# rand 0.8 (through the ledger) needs a WebAssembly entropy source to compile; verifying never draws.
+getrandom_2 = { package = "getrandom", version = "^0.2.16", features = ["js"] }
+getrandom_3 = { package = "getrandom", version = "^0.3.4", features = ["wasm_js"] }
+
+# The same resolution as the proof server 9.0.0-rc.8's workspace (midnight-ledger tag
+# proof-server-9.0.0-rc.8): every crates.io request for the ledger's own crates resolves to the tag,
+# so midnight-zkir 3.1 and the ledger share ONE transient-crypto.
+[patch.crates-io]
+midnight-base-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3" }
+midnight-serialize = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3" }
+midnight-transient-crypto = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3" }
+midnight-storage-core = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "ledger-9.1.0.0-rc.3" }
+midnight-transient-crypto-old = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "transient-crypto-2.2.0-rc.1", package = "midnight-transient-crypto" }
+
+# As midnight-ledger's own `wasm` profile.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = "debuginfo"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Os", "--enable-reference-types"]
